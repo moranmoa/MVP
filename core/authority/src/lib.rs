@@ -1,10 +1,12 @@
-//! Deterministic resolution of a server's control log (spike, experiment 3).
+//! Deterministic resolution of a server's control log.
 //!
 //! Every peer runs [`resolve`] on the set of control records it holds. The
 //! result depends only on that set, never on the order records arrived in, so
 //! peers holding the same records always agree on the server state.
+//! [`Resolver`] reaches the same result incrementally, one arriving record at a
+//! time; `resolve` stays the reference it is tested against.
 //!
-//! Rules covered by the spike:
+//! Rules:
 //! - The genesis author is the owner and can't be demoted or kicked.
 //! - Rank: owner > admin > moderator > member. An actor can only grant a role
 //!   below its own, and only revoke or kick someone ranked below it.
@@ -14,14 +16,22 @@
 //!   deps point at state from before the removal.
 //! - Ties between concurrent records are broken by the record ID.
 //!
-//! Signatures, encryption and timestamps are left out: they don't affect
-//! ordering, which is what this spike tests.
+//! Records come from the `records` crate, so they are signed and their IDs are
+//! content hashes. Records outside the control-log scope are ignored, and so
+//! is a record whose body doesn't parse for its kind (it stays in the graph,
+//! but is never accepted). Timestamps are informational and never consulted.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
 
-pub type Actor = u32;
-pub type RecordId = u64;
+use records::{Draft, Kind, RecordError, Scope, ServerId, SigningKey};
+pub use records::{PublicKey, Record, RecordId};
+
+mod incremental;
+pub use incremental::{Resolver, Stats};
+
+/// An actor is identified by their Ed25519 public key.
+pub type Actor = PublicKey;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Role {
@@ -29,6 +39,16 @@ pub enum Role {
     Moderator,
     Admin,
     Owner,
+}
+
+impl Role {
+    fn code(self) -> u8 {
+        self as u8
+    }
+
+    fn from_code(code: u8) -> Option<Role> {
+        [Role::Member, Role::Moderator, Role::Admin, Role::Owner].get(usize::from(code)).copied()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -40,49 +60,89 @@ pub enum Action {
     Post { text: String },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Record {
-    pub id: RecordId,
-    pub author: Actor,
-    pub seq: u64,
-    /// IDs of the records the author had seen (the heads of its log view).
-    pub deps: Vec<RecordId>,
-    pub action: Action,
-}
+impl Action {
+    pub fn kind(&self) -> Kind {
+        match self {
+            Action::Genesis => Kind::Genesis,
+            Action::Grant { .. } => Kind::Grant,
+            Action::Revoke { .. } => Kind::Revoke,
+            Action::Kick { .. } => Kind::Kick,
+            Action::Post { .. } => Kind::Post,
+        }
+    }
 
-impl Record {
-    pub fn new(author: Actor, seq: u64, mut deps: Vec<RecordId>, action: Action) -> Self {
-        deps.sort_unstable();
-        deps.dedup();
-        let id = record_id(author, seq, &deps, &action);
-        Record { id, author, seq, deps, action }
+    /// Body encoding: target key (32 bytes), then the role byte for a grant;
+    /// UTF-8 text for a post. A genesis body is server metadata, not read here.
+    pub fn body(&self) -> Vec<u8> {
+        match self {
+            Action::Genesis => Vec::new(),
+            Action::Grant { target, role } => {
+                let mut body = target.as_bytes().to_vec();
+                body.push(role.code());
+                body
+            }
+            Action::Revoke { target } | Action::Kick { target } => target.as_bytes().to_vec(),
+            Action::Post { text } => text.as_bytes().to_vec(),
+        }
+    }
+
+    /// Reads the action out of a control record; `None` if the body doesn't
+    /// parse for the record's kind.
+    pub fn from_record(record: &Record) -> Option<Action> {
+        let body = record.body();
+        let key = |bytes: &[u8]| Some(PublicKey::from_bytes(bytes.try_into().ok()?));
+        match record.kind() {
+            Kind::Genesis => Some(Action::Genesis),
+            Kind::Grant => {
+                let (target, role) = body.split_at_checked(32)?;
+                let [role] = role else { return None };
+                Some(Action::Grant { target: key(target)?, role: Role::from_code(*role)? })
+            }
+            Kind::Revoke => Some(Action::Revoke { target: key(body)? }),
+            Kind::Kick => Some(Action::Kick { target: key(body)? }),
+            Kind::Post => Some(Action::Post { text: String::from_utf8(body.to_vec()).ok()? }),
+            Kind::Message => None,
+        }
+    }
+
+    fn target(&self) -> Option<Actor> {
+        match self {
+            Action::Grant { target, .. } | Action::Revoke { target } | Action::Kick { target } => {
+                Some(*target)
+            }
+            Action::Genesis | Action::Post { .. } => None,
+        }
     }
 
     fn is_privileged(&self) -> bool {
-        matches!(
-            self.action,
-            Action::Grant { .. } | Action::Revoke { .. } | Action::Kick { .. }
-        )
+        self.target().is_some()
+    }
+
+    fn is_removal(&self) -> bool {
+        matches!(self, Action::Revoke { .. } | Action::Kick { .. })
     }
 }
 
-/// FNV-1a over the record's content. Stands in for the content hash a real
-/// record would carry; it only has to be deterministic here.
-fn record_id(author: Actor, seq: u64, deps: &[RecordId], action: &Action) -> RecordId {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut feed = |bytes: &[u8]| {
-        for byte in bytes {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0100_0000_01b3);
-        }
-    };
-    feed(&author.to_le_bytes());
-    feed(&seq.to_le_bytes());
-    for dep in deps {
-        feed(&dep.to_le_bytes());
+/// Signs a control-log record carrying `action`.
+pub fn sign_control(
+    key: &SigningKey,
+    server: ServerId,
+    seq: u64,
+    deps: Vec<RecordId>,
+    ts: u64,
+    action: &Action,
+) -> Result<Record, RecordError> {
+    Draft {
+        server,
+        scope: Scope::Control,
+        seq,
+        deps,
+        auth_deps: Vec::new(),
+        ts,
+        kind: action.kind(),
+        body: action.body(),
     }
-    feed(format!("{action:?}").as_bytes());
-    hash
+    .sign(key)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -97,68 +157,223 @@ pub struct State {
 
 impl State {
     pub fn role(&self, actor: Actor) -> Role {
-        if self.owner == Some(actor) {
+        self.role_of(actor)
+    }
+}
+
+/// The parts of the state that decide whether a record is permitted.
+trait View {
+    fn owner(&self) -> Option<Actor>;
+    fn assigned_role(&self, actor: Actor) -> Role;
+    fn is_kicked(&self, actor: Actor) -> bool;
+
+    fn role_of(&self, actor: Actor) -> Role {
+        if self.owner() == Some(actor) {
             Role::Owner
         } else {
-            self.roles.get(&actor).copied().unwrap_or(Role::Member)
+            self.assigned_role(actor)
         }
+    }
+}
+
+impl View for State {
+    fn owner(&self) -> Option<Actor> {
+        self.owner
+    }
+
+    fn assigned_role(&self, actor: Actor) -> Role {
+        self.roles.get(&actor).copied().unwrap_or(Role::Member)
+    }
+
+    fn is_kicked(&self, actor: Actor) -> bool {
+        self.kicked.contains(&actor)
+    }
+}
+
+fn permitted(view: &impl View, record: &Record, action: &Action) -> bool {
+    let author = record.author();
+    if view.is_kicked(author) {
+        return false;
+    }
+    if *action == Action::Genesis {
+        return view.owner().is_none() && record.deps().is_empty();
+    }
+    if view.owner().is_none() {
+        return false;
+    }
+    let author_role = view.role_of(author);
+    match action {
+        Action::Genesis => unreachable!("handled above"),
+        Action::Grant { target, role } => {
+            *role < Role::Owner
+                && author_role > *role
+                && author_role > view.role_of(*target)
+                && !view.is_kicked(*target)
+        }
+        Action::Revoke { target } => {
+            let target_role = view.role_of(*target);
+            author_role > target_role && target_role > Role::Member
+        }
+        Action::Kick { target } => {
+            author_role >= Role::Moderator && author_role > view.role_of(*target)
+        }
+        Action::Post { .. } => true,
+    }
+}
+
+/// What an accepted privileged record left its target with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Write {
+    record: RecordId,
+    role: Role,
+    kicked: bool,
+}
+
+/// Applies an accepted genesis or privileged record to the roles. Posts are
+/// left to the caller, which knows where they go in display order.
+fn apply(state: &mut State, record: &Record, action: &Action) -> Option<(Actor, Write)> {
+    let write = |role, kicked| Write { record: record.id(), role, kicked };
+    match action {
+        Action::Genesis => {
+            state.owner = Some(record.author());
+            None
+        }
+        Action::Grant { target, role } => {
+            if *role == Role::Member {
+                state.roles.remove(target);
+            } else {
+                state.roles.insert(*target, *role);
+            }
+            Some((*target, write(*role, false)))
+        }
+        Action::Revoke { target } => {
+            state.roles.remove(target);
+            Some((*target, write(Role::Member, false)))
+        }
+        Action::Kick { target } => {
+            state.roles.remove(target);
+            state.kicked.insert(*target);
+            Some((*target, write(Role::Member, true)))
+        }
+        Action::Post { .. } => None,
     }
 }
 
 /// Computes the server state from a set of control records. Records whose
 /// deps aren't all in the set are ignored.
 pub fn resolve(records: &[Record]) -> State {
+    full_run(records).state
+}
+
+/// Everything the reference resolution learns on the way to the state. The
+/// incremental resolver keeps these up to date so it can tell when a new
+/// record would change the outcome of earlier passes.
+struct Run {
+    order: Vec<RecordId>,
+    state: State,
+    /// Records voided in any pass.
+    excluded: HashSet<RecordId>,
+    /// Targets of kicks and revokes accepted in any pass.
+    kick_targets: HashSet<Actor>,
+    revoke_targets: HashSet<Actor>,
+    /// Actors whose role history differs between passes: some pass accepted
+    /// a privileged record about them that the final pass didn't, or the
+    /// other way round. Only the final pass's history is kept.
+    unsettled: HashSet<Actor>,
+    /// Same, for the genesis: ownership differed between passes.
+    owner_unsettled: bool,
+    /// Final pass: the writes each actor received, in linear order.
+    writes: HashMap<Actor, Vec<Write>>,
+    genesis: Option<RecordId>,
+}
+
+fn full_run<'a>(records: impl IntoIterator<Item = &'a Record>) -> Run {
     let by_id = complete_records(records);
     let order = linear_order(&by_id);
-    let ancestors = ancestor_sets(&by_id, &order);
+    let graph = Graph::new(&by_id, &order);
 
     // A valid removal can void records that came earlier in the linear
     // order, so fold again until no new records get voided. The excluded set
     // only grows, so this terminates.
-    let mut excluded = BTreeSet::new();
+    let mut excluded = vec![false; order.len()];
+    let mut kick_targets = HashSet::new();
+    let mut revoke_targets = HashSet::new();
+    let mut earlier_passes: Vec<BTreeSet<usize>> = Vec::new();
     loop {
-        let (state, voided) = fold(&by_id, &order, &ancestors, &excluded);
-        if voided.is_subset(&excluded) {
-            return state;
+        let pass = graph.fold(&excluded);
+        kick_targets.extend(pass.kick_targets);
+        revoke_targets.extend(pass.revoke_targets);
+        let fresh: Vec<usize> = pass.voided.into_iter().filter(|i| !excluded[*i]).collect();
+        if fresh.is_empty() {
+            let mut unsettled = HashSet::new();
+            let mut owner_unsettled = false;
+            for settled in &earlier_passes {
+                for &i in pass.settled.symmetric_difference(settled) {
+                    match graph.actions[i].as_ref().and_then(Action::target) {
+                        Some(target) => {
+                            unsettled.insert(target);
+                        }
+                        None => owner_unsettled = true,
+                    }
+                }
+            }
+            let excluded = (0..order.len()).filter(|i| excluded[*i]).map(|i| order[i]).collect();
+            return Run {
+                order,
+                state: pass.state,
+                excluded,
+                kick_targets,
+                revoke_targets,
+                unsettled,
+                owner_unsettled,
+                writes: pass.writes,
+                genesis: pass.genesis,
+            };
         }
-        excluded.extend(voided);
+        earlier_passes.push(pass.settled);
+        for i in fresh {
+            excluded[i] = true;
+        }
     }
 }
 
-/// Keeps only records whose whole dependency chain is present.
-fn complete_records(records: &[Record]) -> BTreeMap<RecordId, &Record> {
-    let mut by_id: BTreeMap<RecordId, &Record> = records.iter().map(|r| (r.id, r)).collect();
+/// Keeps only control records whose whole dependency chain is present and
+/// belongs to the same server.
+fn complete_records<'a>(
+    records: impl IntoIterator<Item = &'a Record>,
+) -> HashMap<RecordId, &'a Record> {
+    let mut by_id: HashMap<RecordId, &Record> =
+        records.into_iter().filter(|r| r.scope() == Scope::Control).map(|r| (r.id(), r)).collect();
     loop {
-        let missing: Vec<RecordId> = by_id
+        let broken: Vec<RecordId> = by_id
             .values()
-            .filter(|r| r.deps.iter().any(|dep| !by_id.contains_key(dep)))
-            .map(|r| r.id)
+            .filter(|r| {
+                r.deps().iter().any(|dep| by_id.get(dep).is_none_or(|d| d.server() != r.server()))
+            })
+            .map(|r| r.id())
             .collect();
-        if missing.is_empty() {
+        if broken.is_empty() {
             return by_id;
         }
-        for id in missing {
+        for id in broken {
             by_id.remove(&id);
         }
     }
 }
 
 /// Topological order of the record graph; concurrent records go in ID order.
-fn linear_order(by_id: &BTreeMap<RecordId, &Record>) -> Vec<RecordId> {
-    let mut pending_deps: BTreeMap<RecordId, usize> =
-        by_id.values().map(|r| (r.id, r.deps.len())).collect();
-    let mut dependents: BTreeMap<RecordId, Vec<RecordId>> = BTreeMap::new();
+fn linear_order(by_id: &HashMap<RecordId, &Record>) -> Vec<RecordId> {
+    let mut pending_deps: HashMap<RecordId, usize> =
+        by_id.values().map(|r| (r.id(), r.deps().len())).collect();
+    let mut dependents: HashMap<RecordId, Vec<RecordId>> = HashMap::new();
     for record in by_id.values() {
-        for dep in &record.deps {
-            dependents.entry(*dep).or_default().push(record.id);
+        for dep in record.deps() {
+            dependents.entry(*dep).or_default().push(record.id());
         }
     }
 
-    let mut ready: BinaryHeap<Reverse<RecordId>> = pending_deps
-        .iter()
-        .filter(|(_, count)| **count == 0)
-        .map(|(id, _)| Reverse(*id))
-        .collect();
+    let mut ready: BinaryHeap<Reverse<RecordId>> =
+        pending_deps.iter().filter(|(_, count)| **count == 0).map(|(id, _)| Reverse(*id)).collect();
     let mut order = Vec::with_capacity(by_id.len());
     while let Some(Reverse(id)) = ready.pop() {
         order.push(id);
@@ -173,98 +388,125 @@ fn linear_order(by_id: &BTreeMap<RecordId, &Record>) -> Vec<RecordId> {
     order
 }
 
-fn ancestor_sets(
-    by_id: &BTreeMap<RecordId, &Record>,
-    order: &[RecordId],
-) -> BTreeMap<RecordId, BTreeSet<RecordId>> {
-    let mut ancestors: BTreeMap<RecordId, BTreeSet<RecordId>> = BTreeMap::new();
-    for id in order {
-        let mut set = BTreeSet::new();
-        for dep in &by_id[id].deps {
-            set.insert(*dep);
-            set.extend(ancestors[dep].iter().copied());
-        }
-        ancestors.insert(*id, set);
+/// Fixed-size bit set over positions in the linear order.
+struct BitSet(Vec<u64>);
+
+impl BitSet {
+    fn new(len: usize) -> Self {
+        BitSet(vec![0; len.div_ceil(64)])
     }
-    ancestors
+
+    fn insert(&mut self, i: usize) {
+        self.0[i / 64] |= 1 << (i % 64);
+    }
+
+    fn contains(&self, i: usize) -> bool {
+        self.0[i / 64] & (1 << (i % 64)) != 0
+    }
+
+    fn union_with(&mut self, other: &BitSet) {
+        for (word, theirs) in self.0.iter_mut().zip(&other.0) {
+            *word |= theirs;
+        }
+    }
 }
 
-fn fold(
-    by_id: &BTreeMap<RecordId, &Record>,
-    order: &[RecordId],
-    ancestors: &BTreeMap<RecordId, BTreeSet<RecordId>>,
-    excluded: &BTreeSet<RecordId>,
-) -> (State, BTreeSet<RecordId>) {
-    let mut state = State::default();
-    let mut voided = BTreeSet::new();
+/// The complete records laid out in linear order, indexed by position.
+struct Graph<'a> {
+    records: Vec<&'a Record>,
+    actions: Vec<Option<Action>>,
+    ancestors: Vec<BitSet>,
+    by_author: HashMap<Actor, Vec<usize>>,
+}
 
-    let concurrent_by = |removal: &Record, target: Actor, privileged_only: bool| {
-        by_id
-            .values()
-            .filter(|r| r.author == target && r.id != removal.id)
-            .filter(|r| !ancestors[&removal.id].contains(&r.id))
-            .filter(|r| !privileged_only || r.is_privileged())
-            .map(|r| r.id)
-            .collect::<Vec<_>>()
-    };
+struct Pass {
+    state: State,
+    voided: Vec<usize>,
+    /// Positions of accepted genesis and privileged records.
+    settled: BTreeSet<usize>,
+    kick_targets: Vec<Actor>,
+    revoke_targets: Vec<Actor>,
+    writes: HashMap<Actor, Vec<Write>>,
+    genesis: Option<RecordId>,
+}
 
-    for id in order {
-        if excluded.contains(id) {
-            continue;
+impl<'a> Graph<'a> {
+    fn new(by_id: &HashMap<RecordId, &'a Record>, order: &[RecordId]) -> Self {
+        let position: HashMap<RecordId, usize> =
+            order.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+        let records: Vec<&Record> = order.iter().map(|id| by_id[id]).collect();
+        let mut ancestors: Vec<BitSet> = Vec::with_capacity(records.len());
+        let mut by_author: HashMap<Actor, Vec<usize>> = HashMap::new();
+        for (i, record) in records.iter().enumerate() {
+            let mut set = BitSet::new(records.len());
+            for dep in record.deps() {
+                let dep = position[dep];
+                set.insert(dep);
+                set.union_with(&ancestors[dep]);
+            }
+            ancestors.push(set);
+            by_author.entry(record.author()).or_default().push(i);
         }
-        let record = by_id[id];
-        if state.kicked.contains(&record.author) {
-            continue;
-        }
-        let author_role = state.role(record.author);
-        let accepted = match &record.action {
-            Action::Genesis => {
-                let ok = state.owner.is_none() && record.deps.is_empty();
-                if ok {
-                    state.owner = Some(record.author);
-                }
-                ok
-            }
-            _ if state.owner.is_none() => false,
-            Action::Grant { target, role } => {
-                let ok = *role < Role::Owner
-                    && author_role > *role
-                    && author_role > state.role(*target)
-                    && !state.kicked.contains(target);
-                if ok {
-                    if *role == Role::Member {
-                        state.roles.remove(target);
-                    } else {
-                        state.roles.insert(*target, *role);
-                    }
-                }
-                ok
-            }
-            Action::Revoke { target } => {
-                let ok = author_role > state.role(*target) && state.role(*target) > Role::Member;
-                if ok {
-                    state.roles.remove(target);
-                    voided.extend(concurrent_by(record, *target, true));
-                }
-                ok
-            }
-            Action::Kick { target } => {
-                let ok = author_role >= Role::Moderator && author_role > state.role(*target);
-                if ok {
-                    state.roles.remove(target);
-                    state.kicked.insert(*target);
-                    voided.extend(concurrent_by(record, *target, false));
-                }
-                ok
-            }
-            Action::Post { .. } => {
-                state.posts.push(record.id);
-                true
-            }
-        };
-        if accepted {
-            state.accepted.insert(record.id);
-        }
+        let actions = records.iter().map(|r| Action::from_record(r)).collect();
+        Graph { records, actions, ancestors, by_author }
     }
-    (state, voided)
+
+    fn fold(&self, excluded: &[bool]) -> Pass {
+        let mut pass = Pass {
+            state: State::default(),
+            voided: Vec::new(),
+            settled: BTreeSet::new(),
+            kick_targets: Vec::new(),
+            revoke_targets: Vec::new(),
+            writes: HashMap::new(),
+            genesis: None,
+        };
+        for (i, record) in self.records.iter().enumerate() {
+            if excluded[i] {
+                continue;
+            }
+            let Some(action) = &self.actions[i] else {
+                continue;
+            };
+            if !permitted(&pass.state, record, action) {
+                continue;
+            }
+            pass.state.accepted.insert(record.id());
+            match action {
+                Action::Post { .. } => {
+                    pass.state.posts.push(record.id());
+                    continue;
+                }
+                Action::Genesis => pass.genesis = Some(record.id()),
+                Action::Grant { .. } => {}
+                Action::Revoke { target } => {
+                    pass.voided.extend(self.concurrent_by(i, *target, true));
+                    pass.revoke_targets.push(*target);
+                }
+                Action::Kick { target } => {
+                    pass.voided.extend(self.concurrent_by(i, *target, false));
+                    pass.kick_targets.push(*target);
+                }
+            }
+            if let Some((target, write)) = apply(&mut pass.state, record, action) {
+                pass.writes.entry(target).or_default().push(write);
+            }
+            pass.settled.insert(i);
+        }
+        pass
+    }
+
+    /// Records by `target` that the removal at `removal` hadn't seen.
+    fn concurrent_by(
+        &self,
+        removal: usize,
+        target: Actor,
+        privileged_only: bool,
+    ) -> impl Iterator<Item = usize> + '_ {
+        self.by_author.get(&target).into_iter().flatten().copied().filter(move |&i| {
+            i != removal
+                && !self.ancestors[removal].contains(i)
+                && (!privileged_only || self.actions[i].as_ref().is_some_and(Action::is_privileged))
+        })
+    }
 }
