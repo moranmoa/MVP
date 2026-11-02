@@ -5,7 +5,11 @@
 //! command to person B, who runs `spike-peer dial <relay-addr> <peer-id>`.
 //! B first connects to A through the relay, then both try to hole-punch a
 //! direct connection (DCUtR). B prints one RESULT line and exits.
+//!
+//! Started with no arguments (double-click on Windows), it asks for the role
+//! and addresses instead, and keeps the window open until Enter is pressed.
 
+use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -38,9 +42,34 @@ enum Mode {
 const USAGE: &str = "usage:\n  spike-peer listen <relay-addr>\n  spike-peer dial <relay-addr> <peer-id>\n\
                      <relay-addr> looks like /ip4/1.2.3.4/tcp/4001/p2p/12D3KooW...";
 
-fn parse_args() -> Result<(Mode, Multiaddr, PeerId)> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let (mode, relay) = match args.as_slice() {
+fn prompt(question: &str) -> Result<String> {
+    print!("{question}");
+    io::stdout().flush()?;
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    // Some shells prefix piped input with a byte-order mark.
+    Ok(line.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}').to_string())
+}
+
+/// Asks for the same values the command line would take.
+fn ask_for_args() -> Result<Vec<String>> {
+    println!("NAT test - choose a role:");
+    println!("  1 = wait for a friend to connect (listen)");
+    println!("  2 = connect to a friend who is waiting (dial)");
+    let role = prompt("Your choice (1 or 2): ")?;
+    let relay = prompt("Relay address (paste what Moran sent you): ")?;
+    match role.as_str() {
+        "1" => Ok(vec!["listen".into(), relay]),
+        "2" => {
+            let peer = prompt("Your friend's ID (starts with 12D3KooW): ")?;
+            Ok(vec!["dial".into(), relay, peer])
+        }
+        _ => bail!("please type 1 or 2"),
+    }
+}
+
+fn parse_args(args: &[String]) -> Result<(Mode, Multiaddr, PeerId)> {
+    let (mode, relay) = match args {
         [cmd, relay] if cmd == "listen" => (Mode::Listen, relay),
         [cmd, relay, peer] if cmd == "dial" => {
             (Mode::Dial(peer.parse().context("invalid peer ID")?), relay)
@@ -68,11 +97,28 @@ fn is_relayed(endpoint: &ConnectedPoint) -> bool {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
-    let (mode, relay_addr, relay_peer) = parse_args()?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let interactive = args.is_empty();
+
+    let result = run(args, interactive).await;
+    if let Err(err) = &result {
+        eprintln!("Error: {err:#}");
+    }
+    if interactive {
+        let _ = prompt("\nPress Enter to close...");
+    }
+    if result.is_err() {
+        std::process::exit(1);
+    }
+}
+
+async fn run(args: Vec<String>, interactive: bool) -> Result<()> {
+    let args = if interactive { ask_for_args()? } else { args };
+    let (mode, relay_addr, relay_peer) = parse_args(&args)?;
 
     let mut swarm = SwarmBuilder::with_new_identity()
         .with_tokio()
@@ -118,9 +164,10 @@ async fn main() -> Result<()> {
     match &mode {
         Mode::Listen => {
             swarm.listen_on(circuit.clone())?;
-            let me = swarm.local_peer_id();
-            println!("\nWaiting for a friend. Send them this command:\n");
-            println!("  spike-peer dial {relay_addr} {me}\n");
+            let me = *swarm.local_peer_id();
+            println!("\nWaiting for a friend. Keep this window open and send them your ID:\n");
+            println!("  {me}\n");
+            println!("(Or the full command: spike-peer dial {relay_addr} {me})\n");
         }
         Mode::Dial(peer) => swarm.dial(circuit.with(Protocol::P2p(*peer)))?,
     }
