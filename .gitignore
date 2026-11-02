@@ -1,0 +1,17 @@
+# Secrets - never commit
+.env
+*.key
+*.pem
+secrets/
+infra/data/
+
+# Build output
+target/
+node_modules/
+dist/
+
+# OS and editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
