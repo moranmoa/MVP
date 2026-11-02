@@ -13,6 +13,7 @@ libp2p = { version = "0.54", features = [
     "quic",
     "noise",
     "yamux",
+    "dns",
     "websocket",
     "identify",
     "ping",

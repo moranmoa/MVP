@@ -26,9 +26,10 @@ services:
       - --no-cli
       - --fingerprint
       - --use-auth-secret
-      - --static-auth-secret=${TURN_SECRET:?set TURN_SECRET in .env}
-      - --realm=${DOMAIN:?set DOMAIN in .env}
-      - --external-ip=${PUBLIC_IP:?set PUBLIC_IP in .env}
+      # Set TURN_SECRET, DOMAIN and PUBLIC_IP in .env before using this profile.
+      - --static-auth-secret=${TURN_SECRET:-}
+      - --realm=${DOMAIN:-}
+      - --external-ip=${PUBLIC_IP:-}
       - --listening-port=3478
       - --min-port=49160
       - --max-port=49200
