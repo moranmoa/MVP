@@ -4,6 +4,7 @@
 | --- | --- |
 | `authority` | Deterministic resolution of a server's control log: roles, revoke, kick, and voiding of concurrent "backdated" actions |
 | `spike-peer` | Spike experiment 1: connects two peers through the relay, then tries a direct hole-punched connection. Tester instructions (Hebrew): `spike-peer/TESTING.md` |
+| `sync` | Spike experiment 2: SQLite store of content-addressed blobs + libp2p sync (pull by have-markers, gossipsub push). Harness: `bash sync/harness/run.sh`; results in `sync/RESULTS.md` |
 
 ## Running the tests
 
