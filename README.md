@@ -5,5 +5,6 @@ with no central server storing messages.
 
 - `docs/spec.md` – product spec (Hebrew), exported from the living doc.
 - `infra/` – helper servers (bootstrap/relay, TURN) that run in Docker.
+- `ui/` – the React interface shell (mock core for now); see `ui/README.md`.
 
 Secrets (`.env`, keys) stay out of git; see `.gitignore`.

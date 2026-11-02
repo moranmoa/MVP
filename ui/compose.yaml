@@ -1,0 +1,25 @@
+# Node is not needed on the host: everything runs in this container.
+# node_modules lives in a named volume so the Windows bind mount stays fast.
+services:
+  ui:
+    image: node:22.23.4-bookworm
+    working_dir: /app
+    volumes:
+      - .:/app
+      - ui_node_modules:/app/node_modules
+    ports:
+      - "5173:5173"
+      - "4173:4173"
+    command: npm run dev
+
+  # Screenshots of the main screens (Playwright + Chromium).
+  shots:
+    image: mcr.microsoft.com/playwright:v1.56.1-noble
+    working_dir: /app
+    volumes:
+      - .:/app
+      - ui_node_modules:/app/node_modules
+    command: npm run screenshots
+
+volumes:
+  ui_node_modules:
