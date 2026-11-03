@@ -3,9 +3,14 @@ import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import { useCore, type Member, type Message, type ServerSummary } from '../../core';
-import { Dialog, Name } from '../../components/common';
+import { Dialog, Name, RICH } from '../../components/common';
 import { BackIcon, CloseIcon, EditIcon, HashIcon, ReplyIcon, SendIcon, UsersIcon, WifiOffIcon } from '../../components/icons';
-import { BODY_MAX } from '../../core/sanitize';
+import { useUserTextProps } from '../../app/textDir';
+import { BODY_MAX, BODY_MAX_BYTES } from '../../core/sanitize';
+
+/** The character counter shows from here on (B6/QA-17 acceptance: 3,800). */
+const COUNTER_FROM = 3800;
+const utf8 = new TextEncoder();
 import { MessageList } from './MessageList';
 
 const NO_MEMBERS: Member[] = [];
@@ -188,6 +193,8 @@ function Composer({
 }) {
   const intl = useIntl();
   const [text, setText] = useState('');
+  // Empty: the interface direction (cursor and placeholder on the right in Hebrew).
+  const textProps = useUserTextProps(text);
   const draft = useRef('');
   const ref = useRef<HTMLTextAreaElement>(null);
 
@@ -213,12 +220,25 @@ function Composer({
     el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
   }, [text]);
 
+  // QA-10: no silent cut. Past the limit the counter turns red and sending
+  // stops, so the person can shorten the text themselves.
+  const nearLimit = text.length >= COUNTER_FROM;
+  const tooLong = nearLimit && (text.length > BODY_MAX || utf8.encode(text).length > BODY_MAX_BYTES);
+  const [failed, setFailed] = useState(false);
+
   const submit = async () => {
     const body = text.trim();
-    if (!body) return;
+    if (!body || tooLong) return;
+    setFailed(false);
     if (!editing) setText('');
-    await onSubmit(body);
-    if (editing) setText('');
+    try {
+      await onSubmit(body);
+      if (editing) setText('');
+    } catch {
+      // The core refused it: give the text back instead of losing it.
+      setText((t) => t || body);
+      setFailed(true);
+    }
   };
 
   return (
@@ -235,7 +255,7 @@ function Composer({
           </span>
           {editing && (
             <span className="muted small">
-              <FormattedMessage id="chat.editHint" />
+              <FormattedMessage id="chat.editHint" values={RICH} />
             </span>
           )}
           <span className="spacer" />
@@ -258,13 +278,17 @@ function Composer({
       >
         <textarea
           ref={ref}
-          dir="auto"
-          maxLength={BODY_MAX}
+          {...textProps}
+          aria-invalid={tooLong || undefined}
+          aria-describedby={nearLimit || failed ? 'composer-status' : undefined}
           rows={1}
           value={text}
           placeholder={intl.formatMessage({ id: 'chat.composer' }, { channel: channelName })}
           aria-label={intl.formatMessage({ id: 'chat.composer' }, { channel: channelName })}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            setFailed(false);
+            setText(e.target.value);
+          }}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
@@ -278,10 +302,28 @@ function Composer({
             }
           }}
         />
-        <button type="submit" className="icon-button send" aria-label={intl.formatMessage({ id: 'chat.send' })} disabled={!text.trim()}>
+        <button type="submit" className="icon-button send" aria-label={intl.formatMessage({ id: 'chat.send' })} disabled={!text.trim() || tooLong}>
           <SendIcon />
         </button>
       </form>
+      {(nearLimit || failed) && (
+        <p id="composer-status" className={`composer-status ${tooLong || failed ? 'error' : 'muted'}`} role={tooLong || failed ? 'alert' : undefined}>
+          {failed ? (
+            <FormattedMessage id="chat.sendFailed" />
+          ) : (
+            <>
+              {tooLong && (
+                <>
+                  <FormattedMessage id="chat.tooLong" values={{ max: BODY_MAX }} />{' '}
+                </>
+              )}
+              <span className="char-count" dir="ltr">
+                <FormattedMessage id="chat.charCount" values={{ count: text.length, max: BODY_MAX }} />
+              </span>
+            </>
+          )}
+        </p>
+      )}
     </div>
   );
 }

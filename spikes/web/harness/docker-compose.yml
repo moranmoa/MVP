@@ -1,0 +1,77 @@
+# Spike 5 harness: relay (relay/, patched copy of infra/relay), an unmodified core/sync
+# node, the WebRTC native peer and headless browsers. Own network, own relay
+# key: it does not touch the infra/ relay. Run it with run.sh.
+name: web-spike
+
+x-peer: &peer
+  image: debian:bookworm-slim
+  volumes:
+    - ./dist:/app:ro
+  tmpfs: [/data]
+  environment:
+    RELAY: /dns4/relay/tcp/4001/p2p/${RELAY_ID:-unset}
+    RUST_LOG: ${RUST_LOG:-info}
+
+services:
+  relay:
+    build: ../relay # patched copy of infra/relay (see relay/relay.patch)
+    image: web-spike-relay
+    environment:
+      KEY_PATH: /tmp/node.key # fresh key per run
+      # Without external addresses the relay still logs "reservation
+      # accepted", but the client drops the empty reservation and then denies
+      # every circuit with NO_RESERVATION. Production sets this in infra/.env.
+      EXTERNAL_ADDRS: /dns4/relay/tcp/4001,/dns4/relay/tcp/4002/ws
+      RUST_LOG: info
+      NO_COLOR: "1" # run.sh greps the peer ID from the log
+      # Circuit limits (empty = libp2p defaults); run.sh passes them through.
+      MAX_CIRCUITS: ${MAX_CIRCUITS:-}
+      MAX_CIRCUITS_PER_PEER: ${MAX_CIRCUITS_PER_PEER:-}
+      MAX_CIRCUIT_SECS: ${MAX_CIRCUIT_SECS:-}
+      MAX_CIRCUIT_BYTES: ${MAX_CIRCUIT_BYTES:-}
+
+  # core/sync's harness peer, built from core/sync as is.
+  sync:
+    <<: *peer
+    command: ["/app/sync-peer", "sync"]
+    depends_on: [relay]
+
+  # core/sync's store + protocols, plus a webrtc-direct listener.
+  native:
+    <<: *peer
+    command: ["/app/web-native", "native"]
+    environment:
+      RELAY: /dns4/relay/tcp/4001/p2p/${RELAY_ID:-unset}
+      # webrtc-rs logs every ICE/DTLS step at info/warn.
+      RUST_LOG: info,webrtc=error,webrtc_ice=error,webrtc_dtls=error,webrtc_sctp=error,libp2p_webrtc_utils=warn
+    depends_on: [relay]
+
+  browsers:
+    image: mcr.microsoft.com/playwright:v1.56.1-noble
+    ipc: host
+    volumes:
+      - ./test.mjs:/harness/test.mjs:ro
+      - ./dist/www:/www:ro
+      - ./dist:/out
+      - web-spike-node-modules:/app/node_modules
+    environment:
+      RELAY_ID: ${RELAY_ID:-unset}
+      SYNC: sync:7000
+      NATIVE: native:7000
+      BROWSERS: ${BROWSERS:-chromium,firefox}
+      ATTEMPTS: ${ATTEMPTS:-10}
+      MESSAGES: ${MESSAGES:-50}
+      BULK_BLOBS: ${BULK_BLOBS:-40}
+      BLOB_BYTES: ${BLOB_BYTES:-8192}
+    working_dir: /app
+    command:
+      - bash
+      - -c
+      - >-
+        cp /harness/test.mjs . &&
+        (test -d node_modules/playwright || npm install --no-save --no-audit --no-fund playwright@1.56.1) &&
+        node test.mjs
+    depends_on: [sync, native]
+
+volumes:
+  web-spike-node-modules:

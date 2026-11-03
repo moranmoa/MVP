@@ -46,14 +46,16 @@ confidence-threshold = 0.93
 #     { allow = ["LGPL-2.1-or-later"], crate = "<crate-name>" },
 # ]
 
-# PENDING OWNER DECISION - temporary, narrowly scoped exception.
+# ACCEPTED EXCEPTION - approved by the owner (Nov 2026). Scoped to this one
+# crate and version only; any other OpenSSL-licensed crate still fails.
 # ring 0.16.20 has no licence field. Its LICENSE file is ISC (ring's own
 # code) + MIT (fiat) + the OpenSSL and SSLeay licences (code inherited from
-# OpenSSL). OpenSSL/SSLeay are permissive and allow commercial use, but are
-# not on our allow list and carry an advertising-acknowledgement clause.
+# OpenSSL). OpenSSL/SSLeay are permissive and allow commercial use; their
+# acknowledgement clause goes into the third-party notices file.
 # It comes in only through libp2p 0.54: libp2p-quic -> libp2p-tls 0.5 ->
 # rcgen 0.11 -> ring 0.16. Newer libp2p-tls uses rcgen 0.13 / ring 0.17
-# (Apache-2.0 AND ISC), so upgrading libp2p should let us delete this.
+# (Apache-2.0 AND ISC); after a libp2p upgrade this entry becomes unused and
+# can be removed.
 [[licenses.clarify]]
 crate = "ring@0.16.20"
 expression = "MIT AND ISC AND OpenSSL"

@@ -4,6 +4,7 @@ import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import { useCore, type Member, type ServerSummary } from '../../core';
 import { Avatar, Code, Dialog, Name } from '../../components/common';
+import { textDir, useUiDir } from '../../app/textDir';
 import { CloseIcon } from '../../components/icons';
 import { nameSkeleton } from '../../core/sanitize';
 
@@ -158,6 +159,7 @@ export function ProfileCard({
   const core = useCore();
   const store = useAppStore();
   const intl = useIntl();
+  const uiDir = useUiDir();
   const myId = useStore(store, (s) => s.identity?.id);
   const [confirmKick, setConfirmKick] = useState(false);
   const canKick = server.ownerId === myId && !isMe && !member.isOwner;
@@ -183,7 +185,7 @@ export function ProfileCard({
           </p>
         )}
         {member.bio && (
-          <p dir="auto" className="bio">
+          <p dir={textDir(member.bio, uiDir)} className="bio user-text">
             {member.bio}
           </p>
         )}

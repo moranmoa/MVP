@@ -1,0 +1,40 @@
+[package]
+name = "web-peer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# rust-libp2p compiled to wasm32: the browser peer.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# wasm-bindgen stack pinned: libp2p-webrtc-websys 0.4.0-alpha matches on
+# web-sys enum variants that newer web-sys releases removed.
+[dependencies]
+futures = "0.3"
+getrandom = { version = "0.2", features = ["js"] }
+# gossipsub 0.47 → futures-ticker → instant: without this feature the bundle
+# imports a missing `env.now` and fails to load.
+instant = { version = "0.1", features = ["wasm-bindgen"] }
+js-sys = "=0.3.69"
+libp2p = { version = "0.54", features = [
+    "wasm-bindgen",
+    "websocket-websys",
+    "ed25519",
+    "noise",
+    "yamux",
+    "relay",
+    "identify",
+    "ping",
+    "gossipsub",
+    "request-response",
+    "cbor",
+    "macros",
+] }
+libp2p-webrtc-websys = "=0.4.0-alpha" # the release built on libp2p-core 0.42 (libp2p 0.54)
+serde_bytes = "0.11"
+serde_json = "1"
+wasm-bindgen = "=0.2.92"
+wasm-bindgen-futures = "=0.4.42"
+web-sys = { version = "=0.3.69", features = ["console", "Window", "Performance"] }
+web-wire = { path = "../wire" }

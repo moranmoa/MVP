@@ -107,3 +107,8 @@ export function Badge({ count, label }: { count: number; label: string }) {
     </span>
   );
 }
+
+/** Rich-text tags for ICU messages: a kbd tag renders as a key, always left to right. */
+export const RICH = {
+  kbd: (chunks: ReactNode[]) => <kbd dir="ltr">{chunks}</kbd>,
+};

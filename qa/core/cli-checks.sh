@@ -171,6 +171,6 @@ else
 fi
 
 echo
-echo "updater/spike-peer checks: $pass passed, $fail failed (known: QA-14, QA-15, QA-16 in qa/BUGS.md)"
+echo "updater/spike-peer checks: $pass passed, $fail failed"
 rm -rf "$W"
 [ "$fail" -eq 0 ]

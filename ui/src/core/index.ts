@@ -15,6 +15,7 @@ export * from './types';
  *   ?update=<ms>     announce a ready update after <ms>
  *   ?fresh=1         forget the stored mock account
  *   ?hostile=1       add attacker-style names and messages (security demo)
+ *   ?bidi=1          add the mixed-direction messages of B17 §2 to "כללי"
  */
 export function createCore(search = typeof location !== 'undefined' ? location.search : ''): CoreApi {
   const params = new URLSearchParams(search);
@@ -27,6 +28,7 @@ export function createCore(search = typeof location !== 'undefined' ? location.s
     demoUnchecked: demo === 'unchecked',
     simulateActivity: !!demo && !params.has('still'),
     hostile: params.has('hostile'),
+    bidi: params.has('bidi'),
     updateAfterMs: update !== null ? Number(update) || 0 : 45_000,
     storage,
   });
