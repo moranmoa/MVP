@@ -48,6 +48,23 @@ Other numbers from the same runs:
   returns. Each peer also listens on a relay circuit as a fallback for NAT. In
   these runs every peer connection was direct TCP.
 
+## Limits on peer input (added after the spike)
+
+Everything a peer sends is untrusted. The node enforces these limits:
+
+| What | Limit |
+|---|---|
+| Blob id | Never read from the wire. It is recomputed as BLAKE3 over the log name, deps and data, and checked again on every `append`. |
+| Blob size | At most 64 deps and 32 KiB of data; larger blobs are rejected before allocation. |
+| Log names | 1–128 printable ASCII characters. Peers' gossip subscriptions are tracked only for `log/<valid name>`, at most 1,024 topics per peer. |
+| `have` list in a pull | Only the first 64 ids are used. |
+| Pull response page | At most 2,000 blobs or 4 MiB, under the CBOR codec's 10 MiB cap. |
+| Inbound pulls | Per peer: a burst of 30, then 10 per second. |
+| "More" in a response | Followed only if the page added something new. |
+| Gossip messages | About 38 KiB max per frame (one maximal blob plus 4 KiB of framing). Invalid blobs are rejected and not forwarded. |
+| Pushed blobs waiting for deps | At most 10,000 blobs or 16 MiB, expiring after 60 s. Re-parking a blob counts against the same cap. |
+| Connections | 256 incoming, 64 pending, 2 per peer. |
+
 ## Full report of run 4
 
 ### Discovery
