@@ -394,10 +394,38 @@ impl Cut {
 /// Most Unicode code points in a channel name, the same limit as the UI.
 pub const MAX_CHANNEL_NAME: usize = 32;
 
-/// Whether `name` can name a channel: 1 to [`MAX_CHANNEL_NAME`] code points.
-/// Which characters are allowed is B23's.
+/// Whether `name` can name a channel: 1 to [`MAX_CHANNEL_NAME`] code points,
+/// and [`display_text_ok`].
 pub fn channel_name_ok(name: &str) -> bool {
-    (1..=MAX_CHANNEL_NAME).contains(&name.chars().count())
+    (1..=MAX_CHANNEL_NAME).contains(&name.chars().count()) && display_text_ok(name)
+}
+
+/// Whether text other people see as a name (a channel, a display name, a
+/// server name) is free of characters that change how text around it looks
+/// or hide what it says (B23, QA-06, QA-13):
+/// - bidi controls: embeddings and overrides U+202A–202E, isolates
+///   U+2066–2069, and the marks U+200E, U+200F and U+061C;
+/// - other control characters (C0, DEL, C1);
+/// - zero-width characters: U+200B–200D, U+2060 and U+FEFF. That includes
+///   the zero-width joiner, so emoji joined into one (a family, a flag with
+///   a modifier) are refused in names.
+///
+/// Right-to-left text needs none of these: "כללי" and "general" both pass.
+pub fn display_text_ok(text: &str) -> bool {
+    !text.chars().any(|c| {
+        c.is_control()
+            || matches!(
+                c,
+                '\u{202A}'..='\u{202E}'
+                    | '\u{2066}'..='\u{2069}'
+                    | '\u{200E}'
+                    | '\u{200F}'
+                    | '\u{061C}'
+                    | '\u{200B}'..='\u{200D}'
+                    | '\u{2060}'
+                    | '\u{FEFF}'
+            )
+    })
 }
 
 /// Signs a control-log record carrying `action`.
