@@ -931,7 +931,10 @@ fn edit_delete_and_retry_messages() {
     let one = owner.core.send_message(&channel, "one", None).unwrap();
     guest.core.sync_now().unwrap();
     let two = guest.core.send_message(&channel, "two", None).unwrap();
-    let sent = world.network.fetch(ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap())).len();
+    let sent = world
+        .network
+        .fetch(ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap()))
+        .len();
 
     // The author edits; everyone sees the new text and when.
     guest.events.take();
@@ -947,7 +950,10 @@ fn edit_delete_and_retry_messages() {
     let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
     let before = world.network.fetch(server_key).len();
     assert_eq!(before, sent + 1);
-    assert_eq!(guest.core.edit_message(&one.id, "mine now").unwrap_err().code, ErrorCode::NotAllowed);
+    assert_eq!(
+        guest.core.edit_message(&one.id, "mine now").unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
     assert_eq!(guest.core.delete_message(&one.id).unwrap_err().code, ErrorCode::NotAllowed);
     assert_eq!(guest.core.edit_message(&two.id, " ").unwrap_err().code, ErrorCode::BadRequest);
     assert_eq!(guest.core.delete_message(&"ab".repeat(32)).unwrap_err().code, ErrorCode::NotFound);

@@ -511,7 +511,6 @@ impl Core {
         })
     }
 
-
     /// The author only (authority's rule). The new text is sealed like a
     /// message; the edit names its target in its body and deps.
     pub fn edit_message(&self, message_id: &str, body: &str) -> CoreResult<()> {
@@ -522,7 +521,15 @@ impl Core {
             let (server, channel, target) = inner.find_message(message_id)?;
             let sealed = inner.seal(ports, server, channel, body)?;
             let body = [target.id().as_bytes().as_slice(), &sealed].concat();
-            inner.tombstone_or_edit(ports, events, server, channel, &target, Kind::MessageEdit, body)
+            inner.tombstone_or_edit(
+                ports,
+                events,
+                server,
+                channel,
+                &target,
+                Kind::MessageEdit,
+                body,
+            )
         })
     }
 
@@ -532,7 +539,15 @@ impl Core {
         self.run(|inner, ports, events| {
             let (server, channel, target) = inner.find_message(message_id)?;
             let body = target.id().as_bytes().to_vec();
-            inner.tombstone_or_edit(ports, events, server, channel, &target, Kind::MessageDelete, body)
+            inner.tombstone_or_edit(
+                ports,
+                events,
+                server,
+                channel,
+                &target,
+                Kind::MessageDelete,
+                body,
+            )
         })
     }
 
@@ -776,7 +791,8 @@ impl Inner {
     /// The `Message` record `message_id` in one of my servers' known
     /// channels; `not-found` otherwise.
     fn find_message(&mut self, message_id: &str) -> CoreResult<(ServerId, ChannelId, Record)> {
-        let id = model::parse_hex32(message_id).map(RecordId::from_bytes).ok_or(ErrorCode::NotFound)?;
+        let id =
+            model::parse_hex32(message_id).map(RecordId::from_bytes).ok_or(ErrorCode::NotFound)?;
         for server in self.db.servers()? {
             self.load(server)?;
             let log = self.logs.get(&server).ok_or(ErrorCode::Internal)?;
@@ -805,8 +821,11 @@ impl Inner {
     ) -> CoreResult<Message> {
         let me = self.me.as_ref().map(Me::key);
         let shown = self.shown(cipher, server, channel)?;
-        let (index, s) =
-            shown.iter().enumerate().find(|(_, s)| s.record.id() == id).ok_or(ErrorCode::Internal)?;
+        let (index, s) = shown
+            .iter()
+            .enumerate()
+            .find(|(_, s)| s.record.id() == id)
+            .ok_or(ErrorCode::Internal)?;
         Ok(message_json(s, index, channel, me))
     }
 
@@ -1168,7 +1187,12 @@ fn auth_deps(view: &ServerView) -> Vec<RecordId> {
 }
 
 /// `sendState: "sent"` on my own messages (they were published).
-fn message_json(s: &chat::Shown, index: usize, channel: ChannelId, me: Option<PublicKey>) -> Message {
+fn message_json(
+    s: &chat::Shown,
+    index: usize,
+    channel: ChannelId,
+    me: Option<PublicKey>,
+) -> Message {
     let mine = Some(s.record.author()) == me;
     Message {
         id: model::hex_id(s.record.id().as_bytes()),
