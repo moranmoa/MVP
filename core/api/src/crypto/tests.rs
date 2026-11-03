@@ -157,3 +157,32 @@ fn only_key_rotation_records_are_taken_in() {
     .unwrap();
     assert_eq!(bob.apply_rotation(&record), Err(CipherError::Rejected));
 }
+
+#[test]
+fn locked_until_unlocked_and_lock_drops_everything() {
+    let alice = GroupKeysCipher::locked();
+    let everyone = members(&[1, 2]);
+    alice.membership_changed(SERVER, &everyone);
+    assert_eq!(alice.rotate(SERVER, CHANNEL, &everyone), Err(CipherError::Unavailable));
+    assert_eq!(alice.encrypt(SERVER, CHANNEL, b"x"), Err(CipherError::Unavailable));
+
+    alice.unlock(Arc::new(MemberSecret::new(&key(1))));
+    let mut accepted = BTreeSet::new();
+    let parts = alice.rotate(SERVER, CHANNEL, &everyone).unwrap();
+    deliver(&[&alice], &sign(1, parts), &mut accepted);
+    assert!(alice.encrypt(SERVER, CHANNEL, b"x").is_ok());
+
+    alice.lock();
+    assert_eq!(alice.encrypt(SERVER, CHANNEL, b"x"), Err(CipherError::Unavailable));
+}
+
+#[test]
+fn debug_never_prints_the_secret() {
+    let scalar = hex::encode(key(1).to_scalar_bytes());
+    let secret = MemberSecret::new(&key(1));
+    let cipher = GroupKeysCipher::new(Arc::new(MemberSecret::new(&key(1))));
+    for shown in [format!("{secret:?}"), format!("{cipher:?}"), format!("{secret:#?}")] {
+        assert!(!shown.contains(&scalar), "{shown}");
+        assert!(!shown.contains(&scalar[..16]), "{shown}");
+    }
+}

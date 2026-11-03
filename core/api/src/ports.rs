@@ -252,7 +252,12 @@ impl GroupCipher for PendingGroupKeys {
         CipherOutcome::Unchanged
     }
 
-    fn encrypt(&self, _: ServerId, _: records::ChannelId, _: &[u8]) -> Result<Vec<u8>, CipherError> {
+    fn encrypt(
+        &self,
+        _: ServerId,
+        _: records::ChannelId,
+        _: &[u8],
+    ) -> Result<Vec<u8>, CipherError> {
         Err(CipherError::Unavailable)
     }
 
