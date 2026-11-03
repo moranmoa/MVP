@@ -3,33 +3,70 @@
 //! It never stores or reads messages: it only helps peers find each other
 //! (Kademlia DHT, server mode) and relays encrypted traffic when two peers
 //! can't connect directly (libp2p circuit relay v2).
+//!
+//! `relay-node healthcheck` exits 0 if the local TCP listener accepts a
+//! connection; the Docker healthcheck runs it (the image has no curl/nc).
 
-use std::{env, fs, path::Path, time::Duration};
+use std::{
+    env, fs,
+    io::Write,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream},
+    path::Path,
+    process::ExitCode,
+    time::{Duration, Instant},
+};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use futures::StreamExt;
 use libp2p::{
-    identify, identity, kad, noise, ping, relay,
+    connection_limits::{self, ConnectionLimits},
+    identify, identity, kad, memory_connection_limits,
+    multiaddr::Protocol,
+    noise, ping, relay,
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, Multiaddr, SwarmBuilder,
+    tcp, yamux, Multiaddr, StreamProtocol, SwarmBuilder,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
-const PROTOCOL_VERSION: &str = "/descord-replacement/0.1.0";
+const PROTOCOL_VERSION: &str = "/mvs/0.1.0";
+
+/// Our own DHT protocol, so it can never merge with the public IPFS DHT
+/// (`/ipfs/kad/1.0.0`). Clients (core/sync) must use the same name.
+const KAD_PROTOCOL: StreamProtocol = StreamProtocol::new("/mvs/kad/1.0.0");
+
+/// TODO(R2): drop once core/sync speaks KAD_PROTOCOL. Until then the relay
+/// also answers on the IPFS name so today's clients can still use its DHT.
+const LEGACY_KAD_PROTOCOL: StreamProtocol = StreamProtocol::new("/ipfs/kad/1.0.0");
 
 #[derive(NetworkBehaviour)]
 struct Behaviour {
+    // Limits first: they deny a connection before any other behaviour
+    // spends anything on it.
+    limits: connection_limits::Behaviour,
+    memory: memory_connection_limits::Behaviour,
     relay: relay::Behaviour,
     identify: identify::Behaviour,
     ping: ping::Behaviour,
     kademlia: kad::Behaviour<kad::store::MemoryStore>,
 }
 
+/// Counters for the periodic `stats` log line. Counts only - no addresses or
+/// peer IDs - so the log can be shared when asking for help.
+#[derive(Default)]
+struct Stats {
+    reservations_accepted: u64,
+    reservations_denied: u64,
+    circuits_accepted: u64,
+    circuits_denied: u64,
+    circuits_open: u64,
+}
+
 /// The node keeps one identity across restarts so its peer ID (and therefore
 /// the bootstrap address baked into clients) stays stable.
 fn load_or_create_key(path: &Path) -> Result<identity::Keypair> {
     if path.exists() {
+        check_key_mode(path)?;
         let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         return identity::Keypair::from_protobuf_encoding(&bytes).context("decoding node key");
     }
@@ -37,30 +74,139 @@ fn load_or_create_key(path: &Path) -> Result<identity::Keypair> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    fs::write(path, key.to_protobuf_encoding()?)
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let encoded = key.to_protobuf_encoding()?;
+    opts.open(path)
+        .and_then(|mut f| f.write_all(&encoded))
         .with_context(|| format!("writing {}", path.display()))?;
     info!(path = %path.display(), "generated new node key");
     Ok(key)
 }
 
-fn env_port(name: &str, default: u16) -> Result<u16> {
+/// Anyone who can read the key can impersonate the relay, so refuse to run
+/// with a key that group or others can read.
+#[cfg(unix)]
+fn check_key_mode(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(path)?.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        bail!(
+            "{} has mode {mode:o}; it must be readable by its owner only. Fix: chmod 600 {}",
+            path.display(),
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_key_mode(_: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Whether an address is worth handing to other peers via the DHT: public
+/// IPs and DNS names only. Private, loopback, link-local and CGNAT addresses
+/// would leak a client's LAN layout and are useless to anyone outside it.
+fn is_global(addr: &Multiaddr) -> bool {
+    match addr.iter().next() {
+        Some(Protocol::Ip4(ip)) => is_global_v4(ip),
+        Some(Protocol::Ip6(ip)) => is_global_v6(ip),
+        Some(Protocol::Dns(name) | Protocol::Dns4(name) | Protocol::Dns6(name)) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            name != "localhost" && !name.ends_with(".localhost") && !name.ends_with(".local")
+        }
+        _ => false,
+    }
+}
+
+fn is_global_v4(ip: Ipv4Addr) -> bool {
+    let [a, b, ..] = ip.octets();
+    !(ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_multicast()
+        || a == 0
+        || (a == 100 && (64..128).contains(&b)) // CGNAT 100.64.0.0/10
+        || a >= 240)
+}
+
+fn is_global_v6(ip: Ipv6Addr) -> bool {
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return is_global_v4(v4);
+    }
+    let first = ip.segments()[0];
+    !(ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_multicast()
+        || (first & 0xfe00) == 0xfc00 // unique local fc00::/7
+        || (first & 0xffc0) == 0xfe80 // link-local fe80::/10
+        || first == 0x2001 && ip.segments()[1] == 0x0db8) // documentation
+}
+
+fn env_num<T: std::str::FromStr>(name: &str, default: T) -> Result<T> {
     match env::var(name) {
-        Ok(value) => value.parse().with_context(|| format!("{name} must be a port number")),
+        Ok(value) => value.parse().ok().with_context(|| format!("{name} must be a number")),
         Err(_) => Ok(default),
     }
 }
 
+fn healthcheck() -> ExitCode {
+    let port = match env_num("TCP_PORT", 4001u16) {
+        Ok(port) => port,
+        Err(err) => {
+            eprintln!("{err:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    match TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("relay not accepting on {addr}: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn main() -> Result<ExitCode> {
+    if env::args().nth(1).as_deref() == Some("healthcheck") {
+        return Ok(healthcheck());
+    }
+    run()?;
+    Ok(ExitCode::SUCCESS)
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
     let key_path = env::var("KEY_PATH").unwrap_or_else(|_| "/data/node.key".into());
     let key = load_or_create_key(Path::new(&key_path))?;
-    let tcp_port = env_port("TCP_PORT", 4001)?;
-    let quic_port = env_port("QUIC_PORT", 4001)?;
-    let ws_port = env_port("WS_PORT", 4002)?;
+    let tcp_port = env_num("TCP_PORT", 4001u16)?;
+    let quic_port = env_num("QUIC_PORT", 4001u16)?;
+    let ws_port = env_num("WS_PORT", 4002u16)?;
+    let stats_every = Duration::from_secs(env_num("STATS_INTERVAL_SECS", 300u64)?.max(10));
+    let limits = ConnectionLimits::default()
+        .with_max_established(Some(env_num("MAX_CONNECTIONS", 512u32)?))
+        .with_max_established_per_peer(Some(8))
+        .with_max_pending_incoming(Some(64));
+    // Absolute bytes, not a percentage: the percentage is of the host's RAM,
+    // which ignores the container's memory limit (256 MB in compose).
+    let max_memory = env_num("MAX_MEMORY_MB", 200usize)? * 1024 * 1024;
+    // Test harnesses and LAN setups have only private addresses; never set
+    // this on the public relay (it would hand out clients' LAN addresses).
+    let allow_private_addrs = env::var("ALLOW_PRIVATE_ADDRS").is_ok_and(|v| v == "1");
+    if allow_private_addrs {
+        warn!("ALLOW_PRIVATE_ADDRS=1: private addresses go into the DHT; for test/LAN use only");
+    }
 
     let mut swarm = SwarmBuilder::with_existing_identity(key)
         .with_tokio()
@@ -71,9 +217,17 @@ async fn main() -> Result<()> {
         .await?
         .with_behaviour(|key| {
             let peer_id = key.public().to_peer_id();
-            let mut kademlia = kad::Behaviour::new(peer_id, kad::store::MemoryStore::new(peer_id));
+            let mut kad_config = kad::Config::new(KAD_PROTOCOL);
+            // Ours first: it is preferred whenever both sides support it.
+            // Deprecated in favour of Config::new, which takes one name only.
+            #[allow(deprecated)]
+            kad_config.set_protocol_names(vec![KAD_PROTOCOL, LEGACY_KAD_PROTOCOL]);
+            let mut kademlia =
+                kad::Behaviour::with_config(peer_id, kad::store::MemoryStore::new(peer_id), kad_config);
             kademlia.set_mode(Some(kad::Mode::Server));
             Behaviour {
+                limits: connection_limits::Behaviour::new(limits),
+                memory: memory_connection_limits::Behaviour::with_max_bytes(max_memory),
                 relay: relay::Behaviour::new(peer_id, relay::Config::default()),
                 identify: identify::Behaviour::new(identify::Config::new(
                     PROTOCOL_VERSION.into(),
@@ -106,22 +260,116 @@ async fn main() -> Result<()> {
 
     info!(peer_id = %swarm.local_peer_id(), "relay node started");
 
+    let started = Instant::now();
+    let mut stats = Stats::default();
+    let mut stats_timer = tokio::time::interval(stats_every);
+
     loop {
-        match swarm.select_next_some().await {
+        let event = tokio::select! {
+            event = swarm.select_next_some() => event,
+            _ = stats_timer.tick() => {
+                let net = swarm.network_info();
+                info!(
+                    uptime_secs = started.elapsed().as_secs(),
+                    peers = net.num_peers(),
+                    connections = net.connection_counters().num_established(),
+                    circuits_open = stats.circuits_open,
+                    circuits_accepted = stats.circuits_accepted,
+                    circuits_denied = stats.circuits_denied,
+                    reservations_accepted = stats.reservations_accepted,
+                    reservations_denied = stats.reservations_denied,
+                    "stats"
+                );
+                continue;
+            }
+        };
+        match event {
             SwarmEvent::NewListenAddr { address, .. } => info!(%address, "listening"),
             SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received {
                 peer_id,
                 info,
                 ..
             })) => {
-                for addr in info.listen_addrs {
+                for addr in info.listen_addrs.into_iter().filter(|a| allow_private_addrs || is_global(a)) {
                     swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
                 }
             }
-            SwarmEvent::Behaviour(BehaviourEvent::Relay(event)) => info!(?event, "relay"),
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => info!(%peer_id, "connected"),
-            SwarmEvent::ConnectionClosed { peer_id, .. } => info!(%peer_id, "disconnected"),
+            SwarmEvent::Behaviour(BehaviourEvent::Relay(event)) => {
+                match &event {
+                    relay::Event::ReservationReqAccepted { renewed: false, .. } => stats.reservations_accepted += 1,
+                    relay::Event::ReservationReqDenied { .. } => stats.reservations_denied += 1,
+                    relay::Event::CircuitReqAccepted { .. } => {
+                        stats.circuits_accepted += 1;
+                        stats.circuits_open += 1;
+                    }
+                    relay::Event::CircuitReqDenied { .. } => stats.circuits_denied += 1,
+                    relay::Event::CircuitClosed { .. } => stats.circuits_open = stats.circuits_open.saturating_sub(1),
+                    _ => {}
+                }
+                debug!(?event, "relay");
+            }
+            // Per-connection lines are debug-only so the log doesn't grow with
+            // every peer; the stats line carries the totals.
+            SwarmEvent::ConnectionEstablished { peer_id, .. } => debug!(%peer_id, "connected"),
+            SwarmEvent::ConnectionClosed { peer_id, .. } => debug!(%peer_id, "disconnected"),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn global(addr: &str) -> bool {
+        is_global(&addr.parse().unwrap())
+    }
+
+    #[test]
+    fn keeps_public_addresses() {
+        assert!(global("/ip4/8.8.8.8/tcp/4001"));
+        assert!(global("/ip4/100.128.0.1/udp/4001/quic-v1"));
+        assert!(global("/ip6/2a00:1450::1/tcp/4001"));
+        assert!(global("/dns4/relay.example.org/tcp/443/wss"));
+        assert!(global("/ip4/8.8.8.8/tcp/4001/p2p/12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc/p2p-circuit"));
+    }
+
+    #[test]
+    fn drops_local_addresses() {
+        for addr in [
+            "/ip4/127.0.0.1/tcp/4001",
+            "/ip4/10.1.2.3/tcp/4001",
+            "/ip4/172.16.0.1/tcp/4001",
+            "/ip4/192.168.1.10/udp/4001/quic-v1",
+            "/ip4/169.254.1.1/tcp/4001",
+            "/ip4/100.64.0.1/tcp/4001",
+            "/ip4/0.0.0.0/tcp/4001",
+            "/ip4/203.0.113.10/tcp/4001",
+            "/ip6/::1/tcp/4001",
+            "/ip6/fe80::1/tcp/4001",
+            "/ip6/fd00::1/tcp/4001",
+            "/ip6/::ffff:192.168.1.1/tcp/4001",
+            "/dns4/localhost/tcp/4001",
+            "/dns4/printer.local/tcp/4001",
+            "/p2p-circuit",
+        ] {
+            assert!(!global(addr), "{addr} should be dropped");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn key_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = env::temp_dir().join(format!("relay-key-test-{}", std::process::id()));
+        let path = dir.join("node.key");
+        let _ = fs::remove_dir_all(&dir);
+        let first = load_or_create_key(&path).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(load_or_create_key(&path).unwrap().public(), first.public());
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(load_or_create_key(&path).is_err());
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

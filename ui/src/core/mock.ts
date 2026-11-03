@@ -49,6 +49,8 @@ export interface MockOptions {
   hostile?: boolean;
   /** `getRecoveryWords()` fails, to show the load error state. */
   wordsError?: boolean;
+  /** Add the mixed-direction messages of the B17 spec (§2) to the first channel. */
+  bidi?: boolean;
   /** Keep the account across reloads. */
   storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 }
@@ -210,6 +212,7 @@ export class MockCore implements CoreApi {
     this.words = this.makeWords(this.identity.id);
     if (this.persisted.demo) DEMO_SERVERS.forEach((s) => this.addSeed(s));
     if (this.persisted.demo && this.options.hostile) this.addHostile(DEMO_SERVERS[0].id);
+    if (this.persisted.demo && this.options.bidi) this.addBidi(DEMO_SERVERS[0].id);
     if (this.persisted.joinedDemo) this.addSeed(JOINABLE_SERVER);
     for (const s of this.persisted.createdServers) this.addOwnServer(s.id, s.name, s.ageRestriction, s.inviteLink);
   }
@@ -289,6 +292,40 @@ export class MockCore implements CoreApi {
         channelId: ch.channel.id,
         index,
         authorId: added[i].id,
+        body,
+        createdAt: Date.now() - (bodies.length - i) * 60_000,
+      });
+    });
+  }
+
+  /**
+   * The test table of docs/ux/specs/B17-mixed-direction.md §2, as messages:
+   * Hebrew that starts with English, links, mentions, an explicit RLM, a tie
+   * and two paragraphs in different directions.
+   */
+  private addBidi(serverId: Id): void {
+    const s = this.servers.get(serverId)!;
+    const ch = s.channels[0];
+    const RLM = String.fromCharCode(0x200f);
+    const bodies = [
+      'lol זה היה מטורף',
+      'GG על המשחק אתמול, 3:1 לנו!',
+      '@Itamar תבדוק את ה-patch החדש',
+      'version 2.4.1 fixed the crash',
+      '🎉🎉',
+      '3:1',
+      'https://youtu.be/abcdefg תראו את זה',
+      `${RLM}ok`,
+      'שלום לכולם\nnpm run build',
+    ];
+    bodies.forEach((body, i) => {
+      const index = this.count(ch);
+      ch.appendedCount++;
+      ch.overrides.set(index, {
+        id: this.messageId(ch.channel.id, index),
+        channelId: ch.channel.id,
+        index,
+        authorId: ch.memberIds[i % ch.memberIds.length],
         body,
         createdAt: Date.now() - (bodies.length - i) * 60_000,
       });

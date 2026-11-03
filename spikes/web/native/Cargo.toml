@@ -1,0 +1,35 @@
+[package]
+name = "web-native"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A native peer that browsers can dial directly over WebRTC (webrtc-direct).
+# Stores blobs with core/sync's SQLite store and speaks the same protocols.
+[dependencies]
+anyhow = "1"
+futures = "0.3"
+libp2p = { version = "0.54", features = [
+    "tokio",
+    "tcp",
+    "dns",
+    "noise",
+    "yamux",
+    "relay",
+    "identify",
+    "ping",
+    "gossipsub",
+    "request-response",
+    "cbor",
+    "macros",
+] }
+libp2p-webrtc = { version = "=0.8.0-alpha", features = ["tokio"] } # libp2p-core 0.42
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+serde_json = "1"
+sync = { path = "../../../core/sync" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net", "io-util", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+web-wire = { path = "../wire" }

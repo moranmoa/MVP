@@ -311,7 +311,7 @@ records/authority, updater).
 ## מה כבר אוטומטי ואיך מריצים
 
 ראו `qa/README.md`. בקצרה: `smoke` (8 בדיקות, מסלול ההצלחה) ו-`explore`
-(38 בדיקות, כולל שחזור של כל באג UI ב-`BUGS.md` ושל UX-01) רצים ב-Docker מול ה-UI;
+(46 בדיקות, כולל שחזור של כל באג UI פתוח ב-`BUGS.md`, UX-01, פריסת טלפון ונתונים עוינים) רצים ב-Docker מול ה-UI;
 `qa/core/cli-checks.sh` בודק את ה-CLI של updater ו-spike-peer עם קלט שגוי
 ו-manifest מזויף.
 

@@ -155,14 +155,14 @@
   "presence.online": "Online",
   "presence.offline": "Offline",
 
-  "chat.messages": "Messages in #{channel}",
-  "chat.empty": "This is the start of #{channel}. Write the first message.",
-  "chat.composer": "Message #{channel}",
+  "chat.messages": "Messages in #\u2068{channel}\u2069",
+  "chat.empty": "This is the start of #\u2068{channel}\u2069. Write the first message.",
+  "chat.composer": "Message #\u2068{channel}\u2069",
   "chat.send": "Send",
-  "chat.replyingTo": "Replying to {name}",
+  "chat.replyingTo": "Replying to \u2068{name}\u2069",
   "chat.cancelReply": "Cancel reply",
   "chat.editing": "Editing message",
-  "chat.editHint": "Enter to save · Esc to cancel",
+  "chat.editHint": "<kbd>Enter</kbd> to save · <kbd>Esc</kbd> to cancel",
   "chat.reply": "Reply",
   "chat.edit": "Edit",
   "chat.delete": "Delete",
@@ -178,7 +178,7 @@
   "chat.jumpToLatest": "Jump to latest",
   "chat.blocked": "Message from a blocked user",
   "chat.showAnyway": "Show anyway",
-  "chat.code": "Identity code {code}",
+  "chat.code": "Identity code \u2068{code}\u2069",
   "chat.toggleMembers": "Member list",
   "chat.repliedMessage": "Original message",
 
@@ -187,7 +187,7 @@
   "members.offline": "Offline – {count}",
   "members.owner": "Owner",
   "members.me": "(you)",
-  "members.open": "{name}'s profile",
+  "members.open": "\u2068{name}\u2069's profile",
 
   "profile.code": "Identity code",
   "profile.codeHint": "Compare this code to make sure it's really the same person.",
@@ -195,7 +195,7 @@
   "profile.unblock": "Unblock",
   "profile.blockHint": "Messages from blocked people are hidden for you.",
   "profile.kick": "Remove from server",
-  "profile.kickConfirm": "Remove {name} from the server? The server's encryption will be updated so they can't read new messages.",
+  "profile.kickConfirm": "Remove \u2068{name}\u2069 from the server? The server's encryption will be updated so they can't read new messages.",
   "profile.kickConfirmButton": "Remove",
   "notice.encryptionRenewed": "Encryption was updated. Whoever was removed can't read new messages.",
 
@@ -222,13 +222,13 @@
   "settings.scale.label": "Interface scale",
   "settings.font.label": "Message font size",
   "settings.font.value": "{size}px",
-  "settings.zoomHint": "Shortcuts: Ctrl+= zoom in, Ctrl+- zoom out, Ctrl+0 reset.",
+  "settings.zoomHint": "Shortcuts: <kbd>Ctrl+=</kbd> zoom in, <kbd>Ctrl+-</kbd> zoom out, <kbd>Ctrl+0</kbd> reset.",
   "settings.reset": "Reset to default",
   "settings.preview": "Preview",
   "settings.preview.sample1": "Anyone up for a game tonight?",
   "settings.preview.sample2": "I'm in, ten minutes 🎮",
 
-  "settings.storage.used": "Using {used} of {limit}",
+  "settings.storage.used": "Using \u2068{used}\u2069 of \u2068{limit}\u2069",
   "settings.storage.messages": "Messages",
   "settings.storage.files": "Cached files",
   "settings.storage.limit": "Maximum space",
@@ -240,7 +240,7 @@
   "settings.diag.export": "Export diagnostics",
   "settings.diag.done": "File saved.",
 
-  "settings.about.version": "Version {version}",
+  "settings.about.version": "Version \u2068{version}\u2069",
   "settings.about.alpha": "Closed alpha – invited testers only.",
   "settings.about.channel": "Update channel",
   "settings.about.stable": "Stable",
@@ -253,5 +253,8 @@
   "members.lookalikeHint": "This name looks like the server owner’s name or like a role. Check the identity code to see who it really is.",
   "onb.profile.avatarTooBig": "Pick a PNG, JPEG, WebP or GIF image up to 512 KB.",
   "chat.back": "Back to channels",
-  "members.close": "Close the member list"
+  "members.close": "Close the member list",
+  "chat.charCount": "{count, number} / {max, number}",
+  "chat.tooLong": "This message is too long. You can send up to {max, number} characters.",
+  "chat.sendFailed": "The message wasn't sent, and your text is back in the box. You can try again."
 }

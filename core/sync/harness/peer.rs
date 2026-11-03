@@ -200,7 +200,7 @@ async fn handle(peer: &Arc<Peer>, command: Command) -> Result<Value> {
     }
 }
 
-async fn record_events(stats: Arc<Mutex<Stats>>, mut events: tokio::sync::mpsc::UnboundedReceiver<NodeEvent>) {
+async fn record_events(stats: Arc<Mutex<Stats>>, mut events: tokio::sync::mpsc::Receiver<NodeEvent>) {
     while let Some(event) = events.recv().await {
         let mut stats = stats.lock().unwrap();
         let since_start = stats.started.map(|s| s.elapsed().as_millis());
