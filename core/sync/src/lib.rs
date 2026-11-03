@@ -28,11 +28,12 @@ pub mod store;
 
 mod keyfile;
 mod limits;
+mod presence;
 #[cfg(test)]
 pub(crate) mod testutil;
 
 pub use access::{binding_message, Binder, Handle, ReadGate, ServerSecret};
-pub use node::{Access, Node, NodeConfig, NodeEvent, Via};
+pub use node::{Access, Node, NodeConfig, NodeEvent, PresenceState, Reachability, Via};
 pub use records::{ChannelId, Record, RecordId, Scope, ServerId};
 pub use store::{Append, ControlLog, IngestError, Store};
 

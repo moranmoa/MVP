@@ -53,6 +53,7 @@ use zeroize::Zeroizing;
 
 use crate::access::{self, Binder, Binding, Handle, ReadGate, ServerSecret};
 use crate::limits::{Acks, Pending, PerIp, RateLimiter, Refused};
+use crate::presence::Presence;
 use crate::store::MAX_HAVE;
 use crate::{
     log_name, log_of, valid_log_name, Append, Authorizer, ChannelId, Record, RecordId, Scope, ServerId, Store,
@@ -138,6 +139,8 @@ const ACK_TTL: Duration = Duration::from_secs(600);
 const MAX_OWN: usize = 10_000;
 /// After writing, the log is pulled again this soon, to pick up acks.
 const ACK_PULL: Duration = Duration::from_secs(1);
+/// Reachability is `Connecting` at most this long after starting.
+const CONNECTING: Duration = Duration::from_secs(10);
 /// Waits between relay dials while it is down: reconnects within a minute
 /// of a relay restart (plus the discovery tick).
 const RELAY_BACKOFF_MIN: Duration = Duration::from_secs(1);
@@ -206,6 +209,31 @@ pub enum NodeEvent {
     /// ordering or deletion. A false ack can only mislead the author's own
     /// UI. Sent once per record.
     Delivered { id: RecordId },
+    /// A bound identity came online on, or went offline from, a server
+    /// opened with its secret (M2). Anyone holding the secret can be bound:
+    /// the app shows only members. Sent on changes only.
+    Presence { server: ServerId, identity: PublicKey, online: bool },
+}
+
+/// Presence on one server (M2). `online` holds bound identities (anyone
+/// with the secret): the app shows only members.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresenceState {
+    pub online: Vec<PublicKey>,
+    /// The last time anyone of the server was seen online here.
+    pub last_seen: Option<SystemTime>,
+    pub reachability: Reachability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Reachability {
+    /// Just started: not on the network yet (no relay reservation, no peer).
+    Connecting,
+    /// Someone of the server is online.
+    Online,
+    /// Nobody of the server is reachable *from here*: others may be online
+    /// but out of reach (NAT, relay down).
+    NobodyOnline,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -222,6 +250,7 @@ enum Command {
     OpenServer { server: ServerId, secret: Box<ServerSecret> },
     OpenChannel { server: ServerId, channel: ChannelId, reply: oneshot::Sender<Result<()>> },
     State { log: String, reply: oneshot::Sender<Result<LogState>> },
+    Presence { server: ServerId, reply: oneshot::Sender<PresenceState> },
     Peers { reply: oneshot::Sender<Vec<PeerId>> },
     Shutdown { reply: oneshot::Sender<()> },
 }
@@ -359,6 +388,10 @@ impl Node {
             own: HashSet::new(),
             acks: Acks::new(ACKS_PER_AUTHOR, MAX_ACK_AUTHORS, ACK_TTL),
             soon: HashSet::new(),
+            presence: Presence::default(),
+            last_seen: HashMap::new(),
+            reached: false,
+            started: Instant::now(),
         };
         for log in config.logs {
             task.open(log, None);
@@ -415,6 +448,14 @@ impl Node {
         let (reply, rx) = oneshot::channel();
         self.send(Command::State { log: log.into(), reply })?;
         rx.await?
+    }
+
+    /// Who is online on a server opened with its secret, and whether anyone
+    /// is reachable (M2).
+    pub async fn presence(&self, server: ServerId) -> Result<PresenceState> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::Presence { server, reply })?;
+        Ok(rx.await?)
     }
 
     pub async fn peers(&self) -> Result<Vec<PeerId>> {
@@ -664,6 +705,12 @@ struct Task {
     acks: Acks<(ServerId, PublicKey)>,
     /// Logs to pull again shortly (to pick up acks after writing).
     soon: HashSet<String>,
+    /// Who is online, per server (M2).
+    presence: Presence,
+    last_seen: HashMap<ServerId, SystemTime>,
+    /// Whether we ever reached the network (a relay reservation or a peer).
+    reached: bool,
+    started: Instant,
 }
 
 /// What a pull may get: the log, the read check still to run, and the
@@ -715,7 +762,11 @@ impl Task {
                 event = self.swarm.select_next_some() => self.on_swarm_event(event),
                 Some(answer) = answers.recv() => self.send_answer(answer),
                 Some((key, records, more, acked)) = decoded.recv() => self.on_decoded(key, records, more, acked),
-                _ = soon.tick() => self.pull_soon(),
+                _ = soon.tick() => {
+                    self.pull_soon();
+                    let gone = self.presence.expire(Instant::now());
+                    self.went_offline(gone);
+                }
                 _ = anti_entropy.tick() => {
                     self.pending.expire(Instant::now(), PENDING_TTL);
                     self.pull_all();
@@ -762,6 +813,17 @@ impl Task {
                     })
                 })();
                 let _ = reply.send(state);
+            }
+            Command::Presence { server, reply } => {
+                let online = self.presence.online(&server);
+                let reachability = if !online.is_empty() {
+                    Reachability::Online
+                } else if self.reached || self.started.elapsed() >= CONNECTING {
+                    Reachability::NobodyOnline
+                } else {
+                    Reachability::Connecting
+                };
+                let _ = reply.send(PresenceState { online, last_seen: self.last_seen.get(&server).copied(), reachability });
             }
             Command::Peers { reply } => {
                 let _ = reply.send(self.connected.iter().copied().collect());
@@ -943,7 +1005,12 @@ impl Task {
     /// The identity `peer` proved for `server` with `binding`. A verified
     /// binding is kept for the connection, so a repeat isn't re-verified.
     fn bound_identity(&mut self, peer: PeerId, server: ServerId, binding: Option<Binding>) -> Option<PublicKey> {
-        let binding = binding?;
+        let identity = self.verify_binding(peer, server, binding?)?;
+        self.mark_seen(server, identity, peer);
+        Some(identity)
+    }
+
+    fn verify_binding(&mut self, peer: PeerId, server: ServerId, binding: Binding) -> Option<PublicKey> {
         let now = unix_now();
         if let Some((known, identity)) = self.bound.get(&(peer, server)) {
             if *known == binding && binding.expiry().saturating_add(access::CLOCK_SKEW.as_secs()) >= now {
@@ -954,6 +1021,24 @@ impl Task {
         let identity = binding.verify(&peer, &control, now)?;
         self.bound.insert((peer, server), (binding, identity));
         Some(identity)
+    }
+
+    /// Presence (M2): `identity` proved itself on `peer` just now.
+    fn mark_seen(&mut self, server: ServerId, identity: PublicKey, peer: PeerId) {
+        if self.access.binder.as_ref().is_some_and(|b| b.identity() == identity) {
+            return;
+        }
+        self.last_seen.insert(server, SystemTime::now());
+        if self.presence.seen(server, identity, peer, Instant::now()) {
+            self.emit(NodeEvent::Presence { server, identity, online: true });
+        }
+    }
+
+    fn went_offline(&mut self, gone: Vec<(ServerId, PublicKey)>) {
+        for (server, identity) in gone {
+            self.last_seen.insert(server, SystemTime::now());
+            self.emit(NodeEvent::Presence { server, identity, online: false });
+        }
     }
 
     fn on_swarm_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
@@ -975,6 +1060,7 @@ impl Task {
                     // Peer ID with its address only at debug level (PR checklist).
                     debug!(%peer_id, address = %endpoint.get_remote_address(), "peer connected");
                     info!(%peer_id, "peer connected");
+                    self.reached = true;
                     self.emit(NodeEvent::PeerConnected(peer_id));
                     for log in self.logs.clone() {
                         self.pull(peer_id, &log);
@@ -1008,6 +1094,8 @@ impl Task {
                     self.emit(NodeEvent::PeerDisconnected(peer_id));
                 }
                 self.bound.retain(|(p, _), _| *p != peer_id);
+                let gone = self.presence.disconnected(&peer_id);
+                self.went_offline(gone);
                 self.inflight.retain(|_, (p, _)| *p != peer_id);
                 self.decoding.retain(|(p, _)| *p != peer_id);
                 self.again.retain(|(p, _)| *p != peer_id);
@@ -1035,6 +1123,7 @@ impl Task {
                     // Reachable through the relay now: look for peers and catch
                     // up at once rather than at the next timer tick.
                     info!("relay reservation accepted");
+                    self.reached = true;
                     self.emit(NodeEvent::RelayReserved);
                     let me = *self.swarm.local_peer_id();
                     self.swarm.behaviour_mut().kad.get_closest_peers(me);
@@ -1134,26 +1223,33 @@ impl Task {
         self.served_bytes.charge(peer, now, max_bytes);
         self.all_served_bytes.charge((), now, max_bytes);
         self.answering += 1;
-        // Receipt acks for the requester's own records (B6), with our binding
-        // so the author can tell a member stored them.
+        // Our binding (presence, M2) and receipt acks for the requester's own
+        // records (B6) go only to a requester our read gate accepts as a
+        // member: a leaked-link holder learns neither who we are nor what
+        // we stored.
         let acks = reader.map(|r| self.acks.take(&r, MAX_ACKS, now)).unwrap_or_default();
-        let binding = match reader {
-            Some((server, _)) if !acks.is_empty() => self.own_binding(server),
+        let ours = match (reader, self.access.read_gate.clone()) {
+            (Some((server, identity)), Some(gate)) => {
+                self.own_binding(server).map(|binding| (ReadCheck { gate, identity, server }, binding))
+            }
             _ => None,
         };
         let store = self.reader.clone();
         let answers = self.answers.clone();
         tokio::task::spawn_blocking(move || {
-            let (mut response, ids) = match store.lock() {
-                Ok(store) => match gate {
-                    Some(gate) if !gate.allows(&store) => (empty_response(), Vec::new()),
-                    _ => answer_with_ids(&store, &log, &request.have, max_bytes),
-                },
-                Err(_) => (empty_response(), Vec::new()),
+            let Ok(store) = store.lock() else {
+                let _ = answers.send((peer, channel, empty_response(), max_bytes, Vec::new()));
+                return;
             };
-            if binding.is_some() {
-                response.acks = acks.iter().map(|id| ByteBuf::from(id.as_bytes().to_vec())).collect();
-                response.binding = binding;
+            let (mut response, ids) = match gate {
+                Some(gate) if !gate.allows(&store) => (empty_response(), Vec::new()),
+                _ => answer_with_ids(&store, &log, &request.have, max_bytes),
+            };
+            if let Some((member, binding)) = ours {
+                if member.allows(&store) {
+                    response.acks = acks.iter().map(|id| ByteBuf::from(id.as_bytes().to_vec())).collect();
+                    response.binding = Some(binding);
+                }
             }
             let _ = answers.send((peer, channel, response, max_bytes, ids));
         });
@@ -1279,6 +1375,13 @@ impl Task {
     /// thread, so the network task keeps serving gossip meanwhile.
     fn on_response(&mut self, key: (PeerId, String), response: SyncResponse) {
         self.decoding.insert(key.clone());
+        // Presence: the answerer's binding says who it is (sent to members only).
+        if let (Some(binding), Some(s)) = (response.binding.clone(), self.sealing.get(&key.1)) {
+            let server = s.server;
+            if let Some(identity) = self.verify_binding(key.0, server, binding) {
+                self.mark_seen(server, identity, key.0);
+            }
+        }
         let acks = self.ack_check(&key, &response);
         let decoded = self.decoded.clone();
         let store = self.reader.clone();
