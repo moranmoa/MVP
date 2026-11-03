@@ -1,0 +1,194 @@
+//! The JSON boundary every shell uses (Tauri command, Electron addon, IPC):
+//!
+//! ```text
+//! request:  { "cmd": "createServer", "args": { "name": "...", "ageRestriction": "none" } }
+//! response: { "ok": <result> }  or  { "error": { "code": "not-allowed", "positions"?: [...] } }
+//! event:    { "event": "server.added", "payload": <ServerSummary> }   (via EventSink)
+//! ```
+//!
+//! `args` holds the TS method's parameters by name (`listChannels(serverId)`
+//! is `{ "serverId": ... }`); commands without parameters take `{}` or no
+//! `args` at all. A `void` result is `{ "ok": null }`.
+
+use std::collections::BTreeMap;
+
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use crate::service::Core;
+use crate::types::*;
+
+#[derive(Deserialize)]
+struct Request {
+    cmd: String,
+    #[serde(default)]
+    args: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerArg {
+    server_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerUserArgs {
+    server_id: String,
+    user_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GrantArgs {
+    server_id: String,
+    user_id: String,
+    role: Role,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateServerArgs {
+    input: CreateServerInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateServerInput {
+    name: String,
+    age_restriction: AgeRestriction,
+}
+
+#[derive(Deserialize)]
+struct InputArg<T> {
+    input: T,
+}
+
+#[derive(Deserialize)]
+struct AnswersArg {
+    answers: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+struct WordsArg {
+    words: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct LinkArg {
+    link: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserArg {
+    user_id: String,
+}
+
+#[derive(Deserialize)]
+struct BytesArg {
+    bytes: u64,
+}
+
+#[derive(Deserialize)]
+struct ChannelArg {
+    channel: UpdateChannel,
+}
+
+fn args<T: DeserializeOwned>(value: Value) -> CoreResult<T> {
+    serde_json::from_value(value).map_err(|_| ErrorCode::BadRequest.into())
+}
+
+fn ok<T: serde::Serialize>(value: CoreResult<T>) -> CoreResult<Value> {
+    value.map(|v| serde_json::to_value(v).expect("result types serialize"))
+}
+
+/// Every command in `CoreCommands`, plus the Rust additions. Commands from
+/// the contract this core doesn't do yet answer `not-implemented`.
+pub const NOT_YET: &[&str] = &[
+    "getMessageCount",
+    "getMessages",
+    "sendMessage",
+    "editMessage",
+    "deleteMessage",
+    "retryMessage",
+];
+
+impl Core {
+    /// Takes a request JSON text, returns the response JSON text.
+    pub fn handle(&self, request: &str) -> String {
+        let response = match serde_json::from_str::<Request>(request) {
+            Ok(request) => self.handle_value(&request.cmd, request.args),
+            Err(_) => Err(ErrorCode::BadRequest.into()),
+        };
+        match response {
+            Ok(value) => json!({ "ok": value }),
+            Err(error) => json!({ "error": error }),
+        }
+        .to_string()
+    }
+
+    pub fn handle_value(&self, cmd: &str, raw: Value) -> CoreResult<Value> {
+        let raw = if raw.is_null() { json!({}) } else { raw };
+        match cmd {
+            "getIdentity" => ok(self.get_identity()),
+            "createIdentity" => {
+                let a: InputArg<NewIdentityInput> = args(raw)?;
+                ok(self.create_identity(a.input))
+            }
+            "checkRecoveryWords" => {
+                let a: AnswersArg = args(raw)?;
+                let mut answers = BTreeMap::new();
+                for (position, word) in a.answers {
+                    let position = position.parse().map_err(|_| ErrorCode::BadRequest)?;
+                    answers.insert(position, word);
+                }
+                ok(self.check_recovery_words(answers))
+            }
+            "getRecoveryWords" => ok(self.get_recovery_words()),
+            "restoreIdentity" => ok(self.restore_identity(args::<WordsArg>(raw)?.words)),
+            "updateProfile" => ok(self.update_profile(args::<InputArg<ProfileInput>>(raw)?.input)),
+
+            "listServers" => ok(self.list_servers()),
+            "listChannels" => ok(self.list_channels(&args::<ServerArg>(raw)?.server_id)),
+            "listMembers" => ok(self.list_members(&args::<ServerArg>(raw)?.server_id)),
+            "createServer" => {
+                let a: CreateServerArgs = args(raw)?;
+                ok(self.create_server(&a.input.name, a.input.age_restriction))
+            }
+            "joinServer" => ok(self.join_server(&args::<LinkArg>(raw)?.link)),
+            "cancelJoin" => ok(self.cancel_join(&args::<LinkArg>(raw)?.link)),
+
+            "markRead" => Ok(Value::Null),
+            "blockUser" => ok(self.block_user(&args::<UserArg>(raw)?.user_id)),
+            "kickMember" => {
+                let a: ServerUserArgs = args(raw)?;
+                ok(self.kick_member(&a.server_id, &a.user_id))
+            }
+
+            "getStorageUsage" => ok(self.get_storage_usage()),
+            "setStorageLimit" => ok(self.set_storage_limit(args::<BytesArg>(raw)?.bytes)),
+            "clearCache" => ok(self.clear_cache()),
+            "exportDiagnostics" => ok(self.export_diagnostics()),
+            "getAppInfo" => ok(self.get_app_info()),
+            "setUpdateChannel" => ok(self.set_update_channel(args::<ChannelArg>(raw)?.channel)),
+            // The shell restarts; nothing for the core to do.
+            "restartToUpdate" => Ok(Value::Null),
+
+            // Rust additions.
+            "grantRole" => {
+                let a: GrantArgs = args(raw)?;
+                ok(self.grant_role(&a.server_id, &a.user_id, a.role))
+            }
+            "revokeRole" => {
+                let a: ServerUserArgs = args(raw)?;
+                ok(self.revoke_role(&a.server_id, &a.user_id))
+            }
+            "syncNow" => ok(self.sync_now()),
+
+            cmd if NOT_YET.contains(&cmd) => Err(ErrorCode::NotImplemented.into()),
+            _ => Err(ErrorCode::BadRequest.into()),
+        }
+    }
+}

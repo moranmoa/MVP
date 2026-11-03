@@ -1,0 +1,23 @@
+[package]
+name = "api"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+identity = { path = "../identity" }
+records = { path = "../records" }
+authority = { path = "../authority" }
+# BSD-3-Clause
+ed25519-dalek = "2"
+# CC0-1.0 OR Apache-2.0
+blake3 = "1"
+# MIT OR Apache-2.0
+chacha20poly1305 = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+zeroize = "1"
+# MIT. SQLite itself is public domain. Same version and features as `sync`.
+rusqlite = { version = "0.32", features = ["bundled"] }
