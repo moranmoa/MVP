@@ -13,7 +13,7 @@ os-keychain = ["dep:keyring", "dep:keyring-core"]
 [dependencies]
 records = { path = "../records" }
 # CC0-1.0. BIP-39 English word list, checksum and seed.
-bip39 = { version = "2", features = ["zeroize"] }
+bip39 = { version = "3", features = ["zeroize"] }
 # BSD-3-Clause
 ed25519-dalek = "2"
 # MIT OR Apache-2.0 (RustCrypto)
