@@ -33,14 +33,28 @@ export function hasDesktopBridge(): boolean {
  */
 export function createIpcCore(bridge: DesktopBridge = window.mvs as DesktopBridge): CoreApi {
   const handlers = new Map<string, Set<(payload: never) => void>>();
+  // An mvs:// link (`link.open`) can arrive before anything listens for it:
+  // on the first launch, or during onboarding before the shell is mounted.
+  // The latest one waits for the first listener.
+  let pendingLink: unknown = null;
   bridge.onEvent((event, payload) => {
-    handlers.get(event)?.forEach((h) => h(payload as never));
+    const set = handlers.get(event);
+    if (event === 'link.open' && !set?.size) {
+      pendingLink = payload;
+      return;
+    }
+    set?.forEach((h) => h(payload as never));
   });
 
   const on = <E extends CoreEventName>(event: E, handler: (payload: CoreEvents[E]) => void): Unsubscribe => {
     let set = handlers.get(event);
     if (!set) handlers.set(event, (set = new Set()));
     set.add(handler as (payload: never) => void);
+    if (event === 'link.open' && pendingLink !== null) {
+      const p = pendingLink;
+      pendingLink = null;
+      setTimeout(() => (handler as (payload: unknown) => void)(p), 0);
+    }
     return () => {
       set.delete(handler as (payload: never) => void);
     };
