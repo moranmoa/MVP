@@ -201,8 +201,9 @@ pub const MAX_CUT_ENTRIES: usize = 64;
 pub const CUT_BYTES: usize = 1 + MAX_CUT_ENTRIES * 2 * ID_LEN;
 
 /// Most parts one key rotation is split into (R7): about 200 members fit in
-/// a part, so 8 parts cover about 1,600 members.
-pub const MAX_ROTATION_PARTS: u8 = 8;
+/// a part, so 32 parts cover about 6,500 members. Decode enforces it, so
+/// raising it later would make older clients reject the new rotations.
+pub const MAX_ROTATION_PARTS: u8 = 32;
 
 /// A key rotation body starts with this header: `rotation [u8; 32]`, the
 /// same in every part of one rotation (`groupkeys` decides how it is
@@ -879,11 +880,12 @@ mod tests {
             body.extend_from_slice(b"wraps");
             Draft { scope: channel, kind: Kind::KeyRotation, body, ..draft() }.sign(&key(1))
         };
-        for (part, parts) in [(0, 1), (0, 8), (7, 8), (2, 3)] {
+        for (part, parts) in [(0, 1), (0, 8), (7, 8), (2, 3), (0, 32), (31, 32)] {
             let record = rotation(&[part, parts]).unwrap();
             assert_eq!(Record::decode(&record.encode()).unwrap(), record);
         }
-        for bad in [&[0, 0][..], &[1, 1], &[8, 8], &[0, 9], &[3, 2], &[0], &[]] {
+        assert_eq!(MAX_ROTATION_PARTS, 32);
+        for bad in [&[0, 0][..], &[1, 1], &[32, 32], &[0, 33], &[40, 33], &[3, 2], &[0], &[]] {
             assert_eq!(rotation(bad), Err(RecordError::BadRotationHeader), "header {bad:?}");
         }
         // The check runs on decode too: patch a valid part into part 1 of 1.
