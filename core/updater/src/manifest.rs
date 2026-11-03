@@ -18,6 +18,7 @@ use ed25519_dalek::{Signature as EdSignature, Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 
 use crate::root::parse_public_key;
+use crate::unpack::MAX_UNPACKED_BYTES;
 use crate::{Error, TrustRoot, Version};
 
 /// The only body format this code understands.
@@ -84,6 +85,10 @@ pub struct Artifact {
     /// Lowercase hex SHA-256 of the artifact file.
     pub sha256: String,
     pub size: u64,
+    /// Total bytes once unpacked (zip payloads). Signed, so the unpacker can
+    /// hold the payload to exactly this instead of a guessed ratio (B8-2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unpacked_bytes: Option<u64>,
 }
 
 /// Channel and platform names end up in file names and log lines, so they
@@ -143,6 +148,9 @@ impl ManifestBody {
             let hex_ok = a.sha256.len() == 64 && a.sha256.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
             if !is_valid_name(platform) || !hex_ok {
                 return Err(Error::Malformed(format!("bad artifact entry {platform:?}")));
+            }
+            if a.unpacked_bytes.is_some_and(|n| n == 0 || n > MAX_UNPACKED_BYTES) {
+                return Err(Error::Malformed(format!("bad unpacked_bytes for {platform:?}")));
             }
         }
         if self.revoked.contains(&self.version) {
@@ -320,7 +328,7 @@ pub(crate) mod tests {
 
     pub fn body(version: &str) -> ManifestBody {
         let mut artifacts = BTreeMap::new();
-        artifacts.insert("linux-x86_64".to_string(), Artifact { sha256: "ab".repeat(32), size: 10 });
+        artifacts.insert("linux-x86_64".to_string(), Artifact { sha256: "ab".repeat(32), size: 10, unpacked_bytes: None });
         ManifestBody {
             format: FORMAT,
             channel: "stable".to_string(),
@@ -661,5 +669,22 @@ pub(crate) mod tests {
         }
         assert!(with_notes(&[("he", &"א".repeat(MAX_NOTES_BYTES / 2))]).validate().is_ok());
         assert!(with_notes(&[("he", "שלום \u{200F}MVS\u{200E} 2.0")]).validate().is_ok());
+    }
+
+    #[test]
+    fn unpacked_bytes_must_be_sane_and_is_optional() {
+        let set = |n: Option<u64>| {
+            let mut b = body("1.2.0");
+            b.artifacts.get_mut("linux-x86_64").unwrap().unpacked_bytes = n;
+            b
+        };
+        assert!(set(None).validate().is_ok());
+        assert!(set(Some(400_581_626)).validate().is_ok());
+        assert!(set(Some(MAX_UNPACKED_BYTES)).validate().is_ok());
+        for bad in [0, MAX_UNPACKED_BYTES + 1] {
+            assert!(matches!(set(Some(bad)).validate(), Err(Error::Malformed(_))), "{bad}");
+        }
+        let json = serde_json::to_string(&set(None)).unwrap();
+        assert!(!json.contains("unpacked_bytes"));
     }
 }
