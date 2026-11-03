@@ -1,0 +1,12 @@
+[package]
+name = "web-wire"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Same wire format as core/sync, without SQLite or tokio, so it builds for
+# wasm32. core/sync keeps these types private today (see RESULTS.md).
+[dependencies]
+blake3 = { version = "1", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"

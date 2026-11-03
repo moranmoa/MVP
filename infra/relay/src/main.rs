@@ -9,9 +9,10 @@ use std::{env, fs, path::Path, time::Duration};
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use libp2p::{
+    core::{upgrade, Transport as _},
     identify, identity, kad, noise, ping, relay,
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, Multiaddr, SwarmBuilder,
+    tcp, websocket, yamux, Multiaddr, SwarmBuilder,
 };
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -50,6 +51,35 @@ fn env_port(name: &str, default: u16) -> Result<u16> {
     }
 }
 
+fn env_num(name: &str) -> Result<Option<u64>> {
+    match env::var(name) {
+        Ok(value) if !value.is_empty() => {
+            Ok(Some(value.parse().with_context(|| format!("{name} must be a number"))?))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Circuit limits. Unset variables keep libp2p's defaults: 16 circuits in
+/// total, 4 per peer, each closed after 2 minutes or 128 KiB. Browsers that
+/// can only reach a peer through the relay need more (spikes/web/RESULTS.md).
+fn relay_config() -> Result<relay::Config> {
+    let mut config = relay::Config::default();
+    if let Some(n) = env_num("MAX_CIRCUITS")? {
+        config.max_circuits = n as usize;
+    }
+    if let Some(n) = env_num("MAX_CIRCUITS_PER_PEER")? {
+        config.max_circuits_per_peer = n as usize;
+    }
+    if let Some(secs) = env_num("MAX_CIRCUIT_SECS")? {
+        config.max_circuit_duration = Duration::from_secs(secs);
+    }
+    if let Some(bytes) = env_num("MAX_CIRCUIT_BYTES")? {
+        config.max_circuit_bytes = bytes;
+    }
+    Ok(config)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -61,20 +91,31 @@ async fn main() -> Result<()> {
     let tcp_port = env_port("TCP_PORT", 4001)?;
     let quic_port = env_port("QUIC_PORT", 4001)?;
     let ws_port = env_port("WS_PORT", 4002)?;
+    let relay_config = relay_config()?;
 
     let mut swarm = SwarmBuilder::with_existing_identity(key)
         .with_tokio()
-        .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
+        // Nagle off: with it, small relayed messages wait for delayed ACKs
+        // (~40 ms per hop, see spikes/web/RESULTS.md).
+        .with_tcp(tcp::Config::default().nodelay(true), noise::Config::new, yamux::Config::default)?
         .with_quic()
+        // What `with_websocket` builds, but on a TCP transport with Nagle off
+        // (the builder offers no TCP config for WebSocket).
+        .with_other_transport(|key| {
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(
+                websocket::WsConfig::new(tcp::tokio::Transport::new(tcp::Config::default().nodelay(true)))
+                    .upgrade(upgrade::Version::V1Lazy)
+                    .authenticate(noise::Config::new(key)?)
+                    .multiplex(yamux::Config::default()),
+            )
+        })?
         .with_dns()?
-        .with_websocket(noise::Config::new, yamux::Config::default)
-        .await?
         .with_behaviour(|key| {
             let peer_id = key.public().to_peer_id();
             let mut kademlia = kad::Behaviour::new(peer_id, kad::store::MemoryStore::new(peer_id));
             kademlia.set_mode(Some(kad::Mode::Server));
             Behaviour {
-                relay: relay::Behaviour::new(peer_id, relay::Config::default()),
+                relay: relay::Behaviour::new(peer_id, relay_config),
                 identify: identify::Behaviour::new(identify::Config::new(
                     PROTOCOL_VERSION.into(),
                     key.public(),
