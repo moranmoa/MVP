@@ -1985,6 +1985,12 @@ meter {
   text-align: left;
 }
 
+/* One line per paragraph, each with its own direction (spec §3). */
+.msg-line {
+  display: block;
+  unicode-bidi: isolate;
+}
+
 /* Keyboard shortcuts read left to right inside Hebrew sentences. */
 kbd {
   direction: ltr;
