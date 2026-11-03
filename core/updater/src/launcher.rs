@@ -83,13 +83,18 @@ pub fn plan(dirs: &UpdateDirs, core_data: &Path, base: Version, platform: &str) 
         state.forget_missing_trial();
     }
 
-    let revoked: BTreeSet<Version> = read_state_file(&dirs.policy_file())
-        .ok()
-        .flatten()
-        .and_then(|b| serde_json::from_slice::<ClientPolicy>(&b).ok())
-        .map(|p| p.revoked().clone())
-        .unwrap_or_default();
-    let boot = state.begin_boot(&revoked);
+    // No policy file yet: nothing is revoked. A policy file that cannot be
+    // read must not un-revoke anything, so then no trial runs at all: start
+    // the committed version and leave the trial (and its count) as it is.
+    let revoked: Option<BTreeSet<Version>> = match read_state_file(&dirs.policy_file()) {
+        Ok(None) => Some(BTreeSet::new()),
+        Ok(Some(b)) => serde_json::from_slice::<ClientPolicy>(&b).ok().map(|p| p.revoked().clone()),
+        Err(_) => None,
+    };
+    let boot = match &revoked {
+        Some(revoked) => state.begin_boot(revoked),
+        None => Boot::Normal(state.current()),
+    };
 
     let restored_snapshot = match boot {
         Boot::RolledBack { failed, .. } => restore_snapshot(dirs, core_data, failed)?,
@@ -348,6 +353,24 @@ mod tests {
         let p = e.launch();
         assert_eq!(p.exe, e.dirs.base_exe());
         assert!(matches!(p.boot, Boot::RolledBack { failed, .. } if failed == v("1.1.0")));
+    }
+
+    #[test]
+    fn unreadable_policy_starts_the_committed_version_not_the_trial() {
+        let e = Env::new("badpolicy");
+        e.install_version("1.1.0");
+        e.stage("1.1.0");
+        fs::create_dir_all(e.dirs.state()).unwrap();
+        // The trial might be revoked in there; we cannot tell.
+        fs::write(e.dirs.policy_file(), b"{ not json").unwrap();
+        for _ in 0..=LAUNCH_ATTEMPTS {
+            let p = e.launch();
+            assert_eq!((p.exe, p.boot), (e.dirs.base_exe(), Boot::Normal(v("1.0.0"))));
+        }
+        // Nothing was counted against the trial: once the policy is readable
+        // again it gets its normal chance.
+        write_atomic(&e.dirs.policy_file(), ClientPolicy::new("alpha").to_json().as_bytes()).unwrap();
+        assert_eq!(e.launch().boot, Boot::Trial(v("1.1.0")));
     }
 
     #[test]
