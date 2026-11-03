@@ -17,6 +17,7 @@ const sec = require('./security');
 const { toRequest } = require('./commands');
 const { Sidecar } = require('./sidecar');
 const deeplink = require('./deeplink');
+const { relayFor } = require('./config');
 
 // One instance only: a second launch (e.g. an mvs:// link, B1-3) focuses this one.
 if (!app.requestSingleInstanceLock()) {
@@ -56,6 +57,8 @@ function startCore() {
   core = new Sidecar({
     exe: CORE_EXE,
     dataDir,
+    // Without a relay the core runs offline (no invites, no chat with others).
+    relay: relayFor({ packaged: app.isPackaged, resourcesPath: process.resourcesPath }),
     onEvent: (name, payload) => {
       for (const win of BrowserWindow.getAllWindows()) {
         if (sec.isInternalUrl(win.webContents.getURL())) win.webContents.send('core:event', name, payload);

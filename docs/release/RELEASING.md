@@ -6,12 +6,17 @@ by the owner.**
 
 ```
 tag vX.Y.Z ──> Release workflow ──> draft pre-release (unsigned)
-                                     ├─ mvs-X.Y.Z-<platform>.zip|.tar.gz   updater artifacts
-                                     ├─ mvs-ui-X.Y.Z.tar.gz                built UI
+                                     ├─ mvs-X.Y.Z-windows-x86_64-setup.exe   installer (NSIS, per user)
+                                     ├─ mvs-X.Y.Z-linux-x86_64.AppImage|.deb installers
+                                     ├─ mvs-X.Y.Z-<platform>.zip|.tar.gz     updater payloads
+                                     ├─ mvs-ui-X.Y.Z.tar.gz                  built UI
                                      ├─ SHA256SUMS
-                                     └─ manifest-body.json                 UNSIGNED
+                                     └─ manifest-body.json                   UNSIGNED
 owner, offline: updater sign-manifest ──> manifest.json ──> upload ──> publish
 ```
+
+Testers start from [ALPHA-QUICKSTART.md](ALPHA-QUICKSTART.md) (Hebrew), which
+the release notes link to.
 
 ## What the workflow does
 
@@ -22,38 +27,54 @@ owner, offline: updater sign-manifest ──> manifest.json ──> upload ─�
    no `-alpha.1` style suffixes; the channel says "alpha" instead.
 2. **ui**: licence check, `npm ci --ignore-scripts`, `npm run build` →
    `mvs-ui-X.Y.Z.tar.gz`.
-3. **core** (matrix): `cargo build --release --locked` for
-   `windows-x86_64`, `macos-x86_64`, `macos-aarch64` and `linux-x86_64`. The
-   platform archive `mvs-X.Y.Z-<platform>` holds `bin/` (core binaries),
-   `ui/` and a README. Everything is **unsigned** (no code-signing certs yet;
-   Windows SmartScreen and macOS Gatekeeper will warn testers).
-4. **publish**: checks that the run produced exactly the artifacts `ui` and
-   `core-<platform>` (one per entry in `PLATFORMS`, which must match the core
-   matrix), each holding exactly its one expected file, and stops on anything
-   missing or extra. Then `SHA256SUMS` over those five files, and
-   [`manifest-body.mjs`](../../.github/scripts/manifest-body.mjs) writes
-   `manifest-body.json`: channel `alpha`, the version, one
-   `{sha256, size}` entry per platform in `PLATFORMS` (any other platform is
-   an error), valid for 14 days from the build. Then it creates the draft
-   pre-release and uploads that explicit list of seven files. If a
-   release for the tag is already published, it stops, so a published
+3. **desktop** (matrix: `windows-x86_64` on `windows-latest`, `linux-x86_64`
+   on `ubuntu-22.04` for an old glibc):
+   - builds the core sidecar `mvs-core` (`cargo build --release --locked -p api`);
+   - unpacks the ui build;
+   - writes `desktop/build/mvs-config.json` with the relay address from the
+     repository variable `MVS_RELAY_ADDR` (below);
+   - runs electron-builder in `desktop/` (version from the tag):
+     - Windows: the NSIS installer plus a `.zip`;
+     - Linux: AppImage, `.deb`, plus a `.tar.gz`.
+
+   The `.zip`/`.tar.gz` are the updater payloads, named
+   `mvs-X.Y.Z-<platform>.zip|.tar.gz`, which is how the manifest body finds
+   them. Windows is built natively, because electron-builder's NSIS step
+   needs wine anywhere else. Everything is **unsigned** (no code-signing
+   certificate yet; Windows SmartScreen warns, and the quickstart explains it).
+4. **publish**, with
+   [`collect-release.sh`](../../.github/scripts/collect-release.sh):
+   - checks that the run produced exactly the artifacts `ui` and
+     `desktop-<platform>` (one per entry in `PLATFORMS`, which must match the
+     desktop matrix), each holding exactly its expected files, and stops on
+     anything missing or extra;
+   - writes `SHA256SUMS` over those files;
+   - [`manifest-body.mjs`](../../.github/scripts/manifest-body.mjs) writes
+     `manifest-body.json`: channel `alpha`, the version, one `{sha256, size}`
+     entry per platform in `PLATFORMS` (any other platform is an error),
+     valid for 14 days from the build;
+   - creates the draft pre-release and uploads that explicit list.
+
+   If a release for the tag is already published, it stops, so a published
    release's assets are never replaced.
 
-**Who can write (GAP-20).** The build jobs (ui, core) run third-party code:
-crates, npm packages and the toolchain action. So they get a read-only token
-and **no caches** (no rust-cache, no npm cache), which means a cache poisoned
-by a PR build can't end up in a release binary. They hand their files to
-`publish` as workflow artifacts (kept 7 days). `publish` is the only job with
-`contents: write`. It runs only GitHub's own actions, the runner's
-preinstalled `gh` and `node`, and our own dependency-free script. Release
-builds are slower without the caches (cold `cargo build` on every platform);
-that's the price.
+**Dry run on pull requests.** A PR that touches the release workflow, its
+scripts or `desktop/`'s package and build config runs the same build jobs as
+version `0.0.0`. A read-only `dry-run` job then runs `collect-release.sh` and
+lists what a tag would publish. Nothing is uploaded. Check that it's green
+before pushing a tag.
 
-The desktop shell is not chosen yet. The **SHELL PACKAGING PLUG-IN POINT** in
-the core job has sketched Tauri and Electron steps behind the repository
-variable `MVS_SHELL` (unset = plain archives). Whichever shell wins, its
-updater payload must be named `mvs-X.Y.Z-<platform>.zip|.tar.gz`, because
-that file name is how the manifest body finds each platform's artifact.
+**Who can write (GAP-20).** The build jobs (ui, desktop) run third-party
+code: crates, npm packages, Electron and electron-builder, and the toolchain
+action. So they get a read-only token and **no caches** (no rust-cache, no
+npm cache), which means a cache poisoned by a PR build can't end up in a
+release binary. They hand their files to `publish` as workflow artifacts
+(kept 7 days). `publish` is the only job with `contents: write`, and it runs
+only on a tag. It runs only GitHub's own actions, the runner's preinstalled
+`gh` and `node`, and our own dependency-free scripts.
+
+macOS isn't built yet; it returns to `PLATFORMS` and the matrix when there's
+a signed, notarisable package.
 
 ## One-time setup (owner)
 
@@ -66,6 +87,41 @@ Covered in `core/updater/SECURITY.md` (PR #8). In short:
 - `updater keygen --out E:\mvs-keys` (removable or encrypted drive, never a
   synced folder), then `updater make-root --threshold 1 --pub E:\mvs-keys\root.pub --out root.json`.
   `root.json` (public) is what the app embeds.
+
+### Relay address for the build (`MVS_RELAY_ADDR`)
+
+The app ships with the relay it connects to. The address contains your
+domain, so it lives in a **repository variable**, never in git:
+
+1. Settings → Secrets and variables → Actions → **Variables** → New
+   repository variable.
+2. Name `MVS_RELAY_ADDR`, value the relay's **wss** address with its peer ID:
+   `/dns4/<relay-domain>/tcp/443/wss/p2p/<relay peer id>`. The peer ID is in
+   `docker compose logs relay` ("relay node started peer_id=..."); see
+   `infra/README.md`. The address **must end in `/p2p/<relay peer id>`**: the build refuses it otherwise, because without the ID the app would trust whatever answers at that address.
+
+   Why wss and not `/tcp/4001`: the domain's DNS record is proxied by
+   Cloudflare, which forwards only HTTP(S) and WebSocket on 443, so port 4001
+   isn't reachable through it. wss also keeps the home IP hidden behind
+   Cloudflare. Never use an `/ip4/...` address here: it would put your home
+   IP into a public download.
+
+Or with `gh` (PowerShell):
+
+```powershell
+gh variable set MVS_RELAY_ADDR --repo moranmoa/MVP --body "/dns4/<relay-domain>/tcp/443/wss/p2p/<relay peer id>"
+```
+
+**Requires** `mvs-core` to dial WebSocket (libp2p `websocket` transport in
+`core/sync`). Until that's on main, a wss address doesn't connect.
+
+Without the variable the build still succeeds, with a warning, but the app
+runs offline and testers can't reach each other. Only tag builds read the
+variable; pull-request dry runs always build with an empty config (the
+repository is public, and so are their artifacts). The value does end up
+inside the released app, so anyone with the download can read it; the owner
+accepted that (decision 2026-11-03). The rule is that it never goes into the
+repository or into pull-request CI artifacts.
 
 ### Protect release tags
 
@@ -163,6 +219,22 @@ PowerShell on your normal (online) PC, in the repo:
    ```
 
    It stays marked as a pre-release. Send the link to testers.
+
+6. **Point the updater at it.** Installed apps look for the signed manifest
+   at a fixed address per channel: the release with tag `update-alpha`
+   (`https://github.com/moranmoa/MVP/releases/download/update-alpha/manifest.json`,
+   with the root-rotation files `root-*.json` next to it). Create it once,
+   then replace its manifest on every release:
+
+   ```powershell
+   # once:
+   gh release create update-alpha --repo moranmoa/MVP --prerelease --title "Update channel: alpha" --notes "Signed update manifest for the alpha channel. Not an installer."
+   # every release (and every keep-alive re-sign):
+   gh release upload update-alpha manifest.json --clobber --repo moranmoa/MVP
+   ```
+
+   The updater payload (`mvs-X.Y.Z-<platform>.zip|.tar.gz`) is the unpacked
+   app folder, without the installer and without `mvs-launcher` (B8).
 
 ## Keeping a release alive
 

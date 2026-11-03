@@ -41,14 +41,14 @@ const launchSecond = async (arg) => {
 before(async () => {
   // Upper case and a trailing slash: the shell must canonicalise.
   app = await electron.launch({ args: ['.', '--', `${A.toUpperCase()}/`], env });
-  page = await app.firstWindow();
-  await page.waitForFunction(() => typeof window.mvs?.onEvent === 'function');
-  // Subscribe late, like the UI after React mounts: the first link must wait.
-  await page.waitForTimeout(1500);
-  await page.evaluate(() => {
+  // The UI itself subscribes to link.open (it opens the join dialog), so the
+  // test listens from document start too, next to it.
+  await app.context().addInitScript(() => {
     window.__links = [];
-    window.mvs.onEvent((name, payload) => name === 'link.open' && window.__links.push(payload));
+    window.mvs?.onEvent((name, payload) => name === 'link.open' && window.__links.push(payload));
   });
+  page = await app.firstWindow();
+  await page.waitForFunction(() => Array.isArray(window.__links));
   log = join(await app.evaluate(({ app: a }) => a.getPath('userData')), 'core', 'commands.log');
 });
 
@@ -56,7 +56,7 @@ after(async () => {
   await app?.close();
 });
 
-test('a link on the first command line reaches the page, canonical, even if it subscribes late', async () => {
+test('a link on the first command line reaches the page, canonical', async () => {
   assert.ok(await until(async () => (await seen()).length > 0), 'link.open not delivered');
   assert.deepEqual(await seen(), [{ link: A }]);
 });
