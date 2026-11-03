@@ -688,14 +688,43 @@ legend {
   user-select: none;
 }
 
+.word-grid-wrap {
+  position: relative;
+}
+
+/* Read down the columns: 1–4, 5–8, 9–12 (B19). */
 .word-grid {
   list-style: none;
   margin: 1.25rem 0 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: repeat(4, auto);
+  grid-auto-flow: column;
   gap: 0.5rem;
   direction: ltr;
+}
+
+.words-hidden {
+  filter: blur(3px);
+  opacity: 0.6;
+}
+
+.word-reveal {
+  position: absolute;
+  inset: 1.25rem 0 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 0.75rem;
+  padding: 1rem;
+  text-align: center;
+  background: color-mix(in srgb, var(--bg-elevated) 70%, transparent);
+  border-radius: var(--radius-m);
+}
+
+.word-reveal p {
+  max-width: 24rem;
 }
 
 .word-grid li {
@@ -737,11 +766,31 @@ legend {
 
 .check-fields {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  /* minmax(0, …) lets the inputs shrink, so they stay inside the card (U1). */
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: end;
   gap: 0.75rem;
 }
 
+/* The fields go to one column when the card is narrow for its text size,
+   e.g. at 200% or on a phone (B19 §4). Container units follow the zoom. */
+.check-form {
+  container-type: inline-size;
+}
+
+@container (max-width: 30em) {
+  .check-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.words-english {
+  margin-block-start: 0.75rem;
+}
+
 .check-fields input {
+  width: 100%;
+  min-width: 0;
   font-family: var(--font-mono);
 }
 
@@ -1959,10 +2008,12 @@ meter {
     padding: 1.5rem 1rem;
   }
 
-  .word-grid,
-  .check-fields {
-    grid-template-columns: repeat(2, 1fr);
+  /* Two columns on a phone, still read down: 1–6, 7–12. */
+  .word-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: repeat(6, auto);
   }
+
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1972,6 +2023,19 @@ meter {
     animation: none !important;
     transition: none !important;
   }
+}
+
+.skeleton-field {
+  display: block;
+  height: 4.25rem;
+  border-radius: var(--radius-s);
+  background: var(--bg-hover);
+}
+
+/* aria-disabled buttons stay focusable (so their hint is read) but look disabled. */
+button[aria-disabled='true'] {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 /* ---- user text direction (B17) -------------------------------------------- */

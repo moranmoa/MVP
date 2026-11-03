@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useState } from 'react';
 import { FormattedMessage } from 'react-intl';
 import { CoreContext, type CoreApi } from '../core';
 import { guardCore } from '../core/sanitize';
-import { Onboarding } from '../screens/onboarding/Onboarding';
+import { Onboarding, resumeStep } from '../screens/onboarding/Onboarding';
 import { Shell } from '../screens/shell/Shell';
 import { SettingsProvider, type Settings } from './settings';
 import { Store, useStore } from './store';
@@ -51,11 +51,13 @@ function Root() {
   const identity = useStore(store, (s) => s.identity);
   // Stays on onboarding until the last step finishes, even though the
   // identity already exists from the "preparing" step on.
-  const [onboarding, setOnboarding] = useState(!identity);
+  const [resume] = useState(() => resumeStep(identity));
+  const [onboarding, setOnboarding] = useState(!identity || !!resume);
 
   if (onboarding || !identity) {
     return (
       <Onboarding
+        initialStep={resume}
         onFinished={async () => {
           await store.loadServers();
           setOnboarding(false);
