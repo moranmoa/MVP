@@ -275,7 +275,9 @@ pub fn x25519_public(identity: &PublicKey) -> Result<MontgomeryPoint, Error> {
     if key.is_weak() {
         return Err(Error::BadMemberKey(*identity));
     }
-    Ok(key.to_montgomery())
+    // ed25519-dalek 2 is built on curve25519-dalek 4; the point crosses to
+    // our curve25519-dalek 5 as its canonical 32-byte encoding.
+    Ok(MontgomeryPoint(key.to_montgomery().to_bytes()))
 }
 
 /// The X25519 secret matching [`x25519_public`]: the Ed25519 secret scalar,
