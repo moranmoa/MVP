@@ -59,12 +59,22 @@
   "onb.words.tip": "Write them on paper, in order, and keep it somewhere safe. Don't photograph them or send them to anyone.",
   "onb.words.gridLabel": "12 recovery words, in order",
   "onb.words.written": "I wrote them down",
+  "onb.check.tooMany": "Too many tries. Show the words again and check once more.",
+  "onb.check.ok": "The words match",
+  "onb.words.authCancelled": "Verification was cancelled, so the words aren't shown. Try again.",
+  "onb.words.loadError": "Couldn't show the words. Try again.",
+  "onb.words.gridHidden": "12 recovery words, hidden",
+  "onb.words.writtenHint": "Show the words and write them on paper first.",
+  "onb.words.revealHint": "Make sure nobody can see your screen and it isn't being streamed.",
+  "onb.words.hide": "Hide the words",
+  "onb.words.english": "The words are always in English: it's the standard list for recovery words.",
+  "onb.words.reveal": "Show the words",
 
   "onb.check.title": "Quick check",
   "onb.check.hint": "To make sure you saved them correctly, enter these words.",
   "onb.check.word": "Word #{n}",
   "onb.check.verify": "Check",
-  "onb.check.wrong": "Some words don't match. Check what you wrote down.",
+  "onb.check.wrong": "{count, plural, one {Word \u2068{positions}\u2069 doesn't match} other {Words \u2068{positions}\u2069 don't match}}. Check what's on your paper.",
   "onb.check.later": "I'll do it later",
   "onb.check.laterNote": "Until your words are checked you can't create a server. A reminder stays at the top of the screen.",
   "onb.check.showAgain": "Show the words again",
@@ -243,5 +253,8 @@
   "members.lookalikeHint": "This name looks like the server owner’s name or like a role. Check the identity code to see who it really is.",
   "onb.profile.avatarTooBig": "Pick a PNG, JPEG, WebP or GIF image up to 512 KB.",
   "chat.back": "Back to channels",
-  "members.close": "Close the member list"
+  "members.close": "Close the member list",
+  "chat.charCount": "{count, number} / {max, number}",
+  "chat.tooLong": "This message is too long. You can send up to {max, number} characters.",
+  "chat.sendFailed": "The message wasn't sent, and your text is back in the box. You can try again."
 }

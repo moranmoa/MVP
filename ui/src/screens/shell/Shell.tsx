@@ -4,10 +4,10 @@ import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import { phoneQuery, useMediaQuery } from '../../app/media';
 import { useSettings } from '../../app/settings';
-import type { Id } from '../../core';
+import { useCore, type Id } from '../../core';
 import { Dialog } from '../../components/common';
 import { ShieldIcon } from '../../components/icons';
-import { RecoveryCheck } from '../onboarding/RecoveryWords';
+import { RecoveryCheck, RecoveryWordsPanel } from '../onboarding/RecoveryWords';
 import { SettingsScreen } from '../settings/SettingsScreen';
 import { ChannelSidebar } from './ChannelSidebar';
 import { ChatView } from './ChatView';
@@ -21,6 +21,7 @@ export type ShellDialog = 'create' | 'join' | 'check' | null;
 
 export function Shell() {
   const store = useAppStore();
+  const core = useCore();
   const identity = useStore(store, (s) => s.identity)!;
   const servers = useStore(store, (s) => s.servers);
   const notice = useStore(store, (s) => s.notice);
@@ -36,6 +37,12 @@ export function Shell() {
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [dialog, setDialog] = useState<ShellDialog>(null);
+  // The reminder can show the words again (the panel loads them on demand).
+  const [showWords, setShowWords] = useState(false);
+  const closeCheck = () => {
+    setShowWords(false);
+    setDialog(null);
+  };
   // On a phone the channel list and the chat are two pages; this is the one shown.
   const phone = useMediaQuery(phoneQuery(uiScale));
   const [phoneView, setPhoneView] = useState<'nav' | 'chat'>('nav');
@@ -209,8 +216,18 @@ export function Shell() {
           setServerId(id);
         }}
       />
-      <Dialog open={dialog === 'check'} onClose={() => setDialog(null)} title={intl.formatMessage({ id: 'onb.check.title' })}>
-        <RecoveryCheck onChecked={() => setDialog(null)} />
+      <Dialog
+        open={dialog === 'check'}
+        onClose={closeCheck}
+        title={intl.formatMessage({ id: showWords ? 'onb.words.title' : 'onb.check.title' })}
+      >
+        {showWords ? (
+          <RecoveryWordsPanel load={() => core.getRecoveryWords()} onDone={() => setShowWords(false)} />
+        ) : (
+          // The words can be shown again here, so a reload during onboarding never
+          // leaves an account that can't pass the check (QA-01).
+          <RecoveryCheck onChecked={closeCheck} onShowAgain={() => setShowWords(true)} />
+        )}
       </Dialog>
       <SettingsScreen open={settingsOpen} onClose={() => setSettingsOpen(false)} onCheckWords={() => setDialog('check')} />
 

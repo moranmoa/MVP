@@ -54,17 +54,20 @@ async function enterBirthDate(page: Page, d: number, m: number, y: number) {
 // ---------------------------------------------------------------------------
 
 test.describe('onboarding', () => {
-  test('QA-01 reload while the recovery words are shown: the words are still reachable', async ({ page }) => {
-    bug('QA-01');
+  test('fixed QA-01: reload while the recovery words are shown: the words are still reachable', async ({ page }) => {
+    // Fixed by PR #28 (B19); kept as a regression check.
     await toBirthDate(page);
     await enterBirthDate(page, 3, 3, 1999);
     await expect(page.getByRole('heading', { name: he.wordsTitle })).toBeVisible({ timeout: 10_000 });
     await page.goto('/?still=1'); // reload: crash, power cut, accidental Ctrl+R …
     // Expected: onboarding resumes on the words, or Settings can show them.
     const wordsAgain = page.getByRole('heading', { name: he.wordsTitle });
-    const settingsShow = page.getByRole('button', { name: /להציג את המילים|הצגת המילים/ });
-    await page.getByRole('button', { name: 'הגדרות' }).first().click().catch(() => undefined);
-    await expect(wordsAgain.or(settingsShow)).toBeVisible({ timeout: 3_000 });
+    const settings = page.getByRole('button', { name: 'הגדרות' }).first();
+    await expect(wordsAgain.or(settings)).toBeVisible({ timeout: 5_000 });
+    if (!(await wordsAgain.isVisible())) {
+      await settings.click();
+      await expect(page.getByRole('button', { name: /להציג את המילים|הצגת המילים/ })).toBeVisible({ timeout: 3_000 });
+    }
   });
 
   test('QA-02 the display name can be changed after onboarding ("אפשר לשנות בכל רגע")', async ({ page }) => {
@@ -79,7 +82,8 @@ test.describe('onboarding', () => {
     const errors = trackErrors(page);
     await toBirthDate(page);
     await enterBirthDate(page, 5, 5, 1995);
-    await page.getByRole('button', { name: he.written }).click({ timeout: 10_000 });
+    await readWords(page); // B19: "כתבתי אותן" works only after the words were shown
+    await page.getByRole('button', { name: he.written }).click();
     await page.getByRole('button', { name: he.later }).click();
     // 8 MB "photo" – a normal phone picture size.
     const big = Buffer.alloc(8 * 1024 * 1024, 0x41);
@@ -146,7 +150,7 @@ test.describe('onboarding', () => {
     const fields = page.getByLabel(/^מילה מספר \d+$/);
     for (const f of await fields.all()) await f.fill('wrong');
     await page.getByRole('button', { name: he.verify, exact: true }).click();
-    await expect(page.getByRole('alert')).toContainText('חלק מהמילים לא תואמות');
+    await expect(page.getByRole('alert')).toContainText(/לא תואמ/);
     // Upper case and stray spaces are accepted.
     for (const f of await fields.all()) {
       const label = await f.evaluate((el) => el.closest('label')?.querySelector('span')?.textContent ?? '');
@@ -307,7 +311,8 @@ test.describe('messages', () => {
     }
     await expect(page.locator('.msg-body')).toHaveCount(cases.length);
     await shot(page, 'ux-01-direction');
-    const shown = await page.locator('.msg-body').evaluateAll((els) =>
+    // Since PR #50 the direction is set per line (`.msg-line`); each case here is one line.
+    const shown = await page.locator('.msg-body .msg-line').evaluateAll((els) =>
       els.map((el) => {
         const cs = getComputedStyle(el);
         // Alignment must be the interface side (right in Hebrew) for every message.
@@ -328,15 +333,18 @@ test.describe('messages', () => {
     expect(letter).toBe('🇮🇱');
   });
 
-  test('a 100,000-character paste sends, renders and the page stays responsive', async ({ page }) => {
+  test('a 100,000-character paste is refused calmly and the page stays responsive', async ({ page }) => {
     const errors = trackErrors(page);
     await onboard(page);
     await createServer(page, 'הדבקה ענקית');
     const huge = 'שלום world '.repeat(9_091).slice(0, 100_000);
-    await composer(page).fill(huge);
     const started = Date.now();
+    await composer(page).fill(huge);
     await composer(page).press('Enter');
-    await expect(lastMessage(page).locator('.msg-body')).toBeVisible();
+    // Since PR #34 the composer refuses text over the limit instead of cutting it.
+    await expect(page.getByRole('alert')).toContainText('ההודעה ארוכה מדי');
+    await expect(page.getByRole('button', { name: 'שליחה' })).toBeDisabled();
+    await expect(page.locator('.msg-body')).toHaveCount(0);
     const ms = Date.now() - started;
     test.info().annotations.push({ type: 'timing', description: `100k paste: ${ms} ms` });
     expect(ms).toBeLessThan(2_000);
@@ -344,11 +352,10 @@ test.describe('messages', () => {
     expect(errors).toEqual([]);
   });
 
-  test('QA-10 a message over the core size limit is refused in the composer', async ({ page }) => {
-    bug('QA-10');
+  test('fixed QA-10: a message over the core size limit is refused in the composer', async ({ page }) => {
+    // Fixed by PR #34 (counter from 3,800, red and no send past the limit); kept as a regression check.
     await onboard(page);
     await createServer(page, 'מגבלת גודל');
-    // records caps a message record; the UI has no limit and no counter.
     await composer(page).fill('א'.repeat(8_200)); // 16,400 bytes of UTF-8 > the 16 KiB Message body limit
     await expect(page.getByRole('button', { name: 'שליחה' })).toBeDisabled({ timeout: 1_000 });
   });
@@ -458,7 +465,7 @@ test.describe('layout', () => {
     expect(await pageOverflow(page)).toBeLessThanOrEqual(0);
   });
 
-  test('QA-12 at 200% the chat column keeps a readable width (1366×768)', async ({ page }) => {
+  test('QA-12 at 200% + 24 px (1366×768) the side panels collapse and the chat stays readable', async ({ page }) => {
     bug('QA-12');
     await page.setViewportSize({ width: 1366, height: 768 });
     await page.addInitScript(() => localStorage.setItem('mvp.settings.v1', JSON.stringify({ uiScale: 2, fontSize: 24 })));
@@ -468,6 +475,10 @@ test.describe('layout', () => {
     test.info().annotations.push({ type: 'measure', description: `chat column ${Math.round(width)} px` });
     // ~25 characters of 24px text; less than that wraps every word.
     expect(width).toBeGreaterThanOrEqual(400);
+    // Effective width ~683 px: the member list collapses below ~900 px and the channel list
+    // moves to a drawer below ~700 px, as on the phone layout (product lead, PR #50 review).
+    await expect(page.locator('aside.members')).toBeHidden();
+    await expect(page.locator('aside.sidebar')).toBeHidden();
   });
 
   test('theme, language and scale change instantly (< 200 ms) without reload', async ({ page }) => {
@@ -594,11 +605,12 @@ test('the diagnostics file contains no words, birth date or message text', async
 test.describe('phone layout', () => {
   test.use({ viewport: { width: 375, height: 812 }, hasTouch: true, isMobile: true });
 
-  test('QA-18 the recovery-word check fits a 375 px phone', async ({ page }) => {
-    bug('QA-18');
+  test('fixed QA-18: the recovery-word check fits a 375 px phone', async ({ page }) => {
+    // Fixed by PR #28 (B19); kept as a regression check.
     await toBirthDate(page);
     await enterBirthDate(page, 1, 1, 1990);
-    await page.getByRole('button', { name: he.written }).click({ timeout: 10_000 });
+    await readWords(page); // B19: "כתבתי אותן" works only after the words were shown
+    await page.getByRole('button', { name: he.written }).click();
     await expect(page.getByRole('heading', { name: he.checkTitle })).toBeVisible();
     await shot(page, 'phone-word-check');
     expect(await pageOverflow(page)).toBeLessThanOrEqual(0);
@@ -711,9 +723,14 @@ test.describe('hostile data from peers', () => {
     // the display and the core, with a visible counter from 3,800.
     await composer(page).fill('a'.repeat(3_900));
     await expect(page.locator('.composer')).toContainText(/3[,.\s]?900|\b100\b/);
-    // 5,000 letters must not be cut silently: the composer refuses or says so.
+    // 5,000 letters must not be cut silently: the composer refuses and says so, nothing is sent.
+    const before = await page.locator('.msg-body').count();
     await composer(page).fill('a'.repeat(5_000));
     await composer(page).press('Enter');
-    await expect(lastMessage(page).locator('.msg-body')).not.toHaveText(/^a{4000}$/);
+    await expect(page.getByRole('alert')).toContainText('ההודעה ארוכה מדי');
+    await expect(page.locator('.msg-body')).toHaveCount(before);
+    // The limit is in code points: 2,100 emoji (4,200 UTF-16 units) are under it and can be sent.
+    await composer(page).fill(String.fromCodePoint(0x1f600).repeat(2_100));
+    await expect(page.getByRole('button', { name: 'שליחה' })).toBeEnabled();
   });
 });

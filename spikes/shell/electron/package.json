@@ -1,0 +1,60 @@
+{
+  "name": "shell-spike-electron",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Electron shell around ui/ for the footprint spike",
+  "author": {
+    "name": "MVP spike",
+    "email": "spike@example.invalid"
+  },
+  "license": "UNLICENSED",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "44.7.0",
+    "electron-builder": "26.17.0"
+  },
+  "build": {
+    "appId": "dev.mvp.shellspike.electron",
+    "productName": "ShellSpikeElectron",
+    "files": [
+      "main.js",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../../../ui/dist",
+        "to": "ui"
+      },
+      {
+        "from": "../bench.js",
+        "to": "bench.js"
+      }
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Network",
+      "maintainer": "MVP spike <spike@example.invalid>"
+    },
+    "mac": {
+      "target": "zip",
+      "identity": null
+    }
+  },
+  "homepage": "https://github.com/moranmoa/MVP"
+}

@@ -1,0 +1,152 @@
+{
+  "cpuPctOfOneCore": 4.5,
+  "id": "s-30c3b7",
+  "memMiB": 5.0,
+  "netem": "delay 50ms 10ms distribution normal loss 2%",
+  "peers": {
+    "s-130afc": {
+      "concealedPct": 20.71623974135787,
+      "jitterBufferMs": 18.9654314847053,
+      "jitterMs": {
+        "max": 16.9,
+        "median": 11.5,
+        "min": 5.0,
+        "n": 81,
+        "p95": 15.0
+      },
+      "kind": "str0m",
+      "latencyMs": {
+        "max": 95.5,
+        "median": 65.3,
+        "min": 65.2,
+        "n": 75,
+        "p95": 95.1
+      },
+      "lossPct": 1.945137157107232,
+      "rttMs": {
+        "max": 123.8,
+        "median": 106.2,
+        "min": 93.6,
+        "n": 75,
+        "p95": 123.8
+      }
+    },
+    "s-2160a2": {
+      "concealedPct": 13.074384361513074,
+      "jitterBufferMs": 22.254379284082255,
+      "jitterMs": {
+        "max": 17.7,
+        "median": 11.2,
+        "min": 0.0,
+        "n": 80,
+        "p95": 14.4
+      },
+      "kind": "str0m",
+      "latencyMs": {
+        "max": 99.0,
+        "median": 68.9,
+        "min": 68.8,
+        "n": 75,
+        "p95": 98.2
+      },
+      "lossPct": 1.9343344362433188,
+      "rttMs": {
+        "max": 126.1,
+        "median": 98.1,
+        "min": 69.9,
+        "n": 63,
+        "p95": 126.1
+      }
+    },
+    "s-2f1b99": {
+      "concealedPct": 2.471528955657863,
+      "jitterBufferMs": 64.25490671189726,
+      "jitterMs": {
+        "max": 15.4,
+        "median": 11.2,
+        "min": 6.1,
+        "n": 83,
+        "p95": 15.0
+      },
+      "kind": "str0m",
+      "latencyMs": {
+        "max": 111.8,
+        "median": 111.7,
+        "min": 111.6,
+        "n": 80,
+        "p95": 111.8
+      },
+      "lossPct": 1.7199612403100775,
+      "rttMs": {
+        "max": 127.2,
+        "median": 97.5,
+        "min": 70.4,
+        "n": 72,
+        "p95": 127.2
+      }
+    },
+    "s-88982d": {
+      "concealedPct": 3.710526315789474,
+      "jitterBufferMs": 29.99473684210526,
+      "jitterMs": {
+        "max": 16.8,
+        "median": 11.5,
+        "min": 0.0,
+        "n": 77,
+        "p95": 15.8
+      },
+      "kind": "str0m",
+      "latencyMs": {
+        "max": 77.2,
+        "median": 76.7,
+        "min": 76.7,
+        "n": 74,
+        "p95": 76.8
+      },
+      "lossPct": 1.8416206261510129,
+      "rttMs": {
+        "max": 118.9,
+        "median": 98.0,
+        "min": 81.6,
+        "n": 69,
+        "p95": 118.9
+      }
+    },
+    "s-bdc9ef": {
+      "concealedPct": 2.2545454545454544,
+      "jitterBufferMs": 44.90181818181818,
+      "jitterMs": {
+        "max": 16.8,
+        "median": 12.1,
+        "min": 6.4,
+        "n": 83,
+        "p95": 15.2
+      },
+      "kind": "str0m",
+      "latencyMs": {
+        "max": 91.6,
+        "median": 91.5,
+        "min": 91.3,
+        "n": 80,
+        "p95": 91.6
+      },
+      "lossPct": 1.8177411536597188,
+      "rttMs": {
+        "max": 141.0,
+        "median": 100.3,
+        "min": 86.1,
+        "n": 72,
+        "p95": 141.0
+      }
+    }
+  },
+  "processing": {
+    "aec": false,
+    "agc": false,
+    "ns": false
+  },
+  "room": "s6-jitter",
+  "seconds": 83.0,
+  "src": "pulses",
+  "variant": "str0m"
+}

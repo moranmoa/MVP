@@ -74,7 +74,7 @@ fn v1_format_is_pinned() {
     // A fixed rotation ID, not a signed record: the pin covers this crate's
     // format only, not the record envelope.
     let id = RecordId::from_bytes([0x42; 32]);
-    assert_eq!(view.apply(id, pk(1), &rotation), Ok(Applied::Key));
+    assert_eq!(view.apply(id, pk(1), &rotation), Ok((Applied::Key, vec![])));
     view.accept(id);
     let ciphertext = view.encrypt(&members(&[1, 2]), b"shalom", &mut rng(8)).unwrap();
     assert_eq!(blake3::hash(&rotation).to_hex().as_str(), GOLDEN_ROTATION);

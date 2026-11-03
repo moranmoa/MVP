@@ -1,239 +1,125 @@
-//! Log sync between peers (spike experiment 2).
+//! Log sync between peers.
 //!
-//! Records are treated as opaque content-addressed blobs: an id, the ids
-//! they depend on, and bytes. The real record format lives in `core/records`;
-//! this crate only needs those three things from it.
+//! What travels and what is stored are signed records (`core/records`), and
+//! nothing a peer sends is trusted until it has passed, in this order:
+//!
+//! 1. [`records::Record::decode`]: size, canonical form, signature. The record
+//!    id is computed from the signed bytes, never taken from the wire.
+//! 2. The log it is filed under is derived from the record ([`log_of`]),
+//!    never from the gossip topic or the pull request.
+//! 3. `deps` are in that same log and `auth_deps` in the same server's
+//!    control log, and all of them are present ([`Store`]).
+//! 4. For channel records only, the [`Authorizer`] (the integration layer,
+//!    using `core/authority`) says the author may write it. Roles come only
+//!    from the signed log. Control records are never refused at ingest:
+//!    authority is a function of the whole set, which must not depend on the
+//!    order records arrived in; authority decides what each one means.
+//!
+//! Only then is a record stored, forwarded on gossip or served to others.
 //!
 //! - [`Store`]: SQLite store with `append`, `get`, `heads`, `missing_since`.
 //! - [`node`]: a libp2p node that finds peers through the bootstrap/relay
-//!   node, pulls what it is missing (heads + markers → missing blobs, paged)
-//!   and pushes new blobs live over gossipsub.
-//!
-//! Everything a peer sends is untrusted. A blob's id is never taken from the
-//! wire: it is recomputed from the log, deps and data ([`Blob::content_id`]),
-//! so a peer can't store junk under the id of a real record, or a real record
-//! under another log.
+//!   node, pulls what it is missing (heads + markers → missing records, paged)
+//!   and pushes new records live over gossipsub.
 
-use std::fmt;
-
-mod limits;
 pub mod node;
 pub mod store;
 
+mod limits;
+#[cfg(test)]
+pub(crate) mod testutil;
+
 pub use node::{Node, NodeConfig, NodeEvent, Via};
-pub use store::{Append, Store};
+pub use records::{ChannelId, Record, RecordId, Scope, ServerId};
+pub use store::{Append, ControlLog, IngestError, Store};
 
-pub type Id = [u8; 32];
+/// Longest log name, in bytes. A channel log name is 64 + 1 + 64 characters.
+pub const MAX_LOG_NAME: usize = 160;
 
-/// Most deps a blob may have; same as `records::MAX_DEPS`.
-pub const MAX_DEPS: usize = 64;
-/// Largest blob data. A record is at most ~19 KiB (`records::MAX_RECORD_BYTES`).
-pub const MAX_DATA_BYTES: usize = 32 * 1024;
-/// Largest encoded blob on the wire.
-pub const MAX_ENCODED_BYTES: usize = 2 + MAX_DEPS * 32 + MAX_DATA_BYTES;
-/// Longest log name, in bytes.
-pub const MAX_LOG_NAME: usize = 128;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Blob {
-    pub id: Id,
-    pub deps: Vec<Id>,
-    pub data: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BlobError {
-    Truncated,
-    TooManyDeps(usize),
-    TooLarge(usize),
-    /// The id isn't the hash of the blob's log, deps and data.
-    WrongId,
-    /// Deps aren't strictly ascending (unsorted or repeated). Only one
-    /// encoding of a blob is valid, the one the store gives back.
-    NotCanonical,
-    /// A dep is stored under another log. Set by the store, not by decoding.
-    DepInOtherLog,
-}
-
-impl fmt::Display for BlobError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BlobError::Truncated => write!(f, "truncated blob"),
-            BlobError::TooManyDeps(n) => write!(f, "{n} deps, limit is {MAX_DEPS}"),
-            BlobError::TooLarge(n) => write!(f, "{n} bytes of data, limit is {MAX_DATA_BYTES}"),
-            BlobError::WrongId => write!(f, "id does not match the content"),
-            BlobError::NotCanonical => write!(f, "deps are not strictly ascending"),
-            BlobError::DepInOtherLog => write!(f, "a dep belongs to another log"),
-        }
+/// The log a record belongs to, derived from what it signed: the server's
+/// control log is `<server>/control`, a channel's log is `<server>/<channel>`
+/// (lowercase hex ids).
+pub fn log_name(server: ServerId, scope: Scope) -> String {
+    match scope {
+        Scope::Control => format!("{server}/control"),
+        Scope::Channel(channel) => format!("{server}/{channel}"),
     }
 }
 
-impl std::error::Error for BlobError {}
+/// The log `record` must be filed under.
+pub fn log_of(record: &Record) -> String {
+    log_name(record.server(), record.scope())
+}
 
-/// A log name: 1–128 printable ASCII characters, no spaces. Log names go into
+/// A log name: 1–160 printable ASCII characters, no spaces. Log names go into
 /// gossipsub topic names and SQL parameters (never into SQL text).
 pub fn valid_log_name(log: &str) -> bool {
     !log.is_empty() && log.len() <= MAX_LOG_NAME && log.bytes().all(|b| b.is_ascii_graphic())
 }
 
-/// Deps in their one valid order: strictly ascending bytes, so no repeats.
-/// Same rule as `records` (and the order SQLite sorts BLOBs in).
-fn is_canonical(deps: &[Id]) -> bool {
-    deps.windows(2).all(|w| w[0] < w[1])
+/// The **storage gate** for channel records: may this record be stored and
+/// served? Called after the record decoded and all its `deps` and
+/// `auth_deps` are stored, with read access to the server's stored control
+/// log. Never called for control records (see the crate docs). Implemented
+/// by the integration layer (T1).
+///
+/// **The verdict must be monotone in the stored control log:** if it accepts
+/// a record while the control log holds the set S, it must accept it for
+/// every superset of S. Rules of the form "the author is the owner, or the
+/// author has a stored `Join` (whose invite is stored)" qualify; so does
+/// "a stored `Grant` names the author".
+///
+/// Kicks, revokes, voided records and the GAP-2 `auth_deps` checks must
+/// **not** be used here (so not `authority::check_channel`): they can flip a
+/// verdict when a record arrives late. A gate that does that leaves honest
+/// children of a refused record waiting forever and splits the channel DAG
+/// between peers that judged it at different times. The full authority
+/// verdict belongs to display, forwarding to the app, and keys; it never
+/// deletes anything from the store. Spam is bounded by per-author quotas
+/// (GAP-8) and members-only transport (GAP-4), not by this gate.
+///
+/// `check` runs inside the store's write transaction on the node's task: it
+/// must not call back into the node.
+pub trait Authorizer: Send + Sync + 'static {
+    fn check(&self, record: &Record, control: &ControlLog<'_>) -> Verdict;
 }
 
-impl Blob {
-    /// A blob of `log` on top of `deps` (sorted and deduplicated here), with
-    /// its content id.
-    pub fn new(log: &str, mut deps: Vec<Id>, data: Vec<u8>) -> Self {
-        deps.sort_unstable();
-        deps.dedup();
-        Self { id: Self::content_id(log, &deps, &data), deps, data }
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    Accept,
+    /// Not stored, served or forwarded (gossip: Ignore, since a peer with
+    /// more of the control log may rightly accept it). May change to Accept
+    /// once more control records are stored.
+    Reject,
+}
 
-    /// The id a blob must have: BLAKE3 over the log name, deps and data.
-    ///
-    /// Hook for `core/records`: once blobs are real `records::Record`s, this
-    /// becomes `Record::decode(data)?.id()` (which also checks the signature),
-    /// plus:
-    /// - `log` must be derived from the record (`server` + `scope`), not taken
-    ///   from the caller, or a real record could be filed under another log;
-    /// - the record's deps must equal `deps` (both strictly ascending);
-    /// - cross-log `auth_deps` (control-log heads) go in a separate list that
-    ///   `append` requires to be present, never in `deps`, which stay same-log.
-    pub fn content_id(log: &str, deps: &[Id], data: &[u8]) -> Id {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"mvs/sync-blob/v1\0");
-        hasher.update(&(log.len() as u32).to_le_bytes());
-        hasher.update(log.as_bytes());
-        hasher.update(&(deps.len() as u32).to_le_bytes());
-        for dep in deps {
-            hasher.update(dep);
-        }
-        hasher.update(data);
-        *hasher.finalize().as_bytes()
-    }
+/// Accepts every validly signed record. For the harness and tests only: it
+/// lets anyone who knows a log's name write to it.
+pub struct AcceptAll;
 
-    /// Checks the limits and that the id matches the content. Every blob that
-    /// reaches the store passes through here.
-    pub fn verify(&self, log: &str) -> Result<(), BlobError> {
-        if self.deps.len() > MAX_DEPS {
-            return Err(BlobError::TooManyDeps(self.deps.len()));
-        }
-        if self.data.len() > MAX_DATA_BYTES {
-            return Err(BlobError::TooLarge(self.data.len()));
-        }
-        if !is_canonical(&self.deps) {
-            return Err(BlobError::NotCanonical);
-        }
-        if Self::content_id(log, &self.deps, &self.data) != self.id {
-            return Err(BlobError::WrongId);
-        }
-        Ok(())
-    }
-
-    /// Wire format: dep count (u16 LE), deps, data. The id is not sent; the
-    /// receiver computes it.
-    pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(2 + 32 * self.deps.len() + self.data.len());
-        out.extend_from_slice(&(self.deps.len() as u16).to_le_bytes());
-        for dep in &self.deps {
-            out.extend_from_slice(dep);
-        }
-        out.extend_from_slice(&self.data);
-        out
-    }
-
-    /// Decodes a blob received for `log`, enforcing the limits.
-    pub fn decode(log: &str, bytes: &[u8]) -> Result<Self, BlobError> {
-        let count: [u8; 2] = bytes.get(..2).and_then(|b| b.try_into().ok()).ok_or(BlobError::Truncated)?;
-        let n = u16::from_le_bytes(count) as usize;
-        if n > MAX_DEPS {
-            return Err(BlobError::TooManyDeps(n));
-        }
-        let deps_end = 2 + 32 * n;
-        let deps = bytes.get(2..deps_end).ok_or(BlobError::Truncated)?;
-        let data = &bytes[deps_end..];
-        if data.len() > MAX_DATA_BYTES {
-            return Err(BlobError::TooLarge(data.len()));
-        }
-        let deps: Vec<Id> = deps.chunks_exact(32).map(|c| c.try_into().expect("chunks are 32 bytes")).collect();
-        // Rejected, not sorted: a blob has exactly one valid encoding.
-        if !is_canonical(&deps) {
-            return Err(BlobError::NotCanonical);
-        }
-        let data = data.to_vec();
-        Ok(Self { id: Self::content_id(log, &deps, &data), deps, data })
+impl Authorizer for AcceptAll {
+    fn check(&self, _: &Record, _: &ControlLog<'_>) -> Verdict {
+        Verdict::Accept
     }
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
+    use crate::testutil::{channel, message, server};
 
-    /// `n` different ids, in ascending order.
-    pub(crate) fn distinct_ids(n: usize) -> Vec<Id> {
-        (0..n as u32).map(|i| blake3::hash(&i.to_le_bytes()).into()).collect::<std::collections::BTreeSet<Id>>().into_iter().collect()
+    #[test]
+    fn log_names_come_from_the_record() {
+        let control = log_name(server(), Scope::Control);
+        let chan = log_name(server(), Scope::Channel(channel()));
+        assert!(control.ends_with("/control") && valid_log_name(&control));
+        assert!(valid_log_name(&chan) && chan.len() == 64 + 1 + 64);
+        assert_eq!(log_of(&message(0, &[], 0)), chan);
     }
 
     #[test]
-    fn deps_must_be_canonical() {
-        let (a, b) = (Blob::new("l", vec![], b"a".to_vec()).id, Blob::new("l", vec![], b"b".to_vec()).id);
-        let (lo, hi) = if a < b { (a, b) } else { (b, a) };
-        // `new` sorts and deduplicates.
-        assert_eq!(Blob::new("l", vec![hi, lo, hi], b"x".to_vec()).deps, vec![lo, hi]);
-        // Anything else is refused, on the wire and in `verify`.
-        for deps in [vec![hi, lo], vec![lo, lo]] {
-            let blob = Blob { id: Blob::content_id("l", &deps, b"x"), deps, data: b"x".to_vec() };
-            assert_eq!(blob.verify("l"), Err(BlobError::NotCanonical));
-            assert_eq!(Blob::decode("l", &blob.encode()), Err(BlobError::NotCanonical));
-        }
-    }
-
-    #[test]
-    fn encode_roundtrip() {
-        let a = Blob::new("l", vec![], b"a".to_vec());
-        let b = Blob::new("l", vec![a.id, [7; 32]], "שלום".as_bytes().to_vec());
-        assert_eq!(Blob::decode("l", &b.encode()), Ok(b));
-        assert_eq!(Blob::decode("l", &a.encode()), Ok(a));
-        assert_eq!(Blob::decode("l", &[1]), Err(BlobError::Truncated));
-        // Claims one dep but carries none.
-        assert_eq!(Blob::decode("l", &[1, 0, 9]), Err(BlobError::Truncated));
-    }
-
-    #[test]
-    fn forged_id_is_rejected() {
-        let real = Blob::new("l", vec![], b"real".to_vec());
-        let forged = Blob { id: real.id, deps: vec![], data: b"junk".to_vec() };
-        assert_eq!(forged.verify("l"), Err(BlobError::WrongId));
-        assert_eq!(real.verify("l"), Ok(()));
-        // The same content under another log has another id.
-        assert_eq!(real.verify("other"), Err(BlobError::WrongId));
-        assert_ne!(Blob::decode("other", &real.encode()).unwrap().id, real.id);
-    }
-
-    #[test]
-    fn decode_enforces_limits() {
-        // A huge dep count is rejected before anything is allocated.
-        let mut bytes = (u16::MAX).to_le_bytes().to_vec();
-        bytes.extend_from_slice(&[0; 64]);
-        assert_eq!(Blob::decode("l", &bytes), Err(BlobError::TooManyDeps(u16::MAX as usize)));
-
-        let max = Blob::new("l", distinct_ids(MAX_DEPS), vec![0; MAX_DATA_BYTES]);
-        assert_eq!(max.encode().len(), MAX_ENCODED_BYTES);
-        assert!(Blob::decode("l", &max.encode()).is_ok());
-
-        let big = Blob::new("l", vec![], vec![0; MAX_DATA_BYTES + 1]);
-        assert_eq!(Blob::decode("l", &big.encode()), Err(BlobError::TooLarge(MAX_DATA_BYTES + 1)));
-        assert_eq!(big.verify("l"), Err(BlobError::TooLarge(MAX_DATA_BYTES + 1)));
-        let many = Blob::new("l", distinct_ids(MAX_DEPS + 1), vec![]);
-        assert_eq!(many.verify("l"), Err(BlobError::TooManyDeps(MAX_DEPS + 1)));
-    }
-
-    #[test]
-    fn log_names() {
+    fn log_name_rules() {
         assert!(valid_log_name("general"));
-        assert!(valid_log_name("channel/3f9a"));
         assert!(!valid_log_name(""));
         assert!(!valid_log_name("has space"));
         assert!(!valid_log_name("קבוצה"));

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ספייק קול</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0 auto; padding: 16px; max-width: 760px; }
+    fieldset { margin-block: 12px; border-radius: 8px; }
+    label { display: block; margin-block: 6px; }
+    select, input[type=text] { min-width: 260px; }
+    button { padding: 6px 14px; margin-inline-end: 6px; }
+    table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+    th, td { border: 1px solid #8884; padding: 4px 6px; text-align: start; }
+    .ltr { direction: ltr; unicode-bidi: isolate; }
+    #log { white-space: pre-wrap; font: 12px ui-monospace, monospace; max-height: 200px; overflow: auto; direction: ltr; text-align: left; }
+    .level { display: inline-block; height: 8px; background: #2f9e44; vertical-align: middle; }
+  </style>
+</head>
+<body>
+  <h1>ספייק קול – שיחה קבוצתית</h1>
+  <fieldset>
+    <legend>חיבור</legend>
+    <label>שרת איתות <input id="signal" type="text" class="ltr" placeholder="ws://host:8080"></label>
+    <label>חדר <input id="room" type="text" class="ltr" value="test"></label>
+    <label>שם <input id="name" type="text" class="ltr"></label>
+  </fieldset>
+  <fieldset>
+    <legend>התקנים ועיבוד שמע</legend>
+    <label>מיקרופון <select id="input"></select></label>
+    <label>רמקול / אוזניות <select id="output"></select> <span id="sinkNote"></span></label>
+    <label><input id="aec" type="checkbox" checked> ביטול הד</label>
+    <label><input id="ns" type="checkbox" checked> דיכוי רעשים</label>
+    <label><input id="agc" type="checkbox" checked> איזון עוצמה אוטומטי</label>
+    <div>המיקרופון שלי: <span class="level" id="myLevel" style="width:0"></span></div>
+  </fieldset>
+  <p>
+    <button id="join">הצטרפות</button>
+    <button id="leave" disabled>יציאה</button>
+    <button id="report" disabled>שליחת דוח</button>
+  </p>
+  <table>
+    <thead><tr><th>משתתף</th><th>RTT ms</th><th>jitter ms</th><th>אובדן %</th><th>buffer ms</th><th>שיהוי ms</th><th>עוצמה</th></tr></thead>
+    <tbody id="peers"></tbody>
+  </table>
+  <h2>יכולות</h2>
+  <pre id="caps" class="ltr"></pre>
+  <pre id="log"></pre>
+  <script src="voice.js"></script>
+</body>
+</html>

@@ -22,7 +22,10 @@ import type {
 export const NAME_MAX = 32;
 export const SERVER_NAME_MAX = 48;
 export const CHANNEL_NAME_MAX = 32;
+/** Message length limit, in code points (an emoji counts as one, QA-17). */
 export const BODY_MAX = 4000;
+/** The core's limit for a message record body (`records`, Kind::Message), in UTF-8 bytes. */
+export const BODY_MAX_BYTES = 16 * 1024;
 export const BODY_MAX_LINES = 100;
 export const BIO_MAX = 300;
 export const BIO_MAX_LINES = 8;
@@ -87,11 +90,22 @@ export function cleanName(raw: unknown, max = NAME_MAX): string {
   return g.length > max ? g.slice(0, max).join('').trim() : s;
 }
 
-/** Multi-line text (messages, bios): keeps newlines and direction marks, drops the rest. */
+/** The first `max` code points of a string, and whether anything was left out. */
+function cutCodePoints(s: string, max: number): { head: string; cut: boolean } {
+  if (s.length <= max) return { head: s, cut: false };
+  // A code point is at most 2 UTF-16 units, so 2·max units always hold max code points.
+  const head = cut(s, max * 2);
+  const points = Array.from(head);
+  if (points.length <= max && head.length === s.length) return { head: s, cut: false };
+  return { head: points.slice(0, max).join(''), cut: true };
+}
+
+/** Multi-line text (messages, bios): keeps newlines and direction marks, drops the rest. Limits are in code points. */
 export function cleanText(raw: unknown, maxChars = BODY_MAX, maxLines = BODY_MAX_LINES): { text: string; clipped: boolean } {
   if (typeof raw !== 'string') return { text: '', clipped: false };
-  let clipped = raw.length > maxChars;
-  let s = stripCommon(cut(raw, maxChars).replace(/\r\n?/g, '\n'));
+  const capped = cutCodePoints(raw, maxChars);
+  let clipped = capped.cut;
+  let s = stripCommon(capped.head.replace(/\r\n?/g, '\n'));
   let lines = 0;
   for (let i = s.indexOf('\n'); i !== -1; i = s.indexOf('\n', i + 1)) {
     if (++lines === maxLines) {

@@ -14,12 +14,20 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sync::{Node, NodeConfig, NodeEvent, Via};
+use rand_core::OsRng;
+use records::{Draft, Kind, PublicKey, SigningKey, GENESIS_NONCE_LEN, MAX_DEPS};
+use sync::{log_name, AcceptAll, ChannelId, Node, NodeConfig, NodeEvent, Record, Scope, ServerId, Via};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tracing_subscriber::EnvFilter;
 
-const LOG: &str = "general";
+/// The harness server: its owner key is a fixed-seed test key (not secret),
+/// so every peer derives the same server id without exchanging anything.
+fn harness_channel() -> (ServerId, ChannelId) {
+    let owner = SigningKey::from_bytes(&[0x42; 32]);
+    let server = ServerId::derive(&PublicKey::from_bytes(owner.verifying_key().to_bytes()), &[0; GENESIS_NONCE_LEN]);
+    (server, ChannelId::from_bytes([1; 32]))
+}
 
 #[derive(Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -53,6 +61,11 @@ struct Peer {
     node: tokio::sync::Mutex<Option<Node>>,
     stats: Arc<Mutex<Stats>>,
     seq: Mutex<u64>,
+    /// This peer's author key (random per process).
+    key: SigningKey,
+    server: ServerId,
+    channel: ChannelId,
+    log: String,
 }
 
 fn now_micros() -> u64 {
@@ -70,6 +83,7 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
     let name = std::env::args().nth(1).context("usage: sync-peer <name>")?;
+    let (server, channel) = harness_channel();
     let peer = Arc::new(Peer {
         name,
         relay: std::env::var("RELAY").context("RELAY is not set")?,
@@ -77,6 +91,10 @@ async fn main() -> Result<()> {
         node: tokio::sync::Mutex::new(None),
         stats: Arc::default(),
         seq: Mutex::new(0),
+        key: SigningKey::generate(&mut OsRng),
+        server,
+        channel,
+        log: log_name(server, Scope::Channel(channel)),
     });
     let listener = TcpListener::bind("0.0.0.0:7000").await?;
     loop {
@@ -118,7 +136,20 @@ async fn handle(peer: &Arc<Peer>, command: Command) -> Result<Value> {
             let (started, events) = Node::start(NodeConfig {
                 relay: peer.relay.parse()?,
                 data_dir: peer.data_dir.clone().into(),
-                logs: vec![LOG.into()],
+                logs: vec![peer.log.clone()],
+                // The harness measures sync, not permissions.
+                authorizer: Arc::new(AcceptAll),
+                listen: "/ip4/0.0.0.0/tcp/4001".parse()?,
+                // The other harness peers, directly on the Docker network: the
+                // relay only hands out global addresses, so without this the
+                // peers would only meet through capped relay circuits.
+                bootstrap: std::env::var("PEERS")
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|p| !p.is_empty() && *p != peer.name)
+                    .map(|p| format!("/dns4/{p}/tcp/4001").parse())
+                    .collect::<Result<_, _>>()?,
+                allow_lan: true,
             })
             .await?;
             let peer_id = started.peer_id();
@@ -143,7 +174,7 @@ async fn handle(peer: &Arc<Peer>, command: Command) -> Result<Value> {
                     };
                     let body = format!("{}|{seq}|{}|הודעה מספר {seq}", peer.name, now_micros());
                     let result = match peer.node.lock().await.as_ref() {
-                        Some(node) => node.append(LOG, body.into_bytes()).await,
+                        Some(node) => write(&peer, node, seq, body.into_bytes()).await,
                         None => Err(anyhow::anyhow!("not running")),
                     };
                     if let Err(err) = result {
@@ -174,7 +205,7 @@ async fn handle(peer: &Arc<Peer>, command: Command) -> Result<Value> {
                 })
             };
             if let Some(node) = node.as_ref() {
-                let state = node.state(LOG).await?;
+                let state = node.state(&peer.log).await?;
                 reply["count"] = json!(state.count);
                 reply["hash"] = json!(state.hash);
                 reply["heads"] = json!(state.heads);
@@ -210,7 +241,7 @@ async fn record_events(stats: Arc<Mutex<Stats>>, mut events: tokio::sync::mpsc::
                     stats.first_peer_ms = since_start;
                 }
             }
-            NodeEvent::Stored { blob, via, at, .. } if via != Via::Local => {
+            NodeEvent::Stored { record, via, at, .. } if via != Via::Local => {
                 if stats.first_remote_ms.is_none() {
                     stats.first_remote_ms = since_start;
                 }
@@ -219,7 +250,7 @@ async fn record_events(stats: Arc<Mutex<Stats>>, mut events: tokio::sync::mpsc::
                     Via::Push => stats.via_push += 1,
                     _ => stats.via_pull += 1,
                 }
-                if let Some(written) = written_at(&blob.data) {
+                if let Some(written) = written_at(record.body()) {
                     let at = at.duration_since(UNIX_EPOCH).unwrap().as_micros() as u64;
                     stats.latencies_ms.push(at.saturating_sub(written) as f64 / 1000.0);
                 }
@@ -227,4 +258,23 @@ async fn record_events(stats: Arc<Mutex<Stats>>, mut events: tokio::sync::mpsc::
             _ => {}
         }
     }
+}
+
+/// Signs a message on top of the log's current heads and appends it.
+async fn write(peer: &Peer, node: &Node, seq: u64, body: Vec<u8>) -> Result<()> {
+    let mut deps = node.heads(&peer.log).await?;
+    // More heads than a record may point at: merge some now, the rest later.
+    deps.truncate(MAX_DEPS);
+    let record: Record = Draft {
+        server: peer.server,
+        scope: Scope::Channel(peer.channel),
+        seq,
+        deps,
+        auth_deps: Vec::new(),
+        ts: now_micros() / 1000,
+        kind: Kind::Message,
+        body,
+    }
+    .sign(&peer.key)?;
+    node.append(record).await
 }

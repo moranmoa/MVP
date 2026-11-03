@@ -66,10 +66,26 @@ const shot = async (p, name) => {
   await p.waitForTimeout(700);
   await shot(p, '05-onboarding-preparing');
   await p.getByRole('heading', { name: 'מילות השחזור שלך' }).waitFor();
-  await shot(p, '06-onboarding-recovery-words');
+  await shot(p, '80-words-hidden-he');
+  // Hidden words must not be in the page at all, and "I wrote them" waits for the reveal.
+  if ((await p.locator('.word-grid .word:not(.word-mask)').count()) > 0) problems.push('recovery words in the page before reveal');
+  if ((await p.getByRole('button', { name: 'כתבתי אותן' }).getAttribute('aria-disabled')) !== 'true') problems.push('"I wrote them" enabled before reveal');
+  await p.getByRole('button', { name: 'הצגת המילים' }).click();
+  await shot(p, '81-words-shown-he');
   const shownWords = await p.locator('.word-grid .word').allTextContents();
   await p.getByRole('button', { name: 'כתבתי אותן' }).click();
   await shot(p, '07-onboarding-check-words');
+  // One right word, two wrong: only the wrong ones are marked (B19), and nothing is checked yet.
+  const asked = (await p.locator('.check-fields label span').allTextContents()).map((s) => Number(s.match(/\d+/)[0]));
+  const fields = p.locator('.check-fields input');
+  await fields.nth(0).fill(shownWords[asked[0] - 1]);
+  await fields.nth(1).fill('wrong');
+  await fields.nth(2).fill('wrong');
+  await p.getByRole('button', { name: 'בדיקה', exact: true }).click();
+  await p.getByRole('alert').waitFor();
+  await shot(p, '83-check-one-wrong-he');
+  const invalid = await fields.evaluateAll((els) => els.map((e) => e.getAttribute('aria-invalid') === 'true'));
+  if (invalid.join() !== 'false,true,true') problems.push(`check marks the wrong fields: ${invalid.join()}`);
   await p.getByRole('button', { name: 'אעשה את זה אחר כך' }).click();
   await p.getByLabel('שם תצוגה').fill('מורן');
   await shot(p, '08-onboarding-profile');
@@ -83,6 +99,61 @@ const shot = async (p, name) => {
   if (shownWords.length !== 12) problems.push(`expected 12 recovery words on screen, saw ${shownWords.length}`);
   await p.getByRole('button', { name: /יצירת שרת/ }).click();
   await shot(p, '10-create-server-needs-word-check');
+  await p.close();
+}
+
+// ---- recovery words, more states (B19 spec §9) --------------------------------
+{
+  const p = await page('?demo=unchecked&still=1&lang=en&theme=light&update=999999');
+  await p.getByRole('button', { name: 'Check now' }).click();
+  await p.getByRole('button', { name: 'Show the words again' }).click();
+  await p.getByRole('button', { name: 'Show the words' }).click();
+  await p.locator('.word-grid .word:not(.word-mask)').first().waitFor();
+  await shot(p, '82-words-shown-en-light');
+  await p.close();
+}
+
+{
+  const p = await page('?demo=unchecked&still=1&lang=he&theme=light&update=999999', { width: 375, height: 812, phone: true });
+  await p.getByRole('button', { name: 'לבדיקה עכשיו' }).click();
+  await p.getByRole('button', { name: 'להציג את המילים שוב' }).click();
+  await p.getByRole('button', { name: 'הצגת המילים' }).click();
+  await p.locator('.word-grid .word:not(.word-mask)').first().waitFor();
+  await p.locator('.word-grid').scrollIntoViewIfNeeded();
+  await shot(p, '84-words-phone-he');
+  await p.close();
+}
+
+{
+  const p = await page('?demo=unchecked&still=1&lang=he&theme=light&update=999999', { height: 768 });
+  await p.evaluate(() => localStorage.setItem('mvp.settings.v1', JSON.stringify({ uiScale: 2, fontSize: 24 })));
+  await p.reload();
+  await p.getByRole('button', { name: 'לבדיקה עכשיו' }).click();
+  const fields = p.getByLabel(/^מילה /);
+  await fields.first().waitFor();
+  const xs = await fields.evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().left)));
+  if (new Set(xs).size !== 1) problems.push(`85: check fields are not in one column at 200%: ${xs.join()}`);
+  await shot(p, '85-check-200-he');
+  await p.evaluate(() => localStorage.removeItem('mvp.settings.v1'));
+  await p.close();
+}
+
+{
+  const p = await page('?demo=unchecked&still=1&lang=he&theme=light&update=999999');
+  await p.getByRole('button', { name: 'לבדיקה עכשיו' }).click();
+  await p.getByRole('button', { name: 'להציג את המילים שוב' }).click();
+  await p.getByRole('button', { name: 'הצגת המילים' }).waitFor();
+  await shot(p, '86-check-dialog-show-words');
+  await p.close();
+}
+
+{
+  const p = await page('?demo=unchecked&wordsError=1&still=1&lang=he&theme=light&update=999999');
+  await p.getByRole('button', { name: 'לבדיקה עכשיו' }).click();
+  await p.getByRole('button', { name: 'להציג את המילים שוב' }).click();
+  await p.getByRole('button', { name: 'הצגת המילים' }).click();
+  await p.getByRole('button', { name: 'לנסות שוב' }).waitFor();
+  await shot(p, '87-words-load-error-he');
   await p.close();
 }
 
@@ -199,6 +270,11 @@ async function chat(query, name, opts) {
 {
   const p = await chat('?demo=1&still=1&lang=en&theme=light&update=300', 'x');
   await shot(p, '27-chat-english-ltr');
+  // QA-10: a paste over the limit stays whole, the counter shows, sending stops.
+  await p.getByRole('textbox', { name: /^Message / }).fill('word '.repeat(840));
+  await shot(p, '29-chat-composer-too-long');
+  if (!(await p.getByRole('button', { name: 'Send' }).isDisabled())) problems.push('send enabled past the length limit');
+  await p.getByRole('textbox', { name: /^Message / }).fill('');
   await p.getByRole('button', { name: 'Member list' }).click();
   await shot(p, '28-chat-english-members-collapsed');
   await p.close();
@@ -379,6 +455,7 @@ const PHONE = { width: 375, height: 812, phone: true };
   await p.getByLabel('שנה').fill('2001');
   await p.getByRole('button', { name: 'המשך' }).click();
   await p.getByRole('heading', { name: 'מילות השחזור שלך' }).waitFor();
+  await p.getByRole('button', { name: 'הצגת המילים' }).click();
   await shot(p, '51-phone-he-recovery-words');
   await p.close();
 }

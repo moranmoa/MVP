@@ -36,7 +36,7 @@ The backlog tasks (B-numbers) are from the product owner's review
 
 | ID | Sev. | Status | Backlog |
 | --- | --- | --- | --- |
-| QA-01 | Blocker | open | B19 (screen returns to the words) + B2 (words kept until checked, `getRecoveryWords` after restart) |
+| QA-01 | Blocker | **closed with PR #28** (B19: after a reload the words are reachable again; verified on its branch 2026-11-03) | B19 (screen returns to the words) + B2 (words kept until checked, `getRecoveryWords` after restart) |
 | QA-02 | Blocker | open | B11e |
 | QA-03 | High | **closed** – fixed by PR #10 (512 KB limit with a message; verified 2026-11-03) | B11e – the resize behaviour (ש-22: scale down pictures up to 25 MB / 40 MP) is tracked there, plus a UI error when `updateProfile` rejects |
 | QA-04 | Low | open | B7 |
@@ -45,16 +45,16 @@ The backlog tasks (B-numbers) are from the product owner's review
 | QA-07 | Low | open | B22 |
 | QA-08 | Medium | open | B18 |
 | QA-09 | Low | open | B22 |
-| QA-10 | Medium | open | B6 + B4 |
+| QA-10 | Medium | **closed** – fixed by PR #34 (counter from 3,800, no send past the limit; verified 2026-11-03) | B6 + B4 |
 | QA-11 | Low | open | B22 |
-| QA-12 | Medium | open | B12 (with UX-17) |
+| QA-12 | **High** | open – raised from Medium by the product lead (PR #50 review: the chat column is ~120 px there) | B12 (with UX-17) |
 | QA-13 | High | **closed** – fixed by PR #10 (`guardCore` strips bidi controls; verified 2026-11-03) | B23 (new, P1: neutralise bidi and invisible characters in UI and core) |
 | QA-14 | High | **closed** – fixed by PR #8 (verified 2026-11-03, cli-checks) | B8 (max validity 30 days) |
 | QA-15 | Low | **closed** – fixed by PR #8 (verified 2026-11-03, cli-checks) | B8 (`issued_at` at most 24 h ahead) |
 | QA-16 | Medium | **closed** – fixed by PR #5 (verified 2026-11-03, cli-checks: error within 60 s) | B5 (fix before the NAT experiment) |
 | UX-01 | Blocker | **closed** – fixed by PR #24 (verified 2026-11-03) | B17 – regression check `fixed UX-01` in explore.spec.ts |
-| QA-17 | Medium | open – limit decided in the PR #27 review | B6 (one limit of 4,000 code points for composer, display and core; counter from 3,800) |
-| QA-18 | Medium | open – Medium for the closed alpha (the phone app is phase 3) | B12 / UX-05; the fix ships with B19 |
+| QA-17 | Low | open – narrowed after PR #34: no more silent cut, but the limit counts UTF-16 units, not code points (lowered to Low; product lead to confirm) | B6 (one limit of 4,000 code points for composer, display and core; counter from 3,800) |
+| QA-18 | Medium | **closed with PR #28** (B19; the check fits 375 px, verified on its branch 2026-11-03) | B12 / UX-05; the fix ships with B19 |
 | QA-19 | Low | open – new | B12 |
 
 ## Bugs
@@ -72,12 +72,12 @@ The backlog tasks (B-numbers) are from the product owner's review
 | QA-09 | Low | ui | Avatar letter breaks flags and ZWJ emoji | Display name "🇮🇱 ישראל", send a message. | Avatar shows 🇮🇱. | Shows a lone regional indicator "🇮" (first code point, not first grapheme). Same for 👨‍👩‍👧. | `QA-09` |
 | QA-10 | Medium | ui, records | Composer has no limit, but `records` caps a Message body at 16 KiB | Paste 8,200 Hebrew letters (16,400 bytes UTF-8) into the composer. | Send is disabled with a counter / message, matching `Kind::Message.max_body()`. | Send is enabled. With the real core the send will be rejected – and the composer clears the text *before* `sendMessage` resolves, with no catch, so the text is lost. | `QA-10` |
 | QA-11 | Low | ui | Unsent draft is lost when switching channels | Type in #כללי, click #lfg, click #כללי. | The draft is still there. | Composer is empty (`ChatView` is keyed by channel). | `QA-11` |
-| QA-12 | Medium | ui | At 200% scale the chat column shrinks to ~260 px | 1366×768, Settings → מראה: scale 200%, font 24 px. Open a server with the member list on. | Spec: "הפריסה לא נשברת ב-200% ובגופן 24px". Side panels collapse so chat stays readable. | Chat column is 262 px: one word per line, composer placeholder cut to "כתי". No horizontal overflow, so it is easy to miss. Screenshot: `test-results/explore-shots/scale-200-he.png`. | `QA-12` |
+| QA-12 | **High** | ui | At 200% + 24 px on 1366×768 both side panels stay open and the chat column is squeezed | 1366×768, Settings → מראה: scale 200%, font 24 px (effective width ~683 px). Open a server with the member list on. | Spec: "הפריסה לא נשברת ב-200% ובגופן 24px". The member list collapses below ~900 effective px and the channel list moves to a drawer below ~700, as on the phone layout. | Both the channel list and the member list stay open. On main the chat column is 262 px, one word per line, and the composer placeholder is cut to "כתי". In PR #50 it is ~120 px and words break letter by letter (screenshot 76 there). No sideways overflow, so it is easy to miss. Screenshot: `test-results/explore-shots/scale-200-he.png`. | `QA-12` |
 | QA-13 | **High** | ui, records | Bidi control characters in names reorder them (impersonation) | Display name "Moran " + U+202E + "evil". Send a message. | Bidi controls (U+202A–202E, U+2066–2069) are stripped or neutralised in names, server and channel names – in the UI and in core validation. | Shows "Moran live". `<bdi>` isolates the name from the line but not from itself. | `QA-13` |
 | QA-14 | **High** | updater | A manifest that never expires can be signed and is accepted | `updater sign-manifest` with `expires_at = 18446744073709551615`, then `verify`. | Spec (security, required before alpha): signed metadata with an expiry so a user cannot be frozen on an old release. A maximum validity window (e.g. 30 days) enforced in `ManifestBody::validate`. | Signed and verified. Any such manifest can be replayed forever to hide newer releases from a client that lost its `ClientPolicy` state. | `cli-checks.sh` |
 | QA-15 | Low | updater | A manifest issued a year in the future is accepted | Body with `issued_at = now + 365 d`, sign, `verify`. | Refused, or at least warned (clock skew allowance). | `signatures ok … exit 0`. | `cli-checks.sh` |
 | QA-16 | Medium | sync | `spike-peer` hangs silently when the relay is unreachable or the relay ID is wrong | `spike-peer dial /ip4/127.0.0.1/tcp/9/p2p/<any id> <any id>` (or a mistyped relay address from a tester). | A `RESULT path=failed …` line or an error within the 30 s dial timeout. | Runs forever with no output after the peer-ID line. The wait for the relay's `identify` has no timeout and ignores `OutgoingConnectionError`; the 30 s deadline starts only afterwards. Testers following `TESTING.md` will just wait. | `cli-checks.sh` |
-| QA-17 | Medium | ui, records | A 4,001–16,384-byte message is accepted but shown cut for everyone, silently | Send 5,000 × "a" (5,000 bytes, under the 16 KiB `Kind::Message` limit). | Decided: one limit of 4,000 code points everywhere (composer, display, core), with a visible counter from 3,800; nothing is cut silently. | The sanitizer (`BODY_MAX = 4000`, PR #10) cuts the body to 4,000 characters for every reader, including the sender, and the "ההודעה ארוכה מדי" notice does not appear. Extends QA-10. | `QA-17` |
+| QA-17 | Low | ui, records | The 4,000 limit counts UTF-16 units, not code points (until PR #34: a 4,001–16,384-byte message was shown cut, silently) | Type 2,100 emoji (2,100 code points, 4,200 UTF-16 units). Also: 5,000 × "a". | Decided: one limit of 4,000 code points everywhere (composer, display, core), with a visible counter from 3,800; nothing is cut silently. | Since PR #34, 5,000 × "a" is refused with "ההודעה ארוכה מדי" and the counter shows from 3,800 (good). But the composer counts `text.length` (UTF-16 units): 2,100 emoji show "4,200 / 4,000" and cannot be sent. Emoji-heavy or non-BMP text gets about half the limit. | `QA-17` |
 | QA-18 | Medium | ui | The recovery-word check does not fit a 375 px phone; "בדיקה" is off-screen | Phone 375×812: onboarding to "בדיקה קצרה". | The step fits the width; the button can be tapped. | Page is 516 px wide (141 px sideways overflow); "בדיקה" is at x = 416, outside the screen, and the hint text is cut on the left. Phone onboarding cannot be finished without sideways scrolling. Same root as UX-05. Screenshot `test-results/explore-shots/phone-word-check.png`. | `QA-18` |
 | QA-19 | Low | ui | Reply reference is a 19 px tap target on phones | Phone 375×812, demo server, a message that replies to another. | Every control ≥ 44×44 px (PR #10 goal). | "ההודעה המקורית" button is about 212×19 px. | `QA-19` |
 

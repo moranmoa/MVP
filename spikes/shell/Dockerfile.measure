@@ -1,0 +1,20 @@
+# Linux footprint bench: one .deb on a clean Debian 13, measured under Xvfb.
+# Build context: spikes/shell, after the packages are in out/linux:
+#   docker build -f Dockerfile.measure --build-arg PKG=<file>.deb -t shell-measure-x .
+FROM debian:trixie
+ARG PKG
+# Libraries a package needs but does not declare (counted in its size).
+ARG EXTRA=""
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends xvfb procps ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY out/linux/${PKG} /pkgs/
+COPY measure-linux.sh /usr/local/bin/
+# Disk use of the package plus every library it pulls in on a clean system.
+RUN apt-get update && before=$(du -sxk --exclude=/var/lib/apt/lists --exclude=/var/cache/apt --exclude=/pkgs / 2>/dev/null | cut -f1) \
+    && apt-get install -y --no-install-recommends /pkgs/*.deb $EXTRA >/dev/null \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt \
+    && after=$(du -sxk --exclude=/var/lib/apt/lists --exclude=/var/cache/apt --exclude=/pkgs / 2>/dev/null | cut -f1) \
+    && echo "{\"package\":\"${PKG}\",\"withDepsMiB\":$(( (after - before) / 1024 )),\"ownInstalledKiB\":$(dpkg-deb -f /pkgs/*.deb Installed-Size)}" > /installed.json
+RUN useradd -m bench
+USER bench
+CMD ["cat", "/installed.json"]

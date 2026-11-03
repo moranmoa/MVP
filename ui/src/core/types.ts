@@ -79,10 +79,13 @@ export interface Member {
 
 /** Commands reject with this shape; `code` maps to a translated message. */
 export interface CoreError {
-  code: 'invalid-words' | 'not-allowed' | 'not-found' | 'recovery-check-required';
+  code: 'invalid-words' | 'not-allowed' | 'not-found' | 'recovery-check-required' | 'auth-cancelled' | 'too-many-attempts';
   /** 1-based word positions that were not recognised (restore). */
   positions?: number[];
 }
+
+/** Result of checking the words of the current recovery challenge. */
+export type RecoveryCheckResult = { ok: true } | { ok: false; wrong: number[] };
 
 export function isCoreError(e: unknown): e is CoreError {
   return typeof e === 'object' && e !== null && 'code' in e;

@@ -54,7 +54,7 @@ use records::{ChannelId, Kind, PublicKey, RecordId, ServerId};
 use zeroize::Zeroizing;
 
 mod channel;
-pub use channel::{Applied, ChannelKeys, Decrypted, RotationNeed};
+pub use channel::{Applied, ChannelKeys, Decrypted, RotationNeed, MAX_UNACCEPTED};
 
 /// Format version of rotation bodies and message ciphertexts.
 pub const VERSION: u8 = 1;
@@ -225,6 +225,34 @@ pub fn x25519_public(identity: &PublicKey) -> Result<MontgomeryPoint, Error> {
 /// which X25519 clamps the same way.
 fn x25519_secret(identity: &SigningKey) -> Zeroizing<[u8; 32]> {
     Zeroizing::new(identity.to_scalar_bytes())
+}
+
+/// The X25519 secret of one identity, derived once. A client builds one and
+/// shares it (behind an `Arc`) between all its [`ChannelKeys`], so the
+/// identity's signing key isn't copied into every channel. Zeroized on drop.
+pub struct MemberSecret {
+    public: PublicKey,
+    secret: Zeroizing<[u8; 32]>,
+}
+
+impl MemberSecret {
+    pub fn new(identity: &SigningKey) -> MemberSecret {
+        MemberSecret {
+            public: PublicKey::from_bytes(identity.verifying_key().to_bytes()),
+            secret: x25519_secret(identity),
+        }
+    }
+
+    /// The identity this secret belongs to.
+    pub fn public(&self) -> PublicKey {
+        self.public
+    }
+}
+
+impl fmt::Debug for MemberSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "MemberSecret({:?})", self.public)
+    }
 }
 
 /// Shared secret, rejecting the all-zero output of a small-order point.
@@ -507,8 +535,8 @@ impl Rotation {
     }
 
     /// Opens the epoch key wrapped for `member`.
-    pub fn unwrap_key(&self, member: &SigningKey) -> Result<EpochKey, Error> {
-        let me = PublicKey::from_bytes(member.verifying_key().to_bytes());
+    pub fn unwrap_key(&self, member: &MemberSecret) -> Result<EpochKey, Error> {
+        let me = member.public();
         let index = self
             .wraps
             .binary_search_by(|(recipient, _)| recipient.cmp(&me))
@@ -516,7 +544,7 @@ impl Rotation {
         let sealed = &self.wraps[index].1;
         let point = x25519_public(&me)?;
         let shared =
-            diffie_hellman(self.ephemeral, &x25519_secret(member)).ok_or(Error::BadEphemeralKey)?;
+            diffie_hellman(self.ephemeral, &member.secret).ok_or(Error::BadEphemeralKey)?;
         let ad = wrap_ad(self.server, self.rotator, &self.header, me);
         let cipher = wrap_cipher(&shared, &self.ephemeral, &point, &ad);
         let opened = Zeroizing::new(
@@ -613,7 +641,8 @@ mod tests {
             let identity = SigningKey::from_bytes(&[seed; 32]);
             let public = PublicKey::from_bytes(identity.verifying_key().to_bytes());
             let from_public = x25519_public(&public).unwrap();
-            let from_secret = MontgomeryPoint::mul_base_clamped(*x25519_secret(&identity));
+            let from_secret =
+                MontgomeryPoint::mul_base_clamped(*MemberSecret::new(&identity).secret);
             assert_eq!(from_public, from_secret);
         }
     }

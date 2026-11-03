@@ -10,16 +10,43 @@ import { safeImageSrc } from '../../core/sanitize';
 import { Avatar, Code } from '../../components/common';
 import { CheckIcon } from '../../components/icons';
 import { LOCALES } from '../../i18n';
-import { RecoveryCheck, WordGrid, WordsWarning } from './RecoveryWords';
+import { RecoveryCheck, RecoveryWordsPanel } from './RecoveryWords';
 import { RestoreScreen } from './Restore';
 
-type Step = 'language' | 'agreement' | 'country' | 'dob' | 'blocked' | 'preparing' | 'words' | 'check' | 'profile' | 'restore';
+export type Step = 'language' | 'agreement' | 'country' | 'dob' | 'blocked' | 'preparing' | 'words' | 'check' | 'profile' | 'restore';
 
 /** Numbered steps shown as "step x of y"; blocked/preparing/restore are not counted. */
 const NUMBERED: Step[] = ['language', 'agreement', 'country', 'dob', 'words', 'check', 'profile'];
 
-export function Onboarding({ onFinished }: { onFinished: () => void }) {
-  const [step, setStep] = useState<Step>('language');
+// Where onboarding resumes after a reload or a crash (QA-01, B19 spec §3).
+// Only the step name is stored, never the words.
+const RESUME_KEY = 'mvs.onboarding.v1';
+const RESUMABLE: Step[] = ['words', 'check', 'profile'];
+
+function storage(): Storage | null {
+  try {
+    return localStorage;
+  } catch {
+    return null;
+  }
+}
+
+/** The step to reopen for an account that left onboarding half-way, or null. */
+export function resumeStep(identity: Identity | null): Step | null {
+  const saved = storage()?.getItem(RESUME_KEY) as Step | null;
+  if (!identity || !saved || !RESUMABLE.includes(saved)) return null;
+  return identity.recoveryChecked && saved !== 'profile' ? 'profile' : saved;
+}
+
+export function Onboarding({ onFinished: finish, initialStep }: { onFinished: () => void; initialStep?: Step | null }) {
+  const [step, setStep] = useState<Step>(initialStep ?? 'language');
+  const onFinished = () => {
+    storage()?.removeItem(RESUME_KEY);
+    finish();
+  };
+  useEffect(() => {
+    if (RESUMABLE.includes(step)) storage()?.setItem(RESUME_KEY, step);
+  }, [step]);
   const [country, setCountry] = useState(detectCountry);
   const [birthDate, setBirthDate] = useState<string | null>(null);
   const [words, setWords] = useState<string[]>([]);
@@ -382,18 +409,15 @@ function PreparingStep() {
 }
 
 function WordsStep({ words, onNext }: { words: string[]; onNext: () => void }) {
+  const core = useCore();
+  // Right after "preparing" the words are in memory; after a reload they come from the core.
+  const load = () => (words.length ? Promise.resolve(words) : core.getRecoveryWords());
   return (
     <>
       <h1>
         <FormattedMessage id="onb.words.title" />
       </h1>
-      <WordsWarning />
-      <WordGrid words={words} />
-      <div className="actions">
-        <button type="button" className="primary" onClick={onNext}>
-          <FormattedMessage id="onb.words.written" />
-        </button>
-      </div>
+      <RecoveryWordsPanel load={load} onDone={onNext} />
     </>
   );
 }

@@ -179,6 +179,15 @@ describe('message text', () => {
     expect(cleanText(s).text.endsWith('\uD83D')).toBe(false);
   });
 
+  it('counts the length limit in code points, so emoji count once (QA-17)', () => {
+    const party = '🎉'.repeat(2100); // 4,200 UTF-16 units
+    expect(cleanText(party)).toEqual({ text: party, clipped: false });
+    const over = cleanText('🎉'.repeat(BODY_MAX + 1));
+    expect([...over.text].length).toBe(BODY_MAX);
+    expect(over.clipped).toBe(true);
+    expect(cleanText('🎉'.repeat(BODY_MAX)).clipped).toBe(false);
+  });
+
   it('makes reply excerpts one short line', () => {
     expect(cleanExcerpt('a\nb')).toBe('a b');
     expect([...cleanExcerpt('y'.repeat(10_000))].length).toBe(141);
@@ -257,14 +266,16 @@ describe('recovery words', () => {
     };
     const core = new MockCore({ speed: 0, storage });
     const { words } = await core.createIdentity({ locale: 'en', country: 'IL', birthDate: '2000-01-01' });
-    await core.checkRecoveryWords({ 1: words[0] });
+    const first = await core.getRecoveryChallenge();
+    await core.checkRecoveryWords(Object.fromEntries(first.positions.map((p) => [p, 'nope'])));
     const saved = [...store.values()].join('\n');
     expect(saved.length).toBeGreaterThan(0);
     for (const w of words) expect(saved).not.toMatch(new RegExp(`\\b${w}\\b`));
 
     // After a restart the check still works, without the words on disk.
     const again = new MockCore({ speed: 0, storage });
-    expect(await again.checkRecoveryWords({ 2: words[1], 7: words[6] })).toBe(true);
+    const { positions } = await again.getRecoveryChallenge();
+    expect(await again.checkRecoveryWords(Object.fromEntries(positions.map((p) => [p, words[p - 1]])))).toEqual({ ok: true });
   });
 
   it('drops words that an older build stored', () => {

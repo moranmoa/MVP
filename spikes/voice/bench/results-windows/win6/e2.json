@@ -1,0 +1,163 @@
+{
+  "id": "e2",
+  "variant": "chromium",
+  "room": "win6",
+  "src": "pulses",
+  "processing": {
+    "aec": true,
+    "ns": true,
+    "agc": true
+  },
+  "seconds": 60.005,
+  "capabilities": {
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) voice-spike-electron/0.1.0 Chrome/152.0.7977.130 Electron/44.7.0 Safari/537.36",
+    "RTCPeerConnection": true,
+    "getUserMedia": true,
+    "enumerateDevices": true,
+    "selectAudioOutput": false,
+    "setSinkId": true,
+    "audioWorklet": true,
+    "echoCancellation": true,
+    "noiseSuppression": true,
+    "autoGainControl": true,
+    "insertableStreams": true,
+    "opus": true
+  },
+  "peers": {
+    "e1": {
+      "kind": "chromium",
+      "latencyMs": {
+        "n": 58,
+        "median": 61.6,
+        "p95": 61.6,
+        "min": 60.2,
+        "max": 72.9
+      },
+      "jitterMs": {
+        "n": 60,
+        "median": 0,
+        "p95": 1,
+        "min": 0,
+        "max": 2
+      },
+      "rttMs": {
+        "n": 60,
+        "median": 1,
+        "p95": 1,
+        "min": 0,
+        "max": 1
+      },
+      "lossPct": 0,
+      "jitterBufferMs": 30.30581039755352,
+      "concealedPct": 0.021484596217012118
+    },
+    "e3": {
+      "kind": "chromium",
+      "latencyMs": {
+        "n": 56,
+        "median": 68.6,
+        "p95": 75.9,
+        "min": 59.6,
+        "max": 77.6
+      },
+      "jitterMs": {
+        "n": 58,
+        "median": 0,
+        "p95": 2,
+        "min": 0,
+        "max": 3
+      },
+      "rttMs": {
+        "n": 58,
+        "median": 1,
+        "p95": 1,
+        "min": 0,
+        "max": 1
+      },
+      "lossPct": 0,
+      "jitterBufferMs": 29.424964936886397,
+      "concealedPct": 0.022953216374269007
+    },
+    "s1": {
+      "kind": "str0m",
+      "latencyMs": {
+        "n": 53,
+        "median": 45.2,
+        "p95": 46.2,
+        "min": 43.6,
+        "max": 47.9
+      },
+      "jitterMs": {
+        "n": 56,
+        "median": 0,
+        "p95": 2,
+        "min": 0,
+        "max": 2
+      },
+      "rttMs": {
+        "n": 56,
+        "median": 0,
+        "p95": 2,
+        "min": 0,
+        "max": 2
+      },
+      "lossPct": 0,
+      "jitterBufferMs": 29.89814477991997,
+      "concealedPct": 0
+    },
+    "s2": {
+      "kind": "str0m",
+      "latencyMs": {
+        "n": 51,
+        "median": 42.9,
+        "p95": 48.1,
+        "min": 36.6,
+        "max": 48.4
+      },
+      "jitterMs": {
+        "n": 54,
+        "median": 0,
+        "p95": 2,
+        "min": 0,
+        "max": 2
+      },
+      "rttMs": {
+        "n": 54,
+        "median": 1,
+        "p95": 1,
+        "min": 0,
+        "max": 1
+      },
+      "lossPct": 0,
+      "jitterBufferMs": 30.302000755001888,
+      "concealedPct": 0.009435742592942064
+    },
+    "s3": {
+      "kind": "str0m",
+      "latencyMs": {
+        "n": 49,
+        "median": 42.4,
+        "p95": 50.2,
+        "min": 39.8,
+        "max": 50.3
+      },
+      "jitterMs": {
+        "n": 52,
+        "median": 0,
+        "p95": 2,
+        "min": 0,
+        "max": 3
+      },
+      "rttMs": {
+        "n": 52,
+        "median": 0,
+        "p95": 1,
+        "min": 0,
+        "max": 1
+      },
+      "lossPct": 0,
+      "jitterBufferMs": 30.94939191839937,
+      "concealedPct": 0.014708766424789174
+    }
+  }
+}
