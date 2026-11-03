@@ -1,0 +1,57 @@
+#!/usr/bin/env node
+// A stand-in for mvs-core that speaks the same line protocol (core/api
+// README, "Sidecar") and misbehaves on cue, for the shell's tests:
+//   getAppInfo        -> answers with its argv and the env keys it got
+//   joinServer        -> an event, then the response (events come first)
+//   getRecoveryWords  -> words (the shell must never log them)
+//   getStorageUsage   -> never answers (timeout)
+//   clearCache        -> exits (crash)
+//   exportDiagnostics -> a 17 MiB line (over the shell's cap)
+'use strict';
+
+const WORDS = ['fake', 'words', 'never', 'logged'];
+let buf = '';
+const out = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
+process.stderr.write('fake core up\n');
+
+process.stdin.on('data', (chunk) => {
+  buf += chunk;
+  let nl;
+  while ((nl = buf.indexOf('\n')) !== -1) {
+    const line = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    let m;
+    try {
+      m = JSON.parse(line);
+    } catch {
+      out({ type: 'response', id: null, error: { code: 'bad-request' } });
+      continue;
+    }
+    switch (m.cmd) {
+      case 'getAppInfo':
+        out({ type: 'response', id: m.id, ok: { argv: process.argv.slice(2), env: Object.keys(process.env).sort(), args: m.args } });
+        break;
+      case 'joinServer':
+        out({ type: 'event', event: 'join.status', payload: { link: m.args.link, state: 'searching' } });
+        out({ type: 'response', id: m.id, ok: { link: m.args.link, state: 'searching' } });
+        break;
+      case 'getRecoveryWords':
+        out({ type: 'response', id: m.id, ok: WORDS });
+        break;
+      case 'getStorageUsage':
+        break;
+      case 'clearCache':
+        process.exit(3);
+        break;
+      case 'exportDiagnostics':
+        process.stdout.write(`{"type":"response","id":${m.id},"ok":"${'x'.repeat(17 * 1024 * 1024)}"}\n`);
+        break;
+      case 'checkRecoveryWords':
+        out({ type: 'response', id: m.id, error: { code: 'invalid-words', positions: [2, 'x', 5], secret: 'dropped' } });
+        break;
+      default:
+        out({ type: 'response', id: m.id, ok: m.args ?? null });
+    }
+  }
+});
+process.stdin.on('end', () => process.exit(0));

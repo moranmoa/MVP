@@ -3,13 +3,16 @@
 //   docker compose run --rm test
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright-core';
+
+const FAKE_CORE = fileURLToPath(new URL('./fake-core.js', import.meta.url));
 
 let app;
 let page;
 
 before(async () => {
-  app = await electron.launch({ args: ['.'], env: { ...process.env, MVS_DEMO: '1' } });
+  app = await electron.launch({ args: ['.'], env: { ...process.env, MVS_DEMO: '1', MVS_CORE_PATH: FAKE_CORE } });
   page = await app.firstWindow();
   await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, null, { timeout: 30_000 });
 });
@@ -84,4 +87,38 @@ test('permissions are refused', async () => {
   assert.notEqual(mic, 'granted');
   const notif = await page.evaluate(() => Notification.requestPermission());
   assert.notEqual(notif, 'granted');
+});
+
+test('the page sees only invoke and onEvent', async () => {
+  const keys = await page.evaluate(() => Object.keys(window.mvs).sort());
+  assert.deepEqual(keys, ['invoke', 'onEvent']);
+  assert.equal(await page.evaluate(() => typeof window.ipcRenderer), 'undefined');
+});
+
+test('allowed commands reach the core with named args and the data dir', async () => {
+  const res = await page.evaluate(() => window.mvs.invoke('getAppInfo', []));
+  assert.equal(res.ok.argv[0], '--data-dir');
+  assert.match(res.ok.argv[1], /core$/);
+  assert.deepEqual(res.ok.args, {});
+});
+
+test('commands outside the allow-list are refused in main', async () => {
+  for (const cmd of ['grantRole', 'syncNow', 'constructor', '__proto__']) {
+    assert.deepEqual(await page.evaluate((c) => window.mvs.invoke(c, []), cmd), { error: { code: 'not-allowed' } }, cmd);
+  }
+  assert.deepEqual(await page.evaluate(() => window.mvs.invoke('getIdentity', ['extra'])), { error: { code: 'bad-request' } });
+});
+
+test('core events reach the page', async () => {
+  const got = await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        const off = window.mvs.onEvent((name, payload) => {
+          off();
+          resolve([name, payload]);
+        });
+        window.mvs.invoke('joinServer', ['mvs://test']);
+      }),
+  );
+  assert.deepEqual(got, ['join.status', { link: 'mvs://test', state: 'searching' }]);
 });

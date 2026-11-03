@@ -21,7 +21,7 @@ test('renderer preferences are locked down and frozen', () => {
   assert.equal(p.allowRunningInsecureContent, false);
   assert.equal(p.webviewTag, false);
   assert.equal(p.experimentalFeatures, false);
-  assert.equal(p.preload, undefined, 'no preload until the B1-2 bridge');
+  assert.equal(p.preload, undefined, 'main.js adds the one preload; nothing else may');
   assert.ok(Object.isFrozen(p));
 });
 
