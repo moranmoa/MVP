@@ -16,17 +16,18 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use rand_core::OsRng;
 use records::{Draft, Kind, PublicKey, SigningKey, GENESIS_NONCE_LEN, MAX_DEPS};
-use sync::{log_name, AcceptAll, ChannelId, Node, NodeConfig, NodeEvent, Record, Scope, ServerId, Via};
+use sync::{log_name, AcceptAll, Access, ChannelId, Node, NodeConfig, NodeEvent, Record, Scope, ServerId, ServerSecret, Via};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tracing_subscriber::EnvFilter;
 
 /// The harness server: its owner key is a fixed-seed test key (not secret),
 /// so every peer derives the same server id without exchanging anything.
-fn harness_channel() -> (ServerId, ChannelId) {
+/// The server secret is a fixed test value too (members-only sync, GAP-4).
+fn harness_channel() -> (ServerId, ChannelId, ServerSecret) {
     let owner = SigningKey::from_bytes(&[0x42; 32]);
     let server = ServerId::derive(&PublicKey::from_bytes(owner.verifying_key().to_bytes()), &[0; GENESIS_NONCE_LEN]);
-    (server, ChannelId::from_bytes([1; 32]))
+    (server, ChannelId::from_bytes([1; 32]), ServerSecret::from_bytes([0x43; 32]))
 }
 
 #[derive(Deserialize)]
@@ -83,7 +84,7 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
     let name = std::env::args().nth(1).context("usage: sync-peer <name>")?;
-    let (server, channel) = harness_channel();
+    let (server, channel, _) = harness_channel();
     let peer = Arc::new(Peer {
         name,
         relay: std::env::var("RELAY").context("RELAY is not set")?,
@@ -133,10 +134,10 @@ async fn handle(peer: &Arc<Peer>, command: Command) -> Result<Value> {
                 stats.first_remote_ms = None;
                 stats.last_remote_ms = None;
             }
-            let (started, events) = Node::start(NodeConfig {
+            let config = NodeConfig {
                 relay: peer.relay.parse()?,
                 data_dir: peer.data_dir.clone().into(),
-                logs: vec![peer.log.clone()],
+                logs: Vec::new(),
                 // The harness measures sync, not permissions.
                 authorizer: Arc::new(AcceptAll),
                 listen: "/ip4/0.0.0.0/tcp/4001".parse()?,
@@ -150,8 +151,13 @@ async fn handle(peer: &Arc<Peer>, command: Command) -> Result<Value> {
                     .map(|p| format!("/dns4/{p}/tcp/4001").parse())
                     .collect::<Result<_, _>>()?,
                 allow_lan: true,
-            })
-            .await?;
+            };
+            // Every harness peer may read; pulls carry this peer's binding.
+            let access = Access { binder: Some(Arc::new(peer.key.clone())), read_gate: Some(Arc::new(AcceptAll)) };
+            let (started, events) = Node::start_with(config, access).await?;
+            let (server, channel, secret) = harness_channel();
+            started.open_server(server, secret)?;
+            started.open_channel(server, channel).await?;
             let peer_id = started.peer_id();
             *node = Some(started);
             tokio::spawn(record_events(peer.stats.clone(), events));

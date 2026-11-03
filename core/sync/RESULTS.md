@@ -75,6 +75,20 @@ Gossip outcomes: stored → `Accept`; duplicate, still waiting for deps, or refu
 
 Every target still passes. Catch-up takes about 1 s longer than with unsigned blobs, which is the cost of checking 10,000 Ed25519 signatures. That work runs on blocking threads, not on the network task.
 
+### Harness on a sealed server (GAP-4, 2026-11-03)
+
+The peers open the harness server with a fixed test secret. Logs are named by handle, gossip is sealed (XChaCha20-Poly1305), and every pull carries a peer binding.
+
+| Measure | Result |
+|---|---|
+| 1,000 concurrent messages → identical state | 362 ms |
+| Live p95 delivery latency (1,200 / 1,200 by sealed push) | 1.6 ms |
+| Catch-up of 10,000 missed messages | 1,024 ms |
+| Join → first messages | 195 ms |
+| Join → full history (11,600 messages) | 1,335 ms |
+
+Sealing, opening and checking bindings cost nothing measurable next to the signature checks.
+
 **Discovery.** The relay now publishes only global addresses (relay PR #30), so on the Docker network the peers would only meet through relay circuits, which are capped at 128 KiB and 2 minutes. The node therefore:
 - dials `bootstrap` peers directly (the harness passes `p1..p4`);
 - replaces a relayed connection with a direct one as soon as one exists;
