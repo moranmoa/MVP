@@ -251,6 +251,20 @@ impl InstallState {
         Boot::Normal(self.current)
     }
 
+    /// The staged version's files are gone (an installer upgrade wiped
+    /// `versions/`). Forget the trial without counting it as a failure.
+    pub fn forget_missing_trial(&mut self) {
+        self.trial = None;
+    }
+
+    /// The running version's files are gone, or the installer put a newer
+    /// base on disk: start over from `installed`, keeping the versions that
+    /// already failed above it.
+    pub fn rebase(&mut self, installed: Version) {
+        let failed = std::mem::take(&mut self.failed).into_iter().filter(|v| *v > installed).collect();
+        *self = InstallState { failed, ..InstallState::new(installed, &self.platform, self.max_attempts) };
+    }
+
     /// The trial version passed its startup health check.
     pub fn report_healthy(&mut self) -> Result<Committed, Error> {
         match &self.trial {

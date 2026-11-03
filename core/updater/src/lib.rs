@@ -21,6 +21,7 @@
 mod artifact;
 mod error;
 mod layout;
+pub mod launcher;
 mod manifest;
 mod policy;
 mod rollback;
