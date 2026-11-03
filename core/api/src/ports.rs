@@ -136,6 +136,10 @@ pub enum CipherOutcome {
 /// the channel's rotation IDs (GAP-5).
 /// Messages with `Verdict::Pending` (auth_deps not here yet) are neither
 /// shown nor forwarded until they resolve (B4).
+/// API as of #51: build one `Arc<MemberSecret>` (`MemberSecret::new(
+/// identity.signing_key())`) at unlock and share it across every
+/// `ChannelKeys::new(server, channel, secret)`. `apply()` returns
+/// `(Applied, Vec<RecordId>)`: hand the evicted IDs to sync to re-request.
 pub trait GroupCipher: Send + Sync {
     fn membership_changed(&self, server: ServerId, members: &BTreeSet<PublicKey>) -> CipherOutcome;
 }
