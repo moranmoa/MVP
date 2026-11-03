@@ -1080,7 +1080,7 @@ impl Task {
                 self.release_pending(id);
                 Ingest::Added
             }
-            Ok(Append::Known) => Ingest::Known,
+            Ok(Append::Known | Append::StubPending) => Ingest::Known,
             Ok(Append::MissingDeps(missing)) if self.refused.covers(&missing) => {
                 // Built only on refused records: refused as well.
                 self.refused.insert(log_of(&record), record.id());
@@ -1180,7 +1180,7 @@ impl Task {
                     Ok(Append::Unauthorized) => {
                         self.refused.insert(log_of(&waiting.record), waiting.record.id());
                     }
-                    Ok(Append::Known | Append::Invalid(_)) => {}
+                    Ok(Append::Known | Append::Invalid(_) | Append::StubPending) => {}
                     Err(err) => warn!(%err, "storing pending record failed"),
                 }
             }
