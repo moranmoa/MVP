@@ -23,6 +23,7 @@ mod error;
 mod manifest;
 mod policy;
 mod rollback;
+mod unpack;
 mod root;
 mod version;
 
@@ -38,6 +39,9 @@ pub use rollback::{Boot, Committed, InstallState, Trial, MAX_ATTEMPTS};
 pub use root::{
     parse_public_key, parse_root_fetch, RootChain, SignedRoot, TrustRoot, TrustRootFile, MAX_ROOT_FETCH_BYTES,
     MAX_ROOT_UPDATES_PER_FETCH, MAX_ROOT_UPDATE_BYTES, ROOT_SIGNING_CONTEXT,
+};
+pub use unpack::{
+    check_entry_name, unpack_zip, MAX_COMPONENT_BYTES, MAX_ENTRIES, MAX_EXPANSION, MAX_PATH_BYTES, MAX_UNPACKED_BYTES,
 };
 pub use version::{ParseVersionError, Version};
 

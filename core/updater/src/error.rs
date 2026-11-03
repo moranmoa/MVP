@@ -40,6 +40,8 @@ pub enum Error {
     RootVersion { expected: u64, found: u64 },
     /// The artifact was verified for another platform.
     WrongPlatform { expected: String, found: String },
+    /// The update payload could not be unpacked safely (B8 §5, A3).
+    Unpack(String),
     /// A persisted state file is inconsistent (corrupted or tampered with).
     InvalidState(String),
     Io(String),
@@ -86,6 +88,7 @@ impl fmt::Display for Error {
                 write!(f, "artifact is for platform {found:?}, this install is {expected:?}")
             }
             Error::InvalidState(why) => write!(f, "invalid persisted state: {why}"),
+            Error::Unpack(why) => write!(f, "unsafe update payload: {why}"),
             Error::Io(why) => write!(f, "i/o error: {why}"),
         }
     }
