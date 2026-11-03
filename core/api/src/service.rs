@@ -7,7 +7,7 @@ use std::sync::{Mutex, MutexGuard};
 use authority::Action;
 use identity::{PhraseError, RecoveryPhrase, Vault, VaultError, VaultState};
 use rand_core::{OsRng, RngCore};
-use records::{Draft, Kind, PublicKey, Record, Scope, ServerId};
+use records::{PublicKey, Record, ServerId};
 use serde::{Deserialize, Serialize};
 
 use crate::db::Db;
@@ -243,27 +243,17 @@ impl Core {
             if name.is_empty() || name.chars().count() > model::MAX_NAME_CHARS {
                 return Err(ErrorCode::BadRequest.into());
             }
-            let mut nonce = [0u8; 16];
+            let mut nonce = [0u8; records::GENESIS_NONCE_LEN];
             OsRng.fill_bytes(&mut nonce);
-            let server = model::server_id(&me.key(), &nonce);
-            let body = GenesisBody {
-                v: 1,
-                name: name.to_owned(),
-                age_restriction,
-                nonce: hex::encode(nonce),
-            };
-            let genesis = Draft {
-                server,
-                scope: Scope::Control,
-                seq: 0,
-                deps: Vec::new(),
-                auth_deps: Vec::new(),
-                ts: ports.clock.now_ms(),
-                kind: Kind::Genesis,
-                body: serde_json::to_vec(&body).expect("plain struct"),
-            }
-            .sign(me.identity.signing_key())
+            let body = GenesisBody { v: 1, name: name.to_owned(), age_restriction };
+            let genesis = authority::sign_genesis(
+                me.identity.signing_key(),
+                nonce,
+                ports.clock.now_ms(),
+                &serde_json::to_vec(&body).expect("plain struct"),
+            )
             .map_err(|_| ErrorCode::BadRequest)?;
+            let server = genesis.server();
             let join = authority::sign_control(
                 me.identity.signing_key(),
                 server,
@@ -346,7 +336,7 @@ impl Core {
             .map_err(|_| ErrorCode::BadRequest)?;
             let mut records = view.records.clone();
             records.push(record.clone());
-            if !authority::resolve(&records).accepted.contains(&record.id()) {
+            if !authority::resolve(server, &records).accepted.contains(&record.id()) {
                 return Err(ErrorCode::NotAllowed.into());
             }
             inner.db.put_record(&record)?;

@@ -40,10 +40,10 @@ own async layer.
 
 ## Formats (frozen for the alpha)
 
-- **Server ID:** `BLAKE3.derive_key("mvs 2026-11 server id v1", owner key ‖
-  16-byte nonce)`. The genesis body (JSON `{v, name, ageRestriction, nonce}`)
-  lets anyone check it, so a genesis signed by someone else for that ID is
-  refused.
+- **Server:** `authority::sign_genesis`. Its body is the 16-byte nonce
+  followed by JSON `{v: 1, name, ageRestriction}`. The server ID is
+  `records::ServerId::derive(owner, nonce)`, so `records` refuses a genesis
+  that anyone but the owner signs for that ID.
 - **Invite link:** `mvs://join/<server id hex>`.
 - **Default channel:** `"general"`, ID `derive_key("mvs 2026-11 default channel id v1", server id)`.
 - **Join:** a control-log `Post` whose text is `{"mvs":"join/v1","displayName":…}`.

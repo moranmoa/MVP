@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use crate::types::{AgeRestriction, Role};
 
 // BLAKE3 derive_key contexts. Frozen for the alpha.
-const SERVER_ID_CTX: &str = "mvs 2026-11 server id v1";
 const DEFAULT_CHANNEL_CTX: &str = "mvs 2026-11 default channel id v1";
 const SHORT_CODE_CTX: &str = "mvs 2026-11 short code v1";
 
@@ -22,16 +21,6 @@ pub(crate) const MAX_NAME_CHARS: usize = 100;
 const CODE_ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 pub(crate) const COLORS: [&str; 8] =
     ["#5865f2", "#2f9e44", "#e8590c", "#d6336c", "#1098ad", "#7048e8", "#f08c00", "#0ca678"];
-
-/// A server's ID is bound to its owner: BLAKE3(owner key ‖ nonce). Anyone can
-/// check a genesis against it, so nobody else can sign a genesis that claims
-/// someone's server ID.
-pub(crate) fn server_id(owner: &PublicKey, nonce: &[u8; 16]) -> ServerId {
-    let mut material = [0u8; 48];
-    material[..32].copy_from_slice(owner.as_bytes());
-    material[32..].copy_from_slice(nonce);
-    ServerId::from_bytes(blake3::derive_key(SERVER_ID_CTX, &material))
-}
 
 pub(crate) fn default_channel(server: ServerId) -> ChannelId {
     ChannelId::from_bytes(blake3::derive_key(DEFAULT_CHANNEL_CTX, server.as_bytes()))
@@ -73,15 +62,14 @@ pub(crate) fn parse_hex32(id: &str) -> Option<[u8; 32]> {
     hex::decode(id).ok()?.try_into().ok()
 }
 
-/// The genesis record's body. `authority` doesn't read it.
+/// Server metadata in the genesis body, after the nonce that `records`
+/// checks against the server ID. `authority` doesn't read it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GenesisBody {
     pub v: u8,
     pub name: String,
     pub age_restriction: AgeRestriction,
-    /// Hex of the 16-byte nonce in the server ID.
-    pub nonce: String,
 }
 
 /// Body of the control-log post a member makes on joining.
@@ -127,18 +115,19 @@ pub(crate) struct ServerView {
 }
 
 impl ServerView {
-    /// `None` unless there is a genesis whose author and nonce give `id`.
+    /// `None` without a genesis for `id`. (`records` refuses a genesis whose
+    /// author and nonce don't give its server ID, so it is the owner's.)
     pub fn build(id: ServerId, records: Vec<Record>) -> Option<ServerView> {
         let genesis = records.iter().find(|r| {
-            r.kind() == Kind::Genesis && r.scope() == Scope::Control && r.deps().is_empty()
+            r.kind() == Kind::Genesis && r.scope() == Scope::Control && r.server() == id
         })?;
-        let body: GenesisBody = serde_json::from_slice(genesis.body()).ok()?;
-        let nonce: [u8; 16] = hex::decode(&body.nonce).ok()?.try_into().ok()?;
-        if body.v != 1 || genesis.server() != id || server_id(&genesis.author(), &nonce) != id {
+        let metadata = genesis.body().get(records::GENESIS_NONCE_LEN..)?;
+        let body: GenesisBody = serde_json::from_slice(metadata).ok()?;
+        if body.v != 1 {
             return None;
         }
         let owner = genesis.author();
-        let state = authority::resolve(&records);
+        let state = authority::resolve(id, &records);
         (state.owner == Some(owner)).then_some(ServerView {
             id,
             genesis: body,

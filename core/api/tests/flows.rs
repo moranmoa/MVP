@@ -162,23 +162,35 @@ fn a_genesis_must_belong_to_its_server_id() {
     sign_up(&owner, "Owner");
     let real = owner.core.create_server("Real", AgeRestriction::None).unwrap();
 
-    // Someone else signs a genesis claiming a made-up server ID.
-    let forged_id = ServerId::from_bytes([9; 32]);
-    let body =
-        format!(r#"{{"v":1,"name":"Fake","ageRestriction":"none","nonce":"{}"}}"#, "00".repeat(16));
-    let genesis = Draft {
-        server: forged_id,
+    // Someone else can't even sign a genesis for the real server's ID
+    // (`records` binds the ID to the owner's key).
+    let mallory = SigningKey::from_bytes(&[5; 32]);
+    let real_id = ServerId::from_bytes(hex::decode(&real.id).unwrap().try_into().unwrap());
+    let stolen = Draft {
+        server: real_id,
         scope: Scope::Control,
         seq: 0,
         deps: vec![],
         auth_deps: vec![],
         ts: 1,
         kind: Kind::Genesis,
-        body: body.into_bytes(),
+        body: [[0u8; 16].as_slice(), br#"{"v":1,"name":"Fake","ageRestriction":"none"}"#].concat(),
     }
-    .sign(&SigningKey::from_bytes(&[5; 32]))
+    .sign(&mallory);
+    assert!(stolen.is_err());
+
+    // Records for a server ID nobody wrote a genesis for.
+    let forged_id = ServerId::from_bytes([9; 32]);
+    let orphan = authority::sign_control(
+        &mallory,
+        forged_id,
+        0,
+        vec![],
+        1,
+        &authority::Action::Post { text: "hi".into() },
+    )
     .unwrap();
-    world.network.publish(&genesis);
+    world.network.publish(&orphan);
 
     let joiner = world.peer();
     sign_up(&joiner, "Joiner");
