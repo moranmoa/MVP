@@ -321,6 +321,12 @@ impl Core {
         self.control_action(server_id, Action::Kick { target: parse_user(user_id)? })
     }
 
+    // TODO(records B4):
+    // - Kick, Leave and Revoke carry a cut of up to 64 channel heads. Sync
+    //   channel heads first, then fill the cut, starting with the channels
+    //   where the target has records.
+    // - When an invite expires, send `InviteRevoke` automatically if we are
+    //   its inviter or a moderator and up.
     fn control_action(&self, server_id: &str, action: Action) -> CoreResult<()> {
         let server = parse_server(server_id)?;
         self.run(|inner, ports, events| {

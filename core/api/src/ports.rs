@@ -131,7 +131,11 @@ pub enum CipherOutcome {
 /// aren't implemented in this core yet, so nothing is encrypted or sent in
 /// the clear today. When they are: a decrypted message whose
 /// `Decrypted.accepted` is false is shown as untrusted, never as a normal
-/// message (issue #21). Feed `set_voided` from authority (GAP-5).
+/// message (issue #21). Rotations are deny-by-default: feed
+/// `ChannelKeys::set_accepted` / `accept` with `authority::State::accepted` ∩
+/// the channel's rotation IDs (GAP-5).
+/// Messages with `Verdict::Pending` (auth_deps not here yet) are neither
+/// shown nor forwarded until they resolve (B4).
 pub trait GroupCipher: Send + Sync {
     fn membership_changed(&self, server: ServerId, members: &BTreeSet<PublicKey>) -> CipherOutcome;
 }
