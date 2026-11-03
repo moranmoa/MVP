@@ -48,7 +48,8 @@ async function openExternal(win, url) {
     defaultId: 1,
     cancelId: 1,
     message: 'Open this link in your browser?',
-    detail: url,
+    // The parsed form shows punycode, so look-alike hosts are visible.
+    detail: new URL(url).href,
   });
   if (response === 0) await shell.openExternal(url);
 }
@@ -76,7 +77,7 @@ function lockDownSession(ses) {
   ses.setDisplayMediaRequestHandler((_req, done) => done({}));
   // Nothing the UI needs lives on the network; any other request is a bug or an attack.
   ses.webRequest.onBeforeRequest((details, done) => {
-    const ok = details.url.startsWith(`${sec.ORIGIN}/`) || details.url.startsWith('devtools://') || details.url.startsWith('data:') || details.url.startsWith('blob:');
+    const ok = details.url.startsWith(`${sec.ORIGIN}/`) || (!app.isPackaged && details.url.startsWith('devtools://')) || details.url.startsWith('data:') || details.url.startsWith('blob:');
     done({ cancel: !ok });
   });
 }
@@ -89,11 +90,11 @@ function createWindow() {
     minHeight: 480,
     show: false,
     backgroundColor: '#1e1f22',
-    webPreferences: { ...sec.WEB_PREFERENCES },
+    webPreferences: { ...sec.WEB_PREFERENCES, devTools: !app.isPackaged },
   });
   win.once('ready-to-show', () => win.show());
-  // The mock core stays reachable with ?demo while the real core is wired up (B1-2).
-  const demo = process.env.MVS_DEMO ? `?demo=${encodeURIComponent(process.env.MVS_DEMO)}` : '';
+  // The mock demo (?demo) is for checkouts only, never a release build.
+  const demo = !app.isPackaged && process.env.MVS_DEMO ? `?demo=${encodeURIComponent(process.env.MVS_DEMO)}` : '';
   win.loadURL(`${sec.ORIGIN}/index.html${demo}`);
   return win;
 }

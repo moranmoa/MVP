@@ -36,7 +36,7 @@ On a machine with Node: `npm ci && npm start` (set `MVS_DEMO=1` for the demo dat
 | Navigation and redirects off `app://mvs` blocked; `<webview>` attachment blocked | `will-navigate`, `will-redirect`, `will-attach-webview` | e2e |
 | No permissions (microphone, notifications, devices, screen capture) | `setPermissionRequestHandler` / `CheckHandler`, `setDevicePermissionHandler`, `setDisplayMediaRequestHandler` | unit + e2e |
 | Crash reporter on with uploads off | `crashReporter.start({ uploadToServer: false })` | – |
-| No default menu (so no DevTools) in packaged builds; `MVS_UI_DIR` only in a checkout | `main.js` | – (B1-3, packaged build) |
+| No default menu and `devTools: false` in packaged builds (and no `devtools://` requests); `MVS_UI_DIR` and `MVS_DEMO` only in a checkout; the link dialog shows the parsed URL (punycode) | `main.js` | – (B1-3, packaged build) |
 
 The microphone permission is decided with voice (phase 2). There is no
 preload yet; B1-2 adds one narrow bridge (`invoke` + `onEvent`) with an
