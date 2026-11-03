@@ -120,3 +120,28 @@ trusted until it has been decoded, verified and authorised.**
 - [ ] No command returns recovery words or keys, except the one-time words
       screen.
 - [ ] CSP unchanged or tightened; no `unsafe-eval`, no remote script sources.
+
+### Electron shell (B1, GAP-17)
+
+- [ ] The core sidecar is started by an absolute path from the app's
+      resources, without a shell, and talks over stdio only (no TCP port or
+      socket). Lines are capped (e.g. 1 MiB) both ways; keys and the keychain
+      stay in the sidecar.
+- [ ] Fuses: `RunAsNode`, `EnableNodeOptionsEnvironmentVariable` and
+      `EnableNodeCliInspectArguments` off; `OnlyLoadAppFromAsar` and
+      `EmbeddedAsarIntegrityValidation` on. No DevTools or remote debugging in
+      release builds.
+- [ ] Every window: `sandbox`, `contextIsolation`, no `nodeIntegration`,
+      `webSecurity` on, no `webviewTag`. Only the app's own protocol or file
+      is loaded, never remote content; CSP also sent as a header.
+- [ ] `will-navigate` is blocked and `setWindowOpenHandler` denies;
+      `setPermissionRequestHandler` denies everything (the microphone only
+      for voice, after a user action).
+- [ ] The preload exposes only `invoke(cmd, args)` and `onEvent`, never
+      `ipcRenderer`. Main checks `event.senderFrame` against the app origin,
+      `cmd` against the `CoreCommands` allow-list, and the size of `args`.
+- [ ] `shell.openExternal` only for `https:` URLs, after confirmation.
+- [ ] `mvs://` links: single-instance lock; parsed strictly in main and
+      passed only as the `joinServer` argument, never as a navigation.
+- [ ] Updates only through `core/updater` (signed manifest); Electron pinned
+      to a supported release. No crash-report upload.
