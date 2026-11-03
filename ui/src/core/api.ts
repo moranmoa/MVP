@@ -100,6 +100,12 @@ export interface CoreEvents {
   'update.ready': UpdateInfo;
   /** e.g. after a kick: the server's encryption was renewed. */
   'notice': { kind: 'encryption-renewed'; serverId: Id };
+  /**
+   * Desktop app only: an mvs:// invite link the OS handed to the app (a click
+   * in a browser or chat). The UI opens the join dialog with it and joins only
+   * when the person presses Join; nothing joins on its own.
+   */
+  'link.open': { link: string };
 }
 
 export type CoreEventName = keyof CoreEvents;

@@ -1,0 +1,4 @@
+# The app with the real core: Playwright's image plus a session D-Bus and
+# gnome-keyring, so mvs-core's OS keychain (Secret Service) works in Docker.
+FROM mcr.microsoft.com/playwright:v1.56.1-noble
+RUN apt-get update && apt-get install -y --no-install-recommends dbus dbus-x11 gnome-keyring && rm -rf /var/lib/apt/lists/*

@@ -195,18 +195,27 @@ export function CreateServerDialog({
   );
 }
 
-export function JoinDialog({ open, onClose, onJoined }: { open: boolean; onClose: () => void; onJoined: (id: Id) => void }) {
+/** `initialLink` pre-fills the field (an mvs:// link from the OS); joining still waits for the Join button. */
+export function JoinDialog({
+  open,
+  initialLink,
+  onClose,
+  onJoined,
+}: {
+  open: boolean;
+  initialLink?: string;
+  onClose: () => void;
+  onJoined: (id: Id) => void;
+}) {
   const core = useCore();
   const intl = useIntl();
   const [link, setLink] = useState('');
   const [status, setStatus] = useState<JoinStatus | null>(null);
 
   useEffect(() => {
-    if (!open) {
-      setLink('');
-      setStatus(null);
-    }
-  }, [open]);
+    setLink(open ? (initialLink ?? '') : '');
+    setStatus(null);
+  }, [open, initialLink]);
 
   useCoreEvent(
     'join.status',

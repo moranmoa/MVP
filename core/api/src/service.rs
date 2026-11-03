@@ -18,6 +18,7 @@ use crate::types::*;
 const DEFAULT_STORAGE_LIMIT: u64 = 5 * 1024 * 1024 * 1024;
 const KV_STORAGE_LIMIT: &str = "storage-limit";
 const KV_UPDATE_CHANNEL: &str = "update-channel";
+const KV_RECOVERY_CHALLENGE: &str = "recovery-challenge";
 
 pub struct Config {
     /// `None` keeps everything in memory (tests).
@@ -35,6 +36,19 @@ struct Profile {
     country: String,
     birth_date: String,
 }
+
+/// Kept in the store so a restart neither resets the count nor offers new
+/// positions (B19 §6). Positions are 1-based. Not secret: they say which
+/// words to ask for, not the words.
+#[derive(Serialize, Deserialize)]
+struct Challenge {
+    positions: Vec<usize>,
+    failures: u8,
+    burned: bool,
+}
+
+pub const CHALLENGE_POSITIONS: usize = 3;
+pub const MAX_CHECK_FAILURES: u8 = 5;
 
 struct Me {
     /// Held only until the recovery check passes, so the UI can show and
@@ -157,34 +171,86 @@ impl Core {
         })
     }
 
-    /// `answers`: 1-based position → typed word.
-    pub fn check_recovery_words(&self, answers: BTreeMap<usize, String>) -> CoreResult<bool> {
+    /// The current word check (B19 §6): [`CHALLENGE_POSITIONS`] 1-based
+    /// positions, the same until passed or burned. `too-many-attempts`
+    /// while burned; `not-allowed` once the check has passed.
+    pub fn get_recovery_challenge(&self) -> CoreResult<RecoveryChallenge> {
+        let inner = self.lock();
+        let me = inner.me.as_ref().ok_or(ErrorCode::NotFound)?;
+        // Already passed: the phrase is gone (see `Me::phrase`).
+        me.phrase.as_ref().ok_or(ErrorCode::NotAllowed)?;
+        let challenge = match inner.challenge()? {
+            Some(c) if c.burned => return Err(ErrorCode::TooManyAttempts.into()),
+            Some(c) => c,
+            None => {
+                let positions = identity::check_positions(CHALLENGE_POSITIONS)
+                    .into_iter()
+                    .map(|p| p + 1)
+                    .collect();
+                let fresh = Challenge { positions, failures: 0, burned: false };
+                inner.save_challenge(&fresh)?;
+                fresh
+            }
+        };
+        Ok(RecoveryChallenge { positions: challenge.positions })
+    }
+
+    /// Answers for exactly the current challenge's positions (1-based),
+    /// else `not-allowed`. The [`MAX_CHECK_FAILURES`]th failure burns the
+    /// challenge and itself rejects with `too-many-attempts`.
+    pub fn check_recovery_words(
+        &self,
+        answers: BTreeMap<usize, String>,
+    ) -> CoreResult<RecoveryCheckResult> {
         self.run(|inner, _, events| {
             let me = inner.me.as_ref().ok_or(ErrorCode::NotFound)?;
-            // Already passed: the phrase is gone (see `Me::phrase`).
             let phrase = me.phrase.as_ref().ok_or(ErrorCode::NotAllowed)?;
-            if answers.keys().any(|p| *p == 0) {
-                return Ok(false);
+            let mut challenge = inner.challenge()?.ok_or(ErrorCode::NotAllowed)?;
+            if challenge.burned {
+                return Err(ErrorCode::TooManyAttempts.into());
             }
-            let answers: Vec<(usize, &str)> =
-                answers.iter().map(|(p, w)| (p - 1, w.as_str())).collect();
-            let ok = inner.vault.confirm_recovery_check(phrase, &answers).map_err(vault_error)?;
-            if ok {
+            if !answers.keys().copied().eq(challenge.positions.iter().copied()) {
+                return Err(ErrorCode::NotAllowed.into());
+            }
+            let wrong: Vec<usize> = answers
+                .iter()
+                .filter(|(p, w)| !phrase.check_words(&[(*p - 1, w.as_str())]))
+                .map(|(p, _)| *p)
+                .collect();
+            if wrong.is_empty() {
+                let answers: Vec<(usize, &str)> =
+                    answers.iter().map(|(p, w)| (p - 1, w.as_str())).collect();
+                if !inner.vault.confirm_recovery_check(phrase, &answers).map_err(vault_error)? {
+                    return Err(ErrorCode::Internal.into());
+                }
+                inner.db.delete(KV_RECOVERY_CHALLENGE)?;
                 inner.me.as_mut().expect("checked above").phrase = None;
                 let me = inner.me.as_ref().expect("checked above");
                 events.push(Event::IdentityChanged(inner.identity_json(me)?));
+                return Ok(RecoveryCheckResult::passed());
             }
-            Ok(ok)
+            challenge.failures += 1;
+            challenge.burned = challenge.failures >= MAX_CHECK_FAILURES;
+            inner.save_challenge(&challenge)?;
+            if challenge.burned {
+                return Err(ErrorCode::TooManyAttempts.into());
+            }
+            Ok(RecoveryCheckResult::wrong(wrong))
         })
     }
 
     /// Only before the recovery check passes: one XSS in the UI must not be
-    /// able to read the words any time later. TODO(#31): allowed again
-    /// after app-lock re-authentication.
+    /// able to read the words any time later. Success lifts a burned
+    /// challenge (the next one has new positions and a fresh count).
+    /// TODO(app lock, #31): OS authentication first (`auth-cancelled`),
+    /// and the words again after the check, behind it.
     pub fn get_recovery_words(&self) -> CoreResult<Vec<String>> {
         let inner = self.lock();
         let me = inner.me.as_ref().ok_or(ErrorCode::NotFound)?;
         let phrase = me.phrase.as_ref().ok_or(ErrorCode::NotAllowed)?;
+        if inner.challenge()?.is_some_and(|c| c.burned) {
+            inner.db.delete(KV_RECOVERY_CHALLENGE)?;
+        }
         Ok(phrase.words().iter().map(|w| (*w).to_owned()).collect())
     }
 
@@ -195,6 +261,7 @@ impl Core {
             }
             let phrase = RecoveryPhrase::parse(&words.join(" ")).map_err(phrase_error)?;
             inner.vault.restore(&phrase).map_err(vault_error)?;
+            inner.db.delete(KV_RECOVERY_CHALLENGE)?;
             // TODO(backup): the spec restores the birth date from the
             // encrypted identity backup; until then the UI asks again.
             let me = inner.new_me(phrase, Profile::default())?;
@@ -519,6 +586,18 @@ impl Core {
 }
 
 impl Inner {
+    fn challenge(&self) -> CoreResult<Option<Challenge>> {
+        match self.db.get(KV_RECOVERY_CHALLENGE)? {
+            None => Ok(None),
+            // Unreadable: start over rather than lock the user out.
+            Some(json) => Ok(serde_json::from_slice(&json).ok()),
+        }
+    }
+
+    fn save_challenge(&self, challenge: &Challenge) -> CoreResult<()> {
+        self.db.set(KV_RECOVERY_CHALLENGE, &serde_json::to_vec(challenge).expect("plain struct"))
+    }
+
     fn new_me(&self, phrase: RecoveryPhrase, profile: Profile) -> CoreResult<Me> {
         let identity = phrase.identity();
         let key = *identity.storage_key().expose_secret();

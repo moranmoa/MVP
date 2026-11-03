@@ -61,6 +61,10 @@ impl Db {
             .map_err(internal)
     }
 
+    pub fn delete(&self, key: &str) -> Result<(), CoreError> {
+        self.conn.execute("DELETE FROM kv WHERE key = ?1", [key]).map(drop).map_err(internal)
+    }
+
     /// The profile JSON, sealed with XChaCha20-Poly1305 under the storage
     /// key: it holds the birth date, which never leaves the device.
     pub fn save_profile(&self, key: &[u8; 32], json: &[u8]) -> Result<(), CoreError> {

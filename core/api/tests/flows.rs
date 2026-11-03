@@ -16,11 +16,26 @@ fn adult() -> NewIdentityInput {
     NewIdentityInput { locale: Locale::He, country: "IL".into(), birth_date: "1990-05-01".into() }
 }
 
+/// Answers the current challenge, with "zzzz" at the indexes (into its
+/// positions) listed in `wrong`. Returns the positions and the result.
+fn answer(
+    peer: &Peer,
+    words: &[String],
+    wrong: &[usize],
+) -> (Vec<usize>, CoreResult<RecoveryCheckResult>) {
+    let positions = peer.core.get_recovery_challenge().unwrap().positions;
+    let answers: BTreeMap<usize, String> = positions
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (*p, if wrong.contains(&i) { "zzzz".into() } else { words[p - 1].clone() }))
+        .collect();
+    (positions, peer.core.check_recovery_words(answers))
+}
+
 /// Creates an identity and passes the recovery check.
 fn sign_up(peer: &Peer, name: &str) -> Identity {
     let created = peer.core.create_identity(adult()).unwrap();
-    let answers: BTreeMap<usize, String> = [(1, created.words[0].clone())].into();
-    assert!(peer.core.check_recovery_words(answers).unwrap());
+    assert!(answer(peer, &created.words, &[]).1.unwrap().ok);
     peer.core
         .update_profile(ProfileInput {
             display_name: name.into(),
@@ -75,9 +90,7 @@ fn create_identity_server_grant_kick() {
         owner.core.create_server("Team", AgeRestriction::None).unwrap_err().code,
         ErrorCode::RecoveryCheckRequired
     );
-    let answers: BTreeMap<usize, String> =
-        [(3, created.words[2].clone()), (9, created.words[8].clone())].into();
-    assert!(owner.core.check_recovery_words(answers).unwrap());
+    assert_eq!(answer(&owner, &created.words, &[]).1.unwrap(), RecoveryCheckResult::passed());
     assert!(owner.core.get_identity().unwrap().unwrap().recovery_checked);
 
     let server = owner.core.create_server("Team", AgeRestriction::None).unwrap();
@@ -336,8 +349,8 @@ fn recovery_words_only_until_the_check_passes() {
 
     let created = peer.core.create_identity(adult()).unwrap();
     assert_eq!(peer.core.get_recovery_words().unwrap(), created.words);
-    let wrong: BTreeMap<usize, String> = [(1, "zzzz".to_owned())].into();
-    assert!(!peer.core.check_recovery_words(wrong).unwrap());
+    let (_, result) = answer(&peer, &created.words, &[0]);
+    assert!(!result.unwrap().ok);
     assert_eq!(peer.core.get_recovery_words().unwrap(), created.words);
 
     // Before the check, a restart still hands them out.
@@ -345,15 +358,82 @@ fn recovery_words_only_until_the_check_passes() {
     let peer = world.peer_with(secrets.clone(), Some(db.clone()), Arc::new(PendingGroupKeys));
     assert_eq!(peer.core.get_recovery_words().unwrap(), created.words);
 
-    let right: BTreeMap<usize, String> = [(2, created.words[1].clone())].into();
-    assert!(peer.core.check_recovery_words(right.clone()).unwrap());
+    let (positions, result) = answer(&peer, &created.words, &[]);
+    assert!(result.unwrap().ok);
     assert_eq!(peer.core.get_recovery_words().unwrap_err().code, ErrorCode::NotAllowed);
-    assert_eq!(peer.core.check_recovery_words(right).unwrap_err().code, ErrorCode::NotAllowed);
+    assert_eq!(peer.core.get_recovery_challenge().unwrap_err().code, ErrorCode::NotAllowed);
+    let again: BTreeMap<usize, String> =
+        positions.iter().map(|p| (*p, created.words[p - 1].clone())).collect();
+    assert_eq!(peer.core.check_recovery_words(again).unwrap_err().code, ErrorCode::NotAllowed);
 
     drop(peer);
     let peer = world.peer_with(secrets, Some(db), Arc::new(PendingGroupKeys));
     assert!(peer.core.get_identity().unwrap().unwrap().recovery_checked);
     assert_eq!(peer.core.get_recovery_words().unwrap_err().code, ErrorCode::NotAllowed);
+    drop(peer);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// B19 §6 / #31: a stable challenge of 3 positions, only its positions
+/// accepted, the wrong ones reported, burned on the 5th failure (which
+/// itself rejects), across a restart, until getRecoveryWords lifts it.
+#[test]
+fn the_recovery_challenge_burns_after_five_failures() {
+    let world = World::new();
+    let secrets = Arc::new(MemoryStore::new());
+    let dir = std::env::temp_dir().join(format!("mvs-api-challenge-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("core.db");
+    let _ = std::fs::remove_file(&db);
+    let open = || world.peer_with(secrets.clone(), Some(db.clone()), Arc::new(PendingGroupKeys));
+    let peer = open();
+    assert_eq!(peer.core.get_recovery_challenge().unwrap_err().code, ErrorCode::NotFound);
+    let words = peer.core.create_identity(adult()).unwrap().words;
+
+    let first = peer.core.get_recovery_challenge().unwrap().positions;
+    assert_eq!(first.len(), CHALLENGE_POSITIONS);
+    assert!(first.windows(2).all(|w| w[0] < w[1]) && first.iter().all(|p| (1..=12).contains(p)));
+    assert_eq!(peer.core.get_recovery_challenge().unwrap().positions, first);
+
+    // Other positions (or some missing): not-allowed, and not a failure.
+    let other: BTreeMap<usize, String> = (1..=12)
+        .filter(|p| !first.contains(p))
+        .take(3)
+        .map(|p| (p, words[p - 1].clone()))
+        .collect();
+    let fewer: BTreeMap<usize, String> = [(first[0], words[first[0] - 1].clone())].into();
+    for answers in [other, fewer, BTreeMap::new()] {
+        assert_eq!(
+            peer.core.check_recovery_words(answers).unwrap_err().code,
+            ErrorCode::NotAllowed
+        );
+    }
+
+    // Four failures report the wrong positions; a restart keeps the count.
+    for _ in 1..MAX_CHECK_FAILURES {
+        let (positions, result) = answer(&peer, &words, &[0, 2]);
+        assert_eq!(positions, first);
+        assert_eq!(result.unwrap(), RecoveryCheckResult::wrong(vec![first[0], first[2]]));
+    }
+    drop(peer);
+    let peer = open();
+    assert_eq!(peer.core.get_recovery_challenge().unwrap().positions, first);
+    // The fifth burns it and itself rejects; so does everything after.
+    let (_, result) = answer(&peer, &words, &[1]);
+    assert_eq!(result.unwrap_err().code, ErrorCode::TooManyAttempts);
+    assert_eq!(peer.core.get_recovery_challenge().unwrap_err().code, ErrorCode::TooManyAttempts);
+    let right: BTreeMap<usize, String> = first.iter().map(|p| (*p, words[p - 1].clone())).collect();
+    assert_eq!(peer.core.check_recovery_words(right).unwrap_err().code, ErrorCode::TooManyAttempts);
+    assert!(!peer.core.get_identity().unwrap().unwrap().recovery_checked);
+
+    // Still burned after a restart, until the words are shown again.
+    drop(peer);
+    let peer = open();
+    assert_eq!(peer.core.get_recovery_challenge().unwrap_err().code, ErrorCode::TooManyAttempts);
+    assert_eq!(peer.core.get_recovery_words().unwrap(), words);
+    let (_, result) = answer(&peer, &words, &[]);
+    assert_eq!(result.unwrap(), RecoveryCheckResult::passed());
+    assert!(peer.core.get_identity().unwrap().unwrap().recovery_checked);
     drop(peer);
     let _ = std::fs::remove_dir_all(&dir);
 }

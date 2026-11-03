@@ -61,3 +61,90 @@ Tests use `test/fake-core.js`, which speaks the sidecar's line protocol
 process; the shell never touches keys (no `safeStorage`).
 
 The microphone permission is decided with voice (phase 2).
+
+## With the real core
+
+Build `mvs-core` from `core/` into `desktop/.core/` (git-ignored), then run the
+app against it with a real keychain (a session D-Bus and an unlocked
+gnome-keyring in the container, test only):
+
+```bash
+MSYS_NO_PATHCONV=1 docker run --rm -v "$PWD/../core":/w -v "$PWD/.core":/out -w /w rust:1.90-bookworm sh -c 'cargo build --release --locked --bin mvs-core && cp target/release/mvs-core /out/'
+```
+
+```bash
+docker compose run --rm real-core
+```
+
+`test/real-core.test.mjs`: createIdentity → getRecoveryWords (same words) →
+checkRecoveryWords → getRecoveryWords refused → createServer → listServers,
+and the recovery words never appear in the main process's stdout or stderr.
+
+## Packaging (B1-3)
+
+`electron-builder` 26.17.0 with `mvs-core` (from `.core/`) and `ui/dist` in
+`resources/`, the app code only in `app.asar`, and `build/fuses.js` as the
+`afterPack` hook. The fuses:
+
+| Fuse | Value |
+| --- | --- |
+| RunAsNode | off |
+| EnableNodeOptionsEnvironmentVariable | off |
+| EnableNodeCliInspectArguments | off |
+| OnlyLoadAppFromAsar | on |
+| EnableEmbeddedAsarIntegrityValidation | on (enforced on Windows and macOS) |
+| EnableCookieEncryption | on |
+| GrantFileProtocolExtraPrivileges | off |
+
+```bash
+MSYS_NO_PATHCONV=1 docker run --rm -v "$PWD/..":/repo -v desktop_node_modules:/repo/desktop/node_modules -w /repo/desktop node:22.23.4-bookworm sh -c "npm ci && npx electron-builder --linux dir && node --test test/fuses.test.mjs"
+```
+
+`publish: null`: electron-builder never uploads anything by itself; releases go
+through our own release workflow and signed updater.
+
+ASAR integrity is enforced only on Windows and macOS. On Linux the fuse is set
+but Electron does not check the archive, so there it protects nothing.
+
+`test/fuses.test.mjs` reads the fuses back from the packaged binary, checks
+the asar-only layout, and runs the binary with `ELECTRON_RUN_AS_NODE=1` and a
+hostile `NODE_OPTIONS` to see both ignored. The core's data folder
+(`<userData>/core`) is created `0700`.
+
+## Invite links (mvs://)
+
+The installed app registers `mvs://` for the current user (never in a
+checkout), with `--` before the link on Windows (`"mvs.exe" -- "%1"`) and
+Linux (`Exec=mvs -- %U`), so a link can never become a switch. A link arrives
+on the first launch's command line, from a second launch
+(`requestSingleInstanceLock` + `second-instance`; the second process quits),
+or as macOS `open-url`. `src/deeplink.js` accepts only the exact core format
+`mvs://join/<64 hex>/<64 hex>` (canonicalised).
+
+**Main never joins by itself** (a click on a link must not reveal who we are
+to someone's server). It sends the page a `link.open` event, `{ link }` with
+the canonical link only, through `window.mvs.onEvent`; if the page has not
+subscribed yet, the preload keeps the latest one for the first subscriber.
+The UI shows the join screen pre-filled and calls `joinServer` only when the
+user presses Join.
+
+Tests: `test/deeplink.test.js` (unit, hostile links) and
+`test/deeplink.e2e.test.mjs` (first launch with a late subscriber, second
+instance, hostile links reach nothing, no `joinServer` without the UI).
+
+## Windows uninstall
+
+`build/installer.nsh`: the uninstaller asks whether to delete the local data
+(`%APPDATA%\MVS`); the default is keep. `/S` keeps it, `/S /DELETEDATA` deletes
+it, an update never deletes it. The identity key in Windows Credential
+Manager is never touched. The `mvs://` registration is always removed.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File test\nsis-uninstall.ps1 -Installer "dist\MVS Setup 0.1.0.exe"
+```
+
+Build the installer with `electronuserland/builder:wine` (see
+spikes/RESULTS.md) after cross-compiling `mvs-core.exe` into `.core/`
+(`cargo build --release --locked --bin mvs-core --target x86_64-pc-windows-gnu`).
+
+Still to come: the release.yml plug-in point with devops.

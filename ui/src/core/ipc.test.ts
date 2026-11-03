@@ -38,6 +38,23 @@ describe('ipc core', () => {
     expect(seen).toEqual([{ serverId: 's1' }]);
   });
 
+  it('keeps a link.open that arrives before anyone listens, for the first listener only', async () => {
+    const { bridge, emit } = fakeBridge(() => ({ ok: null }));
+    const core = createIpcCore(bridge);
+    emit('link.open', { link: 'mvs://join/a' });
+    emit('link.open', { link: 'mvs://join/b' });
+    const first: unknown[] = [];
+    const second: unknown[] = [];
+    core.on('link.open' as never, (p: unknown) => first.push(p));
+    core.on('link.open' as never, (p: unknown) => second.push(p));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(first).toEqual([{ link: 'mvs://join/b' }]);
+    expect(second).toEqual([]);
+    emit('link.open', { link: 'mvs://join/c' });
+    expect(first).toEqual([{ link: 'mvs://join/b' }, { link: 'mvs://join/c' }]);
+    expect(second).toEqual([{ link: 'mvs://join/c' }]);
+  });
+
   it('is not a thenable', () => {
     const { bridge } = fakeBridge(() => ({ ok: null }));
     expect((createIpcCore(bridge) as unknown as { then?: unknown }).then).toBeUndefined();

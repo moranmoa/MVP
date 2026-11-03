@@ -166,6 +166,10 @@ pub enum ErrorCode {
     NotAllowed,
     NotFound,
     RecoveryCheckRequired,
+    /// OS authentication was cancelled (the app lock). TODO(app lock).
+    AuthCancelled,
+    /// The recovery-word challenge is burned (B19 §6).
+    TooManyAttempts,
     /// Rust addition: malformed command JSON or arguments.
     BadRequest,
     /// Rust addition: in the contract, not done by this core yet.
@@ -247,6 +251,31 @@ pub enum UpdateChannel {
 pub struct AppInfo {
     pub version: String,
     pub update_channel: UpdateChannel,
+}
+
+/// `getRecoveryChallenge`'s result: 1-based positions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryChallenge {
+    pub positions: Vec<usize>,
+}
+
+/// `RecoveryCheckResult`: `{ ok: true }` or `{ ok: false, wrong: [...] }`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryCheckResult {
+    pub ok: bool,
+    /// 1-based positions answered wrong; absent when `ok`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrong: Option<Vec<usize>>,
+}
+
+impl RecoveryCheckResult {
+    pub fn passed() -> RecoveryCheckResult {
+        RecoveryCheckResult { ok: true, wrong: None }
+    }
+
+    pub fn wrong(positions: Vec<usize>) -> RecoveryCheckResult {
+        RecoveryCheckResult { ok: false, wrong: Some(positions) }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
