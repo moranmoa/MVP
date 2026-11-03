@@ -23,10 +23,12 @@ describe('composer length limit (QA-10)', () => {
     expect(document.querySelector('.char-count')).toBeNull();
   });
 
-  it('shows a counter near the limit, and keeps sending allowed', async () => {
+  it('shows a counter from 3,800 characters, and keeps sending allowed', async () => {
     const { box, send } = await setup();
-    fireEvent.change(box, { target: { value: 'x'.repeat(3600) } });
-    expect(screen.getByText('3,600 / 4,000')).toBeTruthy();
+    fireEvent.change(box, { target: { value: 'x'.repeat(3799) } });
+    expect(document.querySelector('.char-count')).toBeNull();
+    fireEvent.change(box, { target: { value: 'x'.repeat(3800) } });
+    expect(screen.getByText('3,800 / 4,000')).toBeTruthy();
     expect(send.disabled).toBe(false);
   });
 

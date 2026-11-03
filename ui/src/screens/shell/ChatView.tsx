@@ -8,8 +8,8 @@ import { BackIcon, CloseIcon, EditIcon, HashIcon, ReplyIcon, SendIcon, UsersIcon
 import { useUserTextProps } from '../../app/textDir';
 import { BODY_MAX, BODY_MAX_BYTES } from '../../core/sanitize';
 
-/** The character counter shows from here on. */
-const COUNTER_FROM = 3500;
+/** The character counter shows from here on (B6/QA-17 acceptance: 3,800). */
+const COUNTER_FROM = 3800;
 const utf8 = new TextEncoder();
 import { MessageList } from './MessageList';
 
