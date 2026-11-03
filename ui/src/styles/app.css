@@ -14,6 +14,13 @@ body,
   margin: 0;
 }
 
+/* The layout breakpoints below are container queries on #root: there rem is the
+   scaled root font, so 200% on a 1366px screen lays out like 683px (B12).
+   Media queries would always count rem as 16px. */
+#root {
+  container: app / inline-size;
+}
+
 body {
   font-family: var(--font-ui);
   font-size: 1rem;
@@ -1830,7 +1837,7 @@ meter {
 
 /* ---- narrow windows ------------------------------------------------------- */
 
-@media (max-width: 62rem) {
+@container app (max-width: 62rem) {
   .shell.with-members {
     grid-template-columns: var(--rail-w) var(--sidebar-w) minmax(0, 1fr);
     grid-template-areas:
@@ -1865,7 +1872,7 @@ meter {
   font-size: 1rem;
 }
 
-@media (max-width: 40rem) {
+@container app (max-width: 40rem) {
   .shell {
     height: 100dvh;
     padding-block-end: env(safe-area-inset-bottom);
