@@ -222,6 +222,24 @@ WebView2 runtime 156 on this PC.
 Most of Tauri's Linux memory is the WebKit web process (267 MiB PSS idle).
 On a desktop with a GPU both numbers will be lower.
 
+### Install and uninstall (input for T12)
+
+Checked with `measure-windows.ps1` on this PC (each shell installed and
+removed at least twice) and the Debian 13 images above.
+
+| | Tauri | Electron |
+| --- | --- | --- |
+| Windows silent per-user install | `setup.exe /S`, no admin, to `%LOCALAPPDATA%\ShellSpikeTauri` | `Setup.exe /S`, no admin, to `%LOCALAPPDATA%\Programs\shell-spike-electron` |
+| Windows silent uninstall | `uninstall.exe /S`: program folder, uninstall entry and shortcuts gone | `Uninstall ShellSpikeElectron.exe /S`: same |
+| Local data after a silent uninstall | **kept** (`%LOCALAPPDATA%\dev.mvp.shellspike.tauri`, WebView2 profile) | **kept** (`%APPDATA%\shell-spike-electron`) |
+| Ask keep / delete data on uninstall | built in: Tauri's NSIS uninstaller has a "delete application data" checkbox (interactive only) | not built in: `nsis.deleteAppDataOnUninstall` deletes without asking; a prompt needs a custom `nsis.include` script |
+| OS keychain entry | not touched by either uninstaller | not touched |
+| Linux `.deb` | needs root (`sudo apt install ./x.deb`, `sudo apt remove`); not per-user | same; also must add `libasound2t64` to its dependencies |
+| Linux per-user | AppImage: one file, no install; uninstall = delete it; data in `~/.local/share/<identifier>` stays | AppImage: same; data in `~/.config/<name>` stays |
+
+The spike shells hold only mock data; the keep / delete prompt and the
+keychain rule belong to the real packages (B1 / T12).
+
 ## Reproduce
 
 Everything builds in Docker; only the Windows measurements run on the host.
