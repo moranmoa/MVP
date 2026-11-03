@@ -88,7 +88,7 @@ Merged since the first board: #6 (PO review + backlog), #7 (records hardening), 
 | T3 | libp2p 0.54 → current (clears `ring 0.16` advisories, rcgen, hickory) | dev-sync | todo | – | #5 merged | M | M2 |
 | B9 | Installers: release workflow + archives + `SHA256SUMS` + unsigned manifest body (in #17); then EXE/MSI, DMG, AppImage/deb/rpm via the shell plug-in point; third-party notices; SmartScreen/Gatekeeper notes | devops | in review (pipeline) / blocked (packaging on B1) | #17 | B1; D-sign | M | M3 |
 | T4a | **P0 before alpha**, relay hardening from the #17 review: relay R7 `Cargo.lock` + `--locked` + images pinned by digest; R3 connection + memory limits; R6 `node.key` 0600, refuse otherwise; R1/R2 global-address filter + `/mvs/kad/1.0.0` (with dev-sync, GAP-6); R10 identify string `/mvs/0.1.0`; `v*` tag protection | devops | todo | – | #17 | S | M2 |
-| T4 | Relay + seeder + bootstrap in Docker on the owner's machine behind Caddy and the owner's domain (D24); relay limits raised for catch-up; stop logging who talks to whom (GAP-7, closed in #17) | devops | in review (go-live blocked on 5.1) | #17 | D-domain for go-live | M | M2 |
+| T4 | Relay + seeder + bootstrap in Docker on the owner's machine behind Caddy and the owner's domain (D24); relay limits raised for catch-up; stop logging who talks to whom (GAP-7, closed in #17); no connection logs on disk at the relay or bootstrap, only in-memory metadata and aggregate counters (product-lead, #16) | devops | in review (go-live blocked on 5.1) | #17 | D-domain for go-live | M | M2 |
 | B8 | In-app update: P2P + seeder, verify before install/forward, rail icon (UX-14), rollback after 3 failed starts, "what's new" from signed `notes` (ש-24) | dev-updater | blocked (B1) | – | R4, B1, B9, T4 | M | M3 |
 | B5 | Real networks: 3 machines (home/cellular/work, 3 OSes), p95 < 1 s, creator leaves and others continue, offline catch-up via relay only, `spike-peer` ≥ 10 pairs ≥ 95 % (results committed, no IPs) | dev-sync + qa | blocked (QA-16 #5, T4) | – | QA-16, T4, B4-sync | M | M2 |
 | B14 | UI performance in the real shell (incl. < 50 ms pending echo for B6) | dev-web | todo | – | B1 | M | M3 |
@@ -114,6 +114,7 @@ Merged since the first board: #6 (PO review + backlog), #7 (records hardening), 
 | B16 | Settings export/import, message density, date separators (UX-12) | dev-ui | todo | – | – | M | – |
 | B21 | Accessibility + keyboard (UX-11, UX-20, UX-21, UX-34, UX-37, UX-38) | dev-ui | todo | – | – | M | – |
 | B22 | Flow polish (UX-22..32 part, UX-41..48, QA-05, QA-07, QA-09, QA-11) | dev-ui | todo | – | – | M | – |
+| B24 | About screen: abuse-report address, links to the agreement and privacy notice (business plan §3.3, approved by product-lead in #16) | dev-ui | blocked (5.1 domain for the address) | – | 5.1 | S | M3 |
 | UX-10 | `mvs://` links not clickable in WhatsApp/Telegram/Discord → https landing page on the owner's domain | devops + dev-ui | blocked (D-domain) | – | D-domain, T4 | S | M3 |
 
 ### Reviews, QA, security, business
@@ -153,7 +154,7 @@ B-items: `docs/reviews/po-review-1.md` §8. T2 and T5–T8 are as written in the
 | --- | --- |
 | T1 | The crate exposes every command and event in `ui/src/core/api.ts`, with the same names, the JSON shapes from `types.ts` and the same error codes; a parity test fails if `api.ts` and the crate disagree. Every call is async and answers from the local store, without waiting on the network. An integration test covers M1: create an identity, create a server, send a message, restart and see it again; two instances on one machine sync. Peer input reaches T1 only through `Record::decode`, and a malformed-input test proves there's no panic. The UI contract tests pass against both the mock and T1. |
 | T3 | libp2p is upgraded and all tests are green; `ring 0.16` and `rcgen 0.11` are gone from `Cargo.lock`; the advisories job is clean, or each remaining advisory is listed with a reason. |
-| T4 | One compose file runs relay, seeder and bootstrap, with a templated hostname and no IPs in git. TLS comes from the reverse proxy, which forwards only WebSocket; TCP/UDP ports are documented. Relay circuit limits are raised so 10,000 missed messages catch up over a relay-only path, measured. Restart policies and a health check are in place. |
+| T4 | One compose file runs relay, seeder and bootstrap, with a templated hostname and no IPs in git. TLS comes from the reverse proxy, which forwards only WebSocket; TCP/UDP ports are documented. Relay circuit limits are raised so 10,000 missed messages catch up over a relay-only path, measured. Restart policies and a health check are in place. No connection logs on disk at the relay or bootstrap; only in-memory metadata and aggregate counters. |
 | T9 | The go/no-go checklist covers the spec's Definition of Done, M3 "done when", all Blocker/High bugs closed, SC-01..04 results committed, and tester instructions (install, unsigned-build warnings if relevant, how to export diagnostics). |
 | T11 | Each spec has RTL and LTR layouts, all states, exact Hebrew and English strings, keyboard and screen-reader behaviour, and acceptance checks; product-lead approves it before dev-ui starts the item (B17 may start from UX-01 now). |
 
@@ -296,7 +297,7 @@ What each agent picks up **after its current PR merges**, the lead who assigns i
 | K10 | UX-01 mixed-direction blocker in chat | Hebrew users see garbled messages | B17 first for dev-ui | dev-ui |
 | K11 | QA-01 recovery words lost on reload | Account can never create a server | B19 + B2 persistence | dev-ui, dev-identity |
 | K12 | macOS untested for identity/keychain (R8) | Silent failure on 1 of 3 alpha OSes | macOS runner | devops |
-| K13 | **B4 has no developer** and heads the critical path; tech-lead now reviews every engineering PR | Either B4 stalls or tech-lead becomes the review bottleneck | **Open question, tech-lead ↔ manager:** staff core-5 for `core/records` + `core/authority`, or tech-lead writes B4 and sec-lead reviews it. Decide before #11/#18 merge so B4 starts in parallel with T1 | manager |
+| K13 | **B4 has no developer** and heads the critical path; tech-lead now reviews every engineering PR | Either B4 stalls or tech-lead becomes the review bottleneck | A B4 developer session now exists (records-authority-dev-b4, in the core-5 slot); manager to confirm it owns `core/records` + `core/authority`. Until confirmed, tech-lead stays custodian | manager |
 | K14 | Review load on tech-lead + sec-lead (5 engineering PRs open now) | Merge queue stalls | Sub-leads pre-review; follow the merge order; docs PRs go to product-lead | tech-lead, sec-lead |
 
 ## Owner decisions
