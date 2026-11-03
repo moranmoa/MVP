@@ -1,0 +1,99 @@
+// The relay setting (src/config.js) and how it reaches mvs-core's arguments.
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { EventEmitter } = require('node:events');
+const { relayFor, validRelay, MAX_RELAY } = require('../src/config');
+const { Sidecar } = require('../src/sidecar');
+
+const ID = '12D3KooW' + 'A'.repeat(44);
+const RELAY = `/dns4/relay.example.org/tcp/443/wss/p2p/${ID}`;
+
+function resources(content) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mvs-res-'));
+  if (content !== undefined) fs.writeFileSync(path.join(dir, 'mvs-config.json'), content);
+  return dir;
+}
+
+test('valid relay addresses', () => {
+  assert.equal(validRelay(RELAY), true);
+  assert.equal(validRelay(`/ip4/192.0.2.1/udp/4001/quic-v1/p2p/${ID}`), true);
+});
+
+test('invalid relay values are refused', () => {
+  for (const bad of [
+    // #114: the peer ID must be pinned
+    '/dns4/relay.example.org/tcp/443/wss',
+    `/dns4/relay.example.org/tcp/443/wss/p2p/${ID.slice(0, 40)}`,
+    `/dns4/relay.example.org/tcp/443/wss/p2p/${ID}0OIl`,
+    `/dns4/relay.example.org/tcp/443/wss/p2p/${ID}/extra`,
+    '', '/', 'relay.example.org:4001', ` ${RELAY}`, `${RELAY} --inspect`, `${RELAY}\n`, '/' + 'a'.repeat(MAX_RELAY), 42, null, {}, ['/x']]) {
+    assert.equal(validRelay(bad), false, String(bad).slice(0, 40));
+  }
+});
+
+test('packaged: the relay comes from resources/mvs-config.json', () => {
+  assert.equal(relayFor({ packaged: true, resourcesPath: resources(JSON.stringify({ relay: RELAY })) }), RELAY);
+});
+
+test('packaged: no file, {} or an empty relay means no relay, silently', () => {
+  const warnings = [];
+  const warn = (m) => warnings.push(m);
+  assert.equal(relayFor({ packaged: true, resourcesPath: resources(), warn }), null);
+  assert.equal(relayFor({ packaged: true, resourcesPath: resources('{}'), warn }), null);
+  assert.equal(relayFor({ packaged: true, resourcesPath: resources('{"relay":""}'), warn }), null);
+  assert.deepEqual(warnings, []);
+});
+
+test('packaged: broken JSON or a bad relay is ignored with a warning', () => {
+  const warnings = [];
+  const warn = (m) => warnings.push(m);
+  assert.equal(relayFor({ packaged: true, resourcesPath: resources('{relay'), warn }), null);
+  assert.equal(relayFor({ packaged: true, resourcesPath: resources('{"relay":"tcp://evil --x"}'), warn }), null);
+  assert.equal(relayFor({ packaged: true, resourcesPath: resources('{"relay":["/x"]}'), warn }), null);
+  assert.equal(warnings.length, 3);
+});
+
+test('packaged: MVS_RELAY in the environment is ignored', () => {
+  assert.equal(relayFor({ packaged: true, resourcesPath: resources(), env: { MVS_RELAY: RELAY } }), null);
+});
+
+test('checkout: the relay comes from MVS_RELAY only', () => {
+  const dir = resources(JSON.stringify({ relay: '/ignored' }));
+  assert.equal(relayFor({ packaged: false, resourcesPath: dir, env: { MVS_RELAY: RELAY } }), RELAY);
+  assert.equal(relayFor({ packaged: false, resourcesPath: dir, env: {} }), null);
+  assert.equal(relayFor({ packaged: false, env: { MVS_RELAY: 'nope' }, warn() {} }), null);
+});
+
+function spawnedArgs(options) {
+  let args;
+  const spawnImpl = (_exe, a) => {
+    args = a;
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = { write() {}, end() {} };
+    child.kill = () => {};
+    return child;
+  };
+  new Sidecar({ exe: path.resolve('/opt/mvs-core'), dataDir: path.resolve('/data'), onEvent() {}, spawnImpl, ...options }).start();
+  return args;
+}
+
+test('mvs-core gets --relay only when there is one', () => {
+  const data = path.resolve('/data');
+  assert.deepEqual(spawnedArgs({}), ['--data-dir', data]);
+  assert.deepEqual(spawnedArgs({ relay: null }), ['--data-dir', data]);
+  assert.deepEqual(spawnedArgs({ relay: RELAY }), ['--data-dir', data, '--relay', RELAY]);
+});
+
+test('extra switches are appended and must be strings', () => {
+  const data = path.resolve('/data');
+  assert.deepEqual(spawnedArgs({ relay: RELAY, extraArgs: ['--update-root', '/u'] }), ['--data-dir', data, '--relay', RELAY, '--update-root', '/u']);
+  assert.throws(() => spawnedArgs({ extraArgs: [42] }), /strings/);
+  assert.throws(() => spawnedArgs({ extraArgs: '--x' }), /strings/);
+});
