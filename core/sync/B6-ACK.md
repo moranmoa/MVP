@@ -42,3 +42,20 @@ the message at "sent", which is acceptable for a best-effort tick.
 **Not in this PR:** api wiring (`SendState::Received` on the event), which
 belongs to dev-identity together with the GAP-4 switch; and "failed +
 retry", which stays in api (a failed `append`).
+
+## Additions (tech lead, #124)
+
+1. **Bounded acks.** At most 256 ack ids per answer. Any left wait for the
+   next pull, still under the 10-minute TTL. A test pins the cap.
+2. **Only stored records are acked.** An id is remembered only when the
+   store says `Added`, or `Known` (we already hold it). A record that is
+   waiting for deps, refused or invalid is never acked.
+3. **Backoff jitter.** The relay redial backoff is jittered by ±20 %
+   (commit `83dd33c`, unit-tested bounds).
+4. **A fake ack is harmless.** An ack only moves a message from "sent" to
+   "delivered" in its author's own UI. It changes nothing that is stored,
+   synced or shown to anyone else. A peer that lies can make an author
+   believe a message was delivered when it wasn't. It can already do the
+   same by taking the record and then dropping it, so "delivered" means
+   "a member's node said it stored it", not a guarantee. The binding and
+   `ReadGate` check still keep non-members from producing it.
