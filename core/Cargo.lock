@@ -345,7 +345,7 @@ dependencies = [
 name = "authority"
 version = "0.1.0"
 dependencies = [
- "rand 0.8.8",
+ "rand 0.10.3",
  "records",
 ]
 
