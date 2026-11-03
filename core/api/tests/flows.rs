@@ -1435,3 +1435,91 @@ fn removed_members_age_claims_and_clean_names() {
     adult.core.join_server(&server.invite_link).unwrap();
     assert_eq!(adult.core.list_servers().unwrap().len(), 1);
 }
+
+/// A network that never reaches anyone: what it publishes stays `pending`,
+/// or `received` once told so. For send states across a restart.
+#[derive(Default)]
+struct OfflineNet {
+    states: std::sync::Mutex<BTreeMap<records::RecordId, SendState>>,
+    received: std::sync::atomic::AtomicBool,
+}
+
+impl Network for OfflineNet {
+    fn publish(&self, record: &records::Record) {
+        self.states.lock().unwrap().entry(record.id()).or_insert(SendState::Pending);
+    }
+
+    fn fetch(&self, _: ServerId) -> Vec<records::Record> {
+        Vec::new()
+    }
+
+    fn send_state(&self, id: records::RecordId) -> Option<SendState> {
+        let state = *self.states.lock().unwrap().get(&id)?;
+        Some(if self.received.load(std::sync::atomic::Ordering::SeqCst) {
+            SendState::Received
+        } else {
+            state
+        })
+    }
+}
+
+/// B6: a message written offline is still `pending` after a restart (the
+/// state is kept in the db), and a later `received` is kept too.
+#[test]
+fn send_states_survive_a_restart() {
+    use api::crypto::GroupKeysCipher;
+
+    let secrets = Arc::new(MemoryStore::new());
+    let dir = std::env::temp_dir().join(format!("mvs-api-sendstate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let open = |net: Arc<OfflineNet>| {
+        Core::open(
+            Config { db_path: Some(dir.join("core.db")), app_version: "test".into() },
+            Ports {
+                secrets: secrets.clone(),
+                network: net,
+                events: Arc::new(CollectingSink::new()),
+                clock: Arc::new(SystemClock),
+                cipher: Arc::new(GroupKeysCipher::locked()),
+            },
+        )
+        .unwrap()
+    };
+    let core = open(Arc::new(OfflineNet::default()));
+    core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
+    let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None };
+    core.update_profile(profile).unwrap();
+    let server = core.create_server("Offline", AgeRestriction::None).unwrap();
+    let channel = core.list_channels(&server.id).unwrap().remove(0).id;
+    let sent = core.send_message(&channel, "written offline", None).unwrap();
+    assert_eq!(sent.send_state, Some(SendState::Pending));
+    drop(core);
+
+    // A fresh network knows nothing of it: the db still says pending.
+    let core = open(Arc::new(OfflineNet::default()));
+    let got = core.get_messages(&channel, 0, 9).unwrap().messages;
+    assert_eq!(got[0].send_state, Some(SendState::Pending));
+    drop(core);
+
+    // A network that has it as received: stored, and kept after a restart.
+    let net = Arc::new(OfflineNet::default());
+    net.states.lock().unwrap().insert(
+        records::RecordId::from_bytes(hex::decode(&sent.id).unwrap().try_into().unwrap()),
+        SendState::Pending,
+    );
+    net.received.store(true, std::sync::atomic::Ordering::SeqCst);
+    let core = open(net);
+    assert_eq!(
+        core.get_messages(&channel, 0, 9).unwrap().messages[0].send_state,
+        Some(SendState::Received)
+    );
+    drop(core);
+    let core = open(Arc::new(OfflineNet::default()));
+    assert_eq!(
+        core.get_messages(&channel, 0, 9).unwrap().messages[0].send_state,
+        Some(SendState::Received)
+    );
+    drop(core);
+    let _ = std::fs::remove_dir_all(&dir);
+}

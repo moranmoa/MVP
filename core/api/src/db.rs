@@ -6,11 +6,11 @@ use std::path::Path;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rand_core::{OsRng, RngCore};
-use records::{PublicKey, Record, ServerId, Stub};
+use records::{PublicKey, Record, RecordId, ServerId, Stub};
 use rusqlite::{params, Connection, OptionalExtension};
 use zeroize::Zeroizing;
 
-use crate::types::{CoreError, ErrorCode};
+use crate::types::{CoreError, ErrorCode, SendState};
 
 const SCHEMA: &str = "
 PRAGMA secure_delete = ON;
@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS stubs (
     bytes BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS stubs_server ON stubs (server);
+CREATE TABLE IF NOT EXISTS send_states (id BLOB PRIMARY KEY, state TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS servers (id BLOB PRIMARY KEY, joined_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS blocked (user BLOB PRIMARY KEY);
 ";
@@ -199,6 +200,30 @@ impl Db {
         tx.commit().map_err(internal)
     }
 
+    /// B6: the last known send state of a record written here.
+    pub fn send_state(&self, id: RecordId) -> Result<Option<SendState>, CoreError> {
+        let state: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT state FROM send_states WHERE id = ?1",
+                [id.as_bytes().as_slice()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(internal)?;
+        Ok(state.and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok()))
+    }
+
+    pub fn set_send_state(&self, id: RecordId, state: SendState) -> Result<(), CoreError> {
+        let text = serde_json::to_value(state).map_err(internal)?;
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO send_states (id, state) VALUES (?1, ?2)",
+                params![id.as_bytes().as_slice(), text.as_str().unwrap_or_default()],
+            )
+            .map(drop)
+            .map_err(internal)
+    }
     pub fn stubs(&self, server: ServerId) -> Result<Vec<Stub>, CoreError> {
         let mut stmt = self
             .conn
