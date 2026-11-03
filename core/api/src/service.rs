@@ -2,7 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use authority::Action;
 use groupkeys::MemberSecret;
@@ -51,6 +54,8 @@ struct Challenge {
 
 pub const CHALLENGE_POSITIONS: usize = 3;
 pub const MAX_CHECK_FAILURES: u8 = 5;
+/// How often the background sync runs without a hint.
+pub const SYNC_EVERY: Duration = Duration::from_secs(2);
 
 struct Me {
     /// Held only until the recovery check passes, so the UI can show and
@@ -73,6 +78,9 @@ struct Inner {
     me: Option<Me>,
     /// Loaded on first use per server, then kept current record by record.
     logs: HashMap<ServerId, Log>,
+    /// Messages already announced to the UI, per server, with what was
+    /// announced (edit time, deleted), so sync emits only what is new.
+    announced: HashMap<ServerId, HashMap<RecordId, (Option<u64>, bool)>>,
 }
 
 pub struct Core {
@@ -112,7 +120,8 @@ impl Core {
     pub fn open(config: Config, ports: Ports) -> CoreResult<Core> {
         let db = Db::open(config.db_path.as_deref())?;
         let vault = Vault::new(SharedSecrets(ports.secrets.clone()));
-        let mut inner = Inner { db, vault, me: None, logs: HashMap::new() };
+        let mut inner =
+            Inner { db, vault, me: None, logs: HashMap::new(), announced: HashMap::new() };
         if inner.vault.state().map_err(vault_error)? == VaultState::Ready {
             let phrase = inner.vault.open().map_err(vault_error)?;
             inner.me = Some(inner.load_me(phrase)?);
@@ -597,6 +606,25 @@ impl Core {
         Ok(MessageRange { channel_id: channel_id.to_owned(), start, messages })
     }
 
+    /// The background sync the app runs (`mvs-core` starts it when a
+    /// network is configured): what `syncNow` does, every [`SYNC_EVERY`]
+    /// and at once on each hint (sync stored something), until `stop` is
+    /// set. A failed round is logged and retried on the next one. Holds the
+    /// core lock only to store, never while fetching.
+    pub fn run_sync_loop(&self, hints: &Receiver<()>, stop: &AtomicBool) {
+        while !stop.load(Ordering::SeqCst) {
+            if let Err(e) = self.sync_now() {
+                eprintln!("mvs-core: sync round failed: {:?}", e.code);
+            }
+            match hints.recv_timeout(SYNC_EVERY) {
+                // Several hints at once are one round.
+                Ok(()) => while hints.try_recv().is_ok() {},
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => std::thread::sleep(SYNC_EVERY),
+            }
+        }
+    }
+
     /// Rust addition (`syncNow`): pulls every server's records from the
     /// network and reports what changed. TODO(sync): driven by the sync
     /// crate's push and pull instead of a command.
@@ -619,6 +647,7 @@ impl Core {
                     continue;
                 }
                 inner.load(server)?;
+                inner.seed_announced(&*ports.cipher, server)?;
                 let mut changed = false;
                 for record in records {
                     if record.server() == server {
@@ -643,6 +672,7 @@ impl Core {
                             server_id: model::hex_id(server.as_bytes()),
                         });
                     }
+                    inner.announce(&*ports.cipher, server, events)?;
                 }
             }
             Ok(())
@@ -727,6 +757,49 @@ impl Core {
 }
 
 impl Inner {
+    /// The first time a server is synced: what is already there counts as
+    /// announced (the UI reads history with `getMessages`).
+    fn seed_announced(&mut self, cipher: &dyn GroupCipher, server: ServerId) -> CoreResult<()> {
+        if self.announced.contains_key(&server) {
+            return Ok(());
+        }
+        let mut seen = HashMap::new();
+        for channel in chat::known_channels(server) {
+            for s in self.shown(cipher, server, channel)? {
+                seen.insert(s.record.id(), (s.edited_at, s.deleted));
+            }
+        }
+        self.announced.insert(server, seen);
+        Ok(())
+    }
+
+    /// `message.added` for messages not announced yet, `message.updated` for
+    /// those whose edit or deletion changed since.
+    fn announce(
+        &mut self,
+        cipher: &dyn GroupCipher,
+        server: ServerId,
+        events: &mut Events,
+    ) -> CoreResult<()> {
+        let me = self.me.as_ref().map(Me::key);
+        for channel in chat::known_channels(server) {
+            let shown = self.shown(cipher, server, channel)?;
+            let seen = self.announced.entry(server).or_default();
+            for (index, s) in shown.iter().enumerate() {
+                let state = (s.edited_at, s.deleted);
+                let event = match seen.insert(s.record.id(), state) {
+                    None => Event::MessageAdded(message_json(s, index, channel, me)),
+                    Some(old) if old != state => {
+                        Event::MessageUpdated(message_json(s, index, channel, me))
+                    }
+                    Some(_) => continue,
+                };
+                events.push(event);
+            }
+        }
+        Ok(())
+    }
+
     /// Seals `text` for `channel`'s members. If no key is usable yet, a
     /// moderator or above rotates first; anyone else gets `not-allowed`.
     fn seal(
@@ -833,6 +906,7 @@ impl Inner {
         channel: ChannelId,
         id: RecordId,
     ) -> CoreResult<Message> {
+        self.seed_announced(cipher, server)?;
         let me = self.me.as_ref().map(Me::key);
         let shown = self.shown(cipher, server, channel)?;
         let (index, s) = shown
@@ -840,6 +914,8 @@ impl Inner {
             .enumerate()
             .find(|(_, s)| s.record.id() == id)
             .ok_or(ErrorCode::Internal)?;
+        // Announced by the command itself; sync won't repeat it.
+        self.announced.entry(server).or_default().insert(s.record.id(), (s.edited_at, s.deleted));
         Ok(message_json(s, index, channel, me))
     }
 

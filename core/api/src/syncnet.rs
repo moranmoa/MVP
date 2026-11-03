@@ -14,12 +14,13 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use libp2p::Multiaddr;
 use records::{Record, Scope, ServerId};
-use sync::{log_name, log_of, Node, NodeConfig, Store};
+use sync::{log_name, log_of, Node, NodeConfig, NodeEvent, Store};
 use tokio::runtime::Runtime;
 
 use crate::gate::MemberGate;
@@ -35,6 +36,8 @@ pub struct SyncNetwork {
     node: Node,
     store: PathBuf,
     opened: Mutex<HashSet<String>>,
+    hints: Mutex<Option<Receiver<()>>>,
+    waker: SyncSender<()>,
 }
 
 impl SyncNetwork {
@@ -53,17 +56,36 @@ impl SyncNetwork {
             allow_lan: false,
         };
         let (node, mut events) = runtime.block_on(Node::start(config))?;
-        // Events are only hints, and nothing needs them yet: the gate keys
-        // its rejects by the control log's count, and reads go to the store.
-        // Drained so the node never blocks on a full channel.
-        // TODO(sync): a push hint to the UI instead of `syncNow`.
-        runtime.spawn(async move { while events.recv().await.is_some() {} });
+        // Events are only hints: a stored record wakes the core's sync loop
+        // (`Core::run_sync_loop`), which re-reads the store. Coalesced (one
+        // pending hint is enough) and drained, so the node never blocks.
+        let (hint, hints) = std::sync::mpsc::sync_channel(1);
+        let waker = hint.clone();
+        runtime.spawn(async move {
+            while let Some(event) = events.recv().await {
+                if matches!(event, NodeEvent::Stored { .. } | NodeEvent::Lagged { .. }) {
+                    let _ = hint.try_send(());
+                }
+            }
+        });
         Ok(SyncNetwork {
             runtime,
             node,
             store: data_dir.join("store.db"),
             opened: Mutex::new(HashSet::new()),
+            hints: Mutex::new(Some(hints)),
+            waker,
         })
+    }
+
+    /// The hints for `Core::run_sync_loop` (once; `None` after).
+    pub fn take_hints(&self) -> Option<Receiver<()>> {
+        self.hints.lock().expect("not poisoned").take()
+    }
+
+    /// Wakes the sync loop now, e.g. so it sees its stop flag.
+    pub fn wake(&self) {
+        let _ = self.waker.try_send(());
     }
 
     /// Starts syncing `log` if not already; true the first time.
