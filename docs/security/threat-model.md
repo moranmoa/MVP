@@ -407,6 +407,14 @@ from view rather than voided.
 
 ### Accepted risks (documented, not gaps)
 
+- **One key pair for signing and key wraps (#86).** The X25519 member secret is
+  the Ed25519 secret scalar (as libsodium's `ed25519_sk_to_curve25519`; joint
+  security per Thormarker 2021), so no extra key is published. Leaking it
+  equals leaking the identity, but it lives in the same process as the
+  signing key. Conditions: DH only inside groupkeys (small-order rejected,
+  output always through `derive_key` bound to both keys and the header),
+  never persisted or logged, zeroized on lock, no other protocol uses it.
+  Switch to a separate published X25519 key with the device keys (GAP-10).
 - Kicked members keep what they already saw (spec).
 - Any member can leak plaintext or keys.
 - The owner's home IP is public via the bootstrap domain (spec decision 24).
