@@ -9,6 +9,7 @@
 //! group encryption sit behind [`Network`] and [`GroupCipher`] until their
 //! crates are merged.
 
+pub mod crypto;
 mod datadir;
 mod db;
 mod dispatch;
@@ -23,8 +24,8 @@ pub mod types;
 pub use dispatch::NOT_YET;
 pub use gate::MemberGate;
 pub use ports::{
-    CipherOutcome, Clock, CollectingSink, EventSink, FixedClock, GroupCipher, LoopbackNetwork,
-    Network, PendingGroupKeys, Ports, SharedSecrets, SystemClock,
+    CipherError, CipherOutcome, Clock, CollectingSink, EventSink, FixedClock, GroupCipher,
+    LoopbackNetwork, Network, Opened, PendingGroupKeys, Ports, SharedSecrets, SystemClock,
 };
 pub use service::{Config, Core, CHALLENGE_POSITIONS, MAX_CHECK_FAILURES};
 pub use types::*;

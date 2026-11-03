@@ -12,9 +12,7 @@ use std::sync::Arc;
 
 use api::sidecar::{self, Lines};
 use api::syncnet::SyncNetwork;
-use api::{
-    Config, Core, LoopbackNetwork, MemberGate, Network, PendingGroupKeys, Ports, SystemClock,
-};
+use api::{Config, Core, LoopbackNetwork, MemberGate, Network, Ports, SystemClock};
 use identity::OsKeychain;
 
 struct Args {
@@ -72,8 +70,8 @@ fn main() -> ExitCode {
         network,
         events: out.clone(),
         clock: Arc::new(SystemClock),
-        // TODO(groupkeys): the groupkeys adapter.
-        cipher: Arc::new(PendingGroupKeys),
+        // Locked until the identity unlocks; service calls unlock/lock.
+        cipher: Arc::new(api::crypto::GroupKeysCipher::locked()),
     };
     let config = Config {
         db_path: Some(dir.join("core.db")),

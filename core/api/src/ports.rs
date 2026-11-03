@@ -156,17 +156,149 @@ pub enum CipherOutcome {
 /// GAP-8: a rotation that authority accepts after `ChannelKeys` evicted it
 /// is fetched again (the evicted list can hold the rotation just applied),
 /// and `ChannelKeys` exist only for channels authority knows.
+///
+/// How service.rs uses it:
+/// - send: `encrypt(server, channel, plaintext)` and put the result in the
+///   `Message` record body; on `RotationRequired`/`NoKey` tell the UI the
+///   channel can't be written to yet;
+/// - receive: for an accepted `Message` record, `decrypt(server, channel,
+///   author, body)`; show `Opened { accepted: false }` as untrusted (#21);
+/// - every `KeyRotation` record (accepted or not): `apply_rotation(record)`,
+///   then re-request the evicted record IDs it returns;
+/// - whenever authority's accepted set changes: `set_accepted(server, ids)`
+///   with that server's accepted `KeyRotation` record IDs.
+///
+/// The caller MUST, after every `unlock`: call `set_channels` and
+/// `set_accepted` for each server, then replay every stored `KeyRotation`
+/// record through `apply_rotation`. `lock` drops all keys, and nothing is
+/// kept across it.
 pub trait GroupCipher: Send + Sync {
     fn membership_changed(&self, server: ServerId, members: &BTreeSet<PublicKey>) -> CipherOutcome;
+
+    /// Seals a channel message from us under the channel's current key.
+    fn encrypt(
+        &self,
+        server: ServerId,
+        channel: records::ChannelId,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, CipherError> {
+        let _ = (server, channel, plaintext);
+        Err(CipherError::Unavailable)
+    }
+
+    /// Opens a channel message body whose record `author` signed.
+    fn decrypt(
+        &self,
+        server: ServerId,
+        channel: records::ChannelId,
+        author: PublicKey,
+        body: &[u8],
+    ) -> Result<Opened, CipherError> {
+        let _ = (server, channel, author, body);
+        Err(CipherError::Unavailable)
+    }
+
+    /// Takes in one `KeyRotation` record. Returns the part records evicted
+    /// to stay within the probation caps, for sync to fetch again.
+    fn apply_rotation(&self, record: &Record) -> Result<Vec<records::RecordId>, CipherError> {
+        let _ = record;
+        Err(CipherError::Unavailable)
+    }
+
+    /// The `KeyRotation` records of `server` that authority accepts now
+    /// (deny by default: only these can become a channel's key).
+    fn set_accepted(&self, server: ServerId, accepted: &BTreeSet<records::RecordId>) {
+        let _ = (server, accepted);
+    }
+
+    /// The channels of `server` that authority knows now (until B4-3: the
+    /// default channel). Call it before anything else for the server, and
+    /// whenever the set changes. Keys exist only for these; every other
+    /// channel is refused without creating state, and a channel left out
+    /// drops its keys.
+    fn set_channels(&self, server: ServerId, channels: &BTreeSet<records::ChannelId>) {
+        let _ = (server, channels);
+    }
+
+    /// At identity unlock: `MemberSecret::new(signing_key)`. Until then
+    /// everything but bookkeeping is `Unavailable`. See the MUST above.
+    fn unlock(&self, secret: Arc<groupkeys::MemberSecret>) {
+        let _ = secret;
+    }
+
+    /// At app lock and sign-out: drops the secret and every channel's keys.
+    fn lock(&self) {}
+
+    /// The unsigned `KeyRotation` part bodies (at most 32) of a fresh key for
+    /// `members`, built on the channel's current key. Service signs every
+    /// part with our identity and publishes **all of them or none**, and never
+    /// re-signs a part (a second record for one part gets the rotation
+    /// refused); to retry, it resends the same records.
+    fn rotate(
+        &self,
+        server: ServerId,
+        channel: records::ChannelId,
+        members: &BTreeSet<PublicKey>,
+    ) -> Result<Vec<Vec<u8>>, CipherError> {
+        let _ = (server, channel, members);
+        Err(CipherError::Unavailable)
+    }
 }
 
-/// Stand-in until groupkeys is merged: never claims a renewal it didn't do.
+/// A decrypted channel message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Opened {
+    pub plaintext: Vec<u8>,
+    /// False: sealed under a rotation authority doesn't accept; show it as
+    /// untrusted, never as a normal message.
+    pub accepted: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CipherError {
+    /// No group encryption in this build.
+    Unavailable,
+    /// We hold no key for the channel, or for the message's epoch.
+    NoKey,
+    /// Removed members still hold the key; a moderator must rotate first.
+    RotationRequired,
+    /// Malformed or tampered input, or the author didn't hold the key.
+    Rejected,
+}
+
+/// Stand-in until groupkeys is wired in: never claims a renewal it didn't do,
+/// and refuses to encrypt or decrypt.
 pub struct PendingGroupKeys;
 
 impl GroupCipher for PendingGroupKeys {
     fn membership_changed(&self, _: ServerId, _: &BTreeSet<PublicKey>) -> CipherOutcome {
         CipherOutcome::Unchanged
     }
+
+    fn encrypt(
+        &self,
+        _: ServerId,
+        _: records::ChannelId,
+        _: &[u8],
+    ) -> Result<Vec<u8>, CipherError> {
+        Err(CipherError::Unavailable)
+    }
+
+    fn decrypt(
+        &self,
+        _: ServerId,
+        _: records::ChannelId,
+        _: PublicKey,
+        _: &[u8],
+    ) -> Result<Opened, CipherError> {
+        Err(CipherError::Unavailable)
+    }
+
+    fn apply_rotation(&self, _: &Record) -> Result<Vec<records::RecordId>, CipherError> {
+        Err(CipherError::Unavailable)
+    }
+
+    fn set_accepted(&self, _: ServerId, _: &BTreeSet<records::RecordId>) {}
 }
 
 /// A shared [`SecretStore`], so the shell can hand in `OsKeychain` and tests a
