@@ -1,7 +1,7 @@
 //! Bounded in-memory state that remote peers can make grow: pushed records
 //! waiting for their deps, and request rates.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
@@ -99,6 +99,50 @@ impl Pending {
     }
 }
 
+
+/// Channel records this node refused, remembered so a pull can list them as
+/// "have" and peers stop sending them every round. A record is refused only
+/// once all its deps are stored (or are refused themselves), so claiming it
+/// never hides an ancestor we still need. Bounded: the oldest are forgotten
+/// first, and forgetting one only costs a re-send.
+pub(crate) struct Refused {
+    order: VecDeque<(String, RecordId)>,
+    ids: HashSet<RecordId>,
+    max: usize,
+}
+
+impl Refused {
+    pub fn new(max: usize) -> Self {
+        Self { order: VecDeque::new(), ids: HashSet::new(), max }
+    }
+
+    pub fn insert(&mut self, log: String, id: RecordId) {
+        if !self.ids.insert(id) {
+            return;
+        }
+        self.order.push_back((log, id));
+        if self.order.len() > self.max {
+            if let Some((_, old)) = self.order.pop_front() {
+                self.ids.remove(&old);
+            }
+        }
+    }
+
+    pub fn contains(&self, id: &RecordId) -> bool {
+        self.ids.contains(id)
+    }
+
+    /// Whether every id in `missing` was refused: a record that only waits
+    /// for refused records can never be stored either.
+    pub fn covers(&self, missing: &[RecordId]) -> bool {
+        !missing.is_empty() && missing.iter().all(|id| self.ids.contains(id))
+    }
+
+    /// The newest `n` refused ids of `log`, to send as `have` markers.
+    pub fn markers(&self, log: &str, n: usize) -> Vec<RecordId> {
+        self.order.iter().rev().filter(|(l, _)| l == log).map(|(_, id)| *id).take(n).collect()
+    }
+}
 
 /// Token bucket per key: `burst` requests at once, refilled at `per_sec`.
 ///
@@ -198,6 +242,21 @@ mod tests {
         assert_eq!(pending.take(&dep(1)).len(), 2);
         assert!(pending.insert(dep(2), blob(0, 0), now));
         assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn refused_ids_are_bounded_and_listed_per_log() {
+        let mut refused = Refused::new(3);
+        for n in 1..=4 {
+            refused.insert(if n % 2 == 0 { "b".into() } else { "a".into() }, dep(n));
+        }
+        // The oldest (1) was forgotten.
+        assert!(!refused.contains(&dep(1)) && refused.contains(&dep(4)));
+        assert_eq!(refused.markers("a", 10), vec![dep(3)]);
+        assert_eq!(refused.markers("b", 1), vec![dep(4)]);
+        assert!(refused.covers(&[dep(2), dep(3)]));
+        assert!(!refused.covers(&[dep(2), dep(9)]));
+        assert!(!refused.covers(&[]));
     }
 
     #[test]

@@ -9,8 +9,11 @@
 //!    never from the gossip topic or the pull request.
 //! 3. `deps` are in that same log and `auth_deps` in the same server's
 //!    control log, and all of them are present ([`Store`]).
-//! 4. The [`Authorizer`] (the integration layer, using `core/authority`)
-//!    says the author may write it. Roles come only from the signed log.
+//! 4. For channel records only, the [`Authorizer`] (the integration layer,
+//!    using `core/authority`) says the author may write it. Roles come only
+//!    from the signed log. Control records are never refused at ingest:
+//!    authority is a function of the whole set, which must not depend on the
+//!    order records arrived in; authority decides what each one means.
 //!
 //! Only then is a record stored, forwarded on gossip or served to others.
 //!
@@ -54,10 +57,15 @@ pub fn valid_log_name(log: &str) -> bool {
     !log.is_empty() && log.len() <= MAX_LOG_NAME && log.bytes().all(|b| b.is_ascii_graphic())
 }
 
-/// Whether the author of a record may write it, judged from the signed
-/// control log only (`core/authority`). Called after the record decoded and
-/// all its `deps` and `auth_deps` are stored, before it is stored itself or
-/// forwarded. Implemented by the integration layer (T1).
+/// Whether the author of a **channel** record may write it, judged from the
+/// signed control log only (`core/authority`), at the control state named by
+/// its `auth_deps`. Called after the record decoded and all its `deps` and
+/// `auth_deps` are stored, before it is stored itself or forwarded.
+/// Implemented by the integration layer (T1).
+///
+/// Never called for control records (see the crate docs). A later kick that
+/// voids an accepted message doesn't remove it from the store either:
+/// voiding is decided when displaying, not when storing.
 pub trait Authorizer: Send + Sync + 'static {
     fn check(&self, record: &Record) -> Verdict;
 }

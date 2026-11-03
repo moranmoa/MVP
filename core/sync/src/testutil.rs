@@ -58,3 +58,8 @@ pub fn message_chain(n: usize, size: usize) -> Vec<Record> {
     }
     out
 }
+
+/// A control-log record of any kind by test key `key`.
+pub fn control_by(kind: Kind, seq: u64, deps: &[RecordId], key: u8) -> Record {
+    sign(Scope::Control, seq, deps, &[], kind, vec![key, seq as u8], key)
+}

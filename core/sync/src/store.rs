@@ -129,9 +129,10 @@ impl Store {
         check_in(&self.conn, record)
     }
 
-    /// Stores `record` if its context is present and `auth` accepts it.
-    /// `auth` runs inside the write transaction: it must not call back into
-    /// the node or this store.
+    /// Stores `record` if its context is present and, for channel records,
+    /// `auth` accepts it (control records are never refused; see
+    /// `append_in`). `auth` runs inside the write transaction: it must not
+    /// call back into the node or this store.
     pub fn append(&mut self, record: &Record, auth: &dyn Authorizer) -> rusqlite::Result<Append> {
         let tx = self.conn.transaction()?;
         let result = append_in(&tx, record, auth)?;
@@ -140,22 +141,19 @@ impl Store {
     }
 
     /// Appends many records in one transaction (much faster than one by
-    /// one). Returns the ids added; the rest were known, missing deps or
-    /// invalid.
+    /// one). Returns what happened to each record, in order.
     pub fn append_all<'a>(
         &mut self,
         records: impl IntoIterator<Item = &'a Record>,
         auth: &dyn Authorizer,
-    ) -> rusqlite::Result<Vec<RecordId>> {
+    ) -> rusqlite::Result<Vec<Append>> {
         let tx = self.conn.transaction()?;
-        let mut added = Vec::new();
+        let mut outcomes = Vec::new();
         for record in records {
-            if append_in(&tx, record, auth)? == Append::Added {
-                added.push(record.id());
-            }
+            outcomes.push(append_in(&tx, record, auth)?);
         }
         tx.commit()?;
-        Ok(added)
+        Ok(outcomes)
     }
 
     /// The stored canonical bytes of a record.
@@ -307,8 +305,12 @@ fn append_in(tx: &rusqlite::Transaction, record: &Record, auth: &dyn Authorizer)
         Ok(missing) if !missing.is_empty() => return Ok(Append::MissingDeps(missing)),
         Ok(_) => {}
     }
-    // Judged only now, with everything the record relies on stored.
-    if auth.check(record) == Verdict::Reject {
+    // Control records are never refused here: authority is a function of
+    // the whole set of well-formed control records, and whether one counts
+    // can change as concurrent ones arrive. Storing them all keeps every
+    // peer's set the same whatever the arrival order; authority decides what
+    // they mean. Channel records are judged now, with their auth_deps stored.
+    if record.scope() != Scope::Control && auth.check(record) == Verdict::Reject {
         return Ok(Append::Unauthorized);
     }
     let log = log_of(record);
@@ -330,7 +332,7 @@ fn append_in(tx: &rusqlite::Transaction, record: &Record, auth: &dyn Authorizer)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{channel, genesis, message, message_chain, message_with_auth, post, server};
+    use crate::testutil::{channel, control_by, genesis, message, message_chain, message_with_auth, post, server};
     use crate::AcceptAll;
 
     fn chan() -> String {
@@ -411,13 +413,65 @@ mod tests {
         let refuse = RefuseAuthor(m.author());
         assert_eq!(store.append(&g, &refuse).unwrap(), Append::Added);
         assert_eq!(store.append(&m, &refuse).unwrap(), Append::Unauthorized);
-        assert_eq!(store.append_all([&m], &refuse).unwrap(), vec![]);
+        assert_eq!(store.append_all([&m], &refuse).unwrap(), vec![Append::Unauthorized]);
         assert!(!store.has(&m.id()).unwrap());
         assert!(store.heads(&chan()).unwrap().is_empty());
         // The authorizer is only asked once the context is there: a record
         // with a missing dep is reported as missing, not judged.
         let child = message(1, &[m.id()], 0);
         assert_eq!(store.append(&child, &refuse).unwrap(), Append::MissingDeps(vec![m.id()]));
+    }
+
+    /// Refuses everything, like an authority that hasn't seen a grant yet.
+    struct RefuseAll;
+
+    impl Authorizer for RefuseAll {
+        fn check(&self, _: &Record) -> Verdict {
+            Verdict::Reject
+        }
+    }
+
+    #[test]
+    fn control_records_are_stored_whatever_the_order() {
+        use records::Kind;
+        let g = genesis();
+        // A concurrent grant and a post by the grantee, both on the genesis,
+        // then a post built on the grantee's post.
+        let grant = control_by(Kind::Grant, 1, &[g.id()], 0);
+        let early = control_by(Kind::Post, 1, &[g.id()], 1);
+        let later = control_by(Kind::Post, 2, &[early.id()], 1);
+        let control = log_name(server(), Scope::Control);
+
+        let mut a = Store::in_memory().unwrap();
+        let mut b = Store::in_memory().unwrap();
+        // a sees the grant first; b sees the post before the grant. Even an
+        // authorizer that refuses everything doesn't change what is stored.
+        for r in [&g, &grant, &early, &later] {
+            assert_eq!(a.append(r, &RefuseAll).unwrap(), Append::Added);
+        }
+        for r in [&g, &early, &later, &grant] {
+            assert_eq!(b.append(r, &RefuseAll).unwrap(), Append::Added);
+        }
+        assert_eq!(a.count(&control).unwrap(), 4);
+        assert_eq!(a.state_hash(&control).unwrap(), b.state_hash(&control).unwrap());
+        assert_eq!(a.heads(&control).unwrap(), b.heads(&control).unwrap());
+        // Nothing left for either to pull from the other.
+        assert!(a.missing_since(&control, &b.have_markers(&control).unwrap(), 100, usize::MAX).unwrap().0.is_empty());
+        assert!(b.missing_since(&control, &a.have_markers(&control).unwrap(), 100, usize::MAX).unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn a_refused_record_listed_as_have_is_not_sent_again() {
+        // The responder holds a → r; the requester refused r (its deps were
+        // all present, so claiming it hides nothing the requester needs).
+        let mut responder = Store::in_memory().unwrap();
+        let chain = message_chain(3, 0);
+        responder.append_all(&chain, &AcceptAll).unwrap();
+        let (a, r, after) = (&chain[0], &chain[1], &chain[2]);
+        let (page, _) = responder.missing_since(&chan(), &[a.id()], 100, usize::MAX).unwrap();
+        assert_eq!(page.len(), 2, "without the marker, r and its child are re-sent");
+        let (page, _) = responder.missing_since(&chan(), &[a.id(), r.id()], 100, usize::MAX).unwrap();
+        assert_eq!(page.iter().map(|s| s.id).collect::<Vec<_>>(), vec![after.id()]);
     }
 
     #[test]

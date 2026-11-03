@@ -40,7 +40,7 @@ use serde_bytes::ByteBuf;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::limits::{Pending, RateLimiter};
+use crate::limits::{Pending, RateLimiter, Refused};
 use crate::store::MAX_HAVE;
 use crate::{log_name, log_of, valid_log_name, Append, Authorizer, Record, RecordId, Scope, Store};
 
@@ -58,6 +58,10 @@ const DISCOVERY: Duration = Duration::from_secs(3);
 const MAX_PENDING: usize = 10_000;
 const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
 const PENDING_TTL: Duration = Duration::from_secs(60);
+/// Refused channel-record ids remembered, and how many of a log's go into
+/// each pull's `have` list (out of [`MAX_HAVE`]).
+const MAX_REFUSED: usize = 10_000;
+const MAX_REFUSED_MARKERS: usize = 16;
 /// Inbound pulls per peer: a burst, then a steady rate. A 100,000-message
 /// catch-up is 50 pages, so this costs an honest peer about 2 s at most.
 const PULL_BURST: u32 = 30;
@@ -229,6 +233,7 @@ impl Node {
             decoding: HashSet::new(),
             again: HashSet::new(),
             pending: Pending::new(MAX_PENDING, MAX_PENDING_BYTES),
+            refused: Refused::new(MAX_REFUSED),
             inbound_pulls: RateLimiter::new(PULL_BURST, PULL_RATE, MAX_TRACKED_PEERS),
             all_inbound_pulls: RateLimiter::new(GLOBAL_PULL_BURST, GLOBAL_PULL_RATE, 1),
             answers,
@@ -405,6 +410,8 @@ struct Task {
     again: HashSet<(PeerId, String)>,
     /// Pushed records waiting for a dep.
     pending: Pending,
+    /// Channel records refused by the authorizer (or built only on refused ones).
+    refused: Refused,
     inbound_pulls: RateLimiter<PeerId>,
     all_inbound_pulls: RateLimiter<()>,
     /// Finished answers coming back from blocking threads.
@@ -575,10 +582,13 @@ impl Task {
             self.again.insert(key);
             return;
         }
-        let have = match self.store.have_markers(log) {
-            Ok(have) => have.into_iter().map(|id| ByteBuf::from(id.as_bytes().to_vec())).collect(),
+        // Records we refused count as "have", so the peer stops sending them.
+        let mut have = self.refused.markers(log, MAX_REFUSED_MARKERS);
+        match self.store.have_markers(log) {
+            Ok(markers) => have.extend(markers.into_iter().take(MAX_HAVE - have.len())),
             Err(err) => return warn!(%err, "reading markers failed"),
-        };
+        }
+        let have = have.into_iter().map(|id| ByteBuf::from(id.as_bytes().to_vec())).collect();
         let request = self.swarm.behaviour_mut().sync.send_request(&peer, SyncRequest { log: log.into(), have });
         self.inflight.insert(request, key);
     }
@@ -746,6 +756,9 @@ impl Task {
     /// Stores one record from a peer if it passes the checks, or parks it
     /// until its deps arrive.
     fn ingest(&mut self, from: PeerId, record: Record, via: Via) -> Ingest {
+        if self.refused.contains(&record.id()) {
+            return Ingest::Rejected;
+        }
         match self.store.append(&record, &*self.authorizer) {
             Ok(Append::Added) => {
                 let id = record.id();
@@ -754,6 +767,11 @@ impl Task {
                 Ingest::Added
             }
             Ok(Append::Known) => Ingest::Known,
+            Ok(Append::MissingDeps(missing)) if self.refused.covers(&missing) => {
+                // Built only on refused records: refused as well.
+                self.refused.insert(log_of(&record), record.id());
+                Ingest::Rejected
+            }
             Ok(Append::MissingDeps(missing)) => {
                 let log = log_of(&record);
                 let control = log_name(record.server(), Scope::Control);
@@ -771,6 +789,7 @@ impl Task {
             }
             Ok(Append::Unauthorized) => {
                 debug!(%from, "record refused by the authorizer");
+                self.refused.insert(log_of(&record), record.id());
                 Ingest::Rejected
             }
             Err(err) => {
@@ -797,13 +816,23 @@ impl Task {
         let mut added_any = false;
         if !records.is_empty() {
             match self.store.append_all(&records, &*self.authorizer) {
-                Ok(added) => {
-                    added_any = !added.is_empty();
-                    let added: HashSet<RecordId> = added.into_iter().collect();
+                Ok(outcomes) => {
                     let now = SystemTime::now();
-                    for record in records.into_iter().filter(|r| added.contains(&r.id())) {
-                        self.emit(NodeEvent::Stored { log: log.clone(), record, via: Via::Pull, at: now });
+                    let mut added = Vec::new();
+                    for (record, outcome) in records.into_iter().zip(outcomes) {
+                        match outcome {
+                            Append::Added => {
+                                added.push(record.id());
+                                self.emit(NodeEvent::Stored { log: log.clone(), record, via: Via::Pull, at: now });
+                            }
+                            Append::Unauthorized => self.refused.insert(log.clone(), record.id()),
+                            Append::MissingDeps(missing) if self.refused.covers(&missing) => {
+                                self.refused.insert(log.clone(), record.id())
+                            }
+                            _ => {}
+                        }
                     }
+                    added_any = !added.is_empty();
                     for id in added {
                         self.release_pending(id);
                     }
@@ -827,11 +856,17 @@ impl Task {
                         let log = log_of(&waiting.record);
                         self.emit(NodeEvent::Stored { log, record: waiting.record, via: Via::Push, at: SystemTime::now() });
                     }
+                    Ok(Append::MissingDeps(missing)) if self.refused.covers(&missing) => {
+                        self.refused.insert(log_of(&waiting.record), waiting.record.id());
+                    }
                     Ok(Append::MissingDeps(missing)) => {
                         // Subject to the same caps as a new arrival.
                         self.pending.reinsert(missing[0], waiting);
                     }
-                    Ok(Append::Known | Append::Invalid(_) | Append::Unauthorized) => {}
+                    Ok(Append::Unauthorized) => {
+                        self.refused.insert(log_of(&waiting.record), waiting.record.id());
+                    }
+                    Ok(Append::Known | Append::Invalid(_)) => {}
                     Err(err) => warn!(%err, "storing pending record failed"),
                 }
             }

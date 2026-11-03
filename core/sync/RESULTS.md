@@ -57,7 +57,9 @@ Every record from a peer passes these checks, in order, before it is stored, for
 1. `Record::decode`: size, canonical form, signature. The record id is computed from the signed bytes.
 2. The log is derived from the record (`<server>/control` or `<server>/<channel>`), never from the gossip topic or the pull request. A record pushed on another log's topic is rejected; a pulled page may only contain the requested log.
 3. `deps` are stored in the same log, and `auth_deps` in the same server's control log. Missing ones park the record and trigger a pull (of the control log, for `auth_deps`). Ones found in the wrong log reject it.
-4. The `Authorizer` (supplied by the integration layer, built on `core/authority`) accepts the author. It runs inside the store's write transaction, only once everything the record relies on is present, so roles come only from the signed log.
+4. For **channel** records, the `Authorizer` (supplied by the integration layer, built on `core/authority`) accepts the author. It runs inside the store's write transaction, only once everything the record relies on is present, so roles come only from the signed log. A refused channel record is remembered (bounded) and listed in later pulls' `have`, so peers stop re-sending it.
+
+   **Control records are never refused at ingest.** Authority is a function of the whole set of well-formed control records, and whether one counts can change when a concurrent record arrives. Refusing them would make the stored set depend on arrival order, so every one that decodes and has its deps is stored and forwarded, and authority decides what it means. Likewise, voiding (e.g. by a later kick) is decided when displaying, never by deleting from the store.
 
 Gossip outcomes: stored → `Accept`; duplicate or still waiting for deps → `Ignore`; anything else → `Reject`.
 
