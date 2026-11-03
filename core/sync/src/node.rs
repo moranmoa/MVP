@@ -9,6 +9,14 @@
 //! - Push: every new record is published on the log's gossipsub topic. A
 //!   pushed record whose deps we lack waits in memory and triggers a pull.
 //!
+//! - Send states (B6): [`NodeEvent::Sent`] once one of our records left on a
+//!   connection: it may have reached only a non-member relaying ciphertext.
+//!   [`NodeEvent::Delivered`] once a member's node acked storing it. The
+//!   receipt ack rides in pull answers, goes only to the record's bound
+//!   author, and is never stored, synced, or used for authority, ordering
+//!   or deletion: only for the author's tick. A false ack can only mislead
+//!   that author's own UI.
+//!
 //! Every record from a peer goes through the ingest checks in the crate docs
 //! (decode, derived log, deps in place, [`Authorizer`]) before it is stored,
 //! forwarded on gossip or served to anyone. Every input is bounded: record
@@ -1882,6 +1890,15 @@ mod tests {
     }
 
     async fn test_node(name: &str, listen: Option<u16>, bootstrap: Option<u16>, access: Access) -> Node {
+        test_node_events(name, listen, bootstrap, access).await.0
+    }
+
+    async fn test_node_events(
+        name: &str,
+        listen: Option<u16>,
+        bootstrap: Option<u16>,
+        access: Access,
+    ) -> (Node, mpsc::Receiver<NodeEvent>) {
         let dir = std::env::temp_dir().join(format!("sync-gap4-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let config = NodeConfig {
@@ -1894,7 +1911,67 @@ mod tests {
             bootstrap: bootstrap.map(|p| format!("/ip4/127.0.0.1/tcp/{p}").parse().unwrap()).into_iter().collect(),
             allow_lan: true,
         };
-        Node::start_with(config, access).await.unwrap().0
+        Node::start_with(config, access).await.unwrap()
+    }
+
+    /// The next Sent/Delivered event for `id`, or None after `secs`.
+    async fn tick(events: &mut mpsc::Receiver<NodeEvent>, id: RecordId, secs: u64) -> Option<&'static str> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+        loop {
+            match tokio::time::timeout_at(deadline, events.recv()).await {
+                Ok(Some(NodeEvent::Sent { id: got })) if got == id => return Some("sent"),
+                Ok(Some(NodeEvent::Delivered { id: got })) if got == id => return Some("delivered"),
+                Ok(Some(_)) => {}
+                _ => return None,
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_is_sent_then_delivered_once_a_member_stored_it() {
+        use crate::testutil::{message, test_key};
+        let secret = ServerSecret::from_bytes([9; 32]);
+        let key = |n: u8| -> Option<Arc<dyn Binder>> { Some(Arc::new(test_key(n))) };
+        let port = free_port();
+        // The author (test key 1, who signs `message`) counts only key 0 as a member.
+        let members: Arc<dyn ReadGate> = Arc::new(OnlyReader(test_key(0).identity()));
+        let (author, mut events) =
+            test_node_events("author", Some(port), None, Access { binder: key(1), read_gate: Some(members) }).await;
+        author.open_server(server(), secret.clone()).unwrap();
+        author.open_channel(server(), channel()).await.unwrap();
+
+        // Nobody connected: stored and signed, but not sent.
+        let first = message(0, &[], 0);
+        author.append(first.clone()).await.unwrap();
+        assert_eq!(tick(&mut events, first.id(), 1).await, None);
+
+        // A bound non-member (key 2) can't pull the channel: still not sent.
+        let peer = |name: &'static str, n: u8| {
+            let secret = secret.clone();
+            async move {
+                let access = Access { binder: key(n), read_gate: Some(Arc::new(AcceptAll)) };
+                let node = test_node(name, None, Some(port), access).await;
+                node.open_server(server(), secret).unwrap();
+                node.open_channel(server(), channel()).await.unwrap();
+                node
+            }
+        };
+        let stranger = peer("stranger", 2).await;
+        assert_eq!(tick(&mut events, first.id(), ANTI_ENTROPY.as_secs() + 1).await, None);
+
+        // A member (key 0) pulls it (sent), stores it and acks it (delivered).
+        let member = peer("member", 0).await;
+        assert_eq!(tick(&mut events, first.id(), 20).await, Some("sent"));
+        assert_eq!(tick(&mut events, first.id(), 20).await, Some("delivered"));
+
+        // A new message with peers connected: sent at once, then delivered.
+        let second = message(1, &[first.id()], 0);
+        author.append(second.clone()).await.unwrap();
+        assert_eq!(tick(&mut events, second.id(), 1).await, Some("sent"));
+        assert_eq!(tick(&mut events, second.id(), 10).await, Some("delivered"));
+        for node in [author, stranger, member] {
+            node.shutdown().await.unwrap();
+        }
     }
 
     async fn counts(node: &Node) -> (u64, u64) {

@@ -1,6 +1,6 @@
 # B6: "sent" and "delivered" from the core (design note)
 
-**Status: proposal, for the tech lead's OK before building.** Stacked on
+**Status: approved by both leads (#124) and built.** Stacked on
 #122 (same node code). Sources: the B6 UX spec (#102), ש-11, the
 security lead on #105 ("the ack goes only to the author, once GAP-4
 lands"), and the M2 criteria (row 3).
@@ -59,3 +59,29 @@ retry", which stays in api (a failed `append`).
    same by taking the record and then dropping it, so "delivered" means
    "a member's node said it stored it", not a guarantee. The binding and
    `ReadGate` check still keep non-members from producing it.
+
+## Security lead's notes (#124)
+
+- **"Sent" is not "a member has it".** It means the record left this
+  device; it may have reached only a non-member relaying ciphertext. Only
+  "delivered" means a member's node has it. api and the UI copy should
+  say so.
+- **An ack only drives the tick.** It is never used for authority,
+  ordering or deletion. This is stated in the node's module docs and on
+  `NodeEvent::Delivered`.
+
+## As built
+
+`NodeEvent::Sent { id }` and `NodeEvent::Delivered { id }` are each sent
+once per record.
+- **Acks in pull answers:** `SyncResponse` has `acks` (at most 256) and the
+  answerer's `binding`. The memory is `Acks` in `limits.rs`: 256 per author,
+  4,096 authors, 10 minutes. Only `Added` or `Known` records are remembered.
+- **Pulling soon:** a log written to is pulled again within 1 s.
+- **Tests:**
+  - `acks_are_capped_per_answer_per_author_and_in_time`.
+  - `a_message_is_sent_then_delivered_once_a_member_stored_it`, an
+    end-to-end run. The message isn't sent while nobody is connected, nor
+    to a bound non-member who may not read the channel. A member's pull
+    makes it sent, then delivered. A message written with peers connected
+    is sent at once, then delivered.
