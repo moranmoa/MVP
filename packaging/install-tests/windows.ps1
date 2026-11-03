@@ -97,7 +97,7 @@ function Snapshot {
   if (Test-Path 'Registry::HKEY_CLASSES_ROOT\mvs') { $out += 'proto:mvs' }
   $out | Sort-Object -Unique
 }
-function Diff($before, $after, $label) {
+function Show-Diff($before, $after, $label) {
   $added = @($after | Where-Object { $_ -notin $before })
   $removed = @($before | Where-Object { $_ -notin $after })
   Write-Host "  diff $label"
@@ -132,7 +132,7 @@ $clean = Snapshot
 Write-Host "1. silent install"
 Check ((Install) -eq 0) 'installer exit code 0'
 $installed = Snapshot
-$added, $removed = Diff $clean $installed 'clean -> installed'
+$added, $removed = Show-Diff $clean $installed 'clean -> installed'
 Check (SameSet $added $expect.Installed) 'exactly the expected entries were added'
 Check ($removed.Count -eq 0) 'nothing was removed'
 Check (-not ($added | Where-Object { $_ -like 'reg:HKLM*' -or $_ -like 'file:PROGRAMFILES*' -or $_ -like 'file:COMMON*' -or $_ -like 'file:PUBLIC*' })) 'per-user only: no HKLM, Program Files or all-users entries'
@@ -147,20 +147,20 @@ Check (-not $app.HasExited) 'app still running after 10 s'
 Leftover | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep 2
 $launched = Snapshot
-$added, $null = Diff $installed $launched 'installed -> after first launch'
+$added, $null = Show-Diff $installed $launched 'installed -> after first launch'
 Check (SameSet $added $expect.Data) "first launch created only the data folder ($($expect.Data -join ', '))"
 
 Write-Host "3. install over the existing install"
 Check ((Install) -eq 0) 'installer exit code 0'
 $again = Snapshot
-$added, $removed = Diff $launched $again 'installed -> installed again'
+$added, $removed = Show-Diff $launched $again 'installed -> installed again'
 Check ($added.Count -eq 0 -and $removed.Count -eq 0) 'no duplicate entries, nothing lost'
 
 Write-Host "4. silent uninstall"
 Uninstall | Out-Null
 Start-Sleep 2
 $gone = Snapshot
-$added, $removed = Diff $clean $gone 'clean -> uninstalled'
+$added, $removed = Show-Diff $clean $gone 'clean -> uninstalled'
 Check (SameSet $added $expect.Data) 'only the data folder is left'
 Check ($removed.Count -eq 0) 'nothing that existed before was removed'
 Check ((Leftover).Count -eq 0) 'no process left running'
@@ -168,7 +168,7 @@ Check ((Leftover).Count -eq 0) 'no process left running'
 Write-Host "5. reinstall after uninstall"
 Check ((Install) -eq 0) 'installer exit code 0'
 $re = Snapshot
-$added, $null = Diff $gone $re 'uninstalled -> reinstalled'
+$added, $null = Show-Diff $gone $re 'uninstalled -> reinstalled'
 Check (SameSet $added $expect.Installed) 'same entries as the first install'
 Uninstall | Out-Null
 
