@@ -24,4 +24,4 @@ zeroize = "1"
 # MIT OR Apache-2.0
 proptest = "1"
 # MIT OR Apache-2.0
-rand_chacha = "0.3"
+rand_chacha = "0.9"

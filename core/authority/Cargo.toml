@@ -9,3 +9,5 @@ records = { path = "../records" }
 
 [dev-dependencies]
 rand = "0.8"
+# The sealed-message size test seals a real message.
+groupkeys = { path = "../groupkeys" }

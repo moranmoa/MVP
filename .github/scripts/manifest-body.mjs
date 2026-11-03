@@ -2,7 +2,7 @@
 // release artifacts. The owner signs it offline with `updater sign-manifest`
 // (docs/release/RELEASING.md). No dependencies: runs on any Node >= 18.
 //
-//   node manifest-body.mjs --version 0.1.0 --platforms "linux-x86_64 ..." --dir dist [--channel alpha] [--days 14] --out manifest-body.json
+//   node manifest-body.mjs --version 0.1.0 --platforms "linux-x86_64 ..." --dir dist [--channel alpha] [--days 14] [--notes-dir notes] --out manifest-body.json
 //   node manifest-body.mjs --restamp manifest-body.json [--days 14]
 //
 // Updater artifacts are named mvs-<version>-<platform>.zip|.tar.gz. Every
@@ -10,6 +10,10 @@
 // and an artifact for any other platform is an error. Other files in --dir
 // are ignored. --restamp only renews issued_at/expires_at (for signing days
 // after the build); the hashes are left untouched.
+//
+// --notes-dir holds one <lang>.txt per language ("what's new", B8), e.g.
+// he.txt, en.txt. They go into the signed body as `notes`, with the limits
+// core/updater enforces (MAX_NOTES_LANGUAGES, MAX_NOTES_BYTES).
 
 import { createHash } from "node:crypto";
 import { createReadStream, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -19,6 +23,10 @@ import { join } from "node:path";
 const MAX_DAYS = 30;
 const NAME = /^[a-z0-9_-]{1,32}$/;
 const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+// Mirrors core/updater notes limits (manifest.rs).
+const NOTES_LANG = /^[a-z]{2,3}(-[A-Z]{2})?$/;
+const MAX_NOTES_LANGUAGES = 8;
+const MAX_NOTES_BYTES = 4096;
 
 function args(argv) {
   const out = {};
@@ -38,6 +46,29 @@ function stamp(body, days) {
   if (!(days >= 1 && days <= MAX_DAYS)) fail(`--days must be 1..${MAX_DAYS}`);
   body.issued_at = Math.floor(Date.now() / 1000);
   body.expires_at = body.issued_at + days * 86400;
+}
+
+function readNotes(dir) {
+  const notes = {};
+  for (const file of readdirSync(dir).sort()) {
+    const m = file.match(/^(.+)\.txt$/);
+    if (!m) continue;
+    const lang = m[1];
+    if (!NOTES_LANG.test(lang)) fail(`notes: ${file}: language must be ll, lll or ll-CC`);
+    // Windows line endings and trailing blank lines are editing noise.
+    const text = readFileSync(join(dir, file), "utf8").replace(/\r\n/g, "\n").replace(/\s+$/, "");
+    if (!text) fail(`notes: ${file} is empty`);
+    if (Buffer.byteLength(text) > MAX_NOTES_BYTES) fail(`notes: ${file} is over ${MAX_NOTES_BYTES} bytes`);
+    // Same rule as core/updater: no control characters except newline.
+    if (/[^\P{Cc}\n]/u.test(text)) fail(`notes: ${file} has control characters`);
+    // Nor bidi overrides/isolates, which can reorder what the user reads
+    // (LRM/RLM marks are fine).
+    if (/[‪-‮⁦-⁩]/u.test(text)) fail(`notes: ${file} has bidi override characters`);
+    notes[lang] = text;
+  }
+  if (Object.keys(notes).length === 0) fail(`notes: no <lang>.txt in ${dir}`);
+  if (Object.keys(notes).length > MAX_NOTES_LANGUAGES) fail(`notes: more than ${MAX_NOTES_LANGUAGES} languages`);
+  return notes;
 }
 
 function sha256(path) {
@@ -86,6 +117,7 @@ if (a.restamp) {
   for (const p of platforms) if (!artifacts[p]) fail(`no ${prefix}${p} artifact in ${dir}`);
 
   const body = { format: 1, channel, version, issued_at: 0, expires_at: 0, artifacts, revoked: [] };
+  if (a["notes-dir"]) body.notes = readNotes(a["notes-dir"]);
   stamp(body, days);
   write(out, body);
 }
