@@ -96,6 +96,9 @@ const MAX_CONNECTIONS_PER_PEER: u32 = 2;
 const MAX_CONNECTIONS_PER_IP: usize = 8;
 /// Connections with nothing going on are closed after this long.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Traffic on every connection at least this often, well under the 100 s a
+/// proxy like Cloudflare lets a WebSocket sit idle.
+const PING_INTERVAL: Duration = Duration::from_secs(15);
 /// Bytes of served pull pages: per peer, and for all peers together.
 const SERVED_BYTES_BURST: u32 = 16 * 1024 * 1024;
 const SERVED_BYTES_RATE: u32 = 2 * 1024 * 1024;
@@ -222,7 +225,7 @@ impl Node {
             _ => bail!("the relay address must end with /p2p/<relay peer ID>"),
         };
 
-        let mut swarm = build_swarm(key)?;
+        let mut swarm = build_swarm(key).await?;
         swarm.listen_on(config.listen.clone())?;
         for addr in &config.bootstrap {
             let _ = swarm.dial(DialOpts::unknown_peer_id().address(addr.clone()).build());
@@ -331,11 +334,16 @@ fn load_or_create_key(path: &std::path::Path) -> Result<identity::Keypair> {
     Ok(key)
 }
 
-fn build_swarm(key: identity::Keypair) -> Result<Swarm<Behaviour>> {
+async fn build_swarm(key: identity::Keypair) -> Result<Swarm<Behaviour>> {
     Ok(SwarmBuilder::with_existing_identity(key)
         .with_tokio()
         .with_tcp(tcp::Config::default().nodelay(true), noise::Config::new, yamux::Config::default)?
         .with_dns()?
+        // `/dns4/<relay>/tcp/443/wss`: the relay sits behind a TLS-terminating
+        // proxy (Cloudflare). Ping (every 15 s) keeps such a connection under
+        // the proxy's 100 s idle timeout.
+        .with_websocket(noise::Config::new, yamux::Config::default)
+        .await?
         .with_relay_client(noise::Config::new, yamux::Config::default)?
         .with_behaviour(|key, relay_client| {
             let peer_id = key.public().to_peer_id();
@@ -389,7 +397,7 @@ fn build_swarm(key: identity::Keypair) -> Result<Swarm<Behaviour>> {
                 identify: identify::Behaviour::new(
                     identify::Config::new(IDENTIFY_VERSION.into(), key.public()).with_push_listen_addr_updates(true),
                 ),
-                ping: ping::Behaviour::new(ping::Config::new()),
+                ping: ping::Behaviour::new(ping::Config::new().with_interval(PING_INTERVAL)),
                 kad,
                 gossipsub,
                 sync: request_response::cbor::Behaviour::new(
@@ -1364,5 +1372,48 @@ mod tests {
         assert!(!filter.can_subscribe(&TopicHash::from_raw("log/")));
         assert!(!filter.can_subscribe(&TopicHash::from_raw("something-else")));
         assert!(!filter.can_subscribe(&TopicHash::from_raw(format!("log/{}", "x".repeat(10_000)))));
+    }
+
+    #[tokio::test]
+    async fn the_relay_can_be_dialled_over_wss() {
+        let mut swarm = build_swarm(identity::Keypair::generate_ed25519()).await.unwrap();
+        let relay = PeerId::random();
+        // Without a WebSocket transport this fails at once ("multiaddr not
+        // supported"); with it, the dial is started (DNS + TLS + WebSocket).
+        let wss: Multiaddr = format!("/dns4/relay.example.org/tcp/443/wss/p2p/{relay}").parse().unwrap();
+        swarm.dial(wss).unwrap();
+        let ws: Multiaddr = format!("/ip4/127.0.0.1/tcp/9/ws/p2p/{relay}").parse().unwrap();
+        swarm.dial(ws).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_nodes_sync_over_websocket() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let node = |name: &str, listen: String, bootstrap: Vec<Multiaddr>| {
+            let dir = std::env::temp_dir().join(format!("sync-ws-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            NodeConfig {
+                // Nothing listens there: no relay in this test.
+                relay: format!("/ip4/127.0.0.1/tcp/9/p2p/{}", PeerId::random()).parse().unwrap(),
+                data_dir: dir,
+                logs: vec![chan()],
+                authorizer: Arc::new(AcceptAll),
+                listen: listen.parse().unwrap(),
+                bootstrap,
+                allow_lan: true,
+            }
+        };
+        let (a, _a_events) = Node::start(node("a", format!("/ip4/127.0.0.1/tcp/{port}/ws"), vec![])).await.unwrap();
+        let ws = format!("/ip4/127.0.0.1/tcp/{port}/ws").parse().unwrap();
+        let (b, _b_events) = Node::start(node("b", "/ip4/127.0.0.1/tcp/0".into(), vec![ws])).await.unwrap();
+        a.append(crate::testutil::message(0, &[], 0)).await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while b.state(&chan()).await.unwrap().count == 0 {
+            assert!(Instant::now() < deadline, "no sync over /ws");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(b.peers().await.unwrap(), vec![a.peer_id()]);
+        a.shutdown().await.unwrap();
+        b.shutdown().await.unwrap();
     }
 }
