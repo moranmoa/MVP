@@ -1,12 +1,8 @@
 //! Two cores exchange records through a real relay, over `SyncNetwork`.
-//! Needs a relay: set `RELAY` to its multiaddr and run with `--ignored`,
-//! in a container on the relay's network, e.g. from `core/`:
-//!
-//! ```text
-//! docker run --rm --network infra_default -e RELAY=/dns4/relay/tcp/4001/p2p/<id> \
-//!   -v "$PWD:/work" -w /work rust:1.90-bookworm \
-//!   cargo test --release -p api --test two_peers -- --ignored --nocapture
-//! ```
+//! Needs a relay (`RELAY`, its multiaddr) and `--ignored`. Run it with
+//! `bash core/api/tests/two_peers.sh`, which starts a throwaway relay on its
+//! own Docker network (as `infra/test/relay-catchup.sh` does) and runs this
+//! test next to it. Never point it at the live relay or its network.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -24,7 +20,8 @@ struct Peer {
 fn peer(name: &str, relay: &str) -> Peer {
     let dir = std::env::temp_dir().join(format!("mvs-two-peers-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let net = SyncNetwork::start(relay.parse().unwrap(), &dir, Arc::new(MemberGate::new())).unwrap();
+    let net =
+        SyncNetwork::start(relay.parse().unwrap(), &dir, Arc::new(MemberGate::new())).unwrap();
     let core = Core::open(
         Config { db_path: Some(dir.join("core.db")), app_version: "test".into() },
         Ports {
@@ -40,8 +37,11 @@ fn peer(name: &str, relay: &str) -> Peer {
 }
 
 fn sign_up(peer: &Peer, name: &str) {
-    let input =
-        NewIdentityInput { locale: Locale::He, country: "IL".into(), birth_date: "1990-05-01".into() };
+    let input = NewIdentityInput {
+        locale: Locale::He,
+        country: "IL".into(),
+        birth_date: "1990-05-01".into(),
+    };
     let words = peer.core.create_identity(input).unwrap().words;
     let positions = peer.core.get_recovery_challenge().unwrap().positions;
     let answers: BTreeMap<usize, String> =

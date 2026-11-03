@@ -8,12 +8,12 @@
 //! `ControlLog::records` decodes the whole control log, so verdicts are
 //! cached per server and author (#55):
 //! - an accept never changes (monotone), so it is kept for good;
-//! - a reject holds only until the next control record of that server is
-//!   stored ([`MemberGate::control_changed`]). A reject that is stale
-//!   because the event hadn't arrived yet only delays: sync asks again when
-//!   the record comes back.
+//! - a reject is kept with the control log's record count
+//!   (`ControlLog::count`, an index count) and holds only while that count
+//!   is unchanged. It never waits for a node event, so a record sync pulls
+//!   again right after the control log grew is judged afresh.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use authority::Action;
@@ -27,7 +27,8 @@ const MAX_REJECTS: usize = 4096;
 #[derive(Default)]
 struct Cache {
     accepted: HashSet<(ServerId, PublicKey)>,
-    rejected: HashSet<(ServerId, PublicKey)>,
+    /// The control log's record count when the reject was decided.
+    rejected: HashMap<(ServerId, PublicKey), u64>,
 }
 
 #[derive(Default)]
@@ -38,17 +39,6 @@ pub struct MemberGate {
 impl MemberGate {
     pub fn new() -> MemberGate {
         MemberGate::default()
-    }
-
-    /// Call when a control record of `server` is stored: rejects for that
-    /// server may now be accepts.
-    pub fn control_changed(&self, server: ServerId) {
-        self.cache.lock().expect("not poisoned").rejected.retain(|(s, _)| *s != server);
-    }
-
-    /// Events were dropped (`NodeEvent::Lagged`): any reject may be stale.
-    pub fn forget_rejects(&self) {
-        self.cache.lock().expect("not poisoned").rejected.clear();
     }
 
     /// The monotone rule on a decoded control log.
@@ -72,26 +62,31 @@ impl MemberGate {
 impl Authorizer for MemberGate {
     fn check(&self, record: &Record, control: &ControlLog<'_>) -> Verdict {
         let key = (record.server(), record.author());
+        // A store error is a reject (not cached): sync asks again later.
+        let Ok(count) = control.count() else { return Verdict::Reject };
         {
             let cache = self.cache.lock().expect("not poisoned");
             if cache.accepted.contains(&key) {
                 return Verdict::Accept;
             }
-            if cache.rejected.contains(&key) {
+            if cache.rejected.get(&key) == Some(&count) {
                 return Verdict::Reject;
             }
         }
-        // A store error is a reject: sync asks again later.
-        let ok = control.records().is_ok_and(|records| Self::may_write(key.1, &records));
+        let Ok(records) = control.records() else { return Verdict::Reject };
+        let ok = Self::may_write(key.1, &records);
         let mut cache = self.cache.lock().expect("not poisoned");
         if ok {
+            cache.rejected.remove(&key);
             cache.accepted.insert(key);
             Verdict::Accept
         } else {
             if cache.rejected.len() >= MAX_REJECTS {
                 cache.rejected.clear();
             }
-            cache.rejected.insert(key);
+            // The count read before `records`: if the log grew in between,
+            // the next check sees a new count and decides again.
+            cache.rejected.insert(key, count);
             Verdict::Reject
         }
     }
@@ -169,15 +164,20 @@ mod tests {
             Append::Unauthorized
         );
 
-        // The join arrives: still refused until the gate hears of it (the
-        // cached reject), then accepted, and the accept sticks.
-        assert_eq!(store.append(&join, &gate).unwrap(), Append::Added);
+        // A cached reject holds while the control log is unchanged...
+        assert_eq!(
+            gate.cache.lock().unwrap().rejected.get(&(server, member_key(&member))),
+            Some(&3)
+        );
         assert_eq!(
             store.append(&message(server, &member, 1), &gate).unwrap(),
             Append::Unauthorized
         );
-        gate.control_changed(server);
+        // ...and the moment the join is stored (no event needed), the next
+        // check decides again: accepted, and the accept sticks.
+        assert_eq!(store.append(&join, &gate).unwrap(), Append::Added);
         assert_eq!(store.append(&message(server, &member, 2), &gate).unwrap(), Append::Added);
+        assert!(!gate.cache.lock().unwrap().rejected.contains_key(&(server, member_key(&member))));
         assert_eq!(
             store.append(&message(server, &stranger, 1), &gate).unwrap(),
             Append::Unauthorized

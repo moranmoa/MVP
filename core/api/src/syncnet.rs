@@ -5,9 +5,9 @@
 //!
 //! - Reads come from sync's own store, decoded again here (GAP-1): what
 //!   `fetch` returns has passed `Record::decode` and sits in the right log.
-//! - Node events are hints, never data: a stored control record only tells
-//!   the [`MemberGate`] its rejects may be stale, and `Lagged` (events were
-//!   dropped) clears every reject. The data is always re-read from the store.
+//! - Node events are hints, never data, and nothing depends on them: the
+//!   [`MemberGate`] ties each reject to the control log's count, and the
+//!   data is always re-read from the store (so a `Lagged` loses nothing).
 //! - TODO(#64): a node that won't start (the `node.key` ACL) must reach the
 //!   user as an error or notice; today `SyncNetwork::start` fails and the
 //!   sidecar exits with a log line.
@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use libp2p::Multiaddr;
 use records::{Record, Scope, ServerId};
-use sync::{log_name, log_of, Node, NodeConfig, NodeEvent, Store};
+use sync::{log_name, log_of, Node, NodeConfig, Store};
 use tokio::runtime::Runtime;
 
 use crate::gate::MemberGate;
@@ -47,23 +47,17 @@ impl SyncNetwork {
             relay,
             data_dir: data_dir.to_owned(),
             logs: Vec::new(),
-            authorizer: gate.clone(),
+            authorizer: gate,
             listen: "/ip4/0.0.0.0/tcp/0".parse().expect("valid multiaddr"),
             bootstrap: Vec::new(),
             allow_lan: false,
         };
         let (node, mut events) = runtime.block_on(Node::start(config))?;
-        runtime.spawn(async move {
-            while let Some(event) = events.recv().await {
-                match event {
-                    NodeEvent::Stored { record, .. } if record.scope() == Scope::Control => {
-                        gate.control_changed(record.server());
-                    }
-                    NodeEvent::Lagged { .. } => gate.forget_rejects(),
-                    _ => {}
-                }
-            }
-        });
+        // Events are only hints, and nothing needs them yet: the gate keys
+        // its rejects by the control log's count, and reads go to the store.
+        // Drained so the node never blocks on a full channel.
+        // TODO(sync): a push hint to the UI instead of `syncNow`.
+        runtime.spawn(async move { while events.recv().await.is_some() {} });
         Ok(SyncNetwork {
             runtime,
             node,
