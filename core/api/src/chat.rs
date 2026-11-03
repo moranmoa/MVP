@@ -17,27 +17,42 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use authority::{check_channel, message_text_ok, ChannelGraph, Resolver, State, Verdict};
-use records::{ChannelId, Kind, PublicKey, Record, RecordId, Scope, ServerId, MAX_DEPS};
+use authority::{
+    check_channel, check_stub, message_text_ok, ChannelGraph, Entry, Resolver, State, Verdict,
+};
+use records::{ChannelId, Kind, PublicKey, Record, RecordId, Scope, ServerId, Stub, MAX_DEPS};
 
 use crate::model::Log;
 use crate::ports::{GroupCipher, Opened};
 
-/// The channel records of one server, as `authority` asks about them.
+/// The channel records of one server, as `authority` asks about them: full
+/// records, and the stubs of pruned ones (B6-p), served by `entry`.
 pub(crate) struct Graph<'a> {
     by_id: HashMap<RecordId, &'a Record>,
+    stubs: &'a HashMap<RecordId, Stub>,
     children: HashMap<RecordId, Vec<RecordId>>,
 }
 
 impl<'a> Graph<'a> {
-    pub fn new(records: &'a [Record]) -> Graph<'a> {
+    pub fn new(records: &'a [Record], stubs: &'a HashMap<RecordId, Stub>) -> Graph<'a> {
         let mut children: HashMap<RecordId, Vec<RecordId>> = HashMap::new();
-        for record in records {
-            for dep in record.deps() {
-                children.entry(*dep).or_default().push(record.id());
+        let edges = records
+            .iter()
+            .map(|r| (r.id(), r.deps()))
+            .chain(stubs.values().map(|s| (s.id(), s.deps())));
+        for (id, deps) in edges {
+            for dep in deps {
+                children.entry(*dep).or_default().push(id);
             }
         }
-        Graph { by_id: records.iter().map(|r| (r.id(), r)).collect(), children }
+        Graph { by_id: records.iter().map(|r| (r.id(), r)).collect(), stubs, children }
+    }
+
+    fn deps(&self, id: RecordId) -> Option<&[RecordId]> {
+        match self.by_id.get(&id) {
+            Some(record) => Some(record.deps()),
+            None => self.stubs.get(&id).map(Stub::deps),
+        }
     }
 }
 
@@ -50,9 +65,7 @@ impl ChannelGraph for Graph<'_> {
                 return true;
             }
             if seen.insert(id) {
-                if let Some(record) = self.by_id.get(&id) {
-                    stack.extend(record.deps().iter().copied());
-                }
+                stack.extend(self.deps(id).unwrap_or_default().iter().copied());
             }
         }
         false
@@ -62,9 +75,22 @@ impl ChannelGraph for Graph<'_> {
         self.by_id.get(&id).map(|r| (*r).clone())
     }
 
+    fn entry(&self, id: RecordId) -> Option<Entry> {
+        match self.by_id.get(&id) {
+            Some(record) => Some(Entry::Full((*record).clone())),
+            None => self.stubs.get(&id).cloned().map(Entry::Pruned),
+        }
+    }
+
     fn children(&self, id: RecordId) -> Vec<RecordId> {
         self.children.get(&id).cloned().unwrap_or_default()
     }
+}
+
+/// Whether authority accepts a held stub (a held, accepted delete or newer
+/// edit replaced its record).
+fn stub_accepted(resolver: &Resolver, stub: &Stub, graph: &Graph) -> bool {
+    check_stub(resolver, stub, graph) == Verdict::Accept
 }
 
 /// The records of `channel`, in the order they were added.
@@ -101,7 +127,7 @@ fn in_known(record: &Record, known: &BTreeSet<ChannelId>) -> bool {
 pub(crate) fn sync_cipher(cipher: &dyn GroupCipher, server: ServerId, log: &Log) {
     let known = known_channels(server, log.resolver.state());
     cipher.set_channels(server, &known);
-    let graph = Graph::new(&log.channel);
+    let graph = Graph::new(&log.channel, &log.stubs);
     let rotations: Vec<&Record> = log
         .channel
         .iter()
@@ -116,9 +142,9 @@ pub(crate) fn sync_cipher(cipher: &dyn GroupCipher, server: ServerId, log: &Log)
     }
 }
 
-/// A shown message: its record and opened text.
+/// A shown message: its record (full or pruned) and opened text.
 pub(crate) struct Shown {
-    pub record: Record,
+    pub record: Meta,
     /// The latest accepted edit's text, else the original; empty once deleted.
     pub text: String,
     /// The claimed time of the edit shown, if any.
@@ -162,41 +188,128 @@ pub(crate) fn messages(
     if !known_channels(server, log.resolver.state()).contains(&channel) {
         return Vec::new();
     }
-    let records = channel_records(log, channel);
-    let graph = Graph::new(&log.channel);
-    let ok: Vec<&Record> = records.iter().filter(|r| accepted(&log.resolver, r, &graph)).collect();
-    let deleted: HashSet<RecordId> =
-        ok.iter().filter(|r| r.kind() == Kind::MessageDelete).filter_map(|r| target(r)).collect();
-    // The latest accepted edit per message, by claimed time then ID.
-    let mut edits: HashMap<RecordId, &Record> = HashMap::new();
-    for edit in ok.iter().filter(|r| r.kind() == Kind::MessageEdit) {
-        let Some(of) = target(edit) else { continue };
-        let newer = edits.get(&of).is_none_or(|e| (e.ts(), e.id()) < (edit.ts(), edit.id()));
-        if newer {
-            edits.insert(of, edit);
-        }
-    }
-    let mut shown: Vec<Shown> = ok
-        .iter()
-        .filter(|r| r.kind() == Kind::Message)
-        .filter_map(|record| {
-            let original = open(cipher, server, channel, record.author(), record.body())?;
-            let record = (*record).clone();
-            if deleted.contains(&record.id()) {
-                return Some(Shown { record, text: String::new(), edited_at: None, deleted: true });
+    let replaced = Replaced::of(log, channel);
+    let graph = Graph::new(&log.channel, &log.stubs);
+    // Full messages, and stubs of messages a delete or edit replaced.
+    let full = channel_records(log, channel)
+        .into_iter()
+        .filter(|r| r.kind() == Kind::Message && accepted(&log.resolver, r, &graph))
+        .map(|r| (Meta::of_record(&r), Some(r)));
+    let pruned = log
+        .stubs
+        .values()
+        .filter(|s| s.scope() == Scope::Channel(channel) && s.kind() == Kind::Message)
+        .filter(|s| stub_accepted(&log.resolver, s, &graph))
+        .map(|s| (Meta::of_stub(s), None));
+    let mut shown: Vec<Shown> = full
+        .chain(pruned)
+        .filter_map(|(meta, record)| {
+            if replaced.deleted.contains(&meta.id) {
+                return Some(Shown { record: meta, text: String::new(), edited_at: None, deleted: true });
             }
-            let edit = edits.get(&record.id()).and_then(|e| {
-                let text = open(cipher, server, channel, e.author(), e.body().get(32..)?)?;
-                Some((text, e.ts()))
-            });
-            Some(match edit {
-                Some((text, at)) => Shown { record, text, edited_at: Some(at), deleted: false },
-                None => Shown { record, text: original, edited_at: None, deleted: false },
-            })
+            if let Some(edit) = replaced.latest_edit.get(&meta.id) {
+                let text = open(cipher, server, channel, edit.author(), edit.body().get(32..)?)?;
+                return Some(Shown { record: meta, text, edited_at: Some(edit.ts()), deleted: false });
+            }
+            // Neither deleted nor edited: only a full record has a text.
+            let record = record?;
+            let text = open(cipher, server, channel, record.author(), record.body())?;
+            Some(Shown { record: meta, text, edited_at: None, deleted: false })
         })
         .collect();
     shown.sort_by_key(|s| (s.record.ts(), s.record.id()));
     shown
+}
+
+/// What a shown message needs of its record, full or pruned.
+pub(crate) struct Meta {
+    id: RecordId,
+    author: PublicKey,
+    ts: u64,
+}
+
+impl Meta {
+    fn of_record(record: &Record) -> Meta {
+        Meta { id: record.id(), author: record.author(), ts: record.ts() }
+    }
+
+    fn of_stub(stub: &Stub) -> Meta {
+        Meta { id: stub.id(), author: stub.author(), ts: stub.ts() }
+    }
+
+    pub fn id(&self) -> RecordId {
+        self.id
+    }
+
+    pub fn author(&self) -> PublicKey {
+        self.author
+    }
+
+    pub fn ts(&self) -> u64 {
+        self.ts
+    }
+}
+
+/// Which messages accepted deletes and edits replaced, in one channel.
+struct Replaced {
+    deleted: HashSet<RecordId>,
+    /// The latest accepted edit per message, by claimed time then ID.
+    latest_edit: HashMap<RecordId, Record>,
+    /// Every accepted edit per message.
+    edits: HashMap<RecordId, Vec<RecordId>>,
+}
+
+impl Replaced {
+    fn of(log: &Log, channel: ChannelId) -> Replaced {
+        let graph = Graph::new(&log.channel, &log.stubs);
+        let mut replaced =
+            Replaced { deleted: HashSet::new(), latest_edit: HashMap::new(), edits: HashMap::new() };
+        for record in channel_records(log, channel) {
+            let kind = record.kind();
+            if !matches!(kind, Kind::MessageDelete | Kind::MessageEdit)
+                || !accepted(&log.resolver, &record, &graph)
+            {
+                continue;
+            }
+            let Some(of) = target(&record) else { continue };
+            if kind == Kind::MessageDelete {
+                replaced.deleted.insert(of);
+                continue;
+            }
+            replaced.edits.entry(of).or_default().push(record.id());
+            let newer = replaced
+                .latest_edit
+                .get(&of)
+                .is_none_or(|e| (e.ts(), e.id()) < (record.ts(), record.id()));
+            if newer {
+                replaced.latest_edit.insert(of, record);
+            }
+        }
+        replaced
+    }
+}
+
+/// The full records of `channel` to prune (B6-p): a message an accepted
+/// delete or edit replaced, every edit of a deleted message, and every
+/// edit but the latest of an edited one. Their bodies (ciphertext) go;
+/// their stubs keep the IDs and signatures.
+pub(crate) fn prunable(log: &Log, channel: ChannelId) -> Vec<RecordId> {
+    let replaced = Replaced::of(log, channel);
+    let mut out: Vec<RecordId> = Vec::new();
+    for (message, edits) in &replaced.edits {
+        out.push(*message);
+        let keep = if replaced.deleted.contains(message) {
+            None
+        } else {
+            replaced.latest_edit.get(message).map(Record::id)
+        };
+        out.extend(edits.iter().filter(|e| Some(**e) != keep));
+    }
+    out.extend(replaced.deleted.iter());
+    out.retain(|id| log.channel.iter().any(|r| r.id() == *id));
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Deps for a new record in `channel`: its records no other one depends on,
@@ -227,7 +340,7 @@ pub(crate) fn channel_seq(log: &Log, channel: ChannelId, author: &PublicKey) -> 
 pub(crate) fn would_accept(log: &Log, record: &Record) -> bool {
     let mut records = log.channel.clone();
     records.push(record.clone());
-    accepted(&log.resolver, record, &Graph::new(&records))
+    accepted(&log.resolver, record, &Graph::new(&records, &log.stubs))
 }
 
 /// [`channel_deps`] plus `target`, which an edit or delete must list.

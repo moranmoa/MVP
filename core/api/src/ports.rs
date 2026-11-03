@@ -105,6 +105,11 @@ pub trait Network: Send + Sync {
 
     fn lock(&self) {}
 
+    /// B6-p: replace a held record by its stub, if the stub gate agrees.
+    fn prune(&self, id: records::RecordId) {
+        let _ = id;
+    }
+
     /// GAP-4: sync `server` members-only, with its secret, and these
     /// channels (the ones authority knows). Called at load and whenever
     /// the channels change; opening again is harmless.

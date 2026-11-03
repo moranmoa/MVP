@@ -706,6 +706,7 @@ impl Core {
                         });
                     }
                     inner.announce(&*ports.cipher, server, events)?;
+                    inner.prune(ports, server)?;
                 }
             }
             Ok(())
@@ -790,6 +791,24 @@ impl Core {
 }
 
 impl Inner {
+    /// B6-p: every full record an accepted delete or edit replaced is pruned
+    /// to its stub, in memory, in the store and in sync's store. Nothing of
+    /// its body (the ciphertext) is kept; nothing of its text was ever
+    /// stored.
+    fn prune(&mut self, ports: &Ports, server: ServerId) -> CoreResult<()> {
+        for channel in self.known(server)? {
+            let log = self.logs.get(&server).ok_or(ErrorCode::Internal)?;
+            for id in chat::prunable(log, channel) {
+                let log = self.logs.get_mut(&server).ok_or(ErrorCode::Internal)?;
+                if let Some(stub) = log.prune(id) {
+                    self.db.prune_record(&stub)?;
+                    ports.network.prune(id);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// This server's sync secret, from the sealed store.
     fn secret(&self, server: ServerId) -> CoreResult<Option<Zeroizing<[u8; 32]>>> {
         let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?;
@@ -939,6 +958,7 @@ impl Inner {
         self.store(server, record.clone())?;
         ports.network.publish(&record);
         let message = self.message(&*ports.cipher, server, channel, target.id())?;
+        self.prune(ports, server)?;
         events.push(Event::MessageUpdated(message));
         Ok(())
     }
@@ -1178,7 +1198,10 @@ impl Inner {
     /// Loads `server`'s log from the store unless it is already in memory.
     fn load(&mut self, server: ServerId) -> CoreResult<()> {
         if !self.logs.contains_key(&server) {
-            let log = Log::new(server, self.db.records(server)?);
+            let mut log = Log::new(server, self.db.records(server)?);
+            for stub in self.db.stubs(server)? {
+                log.add_stub(stub);
+            }
             self.logs.insert(server, log);
         }
         Ok(())
