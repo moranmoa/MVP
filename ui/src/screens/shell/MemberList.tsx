@@ -1,9 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import { useCore, type Member, type ServerSummary } from '../../core';
 import { Avatar, Code, Dialog, Name } from '../../components/common';
+import { CloseIcon } from '../../components/icons';
+import { nameSkeleton } from '../../core/sanitize';
 
 const NO_MEMBERS: Member[] = [];
 
@@ -11,7 +13,36 @@ export function displayName(m: { displayName: string; shortCode: string }): stri
   return m.displayName || m.shortCode;
 }
 
-export function MemberList({ server }: { server: ServerSummary }) {
+// Names that pass for a role. Compared by skeleton, so "Αdmin" (Greek Alpha) counts too.
+const ROLE_NAMES = ['admin', 'administrator', 'owner', 'moderator', 'mod', 'system', 'support', 'staff', 'בעלים', 'מנהל', 'מנהלת', 'הנהלה', 'מערכת', 'תמיכה'].map(nameSkeleton);
+
+/**
+ * Members whose name looks like the owner's name or like a role. Owners are
+ * never flagged. The identity code next to every name is the real check; this
+ * only points at the people worth checking.
+ */
+export function lookalikeIds(members: Member[]): Set<string> {
+  const taken = new Set(ROLE_NAMES);
+  for (const m of members) if (m.isOwner && m.displayName) taken.add(nameSkeleton(m.displayName));
+  const out = new Set<string>();
+  for (const m of members) {
+    const s = m.displayName && nameSkeleton(m.displayName);
+    if (s && !m.isOwner && taken.has(s)) out.add(m.id);
+  }
+  return out;
+}
+
+export function LookalikeTag() {
+  const intl = useIntl();
+  return (
+    <span className="lookalike-tag" title={intl.formatMessage({ id: 'members.lookalikeHint' })}>
+      <FormattedMessage id="members.lookalike" />
+    </span>
+  );
+}
+
+/** `onClose` is set on phones, where the list covers the chat and needs its own close button. */
+export function MemberList({ server, onClose }: { server: ServerSummary; onClose?: () => void }) {
   const store = useAppStore();
   const members = useStore(store, (s) => s.members[server.id] ?? NO_MEMBERS);
   const myId = useStore(store, (s) => s.identity?.id);
@@ -25,6 +56,13 @@ export function MemberList({ server }: { server: ServerSummary }) {
   }, [members, intl.locale]);
 
   const open = members.find((m) => m.id === openId);
+  const flagged = useMemo(() => lookalikeIds(members), [members]);
+  const headingId = useId();
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const isSheet = !!onClose;
+  useEffect(() => {
+    if (isSheet) closeRef.current?.focus();
+  }, [isSheet]);
 
   const group = (list: Member[], titleId: string) =>
     list.length > 0 && (
@@ -48,6 +86,7 @@ export function MemberList({ server }: { server: ServerSummary }) {
                     <FormattedMessage id="members.me" />
                   </span>
                 )}
+                {flagged.has(m.id) && <LookalikeTag />}
                 {m.isOwner && (
                   <span className="owner-tag" title={intl.formatMessage({ id: 'members.owner' })}>
                     <FormattedMessage id="members.owner" />
@@ -61,10 +100,44 @@ export function MemberList({ server }: { server: ServerSummary }) {
     );
 
   return (
-    <aside className="members" aria-label={intl.formatMessage({ id: 'members.label' })}>
+    <aside
+      className="members"
+      // On a phone the list covers the whole screen, so it behaves as a modal
+      // dialog: labelled by its heading, focus moves in, Esc closes it (Shell
+      // makes everything underneath inert and returns focus on close).
+      {...(onClose
+        ? {
+            role: 'dialog',
+            'aria-modal': true,
+            'aria-labelledby': headingId,
+            onKeyDown: (e: KeyboardEvent) => {
+              if (e.key === 'Escape' && !open) {
+                e.preventDefault();
+                onClose();
+              }
+            },
+          }
+        : { 'aria-label': intl.formatMessage({ id: 'members.label' }) })}
+    >
+      {onClose && (
+        <header className="members-header">
+          <h2 id={headingId}>
+            <FormattedMessage id="members.label" />
+          </h2>
+          <button
+            ref={closeRef}
+            type="button"
+            className="icon-button"
+            onClick={onClose}
+            aria-label={intl.formatMessage({ id: 'members.close' })}
+          >
+            <CloseIcon />
+          </button>
+        </header>
+      )}
       {group(online, 'members.online')}
       {group(offline, 'members.offline')}
-      {open && <ProfileCard member={open} server={server} isMe={open.id === myId} onClose={() => setOpenId(null)} />}
+      {open && <ProfileCard member={open} server={server} isMe={open.id === myId} lookalike={flagged.has(open.id)} onClose={() => setOpenId(null)} />}
     </aside>
   );
 }
@@ -73,11 +146,13 @@ export function ProfileCard({
   member,
   server,
   isMe,
+  lookalike,
   onClose,
 }: {
   member: Member;
   server: ServerSummary;
   isMe: boolean;
+  lookalike?: boolean;
   onClose: () => void;
 }) {
   const core = useCore();
@@ -102,6 +177,11 @@ export function ProfileCard({
             </span>
           )}
         </div>
+        {lookalike && (
+          <p className="warning-text" role="note">
+            <FormattedMessage id="members.lookalikeHint" />
+          </p>
+        )}
         {member.bio && (
           <p dir="auto" className="bio">
             {member.bio}

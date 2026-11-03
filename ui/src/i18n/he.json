@@ -1,5 +1,5 @@
 {
-  "app.name": "MVP",
+  "app.name": "MVS",
   "common.back": "חזרה",
   "common.next": "המשך",
   "common.cancel": "ביטול",
@@ -236,5 +236,12 @@
   "settings.about.stable": "יציב",
   "settings.about.beta": "בטא",
   "settings.about.channelHint": "עדכונים מותקנים תמיד. אפשר רק לבחור אם לקבל אותם מוקדם יותר.",
-  "settings.about.licenses": "האפליקציה בנויה על רכיבי קוד פתוח, ביניהם React, react-intl ו-TanStack Virtual (רישיונות MIT ו-BSD)."
+  "settings.about.licenses": "האפליקציה בנויה על רכיבי קוד פתוח, ביניהם React, react-intl ו-TanStack Virtual (רישיונות MIT ו-BSD).",
+
+  "chat.clipped": "ההודעה ארוכה מדי, ולכן רק חלק ממנה מוצג",
+  "members.lookalike": "שם דומה",
+  "members.lookalikeHint": "השם הזה דומה לשם של בעלי השרת או לשם של תפקיד. כדי לדעת מי זה באמת, כדאי לבדוק את קוד הזהות.",
+  "onb.profile.avatarTooBig": "אפשר לבחור תמונה מסוג PNG, JPEG, WebP או GIF, עד 512 KB.",
+  "chat.back": "חזרה לערוצים",
+  "members.close": "סגירת רשימת החברים"
 }

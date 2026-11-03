@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, type ReactNode } from 'react';
 import { useIntl } from 'react-intl';
+import { safeColor, safeImageSrc } from '../core/sanitize';
 import { CloseIcon } from './icons';
 
 /** User-controlled names are isolated so they never reorder the sentence around them. */
@@ -31,8 +32,8 @@ export function Avatar({
 }) {
   const letter = [...(name.trim() || '?')][0].toUpperCase();
   return (
-    <span className="avatar" style={{ width: `${size / 16}rem`, height: `${size / 16}rem`, background: color }} aria-hidden="true">
-      {src ? <img src={src} alt="" /> : <span style={{ fontSize: `${size / 40}rem` }}>{letter}</span>}
+    <span className="avatar" style={{ width: `${size / 16}rem`, height: `${size / 16}rem`, background: safeColor(color) }} aria-hidden="true">
+      {safeImageSrc(src) ? <img src={safeImageSrc(src)} alt="" /> : <span style={{ fontSize: `${size / 40}rem` }}>{letter}</span>}
       {presence && <span className={`presence presence-${presence}`} />}
     </span>
   );
