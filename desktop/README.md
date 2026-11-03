@@ -149,6 +149,14 @@ spikes/RESULTS.md) after cross-compiling `mvs-core.exe` into `.core/`
 
 Still to come: the release.yml plug-in point with devops.
 
+## In-app update hooks (B8)
+
+`mvs-launcher.exe` (core/updater, built into `.core/` by the release job)
+ships at the install root via `build.win.extraFiles`. When it is present,
+`customInstall` in `build/installer.nsh` points the Start-menu and desktop
+shortcuts at it. A build without it keeps shortcuts to `MVS.exe`. Design:
+core/updater/docs/B8-in-app-update.md §0 (`update.js` and the main.js hooks
+come with dev-updater's B8-6).
 ## Relay address (release builds)
 
 The core needs a relay to reach anyone (`mvs-core --relay <multiaddr>`).
