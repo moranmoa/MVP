@@ -145,6 +145,20 @@ jobs:
           mkdir -p ../desktop/.core
           cp "target/${{ matrix.target }}/release/${{ matrix.core }}" ../desktop/.core/
 
+      # The stable launcher next to the app ($INSTDIR\mvs-launcher.exe, via
+      # desktop's extraFiles): it starts the healthy version, and rolls back to
+      # the base copy. MVS_BASE_VERSION must be the version this installer
+      # ships, or it always starts the base copy. Windows only for now. It is
+      # never part of the updater payload (excluded in Collect).
+      - name: Build the launcher (mvs-launcher)
+        if: startsWith(matrix.platform, 'windows-')
+        working-directory: core
+        env:
+          MVS_BASE_VERSION: ${{ env.VERSION }}
+        run: |
+          cargo build --release --locked --target "${{ matrix.target }}" -p updater --bin mvs-launcher
+          cp "target/${{ matrix.target }}/release/mvs-launcher.exe" ../desktop/.core/
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ui
@@ -212,7 +226,10 @@ jobs:
           case "${{ matrix.platform }}" in
             windows-*)
               cp "$(one desktop/dist/*Setup*.exe)" "out/${base}-setup.exe"
-              (cd desktop/dist/win-unpacked && 7z a -tzip "../../../out/${base}.zip" . -xr'!mvs-launcher*' > /dev/null) ;;
+              (cd desktop/dist/win-unpacked && 7z a -tzip "../../../out/${base}.zip" . -xr'!mvs-launcher*' > /dev/null)
+              # The installer ships the launcher; the updater payload must not.
+              [ -f desktop/dist/win-unpacked/mvs-launcher.exe ] || { echo "::error::mvs-launcher.exe missing from the app"; exit 1; }
+              if 7z l "out/${base}.zip" | grep -qi 'mvs-launcher'; then echo "::error::mvs-launcher in the updater payload"; exit 1; fi ;;
             linux-*)
               cp "$(one desktop/dist/*.AppImage)" "out/${base}.AppImage"
               cp "$(one desktop/dist/*.deb)" "out/${base}.deb"
