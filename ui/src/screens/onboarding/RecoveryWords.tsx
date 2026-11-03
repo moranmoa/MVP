@@ -1,14 +1,19 @@
-import { useMemo, useState, type FormEvent } from 'react';
+import { useMemo, useRef, useState, type FormEvent } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { useCore } from '../../core';
 import { AlertIcon } from '../../components/icons';
 
-/** Numbered grid of the 12 words. Always LTR, in every language. */
-export function WordGrid({ words }: { words: string[] }) {
+/**
+ * Numbered grid of the 12 words, read down the columns (1–4, 5–8, 9–12) and
+ * always LTR. Until `revealed`, the words are not in the page at all (only
+ * dots), so a stream, a screenshot or a screen reader can't pick them up.
+ */
+export function WordGrid({ words, revealed = true, onReveal }: { words: string[]; revealed?: boolean; onReveal?: () => void }) {
   const intl = useIntl();
   return (
+    <div className="word-grid-wrap">
     <ol
-      className="word-grid words-shown"
+      className={`word-grid words-shown ${revealed ? '' : 'words-hidden'}`}
       dir="ltr"
       aria-label={intl.formatMessage({ id: 'onb.words.gridLabel' })}
       // The words are meant for paper. Copying would leave them in the clipboard,
@@ -22,10 +27,47 @@ export function WordGrid({ words }: { words: string[] }) {
           <span className="word-num" aria-hidden="true">
             {i + 1}
           </span>
-          <span className="word">{w}</span>
+          {revealed ? (
+            <span className="word">{w}</span>
+          ) : (
+            <span className="word word-mask" aria-hidden="true">
+              •••••
+            </span>
+          )}
         </li>
       ))}
     </ol>
+    {!revealed && (
+      <div className="word-reveal">
+        <p className="muted small">
+          <FormattedMessage id="onb.words.hiddenHint" />
+        </p>
+        <button type="button" className="primary" onClick={onReveal}>
+          <FormattedMessage id="onb.words.reveal" />
+        </button>
+      </div>
+    )}
+    </div>
+  );
+}
+
+/**
+ * The words screen: warning, hidden grid, and "I wrote them down", which only
+ * works once the words were shown. Used in onboarding and to show them again
+ * from the reminder (QA-01).
+ */
+export function RecoveryWordsPanel({ words, onDone }: { words: string[]; onDone: () => void }) {
+  const [revealed, setRevealed] = useState(false);
+  return (
+    <>
+      <WordsWarning />
+      <WordGrid words={words} revealed={revealed} onReveal={() => setRevealed(true)} />
+      <div className="actions">
+        <button type="button" className="primary" onClick={onDone} disabled={!revealed}>
+          <FormattedMessage id="onb.words.written" />
+        </button>
+      </div>
+    </>
   );
 }
 
@@ -70,7 +112,8 @@ export function RecoveryCheck({
   const intl = useIntl();
   const positions = useMemo(pickPositions, []);
   const [answers, setAnswers] = useState<Record<number, string>>({});
-  const [wrong, setWrong] = useState(false);
+  const [wrong, setWrong] = useState<number[]>([]);
+  const inputs = useRef<(HTMLInputElement | null)[]>([]);
   const [busy, setBusy] = useState(false);
   const complete = positions.every((p) => (answers[p] ?? '').trim());
 
@@ -78,10 +121,16 @@ export function RecoveryCheck({
     e.preventDefault();
     if (!complete) return;
     setBusy(true);
-    const ok = await core.checkRecoveryWords(answers);
+    // One position per call, so only the wrong fields get marked (B19).
+    const results = await Promise.all(positions.map((p) => core.checkRecoveryWords({ [p]: answers[p] })));
     setBusy(false);
-    if (ok) onChecked();
-    else setWrong(true);
+    const bad = positions.filter((_, i) => !results[i]);
+    if (!bad.length && (await core.checkRecoveryWords(answers))) {
+      onChecked();
+      return;
+    }
+    setWrong(bad);
+    inputs.current[positions.indexOf(bad[0] ?? positions[0])]?.focus();
   };
 
   return (
@@ -100,16 +149,19 @@ export function RecoveryCheck({
               spellCheck={false}
               autoFocus={i === 0}
               value={answers[p] ?? ''}
-              aria-invalid={wrong || undefined}
+              ref={(el) => {
+                inputs.current[i] = el;
+              }}
+              aria-invalid={wrong.includes(p) || undefined}
               onChange={(e) => {
-                setWrong(false);
+                setWrong((w) => w.filter((x) => x !== p));
                 setAnswers({ ...answers, [p]: e.target.value });
               }}
             />
           </label>
         ))}
       </div>
-      {wrong && (
+      {wrong.length > 0 && (
         <p className="error" role="alert">
           <FormattedMessage id="onb.check.wrong" />
         </p>

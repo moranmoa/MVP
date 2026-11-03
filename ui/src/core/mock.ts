@@ -227,11 +227,15 @@ export class MockCore implements CoreApi {
   }
 
   private makeWords(seed: string): string[] {
+    // No repeats, so the demo grid never looks broken (BIP39 itself allows them).
     let h = hashString(seed);
-    return Array.from({ length: 12 }, (_, i) => {
+    const out: string[] = [];
+    for (let i = 0; out.length < 12; i++) {
       h = hash(h + i + 1);
-      return WORDS[h % WORDS.length];
-    });
+      const w = WORDS[h % WORDS.length];
+      if (!out.includes(w)) out.push(w);
+    }
+    return out;
   }
 
   // ---- seeding -------------------------------------------------------------
@@ -502,7 +506,7 @@ export class MockCore implements CoreApi {
     const ok = Object.entries(answers).every(
       ([pos, w]) => this.words[Number(pos) - 1] === w.trim().toLowerCase(),
     );
-    if (ok && this.identity) {
+    if (ok && this.identity && Object.keys(answers).length >= 3) {
       this.identity = { ...this.identity, recoveryChecked: true };
       this.save();
       this.emit('identity.changed', this.identity);

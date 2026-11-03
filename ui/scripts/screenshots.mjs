@@ -66,10 +66,26 @@ const shot = async (p, name) => {
   await p.waitForTimeout(700);
   await shot(p, '05-onboarding-preparing');
   await p.getByRole('heading', { name: 'מילות השחזור שלך' }).waitFor();
-  await shot(p, '06-onboarding-recovery-words');
+  await shot(p, '06-onboarding-recovery-words-hidden');
+  // Hidden words must not be in the page at all, and "I wrote them" waits for the reveal.
+  if ((await p.locator('.word-grid .word:not(.word-mask)').count()) > 0) problems.push('recovery words in the page before reveal');
+  if (!(await p.getByRole('button', { name: 'כתבתי אותן' }).isDisabled())) problems.push('"I wrote them" enabled before reveal');
+  await p.getByRole('button', { name: 'הצגת המילים' }).click();
+  await shot(p, '06b-onboarding-recovery-words-shown');
   const shownWords = await p.locator('.word-grid .word').allTextContents();
   await p.getByRole('button', { name: 'כתבתי אותן' }).click();
   await shot(p, '07-onboarding-check-words');
+  // One right word, two wrong: only the wrong ones are marked (B19), and nothing is checked yet.
+  const asked = (await p.locator('.check-fields label span').allTextContents()).map((s) => Number(s.match(/\d+/)[0]));
+  const fields = p.locator('.check-fields input');
+  await fields.nth(0).fill(shownWords[asked[0] - 1]);
+  await fields.nth(1).fill('wrong');
+  await fields.nth(2).fill('wrong');
+  await p.getByRole('button', { name: 'בדיקה', exact: true }).click();
+  await p.getByRole('alert').waitFor();
+  await shot(p, '07b-onboarding-check-words-wrong');
+  const invalid = await fields.evaluateAll((els) => els.map((e) => e.getAttribute('aria-invalid') === 'true'));
+  if (invalid.join() !== 'false,true,true') problems.push(`check marks the wrong fields: ${invalid.join()}`);
   await p.getByRole('button', { name: 'אעשה את זה אחר כך' }).click();
   await p.getByLabel('שם תצוגה').fill('מורן');
   await shot(p, '08-onboarding-profile');
@@ -266,6 +282,7 @@ const PHONE = { width: 375, height: 812, phone: true };
   await p.getByLabel('שנה').fill('2001');
   await p.getByRole('button', { name: 'המשך' }).click();
   await p.getByRole('heading', { name: 'מילות השחזור שלך' }).waitFor();
+  await p.getByRole('button', { name: 'הצגת המילים' }).click();
   await shot(p, '51-phone-he-recovery-words');
   await p.close();
 }

@@ -59,6 +59,8 @@
   "onb.words.tip": "Write them on paper, in order, and keep it somewhere safe. Don't photograph them or send them to anyone.",
   "onb.words.gridLabel": "12 recovery words, in order",
   "onb.words.written": "I wrote them down",
+  "onb.words.reveal": "Show the words",
+  "onb.words.hiddenHint": "The words are hidden so they don't show up on a stream or a screenshot. Make sure nobody can see your screen.",
 
   "onb.check.title": "Quick check",
   "onb.check.hint": "To make sure you saved them correctly, enter these words.",

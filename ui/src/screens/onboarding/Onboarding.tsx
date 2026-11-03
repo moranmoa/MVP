@@ -9,7 +9,7 @@ import { safeImageSrc } from '../../core/sanitize';
 import { Avatar, Code } from '../../components/common';
 import { CheckIcon } from '../../components/icons';
 import { LOCALES } from '../../i18n';
-import { RecoveryCheck, WordGrid, WordsWarning } from './RecoveryWords';
+import { RecoveryCheck, RecoveryWordsPanel } from './RecoveryWords';
 import { RestoreScreen } from './Restore';
 
 type Step = 'language' | 'agreement' | 'country' | 'dob' | 'blocked' | 'preparing' | 'words' | 'check' | 'profile' | 'restore';
@@ -386,13 +386,7 @@ function WordsStep({ words, onNext }: { words: string[]; onNext: () => void }) {
       <h1>
         <FormattedMessage id="onb.words.title" />
       </h1>
-      <WordsWarning />
-      <WordGrid words={words} />
-      <div className="actions">
-        <button type="button" className="primary" onClick={onNext}>
-          <FormattedMessage id="onb.words.written" />
-        </button>
-      </div>
+      <RecoveryWordsPanel words={words} onDone={onNext} />
     </>
   );
 }

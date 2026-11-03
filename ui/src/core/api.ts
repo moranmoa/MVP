@@ -29,7 +29,12 @@ export interface CoreCommands {
   getIdentity(): Promise<Identity | null>;
   /** Emits `identity.progress` while the account is prepared. */
   createIdentity(input: NewIdentityInput): Promise<{ identity: Identity; words: string[] }>;
-  /** Positions are 1-based. Resolves true when all answers match. */
+  /**
+   * Positions are 1-based. Resolves true when all answers match. The account
+   * is marked checked only when at least 3 positions are given and all match;
+   * fewer positions just answer the question (the UI asks one word at a time
+   * to mark only the wrong fields).
+   */
   checkRecoveryWords(answers: Record<number, string>): Promise<boolean>;
   /** Returns the words again, for the "show my words" path in settings. */
   getRecoveryWords(): Promise<string[]>;
