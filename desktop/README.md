@@ -1,8 +1,9 @@
 # desktop – Electron shell (B1)
 
 Decision 7: Electron (see spikes/RESULTS.md). This folder is the desktop app
-around the `ui/` build. B1-1 (this step) shows the UI with the mock core; the
-core sidecar and the IPC bridge come in B1-2, packaging in B1-3.
+around the `ui/` build. B1-1: window and navigation security. B1-2: the core
+running as a sidecar process (`mvs-core`, core/api) and the one IPC bridge.
+B1-3: packaging (fuses, installers, `mvs://`).
 
 Node and Electron are not needed on the host. Everything runs in Docker.
 
@@ -20,7 +21,9 @@ Unit tests, then the real app under Xvfb with the security checks:
 docker compose run --rm test
 ```
 
-On a machine with Node: `npm ci && npm start` (set `MVS_DEMO=1` for the demo data).
+On a machine with Node: `npm ci && npm start`. `MVS_CORE_PATH=<absolute path to mvs-core>`
+runs the real core (otherwise core commands answer `core-unavailable`);
+`MVS_DEMO=1` opens the mock demo.
 
 ## Security settings and where they are tested
 
@@ -38,6 +41,23 @@ On a machine with Node: `npm ci && npm start` (set `MVS_DEMO=1` for the demo dat
 | Crash reporter on with uploads off | `crashReporter.start({ uploadToServer: false })` | – |
 | No default menu and `devTools: false` in packaged builds (and no `devtools://` requests); `MVS_UI_DIR` and `MVS_DEMO` only in a checkout; the link dialog shows the parsed URL (punycode) | `main.js` | – (B1-3, packaged build) |
 
-The microphone permission is decided with voice (phase 2). There is no
-preload yet; B1-2 adds one narrow bridge (`invoke` + `onEvent`) with an
-allow-list of core commands checked in the main process.
+## Core bridge (B1-2)
+
+| Rule | Where | Test |
+| --- | --- | --- |
+| The page gets only `window.mvs.invoke(cmd, args)` and `window.mvs.onEvent(cb)`, never `ipcRenderer` | `src/preload.js` | e2e |
+| Main answers only our top frame on `app://mvs` (`event.senderFrame`) | `main.js` `serveCoreIpc` | e2e (indirect) |
+| Allow-list = `CoreCommands` in ui/src/core/api.ts, same parameter names; core-only commands (`grantRole`, `revokeRole`, `syncNow`) unreachable; prototype names refused | `src/commands.js` | unit (parses api.ts) + e2e |
+| Positional args mapped to named args; extra args, non-arrays and cycles refused; requests over 1 MiB never sent | `toRequest` | unit + e2e |
+| `mvs-core` spawned by absolute path, `shell: false`, minimal env (no `NODE_OPTIONS`, `LD_PRELOAD`, ...), stdio only, `--data-dir <userData>/core` | `src/sidecar.js` | unit (spawn spy, env seen by the fake core) |
+| stdout never logged (it carries the words); stderr logged, lines truncated | `sidecar.js` | unit |
+| A line from the core over 16 MiB kills and restarts it; a crash fails pending requests (`core-restarted`) and restarts with backoff | `sidecar.js` | unit |
+| Timeout per request (30 s; 120 s for key generation and OS auth) answers `timeout`, for the UI's busy state | `sidecar.js` | unit |
+| Errors reach the page as `{ code, positions? }` only | `sanitizeError` | unit |
+| Single instance; packaged builds quit on `--inspect`, `--remote-debugging-*` or `--js-flags` and have `devTools: false` | `main.js` | – (packaged, B1-3) |
+
+Tests use `test/fake-core.js`, which speaks the sidecar's line protocol
+(core/api README) and misbehaves on cue. The keychain stays in the core
+process; the shell never touches keys (no `safeStorage`).
+
+The microphone permission is decided with voice (phase 2).
