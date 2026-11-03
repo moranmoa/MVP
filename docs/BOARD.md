@@ -42,6 +42,7 @@ Last updated: 2026-11-03, refresh 2. `main` has PRs #1–#4, #6, #7, #10, #12–
 | [#17](https://github.com/moranmoa/MVP/pull/17) | release pipeline (`release.yml`, draft pre-release, offline signing) + hardened relay ops (Caddy) | devops | tech-lead, sec-lead (relay) | in review | tech-lead APPROVE (`02b311c`); sec-lead verdict, then merge. Relay follow-ups → T4a |
 | [#18](https://github.com/moranmoa/MVP/pull/18) | **T1** `core/api`: core API, first flows end to end (draft, stacked on #11) | dev-identity | tech-lead, sec-lead | in progress | draft; rebase after #11 merges; messages wait on #9 |
 | [#22](https://github.com/moranmoa/MVP/pull/22) | UX specs B17 + B19 (`docs/ux/specs/`) | ux | product-lead | in progress | B17 spec approved; B19 sent back (security fix, needs sec-lead) |
+| [#27](https://github.com/moranmoa/MVP/pull/27) | QA re-test of `main` (`0aa9b45`): QA-17..19 new, QA-03 + QA-13 verified fixed | qa | product-lead | in review | review |
 | [#23](https://github.com/moranmoa/MVP/pull/23) | board refresh 1 | pm | product-lead | in review | **ready to merge**: product-lead APPROVE |
 
 Merged since the first board: #6 (PO review + backlog), #7 (records hardening), #10 (UI security), #12 (UX review), #13 (QA plan), #14 (board + team), #16 (business plan 1).
@@ -73,7 +74,7 @@ Merged since the first board: #6 (PO review + backlog), #7 (records hardening), 
 | F4 | Sync: `make_room` scans all 4,096 buckets per new peer when full; switch to LRU if the limit grows | dev-sync | todo | – | #5 | S | – |
 | GAP-4 | Answer sync only for members: peer-ID ↔ identity binding, secret-derived topic names | dev-sync | todo | – | B4 (member set), B4-sync | M | M2 |
 | GAP-6 | Clients: Kademlia client mode, filter private addresses, `/mvs/kad/1.0.0` (relay side in T4a; ship together) | dev-sync | todo | – | B4-sync | S | M2 |
-| B23 | Name sanitising in core: bidi controls, invisible chars (QA-13, QA-06) | core-5 | todo | – | B4 | S | M2 |
+| B23 | Name sanitising in core: bidi controls, invisible chars (QA-06; QA-13 fixed in the UI by #10, core-side check still needed) | core-5 | todo | – | B4 | S | M2 |
 | T1 | **Integration crate `core/api`** — the single glue crate (no `core/node`; confirmed by tech-lead): wires sync → records → authority → groupkeys, verifies peer input (GAP-1 with B4-sync) and exposes the `CoreApi` facade matching `ui/src/core/api.ts` commands, events and error codes. First PR: identity, server create, roles, kick, age gate, SQLite, conformance fixtures; `Network` and `GroupCipher` are stand-in adapters until #5 and #9 land; messages answer `not-implemented` | dev-identity (lead), dev-crypto (crypto module, GAP-5) | in progress | #18 (draft) | B2, R2, B3, B4 (initial kinds) | L | M1 |
 | GAP-5 | Wire encryption into T1 in `core/api/src/crypto`: `Kind::KeyRotation`, `may_rotate`, feed `set_voided` from authority | dev-crypto | todo | – | T1 skeleton, B4 (`KeyRotation`) | M | M1 |
 
@@ -98,14 +99,14 @@ Merged since the first board: #6 (PO review + backlog), #7 (records hardening), 
 
 | ID | Title | Owner | Status | PR | Depends on | Size | MS |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| B6 | Real send states: pending/sent/delivered (receipt ack ש-11), failed + retry; composer 16 KiB cap and no text loss (QA-10) | dev-sync (ack) + dev-ui (composer) | todo | – | B4-sync, T1; QA-10 part can start now | S | M2 |
+| B6 | Real send states: pending/sent/delivered (receipt ack ש-11), failed + retry; composer 16 KiB cap and no text loss (QA-10); **QA-17** (Medium): one message limit for composer, display and core (UI sanitizer `BODY_MAX` = 4,000 chars silently cuts messages records accepts up to 16 KiB) | dev-sync (ack) + dev-ui (composer) | todo | – | B4-sync, T1; QA-10 part can start now | S | M2 |
 | B7 | Age end-to-end: < 16 blocked, 120-year check (QA-04), signed age claims, 18+ channels hidden (ש-12), DOB correction rules, UX-15, UX-23 | core-5 (claims) + dev-ui | todo | – | B4 | M | M2 |
 | B11a | Leave server (owner blocked, ש-19) | dev-ui | todo | – | B4 for core | S | M3 |
 | B11b | Edit / close server (ש-22, ש-23) | dev-ui | todo | – | B4 | M | M3 |
 | B11c | Channels: create, rename, delete (ש-20), 18+ flag | dev-ui | todo | – | B4 | M | M3 |
 | B11d | Revoke invite + new link (ש-21) | dev-ui | todo | – | B4 | S | M3 |
-| B11e | Edit profile: name, avatar, banner, bio (UX-02, UX-16, QA-02, QA-03) | dev-ui | todo | – | – (mock first) | S | M2 |
-| B12 | Display bugs + 200 % / 24 px check (U1, U2, U4–U6, UX-05, UX-17, QA-12) | dev-ui | todo | – | – | M | M3 |
+| B11e | Edit profile: name, avatar, banner, bio (UX-02, UX-16, QA-02; QA-03 fixed by #10) | dev-ui | todo | – | – (mock first) | S | M2 |
+| B12 | Display bugs + 200 % / 24 px check (U1, U2, U4–U6, UX-05, UX-17, QA-12); **QA-18 (High)**: at 375 px the recovery-word check step is 516 px wide and "בדיקה" is off-screen (same root as UX-05; do it with B19); **QA-19** (Low): reply reference tap target ~19 px, goal ≥ 44 px | dev-ui | todo | – | – | M | M3 |
 | B13 | Wording, product name MVS (`mvs://`, `app.name`, `document.title`), spec updates (ש-1, ש-2, ש-5, ש-8, ש-9), UX-39, UX-40 | product-lead (spec + string table), dev-ui (i18n files) | todo | – | – | S | M2 |
 | B17 | Mixed-direction text in messages and strings (UX-01 blocker, UX-03, UX-18), built from `docs/ux/specs/B17-mixed-direction.md` (spec approved). Includes **UX-19** on the same message-head line: identity code next to the name, 0.75rem, `--text-muted`, `aria-hidden` on the code, `aria-labelledby` on the article | dev-ui | todo (ready to start) | #22 (spec) | – | S–M | M1 |
 | B18 | P2P states in UI: own new server, offline server, background join (UX-07..09, QA-08) | dev-ui + dev-sync (API contract) | todo | – | T1 contract for background join | M | M2 |
