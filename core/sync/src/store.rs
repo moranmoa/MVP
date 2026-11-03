@@ -15,7 +15,9 @@ use std::path::Path;
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
-use crate::{log_name, log_of, Authorizer, Record, RecordId, Scope, Verdict};
+use records::{Kind, ServerId, Stub};
+
+use crate::{log_name, log_of, Authorizer, Record, RecordId, Scope, StubGate, StubVerdict, Verdict};
 
 /// Most `have` ids looked at per [`Store::missing_since`] call; the rest are
 /// ignored. [`Store::have_markers`] never produces more.
@@ -33,8 +35,12 @@ pub enum Append {
     MissingDeps(Vec<RecordId>),
     /// Not stored, and never will be.
     Invalid(IngestError),
-    /// Not stored: the [`Authorizer`] refused it.
+    /// Not stored: the [`Authorizer`] (or, for a stub, the [`StubGate`])
+    /// refused it.
     Unauthorized,
+    /// A stub not stored yet: nothing held replaced its record (B6-p). Try
+    /// again once more of its channel arrives, or get the full record.
+    StubPending,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,11 +61,83 @@ impl std::fmt::Display for IngestError {
     }
 }
 
-/// A stored record as served to peers: its id and canonical bytes.
+/// A stored record as served to peers: its id and canonical bytes, which
+/// are a pruned [`Stub`]'s when `stub` is set (B6-p).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stored {
     pub id: RecordId,
     pub bytes: Vec<u8>,
+    pub stub: bool,
+}
+
+/// What the store holds for an id: the full record, or its pruned stub.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Held {
+    Full(Record),
+    Stub(Stub),
+}
+
+impl Held {
+    pub fn id(&self) -> RecordId {
+        match self {
+            Held::Full(r) => r.id(),
+            Held::Stub(s) => s.id(),
+        }
+    }
+
+    pub fn kind(&self) -> Kind {
+        match self {
+            Held::Full(r) => r.kind(),
+            Held::Stub(s) => s.kind(),
+        }
+    }
+
+    fn decode(bytes: &[u8], stub: bool) -> Option<Held> {
+        if stub {
+            Stub::decode(bytes).ok().map(Held::Stub)
+        } else {
+            Record::decode(bytes).ok().map(Held::Full)
+        }
+    }
+}
+
+/// Read access to one channel log and its server's control log, for a
+/// [`StubGate`] (the integration layer builds authority's `ChannelGraph` on
+/// it).
+pub struct ChannelLog<'a> {
+    conn: &'a Connection,
+    log: String,
+    server: ServerId,
+}
+
+impl ChannelLog<'_> {
+    /// What is held for `id`, if it is in this log.
+    pub fn entry(&self, id: &RecordId) -> rusqlite::Result<Option<Held>> {
+        let row: Option<(Vec<u8>, bool)> = self
+            .conn
+            .prepare_cached("SELECT data, stub FROM records WHERE id = ?1 AND log = ?2")?
+            .query_row(params![&id.as_bytes()[..], self.log], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        Ok(row.and_then(|(bytes, stub)| Held::decode(&bytes, stub)))
+    }
+
+    /// The held records that list `id` as a dep.
+    pub fn children(&self, id: &RecordId) -> rusqlite::Result<Vec<Held>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT r.data, r.stub FROM deps d JOIN records r ON r.id = d.child WHERE d.parent = ?1 ORDER BY r.seq",
+        )?;
+        let rows = stmt.query_map([&id.as_bytes()[..]], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, bool>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (bytes, stub) = row?;
+            out.extend(Held::decode(&bytes, stub));
+        }
+        Ok(out)
+    }
+
+    pub fn control(&self) -> ControlLog<'_> {
+        ControlLog { conn: self.conn, log: log_name(self.server, Scope::Control) }
+    }
 }
 
 pub struct Store {
@@ -124,12 +202,14 @@ impl Store {
     fn init(conn: Connection) -> rusqlite::Result<Self> {
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
+             PRAGMA secure_delete = ON;
              PRAGMA synchronous = NORMAL;
              CREATE TABLE IF NOT EXISTS records (
                  seq  INTEGER PRIMARY KEY AUTOINCREMENT,
                  id   BLOB NOT NULL UNIQUE,
                  log  TEXT NOT NULL,
-                 data BLOB NOT NULL
+                 data BLOB NOT NULL,
+                 stub INTEGER NOT NULL DEFAULT 0
              );
              CREATE INDEX IF NOT EXISTS records_log ON records (log, seq);
              CREATE TABLE IF NOT EXISTS deps (
@@ -143,6 +223,13 @@ impl Store {
                  PRIMARY KEY (log, id)
              ) WITHOUT ROWID;",
         )?;
+        // Stores made before stubs (B6-p) lack the column.
+        let has_stub: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('records') WHERE name = 'stub'")?
+            .exists([])?;
+        if !has_stub {
+            conn.execute_batch("ALTER TABLE records ADD COLUMN stub INTEGER NOT NULL DEFAULT 0")?;
+        }
         Ok(Self { conn })
     }
 
@@ -195,9 +282,100 @@ impl Store {
         self.conn.query_row("SELECT data FROM records WHERE id = ?1", [&id.as_bytes()[..]], |r| r.get(0)).optional()
     }
 
-    /// A stored record, decoded (and so re-verified).
+    /// A stored full record, decoded (and so re-verified). None for a stub.
     pub fn get_record(&self, id: &RecordId) -> rusqlite::Result<Option<Record>> {
         Ok(self.get(id)?.and_then(|bytes| Record::decode(&bytes).ok()))
+    }
+
+    /// What is held for `id`: the full record or its stub (for authority's
+    /// `ChannelGraph::entry`).
+    pub fn entry(&self, id: &RecordId) -> rusqlite::Result<Option<Held>> {
+        let row: Option<(Vec<u8>, bool)> = self
+            .conn
+            .prepare_cached("SELECT data, stub FROM records WHERE id = ?1")?
+            .query_row([&id.as_bytes()[..]], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        Ok(row.and_then(|(bytes, stub)| Held::decode(&bytes, stub)))
+    }
+
+    /// Stores a peer's stub (B6-p) if its context is present and `gate`
+    /// accepts it (something held replaced its record). Anything already
+    /// held for its id, full record or stub, is kept: a peer's stub never
+    /// replaces a full record here; only [`Store::prune`] does that.
+    pub fn append_stub(&mut self, stub: &Stub, gate: &dyn StubGate) -> rusqlite::Result<Append> {
+        let tx = self.conn.transaction()?;
+        let result = append_stub_in(&tx, stub, gate)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// Stores `record` together with pending stubs it depends on (B6-p): a
+    /// delete or edit always depends on the message it replaces, so a
+    /// newcomer that could only get the stub (everyone else pruned) would
+    /// otherwise wait forever: the stub waits for the delete, the delete for
+    /// the stub. In one transaction: the stubs go in, then the record (with
+    /// the usual checks), then `gate` must accept every stub with the record
+    /// held. Anything less, and nothing is stored.
+    pub fn append_with_stubs(
+        &mut self,
+        record: &Record,
+        stubs: &[Stub],
+        auth: &dyn Authorizer,
+        gate: &dyn StubGate,
+    ) -> rusqlite::Result<Append> {
+        let tx = self.conn.transaction()?;
+        let log = log_of(record);
+        let mut added = Vec::new();
+        for stub in stubs {
+            let held = tx.prepare_cached("SELECT 1 FROM records WHERE id = ?1")?.exists([&stub.id().as_bytes()[..]])?;
+            if held || log_name(stub.server(), stub.scope()) != log {
+                continue;
+            }
+            match check_context(&tx, &log, stub.server(), stub.deps(), stub.auth_deps())? {
+                Ok(missing) if missing.is_empty() => {}
+                _ => return Ok(Append::StubPending),
+            }
+            insert(&tx, &stub.id(), &log, &stub.encode(), true, stub.deps())?;
+            added.push(stub);
+        }
+        let result = append_in(&tx, record, auth)?;
+        if result != Append::Added {
+            return Ok(result);
+        }
+        for stub in added {
+            let view = ChannelLog { conn: &tx, log: log.clone(), server: stub.server() };
+            if gate.check(stub, &view) != StubVerdict::Accept {
+                return Ok(Append::StubPending);
+            }
+        }
+        tx.commit()?;
+        Ok(Append::Added)
+    }
+
+    /// Replaces a held full record by its stub, if it can be pruned and
+    /// `gate` accepts the stub (a held delete or newer edit replaced it).
+    /// True if pruned. Only after this do we serve the stub.
+    pub fn prune(&mut self, id: &RecordId, gate: &dyn StubGate) -> rusqlite::Result<bool> {
+        let tx = self.conn.transaction()?;
+        let row: Option<(Vec<u8>, bool, String)> = tx
+            .prepare_cached("SELECT data, stub, log FROM records WHERE id = ?1")?
+            .query_row([&id.as_bytes()[..]], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .optional()?;
+        let Some((bytes, false, log)) = row else { return Ok(false) };
+        let Some(stub) = Record::decode(&bytes).ok().and_then(|r| r.prune()) else { return Ok(false) };
+        let view = ChannelLog { conn: &tx, log, server: stub.server() };
+        if gate.check(&stub, &view) != StubVerdict::Accept {
+            return Ok(false);
+        }
+        tx.prepare_cached("UPDATE records SET data = ?1, stub = 1 WHERE id = ?2")?
+            .execute(params![stub.encode(), &id.as_bytes()[..]])?;
+        tx.commit()?;
+        // B6-p: the old page images (with the body) leave the WAL now, not
+        // at some later checkpoint; secure_delete zeroed them in the db.
+        // A reader holding the WAL can keep it from truncating: best effort,
+        // and the next prune tries again.
+        let _ = self.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+        Ok(true)
     }
 
     /// Read access to a server's stored control log (for a [`crate::ReadGate`]).
@@ -263,7 +441,7 @@ impl Store {
                  UNION
                  SELECT d.parent FROM deps d JOIN known k ON d.child = k.id
              )
-             SELECT id, data FROM records
+             SELECT id, data, stub FROM records
              WHERE log = ?1 AND id NOT IN known
              ORDER BY seq",
         )?;
@@ -279,7 +457,7 @@ impl Store {
                 break;
             }
             bytes += data.len();
-            out.push(Stored { id: id_of(row.get(0)?), bytes: data });
+            out.push(Stored { id: id_of(row.get(0)?), bytes: data, stub: row.get(2)? });
         }
         Ok((out, more))
     }
@@ -304,14 +482,25 @@ impl Store {
 }
 
 fn check_in(conn: &Connection, record: &Record) -> rusqlite::Result<Result<Vec<RecordId>, IngestError>> {
+    check_context(conn, &log_of(record), record.server(), record.deps(), record.auth_deps())
+}
+
+/// The context checks of [`check_in`], for a record or a stub (a dep held
+/// as a stub counts as present).
+fn check_context(
+    conn: &Connection,
+    log: &str,
+    server: ServerId,
+    deps: &[RecordId],
+    auth_deps: &[RecordId],
+) -> rusqlite::Result<Result<Vec<RecordId>, IngestError>> {
     let mut stmt = conn.prepare_cached("SELECT log FROM records WHERE id = ?1")?;
     let mut log_of_id =
         |id: &RecordId| -> rusqlite::Result<Option<String>> { stmt.query_row([&id.as_bytes()[..]], |r| r.get(0)).optional() };
-    let log = log_of(record);
     // A record id covers the record's server and scope, so it belongs to
     // exactly one log: a dep found elsewhere is a definite cross-log dep.
     let mut missing = Vec::new();
-    for dep in record.deps() {
+    for dep in deps {
         match log_of_id(dep)? {
             Some(dep_log) if dep_log == log => {}
             Some(_) => return Ok(Err(IngestError::DepInOtherLog)),
@@ -320,8 +509,8 @@ fn check_in(conn: &Connection, record: &Record) -> rusqlite::Result<Result<Vec<R
     }
     // Channel records name the control-log heads their author relied on for
     // permission; those must be there before anyone can judge the record.
-    let control = log_name(record.server(), Scope::Control);
-    for dep in record.auth_deps() {
+    let control = log_name(server, Scope::Control);
+    for dep in auth_deps {
         match log_of_id(dep)? {
             Some(dep_log) if dep_log == control => {}
             Some(_) => return Ok(Err(IngestError::AuthDepNotInControlLog)),
@@ -355,20 +544,43 @@ fn append_in(tx: &rusqlite::Transaction, record: &Record, auth: &dyn Authorizer)
             return Ok(Append::Unauthorized);
         }
     }
-    let log = log_of(record);
-    tx.prepare_cached("INSERT INTO records (id, log, data) VALUES (?1, ?2, ?3)")?.execute(params![
-        &id.as_bytes()[..],
-        log,
-        record.encode()
-    ])?;
+    insert(tx, &id, &log_of(record), &record.encode(), false, record.deps())?;
+    Ok(Append::Added)
+}
+
+fn append_stub_in(tx: &rusqlite::Transaction, stub: &Stub, gate: &dyn StubGate) -> rusqlite::Result<Append> {
+    let id = stub.id();
+    if tx.prepare_cached("SELECT 1 FROM records WHERE id = ?1")?.exists([&id.as_bytes()[..]])? {
+        return Ok(Append::Known);
+    }
+    let log = log_name(stub.server(), stub.scope());
+    match check_context(tx, &log, stub.server(), stub.deps(), stub.auth_deps())? {
+        Err(err) => return Ok(Append::Invalid(err)),
+        Ok(missing) if !missing.is_empty() => return Ok(Append::MissingDeps(missing)),
+        Ok(_) => {}
+    }
+    let view = ChannelLog { conn: tx, log: log.clone(), server: stub.server() };
+    match gate.check(stub, &view) {
+        StubVerdict::Accept => {}
+        StubVerdict::Pending => return Ok(Append::StubPending),
+        StubVerdict::Reject => return Ok(Append::Unauthorized),
+    }
+    insert(tx, &id, &log, &stub.encode(), true, stub.deps())?;
+    Ok(Append::Added)
+}
+
+/// Adds a row, its deps edges, and updates the log's heads.
+fn insert(tx: &rusqlite::Transaction, id: &RecordId, log: &str, data: &[u8], stub: bool, deps: &[RecordId]) -> rusqlite::Result<()> {
+    tx.prepare_cached("INSERT INTO records (id, log, data, stub) VALUES (?1, ?2, ?3, ?4)")?
+        .execute(params![&id.as_bytes()[..], log, data, stub])?;
     let mut add_dep = tx.prepare_cached("INSERT OR IGNORE INTO deps (child, parent) VALUES (?1, ?2)")?;
     let mut drop_head = tx.prepare_cached("DELETE FROM heads WHERE log = ?1 AND id = ?2")?;
-    for dep in record.deps() {
+    for dep in deps {
         add_dep.execute([&id.as_bytes()[..], &dep.as_bytes()[..]])?;
         drop_head.execute(params![log, &dep.as_bytes()[..]])?;
     }
     tx.prepare_cached("INSERT INTO heads (log, id) VALUES (?1, ?2)")?.execute(params![log, &id.as_bytes()[..]])?;
-    Ok(Append::Added)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -696,4 +908,78 @@ mod tests {
         assert_eq!(a.heads(&chan()).unwrap(), b.heads(&chan()).unwrap());
     }
 
+    use crate::testutil::{delete, DeletedOnly};
+
+    /// Rule 2: we prune (and so serve a stub) only once a held delete
+    /// replaced the record.
+    #[test]
+    fn a_record_is_pruned_only_once_its_delete_is_held() {
+        let mut store = Store::in_memory().unwrap();
+        let m = message(0, &[], 10);
+        store.append(&m, &AcceptAll).unwrap();
+        assert!(!store.prune(&m.id(), &DeletedOnly).unwrap());
+        assert_eq!(store.entry(&m.id()).unwrap(), Some(Held::Full(m.clone())));
+
+        let d = delete(1, &m);
+        assert_eq!(store.append(&d, &AcceptAll).unwrap(), Append::Added);
+        assert!(store.prune(&m.id(), &DeletedOnly).unwrap());
+        let stub = m.prune().unwrap();
+        assert_eq!(store.entry(&m.id()).unwrap(), Some(Held::Stub(stub.clone())));
+        assert_eq!(store.get_record(&m.id()).unwrap(), None);
+        // Served as a stub, tagged, in order; the delete still follows it.
+        let (page, _) = store.missing_since(&chan(), &[], 100, 1 << 20).unwrap();
+        assert_eq!(page[0], Stored { id: m.id(), bytes: stub.encode(), stub: true });
+        assert!(!page[1].stub);
+        // A delete can't be pruned, nor a stub pruned again.
+        assert!(!store.prune(&d.id(), &DeletedOnly).unwrap());
+        assert!(!store.prune(&m.id(), &DeletedOnly).unwrap());
+        // The id stays the same, so peers' state hashes still match.
+        let mut full = Store::in_memory().unwrap();
+        full.append_all([&m, &d], &AcceptAll).unwrap();
+        assert_eq!(store.state_hash(&chan()).unwrap(), full.state_hash(&chan()).unwrap());
+    }
+
+    /// Rule 3: a peer's stub never replaces a full record we hold.
+    #[test]
+    fn a_peer_stub_never_replaces_a_held_record() {
+        let mut store = Store::in_memory().unwrap();
+        let m = message(0, &[], 10);
+        let d = delete(1, &m);
+        store.append_all([&m, &d], &AcceptAll).unwrap();
+        // Even though the gate would accept it (the delete is held).
+        assert_eq!(store.append_stub(&m.prune().unwrap(), &DeletedOnly).unwrap(), Append::Known);
+        assert_eq!(store.entry(&m.id()).unwrap(), Some(Held::Full(m)));
+    }
+
+    /// A stub nothing replaced is pending, not stored; when everyone else
+    /// pruned, the stub and the delete arrive in that order and are stored
+    /// together.
+    #[test]
+    fn a_stub_that_arrived_before_its_delete_ends_up_accepted() {
+        let m = message(0, &[], 10);
+        let d = delete(1, &m);
+        let stub = m.prune().unwrap();
+        let mut store = Store::in_memory().unwrap();
+        assert_eq!(store.append_stub(&stub, &DeletedOnly).unwrap(), Append::StubPending);
+        assert!(!store.has(&m.id()).unwrap());
+        // The delete alone waits for its target.
+        assert_eq!(store.append(&d, &AcceptAll).unwrap(), Append::MissingDeps(vec![m.id()]));
+        // With the pending stub: both go in.
+        assert_eq!(store.append_with_stubs(&d, std::slice::from_ref(&stub), &AcceptAll, &DeletedOnly).unwrap(), Append::Added);
+        assert_eq!(store.entry(&m.id()).unwrap(), Some(Held::Stub(stub)));
+        assert!(store.has(&d.id()).unwrap());
+        assert_eq!(store.heads(&chan()).unwrap(), vec![d.id()]);
+    }
+
+    /// A record that depends on a stub but doesn't replace it: nothing is
+    /// stored (the stub still needs its delete, or the full record).
+    #[test]
+    fn a_stub_is_not_taken_in_with_a_record_that_does_not_replace_it() {
+        let m = message(0, &[], 10);
+        let reply = message(1, &[m.id()], 0);
+        let mut store = Store::in_memory().unwrap();
+        let result = store.append_with_stubs(&reply, &[m.prune().unwrap()], &AcceptAll, &DeletedOnly).unwrap();
+        assert_eq!(result, Append::StubPending);
+        assert!(!store.has(&m.id()).unwrap() && !store.has(&reply.id()).unwrap());
+    }
 }

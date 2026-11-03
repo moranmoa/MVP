@@ -122,8 +122,9 @@ pub struct Resolver {
     writes: HashMap<Actor, Vec<Write>>,
     genesis: Option<RecordId>,
     excluded: HashSet<RecordId>,
-    kick_targets: HashSet<Actor>,
-    revoke_targets: HashSet<Actor>,
+    /// Kicks and revokes accepted in any pass, by target.
+    kick_targets: HashMap<Actor, Vec<RecordId>>,
+    revoke_targets: HashMap<Actor, Vec<RecordId>>,
     revoked_invites: HashSet<RecordId>,
     /// Invites whose revoke-invite may have been accepted in an earlier
     /// pass only; a join through one re-resolves. Resolver-only: a full
@@ -172,8 +173,8 @@ impl Resolver {
             writes: HashMap::new(),
             genesis: None,
             excluded: HashSet::new(),
-            kick_targets: HashSet::new(),
-            revoke_targets: HashSet::new(),
+            kick_targets: HashMap::new(),
+            revoke_targets: HashMap::new(),
             revoked_invites: HashSet::new(),
             uncertain_invites: HashSet::new(),
             maybe_excluded: HashSet::new(),
@@ -335,7 +336,6 @@ impl Resolver {
         match self.unsettled.get(&actor) {
             None => false,
             Some(None) => true,
-            // TODO(Unban): an unban ends the freeze; bound it there too.
             Some(Some(kick)) => self.pos[kick] >= at,
         }
     }
@@ -345,16 +345,17 @@ impl Resolver {
         let author = self.known[&id].author();
         let Some(action) = self.actions[&id].clone() else {
             // Never accepted; it can still be voided like any record.
-            if self.kick_targets.contains(&author) {
+            if self.removed_concurrently(&self.kick_targets, author, id) {
                 self.excluded.insert(id);
             }
             return Ok(());
         };
-        // An accepted removal of the author, or revoke of a join's invite,
-        // in any pass voids this record:
+        // An accepted removal of the author that this record doesn't descend
+        // from, or a revoke of a join's invite, in any pass voids this record:
         // it is new, so it can't be an ancestor of anything already here.
-        let voided = self.kick_targets.contains(&author)
-            || (action.is_privileged() && self.revoke_targets.contains(&author))
+        let voided = self.removed_concurrently(&self.kick_targets, author, id)
+            || (action.is_privileged()
+                && self.removed_concurrently(&self.revoke_targets, author, id))
             || matches!(&action, Action::Join { invite }
                 if self.known[&id].deps().contains(invite) && self.invite_is_dead(*invite));
         let allowed = permitted(&self.at(at), &self.known[&id], &action);
@@ -381,6 +382,20 @@ impl Resolver {
             }
             Action::Invite { .. } | Action::RevokeInvite { .. } => {
                 return self.apply_invite_record(id, at, &action, voided, allowed);
+            }
+            Action::AgeClaim { .. } => {
+                // Changes no roles; whether it counts depends on the author's
+                // membership, which must be the same in every pass.
+                if self.owner_unsettled || self.is_unsettled(author, at) {
+                    return Err(Fallback::Other);
+                }
+                if voided {
+                    self.excluded.insert(id);
+                } else if allowed {
+                    self.state.accepted.insert(id);
+                }
+                self.refresh_adult(author);
+                return Ok(());
             }
             Action::ChannelCreate { channel, adult, name } => {
                 // Only the owner creates channels, and the first create of a
@@ -433,7 +448,8 @@ impl Resolver {
             }
             Action::Grant { target, .. }
             | Action::Revoke { target, .. }
-            | Action::Kick { target, .. } => target,
+            | Action::Kick { target, .. }
+            | Action::Unban { target } => target,
         };
 
         // From here on the record is judged the same way in every pass.
@@ -466,11 +482,8 @@ impl Resolver {
             if voids.iter().any(|v| !self.excluded.contains(v)) {
                 return Err(Fallback::Voids);
             }
-            if kick {
-                self.kick_targets.insert(target);
-            } else {
-                self.revoke_targets.insert(target);
-            }
+            let targets = if kick { &mut self.kick_targets } else { &mut self.revoke_targets };
+            targets.entry(target).or_default().push(id);
         }
         self.accept_write(id, &action);
         if let Action::Join { invite } = action {
@@ -579,6 +592,26 @@ impl Resolver {
         Ok(())
     }
 
+    /// Recomputes whether `actor` counts as 18+: their latest accepted age
+    /// claim in linear order.
+    fn refresh_adult(&mut self, actor: Actor) {
+        let latest = self.touch.get(&actor).into_iter().flatten().rev().find_map(|id| {
+            match self.actions[id] {
+                Some(Action::AgeClaim { adult })
+                    if self.known[id].author() == actor && self.state.accepted.contains(id) =>
+                {
+                    Some(adult)
+                }
+                _ => None,
+            }
+        });
+        if latest == Some(true) {
+            self.state.adults.insert(actor);
+        } else {
+            self.state.adults.remove(&actor);
+        }
+    }
+
     /// Recomputes an invite's entry in the state from its accepted joins and
     /// revokes.
     fn refresh_invite(&mut self, invite: RecordId) {
@@ -647,14 +680,14 @@ impl Resolver {
                         self.state.accepted.remove(&id);
                     }
                 }
-                Action::Grant { target, .. } => {
+                Action::Grant { target, .. } | Action::Unban { target } => {
                     if now {
                         self.accept_write(id, &action);
                     } else {
                         self.state.accepted.remove(&id);
                         self.writes
                             .get_mut(&target)
-                            .expect("accepted grant")
+                            .expect("accepted write")
                             .retain(|w| w.record != id);
                     }
                     dirty.insert(target);
@@ -668,6 +701,15 @@ impl Resolver {
                 // Only the owner creates channels, and the owner's role never
                 // changes, so this is never reached; re-resolve to be safe.
                 Action::ChannelCreate { .. } => return Err(Fallback::Other),
+                // The author's membership changed under it.
+                Action::AgeClaim { .. } => {
+                    if now {
+                        self.state.accepted.insert(id);
+                    } else {
+                        self.state.accepted.remove(&id);
+                    }
+                    self.refresh_adult(author);
+                }
                 Action::Genesis => unreachable!("skipped above"),
             }
         }
@@ -679,10 +721,15 @@ impl Resolver {
                 Role::Member => self.state.roles.remove(&actor),
                 role => self.state.roles.insert(actor, role),
             };
-            if last.is_some_and(|w| w.kicked) {
-                self.state.kicked.insert(actor);
-            } else {
-                self.state.kicked.remove(&actor);
+            match last.filter(|w| w.kicked) {
+                Some(kick) => {
+                    self.state.kicked.insert(actor);
+                    self.state.removed.insert(actor, kick.record);
+                }
+                None => {
+                    self.state.kicked.remove(&actor);
+                    self.state.removed.remove(&actor);
+                }
             }
             if last.is_some_and(|w| w.member) || self.state.owner == Some(actor) {
                 self.state.members.insert(actor);
@@ -741,8 +788,27 @@ impl Resolver {
         let Some(Some(Action::Invite { .. })) = self.actions.get(&invite) else {
             return false;
         };
+        // A removal of its author it doesn't descend from kills it.
         let author = self.known[&invite].author();
-        self.kick_targets.contains(&author) || self.revoke_targets.contains(&author)
+        [&self.kick_targets, &self.revoke_targets].into_iter().any(|targets| {
+            targets.get(&author).is_some_and(|removals| {
+                removals.iter().any(|removal| !self.is_control_ancestor(*removal, &[invite]))
+            })
+        })
+    }
+
+    /// Whether one of `author`'s removals in `targets` isn't an ancestor of
+    /// the new record `id`, so it voids it.
+    fn removed_concurrently(
+        &self,
+        targets: &HashMap<Actor, Vec<RecordId>>,
+        author: Actor,
+        id: RecordId,
+    ) -> bool {
+        let deps = self.known[&id].deps();
+        targets.get(&author).is_some_and(|removals| {
+            removals.iter().any(|removal| !self.is_control_ancestor(*removal, deps))
+        })
     }
 
     fn ancestors(&self, id: RecordId) -> HashSet<RecordId> {
