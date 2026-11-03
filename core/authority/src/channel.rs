@@ -16,6 +16,9 @@
 //!   `auth_deps` has the removal as an ancestor. Which records that voids is
 //!   the [`VoidRule`], swappable until the owner decides between
 //!   [`witness`] (A, the default) and [`privileged_only`] (B).
+//!   Under A, a record another member has accepted a reply to (a witness)
+//!   survives a kick on a stale cut; witnesses depend on verdicts, so the
+//!   caller re-checks until they settle (see [`ChannelGraph::witnessed`]).
 //!
 //! Message text is encrypted on the wire, so its length can't be read here:
 //! the caller checks the plaintext with [`message_text_ok`] after decrypting.
@@ -43,6 +46,16 @@ pub trait ChannelGraph {
     fn is_ancestor(&self, ancestor: RecordId, of: RecordId) -> bool;
     /// The author of a channel record the store holds.
     fn author(&self, id: RecordId) -> Option<Actor>;
+    /// Whether a record the caller has **accepted** (verdict `Accept`), by
+    /// someone other than `author`, has `record` as an ancestor: another
+    /// member saw it before replying.
+    ///
+    /// Acceptance depends on these verdicts in turn, so the caller re-checks
+    /// until nothing changes: re-judge the records of a removed author
+    /// whenever a verdict in their channel changes, and repeat while any
+    /// verdict flips. It ends: a record keeps its witnesses as long as they
+    /// stay accepted, and verdicts only change when a witness is voided.
+    fn witnessed(&self, record: RecordId, author: Actor) -> bool;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,10 +114,14 @@ pub struct Removal<'a> {
 }
 
 /// Rule A, the witness (default): the cut names the heads the remover had
-/// seen in each channel. A kick voids every record of the target in a
-/// channel the cut names that isn't an ancestor of one of that channel's
-/// heads; a revoke does the same for privileged records only. A channel the
-/// cut doesn't name is not voided at all.
+/// seen in each channel. In a channel the cut names, a record of the target
+/// that isn't an ancestor of one of that channel's heads is voided: by a
+/// kick, unless it is non-privileged and **witnessed** (an accepted record
+/// by another author has it as an ancestor, see
+/// [`ChannelGraph::witnessed`]), so a kick on a stale cut doesn't erase
+/// what others already replied to; by a revoke, only if it is privileged.
+/// Privileged records keep the plain cut rule: a witness can't save a
+/// backdated rotation. A channel the cut doesn't name is not voided at all.
 pub fn witness(
     record: &Record,
     privileged: bool,
@@ -121,7 +138,9 @@ pub fn witness(
     if heads.peek().is_none() {
         return Void::Keep;
     }
-    if heads.any(|head| graph.is_ancestor(record.id(), head)) {
+    if heads.any(|head| graph.is_ancestor(record.id(), head))
+        || (!privileged && graph.witnessed(record.id(), record.author()))
+    {
         Void::Keep
     } else {
         Void::Void

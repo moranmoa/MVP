@@ -4,7 +4,7 @@
 
 mod common;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use authority::{
     check_channel, check_channel_with, message_text_ok, privileged_only, Action, ChannelGraph,
@@ -19,14 +19,20 @@ use records::{Draft, Kind, Scope};
 const GENERAL: ChannelId = ChannelId::from_bytes([5; 32]);
 const RANDOM: ChannelId = ChannelId::from_bytes([6; 32]);
 
-/// The caller's channel store: records by ID, ancestry through deps.
+/// The caller's channel store: records by ID, ancestry through deps, and
+/// which records the caller has accepted.
 #[derive(Default)]
-struct Store(HashMap<RecordId, Record>);
+struct Store(HashMap<RecordId, Record>, HashSet<RecordId>);
 
 impl Store {
     fn add(&mut self, record: &Record) -> RecordId {
         self.0.insert(record.id(), record.clone());
         record.id()
+    }
+
+    fn accept(&mut self, record: &Record) -> RecordId {
+        self.1.insert(record.id());
+        self.add(record)
     }
 }
 
@@ -46,6 +52,12 @@ impl ChannelGraph for Store {
 
     fn author(&self, id: RecordId) -> Option<authority::PublicKey> {
         self.0.get(&id).map(Record::author)
+    }
+
+    fn witnessed(&self, record: RecordId, author: authority::PublicKey) -> bool {
+        self.1.iter().any(|id| {
+            *id != record && self.0[id].author() != author && self.is_ancestor(record, *id)
+        })
     }
 }
 
@@ -398,4 +410,48 @@ fn message_text_is_limited_in_code_points() {
     assert!(!message_text_ok(&format!("{emoji}a")));
     assert!(message_text_ok(&"a".repeat(MAX_MESSAGE_CODE_POINTS)));
     assert!(message_text_ok(""));
+}
+
+/// A kick signed on a stale cut: the kicker hadn't synced the replies.
+/// What another member already replied to survives; the rest is voided.
+#[test]
+fn a_stale_cut_keeps_what_others_witnessed() {
+    let (mut control, heads) = founded(&[1, 2, 3]);
+    let mut store = Store::default();
+    let old_head = store.accept(&message(2, 0, vec![], &heads));
+    // After the kicker's view: a message of the target that member 3 replied
+    // to, one the target replied to themself, and one nobody saw.
+    let replied = message(1, 0, vec![old_head], &heads);
+    store.accept(&replied);
+    store.accept(&message(3, 0, vec![replied.id()], &heads));
+    let self_replied = message(1, 1, vec![old_head], &heads);
+    store.accept(&self_replied);
+    store.accept(&message(1, 2, vec![self_replied.id()], &heads));
+    let unseen = message(1, 3, vec![old_head], &heads);
+    store.accept(&unseen);
+    // Seen only by a record the caller hasn't accepted.
+    let shadow = message(1, 4, vec![old_head], &heads);
+    store.accept(&shadow);
+    store.add(&message(2, 1, vec![shadow.id()], &heads));
+    // A privileged record keeps the plain cut rule, witnessed or not.
+    let moderator =
+        rec(0, 2, heads.clone(), Action::Grant { target: actor(1), role: Role::Moderator });
+    let rotate = rotation(1, 0, &[moderator.id()]);
+    store.accept(&rotate);
+    store.accept(&message(3, 1, vec![rotate.id()], &heads));
+    let kick = rec(
+        0,
+        3,
+        vec![moderator.id()],
+        Action::Kick { target: actor(1), cut: cut(&[(GENERAL, old_head)]) },
+    );
+    control.extend([moderator, kick.clone()]);
+    let r = resolver(&control);
+
+    let voided = Verdict::Voided { by: kick.id() };
+    assert_eq!(check_channel(&r, &replied, &store), Verdict::Accept, "witnessed by member 3");
+    assert_eq!(check_channel(&r, &self_replied, &store), voided, "the target can't witness itself");
+    assert_eq!(check_channel(&r, &unseen, &store), voided, "nobody saw it");
+    assert_eq!(check_channel(&r, &shadow, &store), voided, "the witness isn't accepted");
+    assert_eq!(check_channel(&r, &rotate, &store), voided, "privileged: the cut alone decides");
 }
