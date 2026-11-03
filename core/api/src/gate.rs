@@ -46,6 +46,11 @@ impl MemberGate {
         self.cache.lock().expect("not poisoned").rejected.retain(|(s, _)| *s != server);
     }
 
+    /// Events were dropped (`NodeEvent::Lagged`): any reject may be stale.
+    pub fn forget_rejects(&self) {
+        self.cache.lock().expect("not poisoned").rejected.clear();
+    }
+
     /// The monotone rule on a decoded control log.
     fn may_write(author: PublicKey, control: &[Record]) -> bool {
         let invites: HashSet<RecordId> =
