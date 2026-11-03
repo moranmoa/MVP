@@ -20,14 +20,19 @@
 
 mod artifact;
 mod error;
+mod layout;
 mod manifest;
 mod policy;
 mod rollback;
+mod unpack;
 mod root;
 mod version;
 
 pub use artifact::{hash_reader, store_artifact, verify_artifact, StoredArtifact, VerifiedArtifact};
 pub use error::Error;
+pub use layout::{
+    read_state_file, save_state, write_atomic, UpdateDirs, UpdateLock, APP_EXE, LAUNCHER_EXE, MAX_STATE_FILE_BYTES,
+};
 pub use manifest::{
     is_valid_name, Artifact, ManifestBody, SignatureEntry, SignedManifest, VerifiedManifest, FORMAT,
     MAX_CLOCK_SKEW_SECS, MAX_MANIFEST_BYTES, MAX_NOTES_BYTES, MAX_NOTES_LANGUAGES, MAX_SIGNATURES, MAX_VALIDITY_SECS,
@@ -38,6 +43,9 @@ pub use rollback::{Boot, Committed, InstallState, Trial, MAX_ATTEMPTS};
 pub use root::{
     parse_public_key, parse_root_fetch, RootChain, SignedRoot, TrustRoot, TrustRootFile, MAX_ROOT_FETCH_BYTES,
     MAX_ROOT_UPDATES_PER_FETCH, MAX_ROOT_UPDATE_BYTES, ROOT_SIGNING_CONTEXT,
+};
+pub use unpack::{
+    check_entry_name, unpack_zip, MAX_COMPONENT_BYTES, MAX_ENTRIES, MAX_EXPANSION, MAX_PATH_BYTES, MAX_UNPACKED_BYTES,
 };
 pub use version::{ParseVersionError, Version};
 

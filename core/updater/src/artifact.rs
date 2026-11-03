@@ -31,6 +31,7 @@ pub struct VerifiedArtifact {
     platform: String,
     sha256: String,
     size: u64,
+    unpacked_bytes: Option<u64>,
 }
 
 impl VerifiedArtifact {
@@ -50,9 +51,19 @@ impl VerifiedArtifact {
         self.size
     }
 
+    /// The signed unpacked size, if the manifest gave one.
+    pub fn unpacked_bytes(&self) -> Option<u64> {
+        self.unpacked_bytes
+    }
+
     #[cfg(test)]
     pub(crate) fn for_tests(version: Version, platform: &str) -> Self {
-        VerifiedArtifact { version, platform: platform.into(), sha256: "00".repeat(32), size: 1 }
+        VerifiedArtifact { version, platform: platform.into(), sha256: "00".repeat(32), size: 1, unpacked_bytes: None }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_tests_sized(version: Version, size: u64, unpacked_bytes: Option<u64>) -> Self {
+        VerifiedArtifact { version, platform: "windows-x86_64".into(), sha256: "00".repeat(32), size, unpacked_bytes }
     }
 }
 
@@ -86,7 +97,13 @@ fn check(m: &VerifiedManifest, platform: &str, sha256: String, size: u64) -> Res
     if sha256 != entry.sha256 {
         return Err(Error::HashMismatch);
     }
-    Ok(VerifiedArtifact { version: m.version(), platform: platform.to_string(), sha256, size })
+    Ok(VerifiedArtifact {
+        version: m.version(),
+        platform: platform.to_string(),
+        sha256,
+        size,
+        unpacked_bytes: entry.unpacked_bytes,
+    })
 }
 
 /// The expected size for `platform`, plus one: reading that many bytes is
@@ -194,7 +211,7 @@ mod tests {
         let k = key();
         let mut b = body("1.1.0");
         let (sha256, size) = hash_reader(payload).unwrap();
-        b.artifacts.insert("windows-x86_64".into(), Artifact { sha256, size });
+        b.artifacts.insert("windows-x86_64".into(), Artifact { sha256, size, unpacked_bytes: None });
         signed_by(&b, &[&k]).verify(&TrustRoot::single(k.verifying_key()).unwrap(), NOW).unwrap()
     }
 
