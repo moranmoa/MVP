@@ -32,6 +32,11 @@ fn random_action(rng: &mut StdRng, author: u8, invites: &[RecordId], cuts: bool)
         }
         1 => Action::Revoke { target, cut: cut(rng) },
         2 => Action::Kick { target, cut: cut(rng) },
+        3 if cuts => Action::ChannelCreate {
+            channel: ChannelId::from_bytes([rng.gen_range(0..3); 32]),
+            adult: rng.gen_bool(0.2),
+            name: format!("c{author}"),
+        },
         5 => Action::Invite {
             expires_ms: *[0, 30, 60].choose(rng).unwrap(),
             max_uses: rng.gen_range(0..3),
@@ -65,7 +70,8 @@ fn heads(known: &BTreeSet<RecordId>, all: &BTreeMap<RecordId, Record>) -> Vec<Re
 
 /// Actors write records against their own partial view of the log and
 /// occasionally sync with each other, so plenty of records are concurrent.
-/// Kicks and revokes carry random cuts if `cuts`. Returns the records in
+/// Kicks and revokes carry random cuts if `cuts`, and channels are created
+/// too (the owner's may win, the rest are refused). Returns the records in
 /// the order they were written.
 fn random_scenario(rng: &mut StdRng, steps: usize, cuts: bool) -> Vec<Record> {
     let genesis = genesis();
