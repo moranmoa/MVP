@@ -26,7 +26,7 @@ function pageOverflow(page: Page) {
   return page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
 }
 
-async function joinDemoServer(page: Page, link = 'mvp://join/qa-explore') {
+async function joinDemoServer(page: Page, link = 'mvs://join/qa-explore') {
   await page.getByRole('button', { name: /^הצטרפות בלינק/ }).click();
   await page.getByLabel(he.joinLink).fill(link);
   await page.getByRole('button', { name: he.join, exact: true }).click();
@@ -232,7 +232,7 @@ test.describe('servers', () => {
   test('join: double-submit then cancel does not join anyway', async ({ page }) => {
     await onboard(page);
     await page.getByRole('button', { name: /^הצטרפות בלינק/ }).click();
-    await page.getByLabel(he.joinLink).fill('mvp://join/double-click');
+    await page.getByLabel(he.joinLink).fill('mvs://join/double-click');
     await page.getByLabel(he.joinLink).press('Enter');
     await page.getByLabel(he.joinLink).press('Enter').catch(() => undefined);
     await page.getByRole('button', { name: 'ביטול' }).click();
@@ -243,7 +243,7 @@ test.describe('servers', () => {
   test('join: links that are not invites are refused', async ({ page }) => {
     await onboard(page);
     await page.getByRole('button', { name: /^הצטרפות בלינק/ }).click();
-    for (const link of ['hello', 'https://example.com', 'mvp://join/', 'javascript:alert(1)']) {
+    for (const link of ['hello', 'https://example.com', 'mvs://join/', 'javascript:alert(1)']) {
       await page.getByLabel(he.joinLink).fill(link);
       await page.getByRole('button', { name: he.join, exact: true }).click();
       await expect(page.getByText('זה לא נראה כמו לינק הזמנה')).toBeVisible();
@@ -254,7 +254,7 @@ test.describe('servers', () => {
     bug('QA-08');
     await onboard(page);
     await page.getByRole('button', { name: /^הצטרפות בלינק/ }).click();
-    await page.getByLabel(he.joinLink).fill('mvp://join/offline-server');
+    await page.getByLabel(he.joinLink).fill('mvs://join/offline-server');
     await page.getByRole('button', { name: he.join, exact: true }).click();
     await page.getByRole('button', { name: 'להמשיך לחפש ברקע' }).click({ timeout: 10_000 });
     // Expected: something on screen says a join is still in progress.
@@ -276,7 +276,7 @@ test.describe('servers', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('messages', () => {
-  test('mixed RTL/LTR, emoji and mixed-script names render in order', async ({ page }) => {
+  test('mixed RTL/LTR and emoji messages and names send and display (direction: see UX-01)', async ({ page }) => {
     await onboard(page, { displayName: 'Moran מורן' });
     await createServer(page, 'Mixed מעורב');
     const bodies = ['hello שלום 123 world', 'שלום hello, מה נשמע? 🎮🔥', '(1) – רשימה', '👨‍👩‍👧‍👦🏳️‍🌈🇮🇱'];
@@ -288,6 +288,34 @@ test.describe('messages', () => {
     // Names are isolated with <bdi>, so a mixed-script name does not reorder the line around it.
     await expect(page.locator('.msg-head bdi').first()).toBeVisible();
     await shot(page, 'mixed-bidi');
+  });
+
+  test('UX-01 message direction follows most strong letters, aligned to the interface side', async ({ page }) => {
+    bug('UX-01'); // ux-review-1 blocker, backlog B17
+    await onboard(page);
+    await createServer(page, 'כיוון');
+    // The five strings from UX-01, with the direction they should get in a Hebrew interface.
+    const cases: [string, 'rtl' | 'ltr'][] = [
+      ['lol זה היה מטורף', 'rtl'],
+      ['GG על המשחק אתמול, 3:1 לנו!', 'rtl'],
+      ['@Itamar תבדוק את ה-patch החדש', 'rtl'],
+      ['version 2.4.1 fixed it', 'ltr'],
+      ['🎉🎉', 'rtl'], // no strong letters: the interface direction
+    ];
+    for (const [text] of cases) {
+      await composer(page).fill(text);
+      await composer(page).press('Enter');
+    }
+    await shot(page, 'ux-01-direction');
+    const shown = await page.locator('.msg-body').evaluateAll((els) =>
+      els.map((el) => {
+        const cs = getComputedStyle(el);
+        // Alignment must be the interface side (right in Hebrew) for every message.
+        const right = cs.textAlign === 'right' || (cs.textAlign === 'start' && cs.direction === 'rtl');
+        return { dir: el.getAttribute('dir'), right };
+      }),
+    );
+    expect(shown).toEqual(cases.map(([, dir]) => ({ dir, right: true })));
   });
 
   test('QA-09 the avatar letter of an emoji/flag name is a whole character', async ({ page }) => {

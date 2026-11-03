@@ -7,7 +7,7 @@
 # The `ui` service builds ../ui and serves it with `vite preview` (mock
 # core). The test services join its network namespace, so the app is at
 # http://localhost:5173 for them and Vite's host check does not get in the way.
-name: mvp-qa
+name: mvs-qa
 
 services:
   ui:

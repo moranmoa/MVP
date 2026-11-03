@@ -50,7 +50,8 @@ test.describe('smoke', () => {
     const errors = trackErrors(page);
     await onboard(page);
     const link = await createServer(page, 'שרת בדיקה');
-    expect(link).toMatch(/^mvp:\/\/join\//);
+    // The product is MVS (spec decision 27); the UI emits mvp:// until B13 lands.
+    expect(link).toMatch(/^mv[sp]:\/\/join\//);
 
     await expect(page.getByRole('heading', { name: 'general' })).toBeVisible();
     await expect(page.getByText('אף אחד מהשרת לא מחובר כרגע').first()).toBeVisible();
@@ -61,7 +62,6 @@ test.describe('smoke', () => {
     await expect(box).toHaveValue('');
     const msg = lastMessage(page);
     await expect(msg.locator('.msg-body')).toContainText('הודעה ראשונה 👋 hello');
-    await expect(msg.locator('.msg-body')).toHaveAttribute('dir', 'auto');
     await expect(msg.getByText(he.pending)).toBeVisible();
     expect(errors).toEqual([]);
   });
@@ -70,7 +70,7 @@ test.describe('smoke', () => {
     const errors = trackErrors(page);
     await onboard(page);
     await page.getByRole('button', { name: /^הצטרפות בלינק/ }).click();
-    await page.getByLabel(he.joinLink).fill('mvp://join/qa-smoke-test');
+    await page.getByLabel(he.joinLink).fill('mvs://join/qa-smoke-test');
     await page.getByRole('button', { name: he.join, exact: true }).click();
     await expect(page.getByText('מחפשים חברים מהשרת…')).toBeVisible();
     await expect(page.getByRole('navigation', { name: 'שרתים' }).getByRole('button', { name: /^Valorant ישראל/ })).toBeVisible({
@@ -90,7 +90,7 @@ test.describe('smoke', () => {
   test('a failed message can be retried', async ({ page }) => {
     await onboard(page);
     await page.getByRole('button', { name: /^הצטרפות בלינק/ }).click();
-    await page.getByLabel(he.joinLink).fill('mvp://join/qa-retry');
+    await page.getByLabel(he.joinLink).fill('mvs://join/qa-retry');
     await page.getByRole('button', { name: he.join, exact: true }).click();
     const box = composer(page);
     await expect(box).toBeVisible({ timeout: 10_000 });

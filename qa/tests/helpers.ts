@@ -21,7 +21,8 @@ export const he = {
   joinLink: 'לינק הזמנה',
   join: 'הצטרפות',
   pending: 'ממתינה – תישלח כשמישהו מהשרת יתחבר',
-  received: 'התקבלה אצל חבר',
+  // "נמסרה" per spec decision ש-1 (UX-39); the UI still says "התקבלה אצל חבר".
+  received: /^(נמסרה|התקבלה אצל חבר)$/,
   failed: 'לא נשלחה',
   recoveryBanner: 'מילות השחזור עוד לא נבדקו',
 };

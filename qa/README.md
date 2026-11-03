@@ -1,4 +1,4 @@
-# qa – test plan, automated checks, bug list
+# qa – MVS test plan, automated checks, bug list
 
 | File | What it is |
 | --- | --- |
@@ -29,7 +29,7 @@ serves it with `vite preview`; the tests run in
 docker compose -f qa/compose.yaml run --rm explore
 ```
 
-Expected result: `37 passed`. Tests named `QA-xx` are known bugs marked
+Expected result: `38 passed`. Tests named `QA-xx` or `UX-xx` are known bugs marked
 `test.fail()`: the list reporter shows them with ✘ but counts them as
 passed. When one reports "expected to fail, but passed", the bug is fixed –
 remove its `bug('QA-xx')` line and close the row in `BUGS.md`.
