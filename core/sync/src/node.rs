@@ -56,13 +56,16 @@ use crate::limits::{Acks, Pending, PerIp, RateLimiter, Refused};
 use crate::presence::Presence;
 use crate::store::MAX_HAVE;
 use crate::{
-    log_name, log_of, valid_log_name, Append, Authorizer, ChannelId, Record, RecordId, Scope, ServerId, Store,
+    log_name, log_of, valid_log_name, Append, Authorizer, ChannelId, NoStubs, Record, RecordId, Scope, ServerId, Store,
+    Stub, StubGate,
 };
 use records::PublicKey;
 
 /// 0.3: logs of servers opened with a secret are named by handle, and pulls
 /// for them carry a peer binding (GAP-4).
-const SYNC_PROTOCOL: StreamProtocol = StreamProtocol::new("/mvs/sync/0.3.0");
+/// 0.4: pull answers carry tagged entries, full records or pruned stubs
+/// (B6-p); 0.3 peers can't talk to 0.4 ones.
+const SYNC_PROTOCOL: StreamProtocol = StreamProtocol::new("/mvs/sync/0.4.0");
 const IDENTIFY_VERSION: &str = "/mvs/0.1.0";
 const KAD_PROTOCOL: StreamProtocol = StreamProtocol::new("/mvs/kad/1.0.0");
 /// Records per sync response page.
@@ -141,6 +144,8 @@ const MAX_OWN: usize = 10_000;
 const ACK_PULL: Duration = Duration::from_secs(1);
 /// Reachability is `Connecting` at most this long after starting.
 const CONNECTING: Duration = Duration::from_secs(10);
+/// Peers' stubs waiting for the delete or edit that replaced them.
+const MAX_PENDING_STUBS: usize = 10_000;
 /// Waits between relay dials while it is down: reconnects within a minute
 /// of a relay restart (plus the discovery tick).
 const RELAY_BACKOFF_MIN: Duration = Duration::from_secs(1);
@@ -177,6 +182,9 @@ pub struct Access {
     pub binder: Option<Arc<dyn Binder>>,
     /// Decides who may pull a server's channel logs.
     pub read_gate: Option<Arc<dyn ReadGate>>,
+    /// Decides about pruned stubs (B6-p). Without one, stubs are never
+    /// stored (peers' stubs stay pending until the full record comes).
+    pub stub_gate: Option<Arc<dyn StubGate>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -252,6 +260,7 @@ enum Command {
     State { log: String, reply: oneshot::Sender<Result<LogState>> },
     Presence { server: ServerId, reply: oneshot::Sender<PresenceState> },
     Peers { reply: oneshot::Sender<Vec<PeerId>> },
+    Prune { id: RecordId, reply: oneshot::Sender<Result<bool>> },
     Shutdown { reply: oneshot::Sender<()> },
 }
 
@@ -266,10 +275,34 @@ struct SyncRequest {
     binding: Option<Binding>,
 }
 
+/// One entry of a pull answer (B6-p): a full record or a pruned stub, with
+/// an explicit tag so neither is ever taken for the other (they also never
+/// decode as each other).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum WireEntry {
+    Full(ByteBuf),
+    Stub(ByteBuf),
+}
+
+impl WireEntry {
+    fn len(&self) -> usize {
+        match self {
+            WireEntry::Full(b) | WireEntry::Stub(b) => b.len(),
+        }
+    }
+}
+
+/// A pulled entry after decoding (and so verifying).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Incoming {
+    Full(Record),
+    Stub(Stub),
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct SyncResponse {
-    /// Encoded records, in an order they can be appended in.
-    records: Vec<ByteBuf>,
+    /// Encoded records and stubs, in an order they can be appended in.
+    records: Vec<WireEntry>,
     more: bool,
     /// Receipt acks (B6): ids of the requester's own records that we
     /// stored, at most [`MAX_ACKS`]. Only for a requester bound to their
@@ -381,6 +414,7 @@ impl Node {
             direct: HashMap::new(),
             secrets: HashMap::new(),
             sealing: Sealing::default(),
+            stub_gate: access.stub_gate.clone().unwrap_or_else(|| Arc::new(NoStubs)),
             access,
             own_bindings: HashMap::new(),
             bound: HashMap::new(),
@@ -392,6 +426,7 @@ impl Node {
             last_seen: HashMap::new(),
             reached: false,
             started: Instant::now(),
+            pending_stubs: HashMap::new(),
         };
         for log in config.logs {
             task.open(log, None);
@@ -456,6 +491,15 @@ impl Node {
         let (reply, rx) = oneshot::channel();
         self.send(Command::Presence { server, reply })?;
         Ok(rx.await?)
+    }
+
+    /// Replaces a stored message or edit by its stub (B6-p), if the stub gate
+    /// accepts it: a held, accepted delete or newer edit replaced it. True if
+    /// pruned; from then on peers get the stub.
+    pub async fn prune(&self, id: RecordId) -> Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::Prune { id, reply })?;
+        rx.await?
     }
 
     pub async fn peers(&self) -> Result<Vec<PeerId>> {
@@ -640,7 +684,7 @@ impl ReadCheck {
 type Answer = (PeerId, ResponseChannel<SyncResponse>, SyncResponse, usize, Vec<RecordId>);
 /// A pulled page after decoding: (peer, log), the records that verified
 /// and belong to the log, and whether the peer said there is more.
-type Decoded = ((PeerId, String), Vec<Record>, bool, Vec<RecordId>);
+type Decoded = ((PeerId, String), Vec<Incoming>, bool, Vec<RecordId>);
 
 struct Task {
     swarm: Swarm<Behaviour>,
@@ -711,6 +755,10 @@ struct Task {
     /// Whether we ever reached the network (a relay reservation or a peer).
     reached: bool,
     started: Instant,
+    /// Peers' stubs the stub gate couldn't accept yet, by id: stored with
+    /// the delete or edit that replaced them when it arrives.
+    pending_stubs: HashMap<RecordId, Stub>,
+    stub_gate: Arc<dyn StubGate>,
 }
 
 /// What a pull may get: the log, the read check still to run, and the
@@ -824,6 +872,9 @@ impl Task {
                     Reachability::Connecting
                 };
                 let _ = reply.send(PresenceState { online, last_seen: self.last_seen.get(&server).copied(), reachability });
+            }
+            Command::Prune { id, reply } => {
+                let _ = reply.send(self.store.prune(&id, &*self.stub_gate).map_err(Into::into));
             }
             Command::Peers { reply } => {
                 let _ = reply.send(self.connected.iter().copied().collect());
@@ -1334,10 +1385,20 @@ impl Task {
                 self.remember_ack(&record);
                 Ingest::Known
             }
+            Ok(Append::StubPending) => Ingest::Known,
             Ok(Append::MissingDeps(missing)) if self.refused.covers(&missing) => {
                 // Built only on refused records: refused as well.
                 self.refused.insert(log_of(&record), record.id());
                 Ingest::Refused
+            }
+            Ok(Append::MissingDeps(missing)) if missing.iter().all(|id| self.pending_stubs.contains_key(id)) => {
+                match self.with_pending_stubs(record, &missing, via) {
+                    Some(id) => {
+                        self.release_pending(id);
+                        Ingest::Added
+                    }
+                    None => Ingest::Waiting,
+                }
             }
             Ok(Append::MissingDeps(missing)) => {
                 let log = log_of(&record);
@@ -1381,12 +1442,12 @@ impl Task {
         let decoded = self.decoded.clone();
         let store = self.reader.clone();
         tokio::task::spawn_blocking(move || {
-            let records = decode_page(&key.1, &response.records);
+            let entries = decode_page(&key.1, &response.records);
             let acked = match (acks, store.lock()) {
                 (Some((check, ids)), Ok(store)) if check.allows(&store) => ids,
                 _ => Vec::new(),
             };
-            let _ = decoded.send((key, records, response.more, acked));
+            let _ = decoded.send((key, entries, response.more, acked));
         });
     }
 
@@ -1419,7 +1480,7 @@ impl Task {
         }
     }
 
-    fn on_decoded(&mut self, key: (PeerId, String), records: Vec<Record>, more: bool, acked: Vec<RecordId>) {
+    fn on_decoded(&mut self, key: (PeerId, String), entries: Vec<Incoming>, more: bool, acked: Vec<RecordId>) {
         self.decoding.remove(&key);
         for id in acked {
             if self.own.remove(&id) {
@@ -1427,37 +1488,102 @@ impl Task {
             }
         }
         let (peer, log) = key.clone();
-        let mut added_any = false;
-        if !records.is_empty() {
-            match self.store.append_all(&records, &*self.authorizer) {
-                Ok(outcomes) => {
-                    let now = SystemTime::now();
-                    let mut added = Vec::new();
-                    for (record, outcome) in records.into_iter().zip(outcomes) {
-                        match outcome {
-                            Append::Added => {
-                                added.push(record.id());
-                                self.remember_ack(&record);
-                                self.stored(log.clone(), record, Via::Pull, now);
-                            }
-                            Append::Known => self.remember_ack(&record),
-                            Append::Unauthorized => self.refused.insert(log.clone(), record.id()),
-                            Append::MissingDeps(missing) if self.refused.covers(&missing) => {
-                                self.refused.insert(log.clone(), record.id())
-                            }
-                            _ => {}
-                        }
-                    }
-                    added_any = !added.is_empty();
-                    for id in added {
-                        self.release_pending(id);
-                    }
+        // In page order: runs of full records in one transaction each,
+        // stubs one at a time between them.
+        let mut added = Vec::new();
+        let mut run = Vec::new();
+        for entry in entries {
+            match entry {
+                Incoming::Full(record) => run.push(record),
+                Incoming::Stub(stub) => {
+                    self.store_run(&log, std::mem::take(&mut run), &mut added);
+                    self.store_stub(stub, &mut added);
                 }
-                Err(err) => warn!(%err, "storing pulled records failed"),
             }
+        }
+        self.store_run(&log, run, &mut added);
+        let added_any = !added.is_empty();
+        for id in added {
+            self.release_pending(id);
         }
         if follow_up(more, added_any) || self.again.remove(&key) {
             self.pull(peer, &log);
+        }
+    }
+
+    /// Stores pulled full records in one transaction.
+    fn store_run(&mut self, log: &str, records: Vec<Record>, added: &mut Vec<RecordId>) {
+        if records.is_empty() {
+            return;
+        }
+        let outcomes = match self.store.append_all(&records, &*self.authorizer) {
+            Ok(outcomes) => outcomes,
+            Err(err) => return warn!(%err, "storing pulled records failed"),
+        };
+        let now = SystemTime::now();
+        for (record, outcome) in records.into_iter().zip(outcomes) {
+            match outcome {
+                Append::Added => {
+                    added.push(record.id());
+                    self.remember_ack(&record);
+                    self.stored(log.to_string(), record, Via::Pull, now);
+                }
+                Append::Known => self.remember_ack(&record),
+                Append::Unauthorized => self.refused.insert(log.to_string(), record.id()),
+                Append::MissingDeps(missing) if self.refused.covers(&missing) => {
+                    self.refused.insert(log.to_string(), record.id())
+                }
+                Append::MissingDeps(missing) => {
+                    if let Some(id) = self.with_pending_stubs(record, &missing, Via::Pull) {
+                        added.push(id);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Stores a peer's stub if the stub gate accepts it now (B6-p). A
+    /// pending one is kept aside (not refused): it goes in with the delete
+    /// or edit that replaced it, see [`Task::with_pending_stubs`].
+    fn store_stub(&mut self, stub: Stub, added: &mut Vec<RecordId>) {
+        match self.store.append_stub(&stub, &*self.stub_gate) {
+            Ok(Append::Added) => {
+                self.pending_stubs.remove(&stub.id());
+                added.push(stub.id());
+            }
+            Ok(Append::StubPending) => {
+                if self.pending_stubs.len() >= MAX_PENDING_STUBS {
+                    self.pending_stubs.clear();
+                }
+                self.pending_stubs.insert(stub.id(), stub);
+            }
+            Ok(_) => {}
+            Err(err) => warn!(%err, "storing a stub failed"),
+        }
+    }
+
+    /// A record whose only missing deps are pending stubs (typically the
+    /// delete of a message everyone else pruned): stores them together if
+    /// the stub gate then accepts every stub. The record's id if stored.
+    fn with_pending_stubs(&mut self, record: Record, missing: &[RecordId], via: Via) -> Option<RecordId> {
+        let stubs: Vec<Stub> =
+            missing.iter().map(|id| self.pending_stubs.get(id).cloned()).collect::<Option<_>>()?;
+        match self.store.append_with_stubs(&record, &stubs, &*self.authorizer, &*self.stub_gate) {
+            Ok(Append::Added) => {
+                for stub in &stubs {
+                    self.pending_stubs.remove(&stub.id());
+                }
+                let id = record.id();
+                self.remember_ack(&record);
+                self.stored(log_of(&record), record, via, SystemTime::now());
+                Some(id)
+            }
+            Ok(_) => None,
+            Err(err) => {
+                warn!(%err, "storing a record with its stubs failed");
+                None
+            }
         }
     }
 
@@ -1483,7 +1609,7 @@ impl Task {
                     Ok(Append::Unauthorized) => {
                         self.refused.insert(log_of(&waiting.record), waiting.record.id());
                     }
-                    Ok(Append::Known | Append::Invalid(_)) => {}
+                    Ok(Append::Known | Append::Invalid(_) | Append::StubPending) => {}
                     Err(err) => warn!(%err, "storing pending record failed"),
                 }
             }
@@ -1680,10 +1806,18 @@ fn check_pushed(open: &HashSet<String>, sealing: &Sealing, message: &gossipsub::
 }
 
 /// Decodes (and so verifies) a pulled page for `log`. A page is for one log:
-/// records that don't decode, or that signed another log, are dropped.
-fn decode_page(log: &str, page: &[ByteBuf]) -> Vec<Record> {
-    let records: Vec<Record> =
-        page.iter().filter_map(|bytes| Record::decode(bytes).ok()).filter(|r| log_of(r) == log).collect();
+/// entries that don't decode as what their tag says, or that signed another
+/// log, are dropped.
+fn decode_page(log: &str, page: &[WireEntry]) -> Vec<Incoming> {
+    let records: Vec<Incoming> = page
+        .iter()
+        .filter_map(|entry| match entry {
+            WireEntry::Full(bytes) => Record::decode(bytes).ok().filter(|r| log_of(r) == log).map(Incoming::Full),
+            WireEntry::Stub(bytes) => {
+                Stub::decode(bytes).ok().filter(|s| log_name(s.server(), s.scope()) == log).map(Incoming::Stub)
+            }
+        })
+        .collect();
     if records.len() != page.len() {
         debug!(dropped = page.len() - records.len(), "dropped invalid or misfiled pulled records");
     }
@@ -1726,7 +1860,10 @@ fn answer_with_ids(store: &Store, log: &str, have: &[ByteBuf], max_bytes: usize)
     match store.missing_since(log, &have, PAGE, max_bytes) {
         Ok((page, more)) => {
             let ids = page.iter().map(|s| s.id).collect();
-            let records = page.into_iter().map(|s| ByteBuf::from(s.bytes)).collect();
+            let records = page
+                .into_iter()
+                .map(|s| if s.stub { WireEntry::Stub(ByteBuf::from(s.bytes)) } else { WireEntry::Full(ByteBuf::from(s.bytes)) })
+                .collect();
             (SyncResponse { records, more, ..empty_response() }, ids)
         }
         Err(err) => {
@@ -1782,7 +1919,8 @@ mod tests {
         let size: usize = response.records.iter().map(|b| b.len()).sum();
         assert!(size <= PAGE_BYTES + records::MAX_RECORD_BYTES, "page is {size} bytes");
         // Every record in it decodes and belongs to the log.
-        for bytes in &response.records {
+        for entry in &response.records {
+            let WireEntry::Full(bytes) = entry else { panic!("a stub in a log with none") };
             assert_eq!(log_of(&Record::decode(bytes).unwrap()), chan());
         }
     }
@@ -1845,8 +1983,30 @@ mod tests {
         let other_log = crate::testutil::genesis();
         let mut forged = good.encode();
         forged[40] ^= 1;
-        let page = [good.encode(), other_log.encode(), forged, vec![], vec![0; 100_000]].map(ByteBuf::from);
-        assert_eq!(decode_page(&chan(), &page), vec![good]);
+        let page = [good.encode(), other_log.encode(), forged, vec![], vec![0; 100_000]]
+            .map(|b| WireEntry::Full(ByteBuf::from(b)));
+        assert_eq!(decode_page(&chan(), &page), vec![Incoming::Full(good)]);
+    }
+
+    /// Rule 1 (B6-p): stubs travel tagged, and an entry is only ever decoded
+    /// as what its tag says: a stub tagged as a record, or a record tagged as
+    /// a stub, is dropped.
+    #[test]
+    fn stubs_and_records_are_never_taken_for_each_other() {
+        let m = crate::testutil::message(0, &[], 10);
+        let stub = m.prune().unwrap();
+        let entry = |full: bool, bytes: Vec<u8>| {
+            if full { WireEntry::Full(ByteBuf::from(bytes)) } else { WireEntry::Stub(ByteBuf::from(bytes)) }
+        };
+        let page = [entry(false, stub.encode()), entry(true, stub.encode()), entry(false, m.encode()), entry(true, m.encode())];
+        assert_eq!(decode_page(&chan(), &page), vec![Incoming::Stub(stub.clone()), Incoming::Full(m)]);
+        // A stub of another log is dropped too.
+        assert!(decode_page(&log_name(server(), Scope::Control), &[entry(false, stub.encode())]).is_empty());
+        // The tag survives the wire.
+        let response = SyncResponse { records: vec![entry(false, stub.encode())], ..empty_response() };
+        let bytes = serde_json::to_vec(&response).unwrap();
+        let back: SyncResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(back.records, vec![WireEntry::Stub(ByteBuf::from(stub.encode()))]);
     }
 
     #[test]
@@ -2054,7 +2214,7 @@ mod tests {
         // The author (test key 1, who signs `message`) counts only key 0 as a member.
         let members: Arc<dyn ReadGate> = Arc::new(OnlyReader(test_key(0).identity()));
         let (author, mut events) =
-            test_node_events("author", Some(port), None, Access { binder: key(1), read_gate: Some(members) }).await;
+            test_node_events("author", Some(port), None, Access { binder: key(1), read_gate: Some(members), stub_gate: None }).await;
         author.open_server(server(), secret.clone()).unwrap();
         author.open_channel(server(), channel()).await.unwrap();
 
@@ -2067,7 +2227,7 @@ mod tests {
         let peer = |name: &'static str, n: u8| {
             let secret = secret.clone();
             async move {
-                let access = Access { binder: key(n), read_gate: Some(Arc::new(AcceptAll)) };
+                let access = Access { binder: key(n), read_gate: Some(Arc::new(AcceptAll)), stub_gate: None };
                 let node = test_node(name, None, Some(port), access).await;
                 node.open_server(server(), secret).unwrap();
                 node.open_channel(server(), channel()).await.unwrap();
@@ -2114,7 +2274,7 @@ mod tests {
         let port = free_port();
         // The owner's node serves channels to test key 1 only.
         let reader: Arc<dyn ReadGate> = Arc::new(OnlyReader(test_key(1).identity()));
-        let owner = test_node("owner", Some(port), None, Access { binder: key(0), read_gate: Some(reader) }).await;
+        let owner = test_node("owner", Some(port), None, Access { binder: key(0), read_gate: Some(reader), stub_gate: None }).await;
         owner.open_server(server(), secret.clone()).unwrap();
         owner.open_channel(server(), channel()).await.unwrap();
         owner.append(genesis()).await.unwrap();
@@ -2123,7 +2283,7 @@ mod tests {
         owner.open(&chan()).unwrap();
 
         let peer = |name: &'static str, binder, secret: ServerSecret| async move {
-            let node = test_node(name, None, Some(port), Access { binder, read_gate: None }).await;
+            let node = test_node(name, None, Some(port), Access { binder, read_gate: None, stub_gate: None }).await;
             node.open_server(server(), secret).unwrap();
             node.open_channel(server(), channel()).await.unwrap();
             node
@@ -2211,7 +2371,7 @@ mod tests {
         let node = |name: &'static str, n: u8, listen, bootstrap, gate: Arc<dyn ReadGate>| {
             let secret = secret.clone();
             async move {
-                let access = Access { binder: Some(Arc::new(test_key(n))), read_gate: Some(gate) };
+                let access = Access { binder: Some(Arc::new(test_key(n))), read_gate: Some(gate), stub_gate: None };
                 let node = test_node(name, listen, bootstrap, access).await;
                 node.open_server(server(), secret).unwrap();
                 node
@@ -2274,5 +2434,41 @@ mod tests {
         let stranger = answer_to(2);
         assert_eq!(stranger.binding, None);
         assert!(stranger.acks.is_empty());
+    }
+
+    /// B6-p end to end: the only peer pruned a deleted message, so a newcomer
+    /// can only get the stub. It arrives before the delete (page order) and
+    /// ends up stored with it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_newcomer_gets_the_stub_of_a_message_everyone_pruned() {
+        use crate::testutil::{delete, message, DeletedOnly};
+        let port = free_port();
+        let access = || Access { stub_gate: Some(Arc::new(DeletedOnly)), ..Access::default() };
+        let old = test_node("pruner", Some(port), None, access()).await;
+        old.open(&chan()).unwrap();
+        let m = message(0, &[], 100);
+        let d = delete(1, &m);
+        old.append(m.clone()).await.unwrap();
+        // Not before its delete is held.
+        assert!(!old.prune(m.id()).await.unwrap());
+        old.append(d.clone()).await.unwrap();
+        assert!(old.prune(m.id()).await.unwrap());
+
+        let new = test_node("newcomer", None, Some(port), access()).await;
+        new.open(&chan()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while new.state(&chan()).await.unwrap().count < 2 {
+            assert!(Instant::now() < deadline, "the newcomer never stored the stub and its delete");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(new.state(&chan()).await.unwrap().hash, old.state(&chan()).await.unwrap().hash);
+        // Without a stub gate, the newcomer would wait for a full record nobody has.
+        let strict = test_node("strict", None, Some(port), Access::default()).await;
+        strict.open(&chan()).unwrap();
+        tokio::time::sleep(ANTI_ENTROPY + Duration::from_secs(1)).await;
+        assert_eq!(strict.state(&chan()).await.unwrap().count, 0);
+        for node in [old, new, strict] {
+            node.shutdown().await.unwrap();
+        }
     }
 }

@@ -4,10 +4,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use authority::{Action, Inserted, Resolver, State};
-use records::{ChannelId, Kind, PublicKey, Record, RecordId, Scope, ServerId, MAX_DEPS};
+use records::{ChannelId, Kind, PublicKey, Record, RecordId, Scope, ServerId, Stub, MAX_DEPS};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{AgeRestriction, ErrorCode, ProfileInput, Role};
+use zeroize::Zeroizing;
 
 // BLAKE3 derive_key contexts. Frozen for the alpha.
 const DEFAULT_CHANNEL_CTX: &str = "mvs 2026-11 default channel id v1";
@@ -134,14 +135,29 @@ pub(crate) struct GenesisBody {
 // records (relays too) until control-log content is encrypted.
 // TODO(profiles): updateProfile re-posts it to every server.
 
-pub(crate) fn invite_link(server: ServerId, invite: RecordId) -> String {
-    format!("{INVITE_PREFIX}{}/{}", hex_id(server.as_bytes()), hex_id(invite.as_bytes()))
+/// `mvs://join/<server>/<invite>/<secret>`, all 64 hex. The secret (GAP-4)
+/// is a bearer credential: never logged, only copied by the user.
+pub(crate) fn invite_link(server: ServerId, invite: RecordId, secret: &[u8; 32]) -> String {
+    format!(
+        "{INVITE_PREFIX}{}/{}/{}",
+        hex_id(server.as_bytes()),
+        hex_id(invite.as_bytes()),
+        hex::encode(secret)
+    )
 }
 
-/// `(server, invite)` from an invite link.
-pub(crate) fn parse_invite_link(link: &str) -> Option<(ServerId, RecordId)> {
-    let (server, invite) = link.strip_prefix(INVITE_PREFIX)?.split_once('/')?;
-    Some((ServerId::from_bytes(parse_hex32(server)?), RecordId::from_bytes(parse_hex32(invite)?)))
+/// `(server, invite, secret)` from an invite link; `None` without all three.
+pub(crate) fn parse_invite_link(link: &str) -> Option<(ServerId, RecordId, Zeroizing<[u8; 32]>)> {
+    let mut parts = link.strip_prefix(INVITE_PREFIX)?.split('/');
+    let (server, invite, secret) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((
+        ServerId::from_bytes(parse_hex32(server)?),
+        RecordId::from_bytes(parse_hex32(invite)?),
+        Zeroizing::new(parse_hex32(secret)?),
+    ))
 }
 
 /// The first invite a new server gets: no expiry, no use limit.
@@ -186,6 +202,8 @@ pub(crate) struct Log {
     /// This server's channel records, in the order they arrived. TODO:
     /// bound them (per-channel windows, as sync pages).
     pub channel: Vec<Record>,
+    /// Channel records pruned to their stubs (B6-p): no body kept.
+    pub stubs: HashMap<RecordId, Stub>,
     server: ServerId,
     channel_ids: HashSet<RecordId>,
 }
@@ -207,6 +225,7 @@ impl Log {
             pending: HashMap::new(),
             waiting: HashMap::new(),
             channel: Vec::new(),
+            stubs: HashMap::new(),
             server,
             channel_ids: HashSet::new(),
         };
@@ -288,6 +307,22 @@ impl Log {
         self.pending.len()
     }
 
+    /// A stub from the store (a record pruned earlier).
+    pub fn add_stub(&mut self, stub: Stub) {
+        if stub.server() == self.server && self.channel_ids.insert(stub.id()) {
+            self.stubs.insert(stub.id(), stub);
+        }
+    }
+
+    /// Replaces a held full record by its stub (B6-p); the stub, for the
+    /// store and the network, or `None` if not held or not prunable.
+    pub fn prune(&mut self, id: RecordId) -> Option<Stub> {
+        let at = self.channel.iter().position(|r| r.id() == id)?;
+        let stub = self.channel[at].prune()?;
+        self.channel.remove(at);
+        self.stubs.insert(id, stub.clone());
+        Some(stub)
+    }
     pub fn accepted(&self, id: &RecordId) -> bool {
         self.resolver.state().accepted.contains(id)
     }

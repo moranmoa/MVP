@@ -21,8 +21,8 @@ const DELIVERIES_PER_SCENARIO: usize = 3;
 
 /// A random action; joins and revoke-invites name one of `invites`, the
 /// invites the author has seen.
-fn random_action(rng: &mut StdRng, author: u8, invites: &[RecordId], cuts: bool) -> Action {
-    let cut = |rng: &mut StdRng| if cuts { random_cut(rng) } else { Cut::default() };
+fn random_action(rng: &mut StdRng, author: u8, invites: &[RecordId], rich: bool) -> Action {
+    let cut = |rng: &mut StdRng| if rich { random_cut(rng) } else { Cut::default() };
     let target = actor(rng.gen_range(0..ACTORS));
     match rng.gen_range(0..8) {
         0 => {
@@ -31,11 +31,13 @@ fn random_action(rng: &mut StdRng, author: u8, invites: &[RecordId], cuts: bool)
         }
         1 => Action::Revoke { target, cut: cut(rng) },
         2 => Action::Kick { target, cut: cut(rng) },
-        3 if cuts => Action::ChannelCreate {
+        3 if rich && rng.gen_bool(0.5) => Action::AgeClaim { adult: rng.gen_bool(0.5) },
+        3 if rich => Action::ChannelCreate {
             channel: ChannelId::from_bytes([rng.gen_range(0..3); 32]),
             adult: rng.gen_bool(0.2),
             name: format!("c{author}"),
         },
+        4 if rich => Action::Unban { target },
         5 => Action::Invite {
             expires_ms: *[0, 30, 60].choose(rng).unwrap(),
             max_uses: rng.gen_range(0..3),
@@ -69,10 +71,11 @@ fn heads(known: &BTreeSet<RecordId>, all: &BTreeMap<RecordId, Record>) -> Vec<Re
 
 /// Actors write records against their own partial view of the log and
 /// occasionally sync with each other, so plenty of records are concurrent.
-/// Kicks and revokes carry random cuts if `cuts`, and channels are created
-/// too (the owner's may win, the rest are refused). Returns the records in
+/// If `rich`, kicks and revokes carry random cuts, and unbans (far more
+/// often than an owner would), channel creates (the owner's may win, the
+/// rest are refused) and age claims are written too. Returns the records in
 /// the order they were written.
-fn random_scenario(rng: &mut StdRng, steps: usize, cuts: bool) -> Vec<Record> {
+fn random_scenario(rng: &mut StdRng, steps: usize, rich: bool) -> Vec<Record> {
     let genesis = genesis();
     let mut written = vec![genesis.clone()];
     let mut all = BTreeMap::from([(genesis.id(), genesis.clone())]);
@@ -91,7 +94,7 @@ fn random_scenario(rng: &mut StdRng, steps: usize, cuts: bool) -> Vec<Record> {
             let mut deps = heads(&known[a], &all);
             let invites: Vec<RecordId> =
                 known[a].iter().copied().filter(|id| all[id].kind() == Kind::Invite).collect();
-            let action = random_action(rng, actor, &invites, cuts);
+            let action = random_action(rng, actor, &invites, rich);
             if let Action::Join { invite } | Action::RevokeInvite { invite } = &action {
                 deps.push(*invite);
             }
@@ -191,8 +194,9 @@ fn apply_all(records: &[Record]) -> (Resolver, Duration, usize) {
 #[test]
 fn incremental_vs_full_on_a_large_control_log() {
     let mut rng = StdRng::seed_from_u64(42);
-    // No cuts: they don't change resolution, but they change record IDs,
-    // so this log stays the one the main branch is measured on.
+    // No cuts or unbans: cuts don't change resolution but change record IDs,
+    // and the generator's unbans undo nearly every kick, far beyond what an
+    // owner does. This log stays the one the main branch is measured on.
     let written = random_scenario(&mut rng, 7_150, false);
     let n = written.len();
 
@@ -215,10 +219,11 @@ fn incremental_vs_full_on_a_large_control_log() {
     let (resolver, total, _) = apply_all(&written);
     assert_eq!(resolver.state(), &expected);
     // A live peer re-resolves only for the rare removal that voids
-    // applied records. Measured: 8 on this log (tests/rng, seed 42); the
-    // bound is that + 2. Re-measure if the generator or the scenario change.
+    // applied records. Measured: 16 on this log (tests/rng, seed 42, record
+    // format v2); the bound is that + 2. Record IDs fix the linear order, so
+    // re-measure if the generator, the scenario or the record format change.
     assert!(
-        resolver.stats().rebuilds <= 10,
+        resolver.stats().rebuilds <= 18,
         "too many re-resolves: {}",
         describe(resolver.stats())
     );

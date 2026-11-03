@@ -34,8 +34,8 @@ pub(crate) mod testutil;
 
 pub use access::{binding_message, Binder, Handle, ReadGate, ServerSecret};
 pub use node::{Access, Node, NodeConfig, NodeEvent, PresenceState, Reachability, Via};
-pub use records::{ChannelId, Record, RecordId, Scope, ServerId};
-pub use store::{Append, ControlLog, IngestError, Store};
+pub use records::{ChannelId, Record, RecordId, Scope, ServerId, Stub};
+pub use store::{Append, ChannelLog, ControlLog, Held, IngestError, Store};
 
 /// Longest log name, in bytes. A channel log name is 64 + 1 + 64 characters.
 pub const MAX_LOG_NAME: usize = 160;
@@ -104,6 +104,40 @@ pub struct AcceptAll;
 impl Authorizer for AcceptAll {
     fn check(&self, _: &Record, _: &ControlLog<'_>) -> Verdict {
         Verdict::Accept
+    }
+}
+
+/// Decides about pruned stubs (B6-p): whether a peer's stub may be stored
+/// in place of its record, and whether we may prune one of ours. Implemented
+/// by the integration layer over `authority::check_stub`. The stub is held
+/// only once a held, accepted `MessageDelete` (or newer `MessageEdit`)
+/// replaced its record; until then it is [`StubVerdict::Pending`]. So a
+/// hostile peer serving stubs can't make messages disappear.
+///
+/// Called with the stub's context (deps, auth_deps) stored, inside the
+/// store's write transaction: it must not call back into the node.
+pub trait StubGate: Send + Sync + 'static {
+    fn check(&self, stub: &Stub, channel: &ChannelLog<'_>) -> StubVerdict;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StubVerdict {
+    /// Store (or prune to) the stub.
+    Accept,
+    /// Nothing held replaced the record yet: not stored. Asked again when
+    /// more of the channel arrives; meanwhile the full record may come.
+    Pending,
+    /// Never store it.
+    Reject,
+}
+
+/// Refuses every stub: only full records are stored and served. The
+/// default until the integration layer provides a gate.
+pub struct NoStubs;
+
+impl StubGate for NoStubs {
+    fn check(&self, _: &Stub, _: &ChannelLog<'_>) -> StubVerdict {
+        StubVerdict::Pending
     }
 }
 
