@@ -1,0 +1,176 @@
+{
+  "version": 1,
+  "about": "Scenarios both cores must pass: the TS mock (ui/src/core/mock.ts) and the Rust core (core/api). Format: core/api/CONFORMANCE.md.",
+  "scenarios": [
+    {
+      "name": "sign-up, recovery check gates server creation",
+      "targets": ["mock", "rust"],
+      "peers": ["alice"],
+      "steps": [
+        { "peer": "alice", "cmd": "getIdentity", "expect": { "ok": null } },
+        {
+          "peer": "alice",
+          "cmd": "createIdentity",
+          "args": { "input": { "locale": "he", "country": "IL", "birthDate": "1990-05-01" } },
+          "expect": {
+            "ok": {
+              "identity": { "id": "<string>", "shortCode": "<string>", "country": "IL", "birthDate": "1990-05-01", "recoveryChecked": false },
+              "words": "<len:12>"
+            }
+          },
+          "events": ["identity.progress"],
+          "save": { "me": "ok.identity.id", "words": "ok.words" }
+        },
+        { "peer": "alice", "cmd": "getIdentity", "expect": { "ok": { "id": "${me}", "recoveryChecked": false } } },
+        { "peer": "alice", "cmd": "getRecoveryWords", "expect": { "ok": "${words}" } },
+        {
+          "peer": "alice",
+          "cmd": "createServer",
+          "args": { "input": { "name": "קהילת הקוד", "ageRestriction": "none" } },
+          "expect": { "error": { "code": "recovery-check-required" } }
+        },
+        {
+          "peer": "alice",
+          "cmd": "checkRecoveryWords",
+          "args": { "answers": { "2": "zzzz", "7": "${words.6}" } },
+          "expect": { "ok": false }
+        },
+        { "peer": "alice", "cmd": "getIdentity", "expect": { "ok": { "recoveryChecked": false } } },
+        {
+          "peer": "alice",
+          "cmd": "checkRecoveryWords",
+          "args": { "answers": { "1": "${words.0}", "7": "${words.6}", "12": "${words.11}" } },
+          "expect": { "ok": true },
+          "events": ["identity.changed"]
+        },
+        { "peer": "alice", "cmd": "getIdentity", "expect": { "ok": { "recoveryChecked": true } } },
+        {
+          "peer": "alice",
+          "cmd": "createServer",
+          "args": { "input": { "name": "  קהילת הקוד ", "ageRestriction": "none" } },
+          "expect": { "ok": { "id": "<string>", "name": "קהילת הקוד", "initials": "קה", "ownerId": "${me}", "ageRestriction": "none", "inviteLink": "<string>", "unread": false } },
+          "events": ["server.added"],
+          "save": { "server": "ok.id" }
+        },
+        { "peer": "alice", "cmd": "listServers", "expect": { "ok": "<len:1>" } },
+        {
+          "peer": "alice",
+          "cmd": "listChannels",
+          "args": { "serverId": "${server}" },
+          "expect": { "ok": [{ "serverId": "${server}", "name": "general", "adult": false }] }
+        },
+        {
+          "peer": "alice",
+          "cmd": "listMembers",
+          "args": { "serverId": "${server}" },
+          "expect": { "ok": [{ "id": "${me}", "serverId": "${server}", "isOwner": true, "presence": "online" }] }
+        },
+        {
+          "peer": "alice",
+          "cmd": "kickMember",
+          "args": { "serverId": "${server}", "userId": "${me}" },
+          "expect": { "error": { "code": "not-allowed" } }
+        },
+        { "peer": "alice", "cmd": "listChannels", "args": { "serverId": "nope" }, "expect": { "error": { "code": "not-found" } } },
+        {
+          "peer": "alice",
+          "cmd": "updateProfile",
+          "args": { "input": { "displayName": "אליס" } },
+          "expect": { "ok": { "id": "${me}", "displayName": "אליס" } },
+          "events": ["identity.changed"]
+        }
+      ]
+    },
+    {
+      "name": "restore: wrong words are reported by position",
+      "targets": ["mock", "rust"],
+      "note": "Only 'yellow' is in both the mock's stand-in list and BIP-39.",
+      "peers": ["bob"],
+      "steps": [
+        {
+          "peer": "bob",
+          "cmd": "restoreIdentity",
+          "args": { "words": ["yellow", "yellow", "zzzz", "yellow", "yellow", "yellow", "yellow", "yellow", "yellow", "yellow", "yellow", "qqq"] },
+          "expect": { "error": { "code": "invalid-words", "positions": [3, 12] } }
+        },
+        {
+          "peer": "bob",
+          "cmd": "restoreIdentity",
+          "args": { "words": ["yellow", "yellow", "yellow"] },
+          "expect": { "error": { "code": "invalid-words", "positions": [] } }
+        },
+        { "peer": "bob", "cmd": "getIdentity", "expect": { "ok": null } }
+      ]
+    },
+    {
+      "name": "restore with the BIP-39 list: typos, checksum, success",
+      "targets": ["rust"],
+      "why-not-mock": "the mock has a 64-word stand-in list and no checksum (follow-up: give the mock the BIP-39 list)",
+      "peers": ["bob"],
+      "steps": [
+        {
+          "peer": "bob",
+          "cmd": "restoreIdentity",
+          "args": { "words": ["legal", "winnr", "thank", "year", "wave", "sausage", "worth", "useful", "legal", "winner", "thank", "yelow"] },
+          "expect": { "error": { "code": "invalid-words", "positions": [2, 12] } }
+        },
+        {
+          "peer": "bob",
+          "cmd": "restoreIdentity",
+          "args": { "words": ["abandon", "abandon", "abandon", "abandon", "abandon", "abandon", "abandon", "abandon", "abandon", "abandon", "abandon", "abandon"] },
+          "expect": { "error": { "code": "invalid-words", "positions": [] } }
+        },
+        {
+          "peer": "bob",
+          "cmd": "restoreIdentity",
+          "args": { "words": ["legal", "winner", "thank", "year", "wave", "sausage", "worth", "useful", "legal", "winner", "thank", "yellow"] },
+          "expect": { "ok": { "id": "<string>", "recoveryChecked": true } }
+        },
+        { "peer": "bob", "cmd": "getRecoveryWords", "expect": { "ok": ["legal", "winner", "thank", "year", "wave", "sausage", "worth", "useful", "legal", "winner", "thank", "yellow"] } }
+      ]
+    },
+    {
+      "name": "two peers: join, grant, kick",
+      "targets": ["rust"],
+      "why-not-mock": "the mock is one person; its joinServer adds a canned demo server",
+      "peers": ["owner", "mod", "carol"],
+      "steps": [
+        { "peer": "owner", "cmd": "restoreIdentity", "args": { "words": ["legal", "winner", "thank", "year", "wave", "sausage", "worth", "useful", "legal", "winner", "thank", "yellow"] }, "expect": { "ok": {} }, "save": { "ownerId": "ok.id" } },
+        { "peer": "owner", "cmd": "updateProfile", "args": { "input": { "displayName": "Owner" } }, "expect": { "ok": {} } },
+        { "peer": "owner", "cmd": "createServer", "args": { "input": { "name": "Team", "ageRestriction": "none" } }, "expect": { "ok": {} }, "save": { "server": "ok.id", "link": "ok.inviteLink" } },
+
+        { "peer": "mod", "cmd": "createIdentity", "args": { "input": { "locale": "en", "country": "IL", "birthDate": "1985-01-01" } }, "expect": { "ok": {} }, "save": { "modId": "ok.identity.id" } },
+        { "peer": "mod", "cmd": "updateProfile", "args": { "input": { "displayName": "Mod" } }, "expect": { "ok": {} } },
+        { "peer": "mod", "cmd": "joinServer", "args": { "link": "${link}" }, "expect": { "ok": { "phase": "searching" } }, "events": ["join.status", "server.added", "join.status"] },
+        { "peer": "mod", "cmd": "listServers", "expect": { "ok": [{ "id": "${server}", "ownerId": "${ownerId}" }] } },
+
+        { "peer": "carol", "cmd": "createIdentity", "args": { "input": { "locale": "he", "country": "IL", "birthDate": "2000-02-29" } }, "expect": { "ok": {} }, "save": { "carolId": "ok.identity.id" } },
+        { "peer": "carol", "cmd": "joinServer", "args": { "link": "${link}" }, "expect": { "ok": { "phase": "searching" } } },
+
+        { "peer": "owner", "cmd": "syncNow", "expect": { "ok": null }, "events": ["members.changed"] },
+        { "peer": "owner", "cmd": "listMembers", "args": { "serverId": "${server}" }, "expect": { "ok": "<len:3>" } },
+
+        { "peer": "mod", "cmd": "kickMember", "args": { "serverId": "${server}", "userId": "${carolId}" }, "expect": { "error": { "code": "not-allowed" } } },
+        { "peer": "owner", "cmd": "grantRole", "args": { "serverId": "${server}", "userId": "${modId}", "role": "moderator" }, "expect": { "ok": null }, "events": ["members.changed"] },
+        { "peer": "mod", "cmd": "syncNow", "expect": { "ok": null } },
+        { "peer": "mod", "cmd": "kickMember", "args": { "serverId": "${server}", "userId": "${ownerId}" }, "expect": { "error": { "code": "not-allowed" } } },
+        { "peer": "mod", "cmd": "kickMember", "args": { "serverId": "${server}", "userId": "${carolId}" }, "expect": { "ok": null }, "events": ["members.changed"] },
+
+        { "peer": "carol", "cmd": "syncNow", "expect": { "ok": null }, "events": ["server.removed"] },
+        { "peer": "carol", "cmd": "listServers", "expect": { "ok": [] } },
+        { "peer": "owner", "cmd": "syncNow", "expect": { "ok": null } },
+        {
+          "peer": "owner",
+          "cmd": "listMembers",
+          "args": { "serverId": "${server}" },
+          "expect": { "ok": [
+            { "id": "${ownerId}", "displayName": "Owner", "isOwner": true, "role": "owner" },
+            { "id": "${modId}", "displayName": "Mod", "isOwner": false, "role": "moderator" }
+          ] }
+        },
+        { "peer": "owner", "cmd": "revokeRole", "args": { "serverId": "${server}", "userId": "${modId}" }, "expect": { "ok": null } },
+        { "peer": "owner", "cmd": "listMembers", "args": { "serverId": "${server}" }, "expect": { "ok": [{ "role": "owner" }, { "id": "${modId}", "role": "member" }] } }
+      ]
+    }
+  ]
+}
