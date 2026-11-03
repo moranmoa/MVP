@@ -5,7 +5,8 @@ use std::collections::BTreeSet;
 use common::*;
 use groupkeys::{
     open, rotation_body_len, seal, Applied, ChannelKeys, Error, MessageContext, Rotation,
-    RotationNeed, MAX_MESSAGE_PLAINTEXT, MESSAGE_OVERHEAD, ROTATION_HEADER_LEN, WRAP_LEN,
+    RotationNeed, MAX_MESSAGE_PLAINTEXT, MESSAGE_OVERHEAD, PART_HEADER_LEN, ROTATION_HEADER_LEN,
+    WRAPS_PER_PART, WRAP_LEN,
 };
 use records::{ChannelId, Draft, Kind, PublicKey, Scope, ServerId, SigningKey};
 
@@ -62,7 +63,7 @@ fn kicked_member_cannot_read_the_next_epoch() {
     assert_eq!(mallory.decrypt(pk(2), &old).unwrap(), b"before the kick");
 
     // Trying the key Mallory does hold, in the new epoch's context, fails too.
-    let first_key = Rotation::decode(first.id, SERVER, first.author, &first.body)
+    let first_key = Rotation::decode(SERVER, first.author, first.body())
         .unwrap()
         .unwrap_key(&secret(3))
         .unwrap();
@@ -120,20 +121,22 @@ fn rotation_for_another_channel_is_refused() {
     let elsewhere = ChannelKeys::new(SERVER, ChannelId::from_bytes([7; 32]), secret(1));
     let foreign = rotate(&elsewhere, 1, &everyone, 1);
     let mut here = peer(2);
-    assert_eq!(here.apply(foreign.id, foreign.author, &foreign.body), Err(Error::WrongChannel));
+    let part = &foreign.parts[0];
+    assert_eq!(here.apply(part.record, part.author, &part.body), Err(Error::WrongChannel));
     assert!(here.head().is_none());
 }
 
 #[test]
-fn rotation_signed_by_someone_else_does_not_open() {
-    // The wraps bind the rotator: a body lifted into a record signed by
-    // another author gives nobody a key.
+fn a_part_signed_by_someone_else_is_refused() {
+    // The rotation ID binds the rotator: a part lifted into a record signed
+    // by another author is refused outright, and gives nobody a key.
     let everyone = members(&[1, 2]);
     let original = rotate(&peer(1), 1, &everyone, 1);
-    let lifted = sign(3, original.body.clone());
+    let lifted = sign_part(3, original.body().to_vec());
     let mut bob = peer(2);
-    assert_eq!(apply(&mut bob, &lifted), Applied::WrapInvalid);
-    assert!(!bob.has_key(&lifted.id));
+    let refused = bob.apply(lifted.record, lifted.author, &lifted.body);
+    assert_eq!(refused, Err(Error::RotationIdMismatch));
+    assert_eq!(bob.held(), 0);
 }
 
 #[test]
@@ -334,26 +337,49 @@ fn largest_message_fits_a_message_record() {
 }
 
 #[test]
-fn rotation_sizes() {
-    let limit = Kind::Message.max_body();
-    let fits = groupkeys::recipients_within(limit);
+fn large_rotations_split_into_parts() {
+    let limit = Kind::KeyRotation.max_body();
     let mut view = peer(1);
     let first = rotate(&view, 1, &members(&[1]), 1);
     apply(&mut view, &first);
-    let many: BTreeSet<PublicKey> = (1..=fits as u32)
+    // Two full parts and one more member: three parts.
+    let count = 2 * WRAPS_PER_PART + 1;
+    let mut many: BTreeSet<PublicKey> = (1..count as u32)
         .map(|n| {
             let mut seed = [0; 32];
             seed[..4].copy_from_slice(&n.to_le_bytes());
+            seed[31] = 0xee;
             PublicKey::from_bytes(SigningKey::from_bytes(&seed).verifying_key().to_bytes())
         })
         .collect();
-    let body = view.rotate(pk(1), &many, &mut rng(2)).unwrap();
-    assert_eq!(body.len(), rotation_body_len(fits));
-    assert!(body.len() <= limit);
-    assert!(rotation_body_len(fits + 1) > limit);
+    many.insert(pk(1));
+    assert_eq!(many.len(), count);
+    let parts = view.rotate(pk(1), &many, &mut rng(2)).unwrap();
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts.iter().map(Vec::len).sum::<usize>(), rotation_body_len(count));
+    assert!(parts.iter().all(|part| part.len() <= limit));
+    assert!(rotation_body_len(WRAPS_PER_PART + 1) > limit + PART_HEADER_LEN);
+
+    // Each part signs as its own record (records checks its header), and
+    // the rotation counts only once every part is in, in any order.
+    let signed = sign(1, parts);
+    let mut alice = peer(1);
+    apply(&mut alice, &first);
+    let order = [2, 0, 1];
+    for (n, i) in order.iter().enumerate() {
+        let part = &signed.parts[*i];
+        let (applied, _) = alice.apply(part.record, part.author, &part.body).unwrap();
+        let expected = if n + 1 < order.len() { Applied::Incomplete } else { Applied::Key };
+        assert_eq!(applied, expected);
+        alice.accept(part.record);
+    }
+    assert_eq!(alice.head().unwrap().id(), signed.id);
+    assert_eq!(alice.head().unwrap().recipients().count(), count);
     println!(
-        "message overhead {MESSAGE_OVERHEAD} B; rotation {ROTATION_HEADER_LEN} B + {WRAP_LEN} B \
-         per member; {fits} members fit {limit} B; 500 members need {} B",
+        "message overhead {MESSAGE_OVERHEAD} B; rotation part {PART_HEADER_LEN} + \
+         {ROTATION_HEADER_LEN} B + {WRAP_LEN} B per member; {WRAPS_PER_PART} members per \
+         {limit} B part; 500 members: {} parts, {} B",
+        groupkeys::parts_for(500),
         rotation_body_len(500),
     );
 }
