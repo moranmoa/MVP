@@ -1600,5 +1600,144 @@ mod tests {
         assert!(!filter.can_subscribe(&TopicHash::from_raw("log/")));
         assert!(!filter.can_subscribe(&TopicHash::from_raw("something-else")));
         assert!(!filter.can_subscribe(&TopicHash::from_raw(format!("log/{}", "x".repeat(10_000)))));
+        let handle = ServerSecret::from_bytes([9; 32]).handle(Scope::Control);
+        assert!(filter.can_subscribe(&TopicHash::from_raw(handle.wire())));
+        assert!(!filter.can_subscribe(&TopicHash::from_raw("h/1234")));
+    }
+
+    fn sealed_logs(secret: &ServerSecret) -> (HashSet<String>, Sealing) {
+        let mut sealing = Sealing::default();
+        let mut open = HashSet::new();
+        for scope in [Scope::Control, Scope::Channel(channel())] {
+            let log = log_name(server(), scope);
+            open.insert(log.clone());
+            let sealed = Sealed { server: server(), scope, handle: secret.handle(scope), key: secret.gossip_key(scope) };
+            sealing.insert(log, sealed);
+        }
+        (open, sealing)
+    }
+
+    #[test]
+    fn sealed_gossip_is_opened_then_checked_like_any_record() {
+        let secret = ServerSecret::from_bytes([9; 32]);
+        let (open, sealing) = sealed_logs(&secret);
+        let chan_scope = Scope::Channel(channel());
+        let (handle, key) = (secret.handle(chan_scope), secret.gossip_key(chan_scope));
+        let on = |topic: &Handle, data: Vec<u8>| gossipsub::Message {
+            source: None,
+            data,
+            sequence_number: None,
+            topic: TopicHash::from_raw(topic.wire()),
+        };
+        let m = crate::testutil::message(0, &[], 0);
+        assert_eq!(check_pushed(&open, &sealing, &on(&handle, access::seal(&key, &handle, &m.encode()))), Ok(m.clone()));
+
+        // Plaintext, or sealed under another log's key or topic: refused.
+        assert_eq!(check_pushed(&open, &sealing, &on(&handle, m.encode())), Err(Refuse::Reject));
+        let control = secret.handle(Scope::Control);
+        let moved = access::seal(&key, &handle, &m.encode());
+        assert_eq!(check_pushed(&open, &sealing, &on(&control, moved)), Err(Refuse::Reject));
+        let wrong_key = ServerSecret::from_bytes([8; 32]).gossip_key(chan_scope);
+        assert_eq!(check_pushed(&open, &sealing, &on(&handle, access::seal(&wrong_key, &handle, &m.encode()))), Err(Refuse::Reject));
+        // Opens fine but signed another log (sealed by a secret holder): still refused.
+        let g = crate::testutil::genesis();
+        assert_eq!(check_pushed(&open, &sealing, &on(&handle, access::seal(&key, &handle, &g.encode()))), Err(Refuse::Reject));
+        // A handle we don't hold, or a sealed log under its plain name: not ours.
+        let unknown = ServerSecret::from_bytes([7; 32]).handle(chan_scope);
+        assert_eq!(check_pushed(&open, &sealing, &on(&unknown, m.encode())), Err(Refuse::Ignore));
+        assert_eq!(check_pushed(&open, &sealing, &pushed(&chan(), m.encode())), Err(Refuse::Ignore));
+    }
+
+    /// Lets one identity read channels.
+    struct OnlyReader(PublicKey);
+
+    impl ReadGate for OnlyReader {
+        fn may_read(&self, reader: &PublicKey, _: &crate::ControlLog<'_>) -> bool {
+            *reader == self.0
+        }
+    }
+
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    }
+
+    async fn test_node(name: &str, listen: Option<u16>, bootstrap: Option<u16>, access: Access) -> Node {
+        let dir = std::env::temp_dir().join(format!("sync-gap4-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = NodeConfig {
+            // Nothing listens there: no relay in this test.
+            relay: format!("/ip4/127.0.0.1/tcp/9/p2p/{}", PeerId::random()).parse().unwrap(),
+            data_dir: dir,
+            logs: Vec::new(),
+            authorizer: Arc::new(AcceptAll),
+            listen: format!("/ip4/127.0.0.1/tcp/{}", listen.unwrap_or(0)).parse().unwrap(),
+            bootstrap: bootstrap.map(|p| format!("/ip4/127.0.0.1/tcp/{p}").parse().unwrap()).into_iter().collect(),
+            allow_lan: true,
+        };
+        Node::start_with(config, access).await.unwrap().0
+    }
+
+    async fn counts(node: &Node) -> (u64, u64) {
+        let control = node.state(&log_name(server(), Scope::Control)).await.unwrap().count;
+        (control, node.state(&chan()).await.unwrap().count)
+    }
+
+    /// Waits until `node` holds `want`, or fails after `secs`.
+    async fn eventually(node: &Node, want: (u64, u64), secs: u64) {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while counts(node).await != want {
+            assert!(Instant::now() < deadline, "expected {want:?}, have {:?}", counts(node).await);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sealed_servers_are_served_to_bound_members_only() {
+        use crate::testutil::{genesis, message, test_key};
+        let secret = ServerSecret::from_bytes([9; 32]);
+        let key = |n: u8| -> Option<Arc<dyn Binder>> { Some(Arc::new(test_key(n))) };
+        let port = free_port();
+        // The owner's node serves channels to test key 1 only.
+        let reader: Arc<dyn ReadGate> = Arc::new(OnlyReader(test_key(1).identity()));
+        let owner = test_node("owner", Some(port), None, Access { binder: key(0), read_gate: Some(reader) }).await;
+        owner.open_server(server(), secret.clone()).unwrap();
+        owner.open_channel(server(), channel()).await.unwrap();
+        owner.append(genesis()).await.unwrap();
+        owner.append(message(0, &[], 0)).await.unwrap();
+        // A plain-name request for a sealed log is never answered.
+        owner.open(&chan()).unwrap();
+
+        let peer = |name: &'static str, binder, secret: ServerSecret| async move {
+            let node = test_node(name, None, Some(port), Access { binder, read_gate: None }).await;
+            node.open_server(server(), secret).unwrap();
+            node.open_channel(server(), channel()).await.unwrap();
+            node
+        };
+        let member = peer("member", key(1), secret.clone()).await;
+        let stranger = peer("stranger", key(2), secret.clone()).await;
+        let unbound = peer("unbound", None, secret.clone()).await;
+        let outsider = peer("outsider", key(1), ServerSecret::from_bytes([8; 32])).await;
+        let by_name = test_node("by-name", None, Some(port), Access::default()).await;
+        by_name.open(&chan()).unwrap();
+        by_name.open(&log_name(server(), Scope::Control)).unwrap();
+
+        // The member gets everything; a bound non-member only the control log.
+        eventually(&member, (1, 1), 20).await;
+        eventually(&stranger, (1, 0), 20).await;
+        // Live push reaches the member (sealed gossip, or the next pull). The
+        // non-member holds the secret, so the push may reach it too (residual
+        // GAP-4b), but it builds on a record only a pull would give it.
+        let first = message(0, &[], 0);
+        owner.append(message(1, &[first.id()], 0)).await.unwrap();
+        eventually(&member, (1, 2), 20).await;
+        // Past another anti-entropy round: the rest still have nothing more.
+        tokio::time::sleep(ANTI_ENTROPY + Duration::from_secs(1)).await;
+        assert_eq!(counts(&stranger).await, (1, 0), "a bound non-member pulled a channel");
+        assert_eq!(counts(&unbound).await, (0, 0), "a pull without a binding was answered");
+        assert_eq!(counts(&outsider).await, (0, 0), "a wrong secret was answered");
+        assert_eq!(counts(&by_name).await, (0, 0), "a sealed log was served by its plain name");
+        for node in [owner, member, stranger, unbound, outsider, by_name] {
+            node.shutdown().await.unwrap();
+        }
     }
 }
