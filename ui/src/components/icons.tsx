@@ -126,3 +126,9 @@ export const SendIcon = (p: IconProps) => (
     <path d="M4 12 20 4l-6 16-3-7z" />
   </Icon>
 );
+/** Points back, against the reading direction (left in English, right in Hebrew). */
+export const BackIcon = (p: IconProps) => (
+  <Icon flip {...p}>
+    <path d="M15 18l-6-6 6-6" />
+  </Icon>
+);
