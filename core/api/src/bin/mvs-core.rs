@@ -95,7 +95,8 @@ fn main() -> ExitCode {
     let stop = AtomicBool::new(false);
     let served = std::thread::scope(|scope| {
         if let Some(hints) = sync.as_ref().and_then(|net| net.take_hints()) {
-            scope.spawn(|| core.run_sync_loop(&hints, &stop));
+            let (core, stop) = (&core, &stop);
+            scope.spawn(move || core.run_sync_loop(&hints, stop));
         }
         let served = sidecar::serve(&core, io::stdin().lock(), &out);
         stop.store(true, Ordering::SeqCst);
