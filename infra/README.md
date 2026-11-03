@@ -48,6 +48,38 @@ All of it is in `docker-compose.yml`:
 - coturn has the restart, log and limit settings but not the read-only root
   yet: that is untested until voice is switched on.
 
+And in the relay itself (`relay/src/main.rs`):
+
+- Connection limits: at most `MAX_CONNECTIONS` (default 512) established
+  connections, 8 per peer and 64 half-open incoming ones. New connections
+  are also refused once the process uses `MAX_MEMORY_MB` (default 200, below
+  the container's 256 MB). Raise both together with the compose `memory`.
+- The DHT runs on `/mvs/kad/1.0.0`, not the IPFS default, so it can't merge
+  with the public IPFS DHT. Only public addresses that peers announce go into
+  it: private, loopback, link-local and CGNAT addresses are dropped, so a
+  client's home network layout is never handed out. For a test harness or
+  a LAN-only setup, `ALLOW_PRIVATE_ADDRS=1` turns this filter off (never on
+  the public relay). Until `core/sync` switches, the relay also answers on
+  `/ipfs/kad/1.0.0` so current clients keep working (TODO: drop it then).
+- `node.key` is created readable by its owner only (0600), and the relay
+  **refuses to start** if the file is readable by group or others. Keys
+  created before this check are 0644. Fix once, with the relay stopped:
+
+  ```
+  docker run --rm -v infra_relay-data:/data debian:bookworm-slim chmod 600 /data/node.key
+  ```
+
+### Reproducible builds
+
+`relay/Cargo.lock` is committed and the image builds with `--locked`, so a
+rebuild uses exactly the reviewed dependency versions. The image build also
+runs the relay's tests. Base images (`rust`, `debian`, `caddy`, `coturn`) are
+pinned by digest. To update one, take the new digest from
+`docker buildx imagetools inspect <image:tag>`, then update the
+`Dockerfile`/compose line in a PR. Update dependencies with
+`cargo update` in `relay/` in a PR of their own; the CI licence job checks
+the result.
+
 ## Making it public
 
 A reverse proxy only carries HTTP and WebSocket traffic, so it covers part of it:
@@ -65,23 +97,23 @@ The `caddy` service in the compose file proxies a whole subdomain to the
 relay's WebSocket port and gets its certificate from Let's Encrypt by
 itself. Config: [`caddy/Caddyfile`](caddy/Caddyfile).
 
-1. Pick a subdomain, e.g. `relay.example.com` (placeholder), and point its
+1. Pick a subdomain, e.g. `relay.example.org` (placeholder), and point its
    DNS `A` record at your home IP.
 2. Forward TCP **80** and **443** on the router to this PC. Port 80 is only
    used for the certificate challenge and redirects.
-3. In `.env`: `RELAY_DOMAIN=relay.example.com`, and add
-   `/dns4/relay.example.com/tcp/443/wss` to `EXTERNAL_ADDRS`.
+3. In `.env`: `RELAY_DOMAIN=relay.example.org`, and add
+   `/dns4/relay.example.org/tcp/443/wss` to `EXTERNAL_ADDRS`.
 4. `docker compose --profile proxy up -d`, then
    `docker compose logs caddy` should show "certificate obtained successfully".
 
-Browsers then dial `/dns4/relay.example.com/tcp/443/wss/p2p/<peer_id>`. The
+Browsers then dial `/dns4/relay.example.org/tcp/443/wss/p2p/<peer_id>`. The
 relay's port 4002 stays bound to `127.0.0.1` on the host (`WS_BIND`): Caddy
 reaches it over the internal Docker network, nothing else can.
 
 If you already run a reverse proxy on this PC instead, the equivalent is:
 
 ```
-relay.example.com {
+relay.example.org {
     reverse_proxy 127.0.0.1:4002
 }
 ```
