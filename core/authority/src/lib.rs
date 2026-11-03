@@ -58,7 +58,7 @@ mod channel;
 mod incremental;
 pub use channel::{
     check_channel, check_channel_with, message_text_ok, privileged_only, witness, ChannelGraph,
-    Refusal, Removal, Verdict, Void, VoidRule, MAX_MESSAGE_CODE_POINTS,
+    Context, Refusal, Removal, Verdict, Void, VoidRule, MAX_MESSAGE_CODE_POINTS, MAX_WITNESS_DEPTH,
 };
 pub use incremental::{Inserted, Resolver, Stats, MAX_PENDING};
 

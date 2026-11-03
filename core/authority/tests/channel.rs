@@ -4,7 +4,7 @@
 
 mod common;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use authority::{
     check_channel, check_channel_with, message_text_ok, privileged_only, Action, ChannelGraph,
@@ -19,20 +19,14 @@ use records::{Draft, Kind, Scope};
 const GENERAL: ChannelId = ChannelId::from_bytes([5; 32]);
 const RANDOM: ChannelId = ChannelId::from_bytes([6; 32]);
 
-/// The caller's channel store: records by ID, ancestry through deps, and
-/// which records the caller has accepted.
+/// The caller's channel store: records by ID, ancestry through deps.
 #[derive(Default)]
-struct Store(HashMap<RecordId, Record>, HashSet<RecordId>);
+struct Store(HashMap<RecordId, Record>);
 
 impl Store {
     fn add(&mut self, record: &Record) -> RecordId {
         self.0.insert(record.id(), record.clone());
         record.id()
-    }
-
-    fn accept(&mut self, record: &Record) -> RecordId {
-        self.1.insert(record.id());
-        self.add(record)
     }
 }
 
@@ -50,14 +44,12 @@ impl ChannelGraph for Store {
         false
     }
 
-    fn author(&self, id: RecordId) -> Option<authority::PublicKey> {
-        self.0.get(&id).map(Record::author)
+    fn record(&self, id: RecordId) -> Option<Record> {
+        self.0.get(&id).cloned()
     }
 
-    fn witnessed(&self, record: RecordId, author: authority::PublicKey) -> bool {
-        self.1.iter().any(|id| {
-            *id != record && self.0[id].author() != author && self.is_ancestor(record, *id)
-        })
+    fn children(&self, id: RecordId) -> Vec<RecordId> {
+        self.0.values().filter(|r| r.deps().contains(&id)).map(Record::id).collect()
     }
 }
 
@@ -418,27 +410,27 @@ fn message_text_is_limited_in_code_points() {
 fn a_stale_cut_keeps_what_others_witnessed() {
     let (mut control, heads) = founded(&[1, 2, 3]);
     let mut store = Store::default();
-    let old_head = store.accept(&message(2, 0, vec![], &heads));
+    let old_head = store.add(&message(2, 0, vec![], &heads));
     // After the kicker's view: a message of the target that member 3 replied
     // to, one the target replied to themself, and one nobody saw.
     let replied = message(1, 0, vec![old_head], &heads);
-    store.accept(&replied);
-    store.accept(&message(3, 0, vec![replied.id()], &heads));
+    store.add(&replied);
+    store.add(&message(3, 0, vec![replied.id()], &heads));
     let self_replied = message(1, 1, vec![old_head], &heads);
-    store.accept(&self_replied);
-    store.accept(&message(1, 2, vec![self_replied.id()], &heads));
+    store.add(&self_replied);
+    store.add(&message(1, 2, vec![self_replied.id()], &heads));
     let unseen = message(1, 3, vec![old_head], &heads);
-    store.accept(&unseen);
-    // Seen only by a record the caller hasn't accepted.
+    store.add(&unseen);
+    // Seen only by a record that isn't accepted (a key that never joined).
     let shadow = message(1, 4, vec![old_head], &heads);
-    store.accept(&shadow);
-    store.add(&message(2, 1, vec![shadow.id()], &heads));
+    store.add(&shadow);
+    store.add(&message(9, 0, vec![shadow.id()], &heads));
     // A privileged record keeps the plain cut rule, witnessed or not.
     let moderator =
         rec(0, 2, heads.clone(), Action::Grant { target: actor(1), role: Role::Moderator });
     let rotate = rotation(1, 0, &[moderator.id()]);
-    store.accept(&rotate);
-    store.accept(&message(3, 1, vec![rotate.id()], &heads));
+    store.add(&rotate);
+    store.add(&message(3, 1, vec![rotate.id()], &heads));
     let kick = rec(
         0,
         3,
@@ -446,6 +438,17 @@ fn a_stale_cut_keeps_what_others_witnessed() {
         Action::Kick { target: actor(1), cut: cut(&[(GENERAL, old_head)]) },
     );
     control.extend([moderator, kick.clone()]);
+    // A "witness" signed after the kick was known doesn't count: a colluder
+    // can't revive a backdated message.
+    let late = message(1, 5, vec![old_head], &heads);
+    store.add(&late);
+    store.add(&message(3, 2, vec![late.id()], &[kick.id()]));
+    // A witness further down, through the target's own reply, still counts.
+    let deep = message(1, 6, vec![old_head], &heads);
+    let own = message(1, 7, vec![deep.id()], &heads);
+    store.add(&deep);
+    store.add(&own);
+    store.add(&message(2, 2, vec![own.id()], &heads));
     let r = resolver(&control);
 
     let voided = Verdict::Voided { by: kick.id() };
@@ -453,5 +456,84 @@ fn a_stale_cut_keeps_what_others_witnessed() {
     assert_eq!(check_channel(&r, &self_replied, &store), voided, "the target can't witness itself");
     assert_eq!(check_channel(&r, &unseen, &store), voided, "nobody saw it");
     assert_eq!(check_channel(&r, &shadow, &store), voided, "the witness isn't accepted");
+    assert_eq!(check_channel(&r, &late, &store), voided, "witnessed only after the kick");
+    assert_eq!(check_channel(&r, &deep, &store), Verdict::Accept, "witnessed further down");
     assert_eq!(check_channel(&r, &rotate, &store), voided, "privileged: the cut alone decides");
+}
+
+/// A cut head the caller doesn't hold yet: the record may well be an
+/// ancestor of it, so the verdict waits instead of flickering to void.
+#[test]
+fn a_missing_cut_head_is_pending_not_void() {
+    let (mut control, heads) = founded(&[1, 2]);
+    let mut store = Store::default();
+    let mine = message(1, 0, vec![], &heads);
+    store.add(&mine);
+    let reply = message(2, 0, vec![mine.id()], &heads);
+    let kick = rec(
+        0,
+        2,
+        heads.clone(),
+        Action::Kick { target: actor(1), cut: cut(&[(GENERAL, reply.id())]) },
+    );
+    control.push(kick);
+    let r = resolver(&control);
+    assert_eq!(check_channel(&r, &mine, &store), Verdict::Pending { missing: vec![reply.id()] });
+    store.add(&reply);
+    assert_eq!(check_channel(&r, &mine, &store), Verdict::Accept);
+}
+
+/// Edits and deletes change messages only, never a rotation or another
+/// edit or delete.
+#[test]
+fn only_messages_are_edited_or_deleted() {
+    let (mut control, heads) = founded(&[1, 2]);
+    let moderator =
+        rec(0, 2, heads.clone(), Action::Grant { target: actor(1), role: Role::Moderator });
+    control.push(moderator.clone());
+    let r = resolver(&control);
+    let auth = vec![moderator.id()];
+    let mut store = Store::default();
+    let rotate = rotation(1, 0, &auth);
+    let note = message(1, 1, vec![], &auth);
+    store.add(&rotate);
+    store.add(&note);
+    let fix = channel_record(
+        1,
+        2,
+        GENERAL,
+        vec![note.id()],
+        auth.clone(),
+        Kind::MessageEdit,
+        [note.id().as_bytes().as_slice(), b"x"].concat(),
+    );
+    store.add(&fix);
+    let other_channel =
+        channel_record(1, 3, RANDOM, vec![], auth.clone(), Kind::Message, b"hi".to_vec());
+    store.add(&other_channel);
+
+    let edit = |target: &Record, seq: u64| {
+        let body = [target.id().as_bytes().as_slice(), b"new"].concat();
+        channel_record(1, seq, GENERAL, vec![target.id()], auth.clone(), Kind::MessageEdit, body)
+    };
+    let delete = |author: u8, target: &Record, seq: u64| {
+        let body = target.id().as_bytes().to_vec();
+        channel_record(
+            author,
+            seq,
+            GENERAL,
+            vec![target.id()],
+            auth.clone(),
+            Kind::MessageDelete,
+            body,
+        )
+    };
+    let bad = Verdict::Refused(Refusal::BadTarget);
+    assert_eq!(check_channel(&r, &edit(&note, 10), &store), Verdict::Accept);
+    assert_eq!(check_channel(&r, &edit(&rotate, 11), &store), bad, "edit a rotation");
+    assert_eq!(check_channel(&r, &edit(&fix, 12), &store), bad, "edit an edit");
+    assert_eq!(check_channel(&r, &edit(&other_channel, 13), &store), bad, "another channel");
+    assert_eq!(check_channel(&r, &delete(1, &rotate, 14), &store), bad, "delete own rotation");
+    assert_eq!(check_channel(&r, &delete(0, &rotate, 0), &store), bad, "owner deletes a rotation");
+    assert_eq!(check_channel(&r, &delete(1, &fix, 15), &store), bad, "delete an edit");
 }
