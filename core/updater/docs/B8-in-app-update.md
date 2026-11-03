@@ -24,7 +24,7 @@ These override anything below that disagrees.
 
 **Security lead:**
 - **A1. Paths.** The launcher never takes a path from `state.json`. It
-  parses a `Version` and builds `versions/<v>/MVS[.exe]` itself; anything
+  parses a `Version` and builds `versions/<v>/mvs[.exe]` itself; anything
   else counts as a failed start. It spawns with no shell and forwards argv
   **verbatim**, including the `--` before an `mvs://` link (#78). The only
   thing it adds is `--mvs-update-root=<root>`.
@@ -69,13 +69,13 @@ These override anything below that disagrees.
   electron-builder way into `$INSTDIR`, and that copy is the **base**
   version. `mvs-launcher[.exe]` ships at `$INSTDIR/` via `build.extraFiles`.
   Updates unpack into `$INSTDIR/versions/<ver>/`. The launcher falls back
-  to the base copy (`$INSTDIR/MVS.exe`) when no update is healthy; that is
+  to the base copy (`$INSTDIR/mvs.exe`) when no update is healthy; that is
   A6's "installer's version". The uninstaller already removes all of
   `$INSTDIR`. A `customInstall` macro in `installer.nsh` (dev-voice-shell)
   points the Start-menu and desktop shortcuts at the launcher.
 - **The update root is derived, never trusted from argv.** In a packaged
   app, `update.js` derives the root from `process.execPath`: either
-  `<root>/MVS[.exe]` (base) or `<root>/versions/<ver>/MVS[.exe]`, and
+  `<root>/mvs[.exe]` (base) or `<root>/versions/<ver>/mvs[.exe]`, and
   `<root>/mvs-launcher[.exe]` must exist. `--mvs-update-root` from argv is
   accepted only if it equals the derived root; otherwise the app runs with
   updates off and logs a warning.
@@ -148,7 +148,7 @@ B8 is integration: where files live, who runs what, and the transport.
     lock                        exclusive-create lock file
     downloads/                  temp files from store_artifact
   versions/
-    0.3.0/  MVS[.exe], resources/app.asar, resources/mvs-core[.exe], ...
+    0.3.0/  mvs[.exe], resources/app.asar, resources/mvs-core[.exe], ...
     0.4.0/  ...
 ```
 
@@ -241,7 +241,7 @@ is verified by hash first, then unpacked by a new `unpack` module into
   ≤ 20,000 entries. Executable bits come from the archive on Unix only.
 - `.partial` is renamed to `<v>` only after the whole tree is written and
   fsynced. Then `InstallState::stage` runs.
-- The required entry (`MVS.exe` / `mvs`) must exist, or the stage fails.
+- The required entry (`mvs.exe` / `mvs`) must exist, or the stage fails.
 
 ## 6. "What's new" from signed notes
 
