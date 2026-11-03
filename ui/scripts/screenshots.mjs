@@ -199,6 +199,11 @@ async function chat(query, name, opts) {
 {
   const p = await chat('?demo=1&still=1&lang=en&theme=light&update=300', 'x');
   await shot(p, '27-chat-english-ltr');
+  // QA-10: a paste over the limit stays whole, the counter shows, sending stops.
+  await p.getByRole('textbox', { name: /^Message / }).fill('word '.repeat(840));
+  await shot(p, '29-chat-composer-too-long');
+  if (!(await p.getByRole('button', { name: 'Send' }).isDisabled())) problems.push('send enabled past the length limit');
+  await p.getByRole('textbox', { name: /^Message / }).fill('');
   await p.getByRole('button', { name: 'Member list' }).click();
   await shot(p, '28-chat-english-members-collapsed');
   await p.close();

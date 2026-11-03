@@ -243,5 +243,8 @@
   "members.lookalikeHint": "This name looks like the server owner’s name or like a role. Check the identity code to see who it really is.",
   "onb.profile.avatarTooBig": "Pick a PNG, JPEG, WebP or GIF image up to 512 KB.",
   "chat.back": "Back to channels",
-  "members.close": "Close the member list"
+  "members.close": "Close the member list",
+  "chat.charCount": "{count, number} / {max, number}",
+  "chat.tooLong": "This message is too long. You can send up to {max, number} characters.",
+  "chat.sendFailed": "The message wasn't sent, and your text is back in the box. You can try again."
 }

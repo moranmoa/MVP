@@ -23,6 +23,8 @@ export const NAME_MAX = 32;
 export const SERVER_NAME_MAX = 48;
 export const CHANNEL_NAME_MAX = 32;
 export const BODY_MAX = 4000;
+/** The core's limit for a message record body (`records`, Kind::Message), in UTF-8 bytes. */
+export const BODY_MAX_BYTES = 16 * 1024;
 export const BODY_MAX_LINES = 100;
 export const BIO_MAX = 300;
 export const BIO_MAX_LINES = 8;
