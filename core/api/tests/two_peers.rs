@@ -237,6 +237,11 @@ fn the_background_sync_delivers_without_sync_now() {
             (added[0].id.as_str(), added[0].body.as_str()),
             (sent.id.as_str(), "no sync_now here")
         );
+        // B6: the guest's node acknowledged it, so the owner sees `received`.
+        eventually("the owner's message to be received", || {
+            owner.core.get_messages(&channel, 0, 1).unwrap().messages[0].send_state
+                == Some(SendState::Received)
+        });
 
         stop.store(true, Ordering::SeqCst);
         owner.net.wake();
