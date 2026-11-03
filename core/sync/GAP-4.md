@@ -58,8 +58,7 @@ api.
    follow-up.
 
 This PR is core/sync only. The api side (the link, the store, the binding
-callback, `ReadGate`) goes to dev-identity. Building waits for the
-security lead's OK too.
+callback, `ReadGate`) goes to dev-identity.
 
 ## As built (core/sync)
 
