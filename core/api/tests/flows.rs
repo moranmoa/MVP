@@ -725,11 +725,17 @@ const OWNER_WORDS: &str =
 struct Spy {
     inner: api::crypto::GroupKeysCipher,
     channels: std::sync::Mutex<BTreeSet<records::ChannelId>>,
+    /// When set, `rotate` fails (a re-key that can't happen).
+    fail_rotate: std::sync::atomic::AtomicBool,
 }
 
 impl Spy {
     fn new() -> Spy {
-        Spy { inner: api::crypto::GroupKeysCipher::locked(), channels: Default::default() }
+        Spy {
+            inner: api::crypto::GroupKeysCipher::locked(),
+            channels: Default::default(),
+            fail_rotate: Default::default(),
+        }
     }
 
     fn saw(&self, channel: records::ChannelId) {
@@ -786,6 +792,9 @@ impl GroupCipher for Spy {
         m: &BTreeSet<PublicKey>,
     ) -> Result<Vec<Vec<u8>>, CipherError> {
         self.saw(c);
+        if self.fail_rotate.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(CipherError::Rejected);
+        }
         self.inner.rotate(s, c, m)
     }
 }
@@ -972,4 +981,66 @@ fn edit_delete_and_retry_messages() {
     assert_eq!(world.network.fetch(server_key).len(), before + 1, "nothing new was signed");
     assert_eq!(guest.core.retry_message(&one.id).unwrap_err().code, ErrorCode::NotAllowed);
     assert_eq!(guest.core.retry_message("nope").unwrap_err().code, ErrorCode::NotFound);
+}
+
+/// A re-key that fails after a kick fails closed: the kick still stands
+/// (Ok), no `encryption-renewed` is claimed, sending stays blocked, and
+/// sync carries on; the next send after the cause is gone re-keys.
+#[test]
+fn a_failed_re_key_fails_closed() {
+    use api::crypto::GroupKeysCipher;
+    use std::sync::atomic::Ordering;
+
+    let world = World::new();
+    let open = |words: &str, name: &str, cipher: Arc<dyn GroupCipher>| {
+        let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
+        peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        peer.core.update_profile(profile).unwrap();
+        peer
+    };
+    let spy = Arc::new(Spy::new());
+    let owner = open(OWNER_WORDS, "Owner", spy.clone());
+    let guest = open(LEGAL, "Guest", Arc::new(GroupKeysCipher::locked()));
+    let carol = open(
+        "letter advice cage absurd amount doctor acoustic avoid letter advice cage above",
+        "Carol",
+        Arc::new(GroupKeysCipher::locked()),
+    );
+    let server = owner.core.create_server("Fails", AgeRestriction::None).unwrap();
+    for peer in [&guest, &carol] {
+        peer.core.join_server(&server.invite_link).unwrap();
+    }
+    owner.core.sync_now().unwrap();
+    let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    owner.core.send_message(&channel, "before", None).unwrap();
+
+    spy.fail_rotate.store(true, Ordering::SeqCst);
+    let carol_id = carol.core.get_identity().unwrap().unwrap().id;
+    owner.events.take();
+    owner.core.kick_member(&server.id, &carol_id).unwrap();
+    let after_kick = notices(&owner);
+    assert_eq!(after_kick, [NoticeKind::RekeyWaiting]);
+    assert!(!after_kick.contains(&NoticeKind::EncryptionRenewed));
+    assert_eq!(
+        owner.core.send_message(&channel, "too soon", None).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+    // Sync doesn't fail either.
+    guest.core.sync_now().unwrap();
+    owner.core.sync_now().unwrap();
+
+    // The cause gone, the next send re-keys and the guest reads it.
+    spy.fail_rotate.store(false, Ordering::SeqCst);
+    owner.core.send_message(&channel, "after", None).unwrap();
+    guest.core.sync_now().unwrap();
+    let bodies: Vec<String> = guest
+        .core
+        .get_messages(&channel, 0, 10)
+        .unwrap()
+        .messages
+        .into_iter()
+        .map(|m| m.body)
+        .collect();
+    assert_eq!(bodies, ["before", "after"]);
 }

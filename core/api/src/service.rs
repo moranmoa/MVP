@@ -470,7 +470,13 @@ impl Core {
             });
             // M2: removed members must not read what comes next.
             if matches!(action, Action::Kick { .. } | Action::Revoke { .. }) {
-                inner.rekey(ports, server, events)?;
+                // The kick is stored and sent: a failed re-key must not undo that.
+                if inner.rekey(ports, server, events).is_err() {
+                    events.push(Event::Notice {
+                        kind: NoticeKind::RekeyWaiting,
+                        server_id: server_id.to_owned(),
+                    });
+                }
             }
             Ok(())
         })
@@ -630,7 +636,13 @@ impl Core {
                         members: inner.members_json(&after)?,
                     });
                     // M2: a kick or revoke we read, that nobody re-keyed for.
-                    inner.rekey(ports, server, events)?;
+                    // Never aborts the other servers; the next sync retries.
+                    if inner.rekey(ports, server, events).is_err() {
+                        events.push(Event::Notice {
+                            kind: NoticeKind::RekeyWaiting,
+                            server_id: model::hex_id(server.as_bytes()),
+                        });
+                    }
                 }
             }
             Ok(())
@@ -734,7 +746,9 @@ impl Inner {
         chat::sync_cipher(cipher, server, self.logs.get(&server).ok_or(ErrorCode::Internal)?);
         match cipher.encrypt(server, channel, text.as_bytes()) {
             Err(CipherError::NoKey | CipherError::RotationRequired) if may_rotate => {
-                self.rotate_channel(ports, server, channel, &members, &auth_deps)?;
+                // Fail closed: no rotation, no message (`not-allowed`).
+                self.rotate_channel(ports, server, channel, &members, &auth_deps)
+                    .map_err(|_| CoreError::from(ErrorCode::NotAllowed))?;
                 cipher.encrypt(server, channel, text.as_bytes()).map_err(cipher_error)
             }
             other => other.map_err(cipher_error),
@@ -895,12 +909,13 @@ impl Inner {
             if cipher.encrypt(server, channel, b"") != Err(CipherError::RotationRequired) {
                 continue;
             }
-            let kind = if may_rotate {
-                self.rotate_channel(ports, server, channel, &members, &auth_deps)?;
-                NoticeKind::EncryptionRenewed
-            } else {
-                NoticeKind::RekeyWaiting
-            };
+            // Fail closed: a rotation that didn't happen is never announced as
+            // one, and the channel stays blocked by `RotationRequired` until the
+            // next sync or send retries.
+            let renewed = may_rotate
+                && self.rotate_channel(ports, server, channel, &members, &auth_deps).is_ok();
+            let kind =
+                if renewed { NoticeKind::EncryptionRenewed } else { NoticeKind::RekeyWaiting };
             events.push(Event::Notice { kind, server_id: server_id.clone() });
         }
         Ok(())
