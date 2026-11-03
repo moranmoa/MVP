@@ -43,3 +43,19 @@
     ${endIf}
   SectionEnd
 !macroend
+
+; B8 (in-app update, core/updater/docs/B8-in-app-update.md §0): the shortcuts
+; start mvs-launcher, which picks the healthy version (the base copy in
+; $INSTDIR or one under $INSTDIR\versions\) and forwards argv verbatim. Only
+; when the launcher is installed (builds before B8-3 have none), and only the
+; shortcuts the installer actually created.
+!macro customInstall
+  ${if} ${FileExists} "$INSTDIR\mvs-launcher.exe"
+    ${if} ${FileExists} "$SMPROGRAMS\${SHORTCUT_NAME}.lnk"
+      CreateShortCut "$SMPROGRAMS\${SHORTCUT_NAME}.lnk" "$INSTDIR\mvs-launcher.exe" "" "$INSTDIR\${APP_EXECUTABLE_FILENAME}" 0
+    ${endIf}
+    ${if} ${FileExists} "$DESKTOP\${SHORTCUT_NAME}.lnk"
+      CreateShortCut "$DESKTOP\${SHORTCUT_NAME}.lnk" "$INSTDIR\mvs-launcher.exe" "" "$INSTDIR\${APP_EXECUTABLE_FILENAME}" 0
+    ${endIf}
+  ${endIf}
+!macroend

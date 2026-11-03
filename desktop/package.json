@@ -83,6 +83,12 @@
           "from": ".core/mvs-core.exe",
           "to": "mvs-core.exe"
         }
+      ],
+      "extraFiles": [
+        {
+          "from": ".core/mvs-launcher.exe",
+          "to": "mvs-launcher.exe"
+        }
       ]
     },
     "nsis": {
