@@ -40,16 +40,18 @@ docker run --rm -v "$REPO":/repo -v shell-tauri-target-trixie:/repo/spikes/shell
 
 echo "== Electron (Linux deb + AppImage, Windows NSIS)"
 docker run --rm -v "$REPO":/repo -v shell-electron-node-modules:/repo/spikes/shell/electron/node_modules \
-  -v shell-electron-cache:/root/.cache -w /repo/spikes/shell/electron \
+  -v shell-electron-cache:/root/.cache -w /repo/spikes/shell/electron -e HOST_IDS="$(id -u):$(id -g)" \
   electronuserland/builder:wine@sha256:f3a8d451994c881d0972e7b1846ee4d4fdc15eb41fc6b1f350b38cbf99ca90fe sh -c '
     set -e
-    npm install --no-audit --no-fund >/dev/null
+    npm install --no-audit --no-fund
     rm -rf dist
-    npx electron-builder --linux AppImage deb --win nsis >/dev/null
+    # Full output: in CI this is the only trace when a download or wine fails.
+    npx electron-builder --linux AppImage deb --win nsis
     S=../out/stage
     cp dist/*.deb $S/shell-electron-linux-amd64.deb
     cp dist/*.AppImage $S/shell-electron-linux-amd64.AppImage
-    cp dist/*Setup*.exe $S/shell-electron-windows-x64-setup.exe'
+    cp dist/*Setup*.exe $S/shell-electron-windows-x64-setup.exe
+    chown -R $HOST_IDS dist $S'
 
 missing=0
 for f in shell-{tauri,electron}-windows-x64-setup.exe shell-{tauri,electron}-linux-amd64.{deb,AppImage}; do
