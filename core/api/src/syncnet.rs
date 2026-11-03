@@ -77,6 +77,9 @@ impl SyncNetwork {
         let access = Access {
             binder: Some(binder.clone()),
             read_gate: Some(Arc::new(MemberReadGate::new())),
+            // No stubs until B6-p's api gate lands (#149): peers' stubs stay
+            // pending and full records are fetched instead.
+            stub_gate: None,
         };
         let (node, mut events) = runtime.block_on(Node::start_with(config, access))?;
         // Events are only hints: a stored record wakes the core's sync loop
