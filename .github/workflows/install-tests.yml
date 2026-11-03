@@ -26,8 +26,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Until the shell spike (PR #59) is on main, packages come from its branch.
-  FALLBACK_PACKAGES_REF: claude/voice-shell-spike-7d5285
+  # TEMPORARY: build-packages.sh with the CI fixes (output shown, files
+  # handed back to the runner user) is only on the spike branch so far.
+  # Set to "" once that commit is on main; then this ref's script is used.
+  PINNED_PACKAGES_REF: 49210580a19555f4e546207cb0e415e3b42652f7
 
 jobs:
   packages:
@@ -38,20 +40,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-          ref: ${{ inputs.packages_ref }}
-      - name: Use the spike branch if this ref has no build script
-        id: src
-        run: |
-          if [ -f spikes/shell/build-packages.sh ]; then
-            echo "ref=" >> "$GITHUB_OUTPUT"
-          else
-            echo "ref=$FALLBACK_PACKAGES_REF" >> "$GITHUB_OUTPUT"
-          fi
-      - if: steps.src.outputs.ref != ''
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          persist-credentials: false
-          ref: ${{ steps.src.outputs.ref }}
+          ref: ${{ inputs.packages_ref || env.PINNED_PACKAGES_REF }}
       - name: Build the six packages (Docker)
         env:
           CARGO_BUILD_JOBS: "4"
