@@ -114,6 +114,11 @@ pub struct Message {
     pub author_id: Id,
     pub body: String,
     pub created_at: Timestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_at: Option<Timestamp>,
+    /// A tombstone: the message keeps its place, its body is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<bool>,
     /// Only on messages written on this device.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub send_state: Option<SendState>,
@@ -333,6 +338,9 @@ pub enum ProgressStep {
 #[serde(rename_all = "kebab-case")]
 pub enum NoticeKind {
     EncryptionRenewed,
+    /// Rust addition: removed members still hold a channel key and only a
+    /// moderator can renew it; the channel can't be written to until then.
+    RekeyWaiting,
 }
 
 /// `CoreEvents` in api.ts, as `{ "event": name, "payload": ... }`.
@@ -355,6 +363,8 @@ pub enum Event {
     MembersChanged { server_id: Id, members: Vec<Member> },
     #[serde(rename = "join.status")]
     JoinStatus(JoinStatus),
+    #[serde(rename = "message.updated")]
+    MessageUpdated(Message),
     #[serde(rename = "message.added")]
     MessageAdded(Message),
     #[serde(rename = "update.ready")]

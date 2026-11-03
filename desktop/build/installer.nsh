@@ -7,6 +7,8 @@
 ;   the recovery words) the account comes back after a reinstall.
 ; - An update runs the old uninstaller too; then nothing is deleted.
 ; - Always removes the mvs:// registration the app made for this user.
+; - Leaves nothing else: the installer cache and an empty Programs folder go
+;   too (customUnInstallSection below).
 
 !include "FileFunc.nsh"
 
@@ -25,4 +27,19 @@
       keepData:
     ${endIf}
   ${endIf}
+!macroend
+
+; Runs after electron-builder's own uninstall section, i.e. after the program
+; folder is gone (issue #94). Not on an update: the new version is being
+; installed in the same place.
+;   - %LOCALAPPDATA%\<package>-updater: electron-builder's installer cache.
+;   - %LOCALAPPDATA%\Programs: only if it is now empty (RMDir without /r
+;     never deletes anything else).
+!macro customUnInstallSection
+  Section "un.mvsCleanup"
+    ${ifNot} ${isUpdated}
+      RMDir /r "$LOCALAPPDATA\${APP_PACKAGE_NAME}-updater"
+      RMDir "$LOCALAPPDATA\Programs"
+    ${endIf}
+  SectionEnd
 !macroend

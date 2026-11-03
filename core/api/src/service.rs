@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::chat;
 use crate::db::Db;
 use crate::model::{self, GenesisBody, Log, ServerView};
-use crate::ports::{CipherError, CipherOutcome, GroupCipher, Ports, SharedSecrets};
+use crate::ports::{CipherError, GroupCipher, Ports, SharedSecrets};
 use crate::types::*;
 
 const DEFAULT_STORAGE_LIMIT: u64 = 5 * 1024 * 1024 * 1024;
@@ -468,11 +468,12 @@ impl Core {
                 server_id: server_id.to_owned(),
                 members: inner.members_json(&after)?,
             });
-            if matches!(action, Action::Kick { .. }) {
-                let members: BTreeSet<PublicKey> = after.members().iter().map(|m| m.key).collect();
-                if ports.cipher.membership_changed(server, &members) == CipherOutcome::Renewed {
+            // M2: removed members must not read what comes next.
+            if matches!(action, Action::Kick { .. } | Action::Revoke { .. }) {
+                // The kick is stored and sent: a failed re-key must not undo that.
+                if inner.rekey(ports, server, events).is_err() {
                     events.push(Event::Notice {
-                        kind: NoticeKind::EncryptionRenewed,
+                        kind: NoticeKind::RekeyWaiting,
                         server_id: server_id.to_owned(),
                     });
                 }
@@ -505,67 +506,70 @@ impl Core {
         }
         self.run(|inner, ports, events| {
             let (server, channel) = inner.find_channel(channel_id)?;
-            let cipher = &*ports.cipher;
-            let me = inner.me.as_ref().ok_or(ErrorCode::NotFound)?;
-            let key = me.key();
-            let view = inner.view(server)?;
-            let members = view.state.members.clone();
-            let may_rotate = view.state.role(key) >= authority::Role::Moderator;
-            let auth_deps = auth_deps(&view);
-            cipher.membership_changed(server, &members);
-            let log = inner.logs.get_mut(&server).ok_or(ErrorCode::Internal)?;
-            chat::sync_cipher(cipher, server, log);
-            let sealed = match cipher.encrypt(server, channel, body.as_bytes()) {
-                Err(CipherError::NoKey | CipherError::RotationRequired) if may_rotate => {
-                    let parts = cipher.rotate(server, channel, &members).map_err(cipher_error)?;
-                    // All parts or none, each signed once (see `GroupCipher::rotate`).
-                    let seq = chat::channel_seq(log, channel, &key);
-                    let deps = chat::channel_deps(log, channel);
-                    let mut signed = Vec::new();
-                    for (i, part) in parts.into_iter().enumerate() {
-                        signed.push(inner.sign_channel(
-                            server,
-                            channel,
-                            seq + i as u64,
-                            deps.clone(),
-                            auth_deps.clone(),
-                            ports.clock.now_ms(),
-                            Kind::KeyRotation,
-                            part,
-                        )?);
-                    }
-                    for record in signed {
-                        inner.store(server, record.clone())?;
-                        ports.network.publish(&record);
-                    }
-                    let log = inner.logs.get_mut(&server).ok_or(ErrorCode::Internal)?;
-                    chat::sync_cipher(cipher, server, log);
-                    cipher.encrypt(server, channel, body.as_bytes()).map_err(cipher_error)?
-                }
-                other => other.map_err(cipher_error)?,
-            };
-            let log = inner.logs.get(&server).ok_or(ErrorCode::Internal)?;
-            let seq = chat::channel_seq(log, channel, &key);
-            let deps = chat::channel_deps(log, channel);
-            let record = inner.sign_channel(
-                server,
-                channel,
-                seq,
-                deps,
-                auth_deps,
-                ports.clock.now_ms(),
-                Kind::Message,
-                sealed,
-            )?;
+            let sealed = inner.seal(ports, server, channel, body)?;
+            let record =
+                inner.sign_in_channel(ports, server, channel, None, Kind::Message, sealed)?;
             inner.store(server, record.clone())?;
             ports.network.publish(&record);
-            let index = inner.message_count(cipher, server, channel)?.saturating_sub(1);
-            let message = message_json(&record, body, index, channel, Some(SendState::Sent));
+            let message = inner.message(&*ports.cipher, server, channel, record.id())?;
             events.push(Event::MessageAdded(message.clone()));
             Ok(message)
         })
     }
 
+    /// The author only (authority's rule). The new text is sealed like a
+    /// message; the edit names its target in its body and deps.
+    pub fn edit_message(&self, message_id: &str, body: &str) -> CoreResult<()> {
+        if body.trim().is_empty() || !authority::message_text_ok(body) {
+            return Err(ErrorCode::BadRequest.into());
+        }
+        self.run(|inner, ports, events| {
+            let (server, channel, target) = inner.find_message(message_id)?;
+            let sealed = inner.seal(ports, server, channel, body)?;
+            let body = [target.id().as_bytes().as_slice(), &sealed].concat();
+            inner.tombstone_or_edit(
+                ports,
+                events,
+                server,
+                channel,
+                &target,
+                Kind::MessageEdit,
+                body,
+            )
+        })
+    }
+
+    /// The author, or a moderator or above who outranks them. The message
+    /// keeps its place as a tombstone (`deleted: true`, no text).
+    pub fn delete_message(&self, message_id: &str) -> CoreResult<()> {
+        self.run(|inner, ports, events| {
+            let (server, channel, target) = inner.find_message(message_id)?;
+            let body = target.id().as_bytes().to_vec();
+            inner.tombstone_or_edit(
+                ports,
+                events,
+                server,
+                channel,
+                &target,
+                Kind::MessageDelete,
+                body,
+            )
+        })
+    }
+
+    /// Sends one of my messages again: the same stored record, never
+    /// re-signed (another record would be another message).
+    pub fn retry_message(&self, message_id: &str) -> CoreResult<()> {
+        let mut inner = self.lock();
+        let (_, _, record) = inner.find_message(message_id)?;
+        let me = inner.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+        if record.author() != me {
+            return Err(ErrorCode::NotAllowed.into());
+        }
+        drop(inner);
+        self.ports.network.publish(&record);
+        Ok(())
+    }
     pub fn get_message_count(&self, channel_id: &str) -> CoreResult<usize> {
         let mut inner = self.lock();
         let (server, channel) = inner.find_channel(channel_id)?;
@@ -588,16 +592,7 @@ impl Core {
         let messages = shown[start..end]
             .iter()
             .enumerate()
-            .map(|(i, s)| {
-                let mine = Some(s.record.author()) == me;
-                message_json(
-                    &s.record,
-                    &s.text,
-                    start + i,
-                    channel,
-                    mine.then_some(SendState::Sent),
-                )
-            })
+            .map(|(i, s)| message_json(s, start + i, channel, me))
             .collect();
         Ok(MessageRange { channel_id: channel_id.to_owned(), start, messages })
     }
@@ -616,7 +611,7 @@ impl Core {
         // Fetch without the lock, so UI commands don't wait on the network.
         let fetched: Vec<(ServerId, Vec<Record>)> =
             servers.into_iter().map(|s| (s, self.ports.network.fetch(s))).collect();
-        self.run(|inner, _, events| {
+        self.run(|inner, ports, events| {
             let Some(me) = inner.me.as_ref() else { return Ok(()) };
             let me = me.key();
             for (server, records) in fetched {
@@ -640,6 +635,14 @@ impl Core {
                         server_id: model::hex_id(server.as_bytes()),
                         members: inner.members_json(&after)?,
                     });
+                    // M2: a kick or revoke we read, that nobody re-keyed for.
+                    // Never aborts the other servers; the next sync retries.
+                    if inner.rekey(ports, server, events).is_err() {
+                        events.push(Event::Notice {
+                            kind: NoticeKind::RekeyWaiting,
+                            server_id: model::hex_id(server.as_bytes()),
+                        });
+                    }
                 }
             }
             Ok(())
@@ -724,6 +727,200 @@ impl Core {
 }
 
 impl Inner {
+    /// Seals `text` for `channel`'s members. If no key is usable yet, a
+    /// moderator or above rotates first; anyone else gets `not-allowed`.
+    fn seal(
+        &mut self,
+        ports: &Ports,
+        server: ServerId,
+        channel: ChannelId,
+        text: &str,
+    ) -> CoreResult<Vec<u8>> {
+        let cipher = &*ports.cipher;
+        let key = self.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+        let view = self.view(server)?;
+        let members = view.state.members.clone();
+        let may_rotate = view.state.role(key) >= authority::Role::Moderator;
+        let auth_deps = auth_deps(&view);
+        cipher.membership_changed(server, &members);
+        chat::sync_cipher(cipher, server, self.logs.get(&server).ok_or(ErrorCode::Internal)?);
+        match cipher.encrypt(server, channel, text.as_bytes()) {
+            Err(CipherError::NoKey | CipherError::RotationRequired) if may_rotate => {
+                // Fail closed: no rotation, no message (`not-allowed`).
+                self.rotate_channel(ports, server, channel, &members, &auth_deps)
+                    .map_err(|_| CoreError::from(ErrorCode::NotAllowed))?;
+                cipher.encrypt(server, channel, text.as_bytes()).map_err(cipher_error)
+            }
+            other => other.map_err(cipher_error),
+        }
+    }
+
+    /// A new record of mine in `channel`, on its heads (plus `target` for an
+    /// edit or delete) and our latest control heads.
+    fn sign_in_channel(
+        &self,
+        ports: &Ports,
+        server: ServerId,
+        channel: ChannelId,
+        target: Option<RecordId>,
+        kind: Kind,
+        body: Vec<u8>,
+    ) -> CoreResult<Record> {
+        let key = self.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+        let log = self.logs.get(&server).ok_or(ErrorCode::Internal)?;
+        let seq = chat::channel_seq(log, channel, &key);
+        let deps = match target {
+            Some(target) => chat::deps_with(log, channel, target),
+            None => chat::channel_deps(log, channel),
+        };
+        let auth_deps = auth_deps(&self.view(server)?);
+        self.sign_channel(server, channel, seq, deps, auth_deps, ports.clock.now_ms(), kind, body)
+    }
+
+    /// Signs an edit or delete of `target`; `not-allowed` unless authority
+    /// would accept it (dry run), so a refused one is never stored or sent.
+    #[allow(clippy::too_many_arguments)]
+    fn tombstone_or_edit(
+        &mut self,
+        ports: &Ports,
+        events: &mut Events,
+        server: ServerId,
+        channel: ChannelId,
+        target: &Record,
+        kind: Kind,
+        body: Vec<u8>,
+    ) -> CoreResult<()> {
+        let record = self.sign_in_channel(ports, server, channel, Some(target.id()), kind, body)?;
+        let log = self.logs.get(&server).ok_or(ErrorCode::Internal)?;
+        if !chat::would_accept(log, &record) {
+            return Err(ErrorCode::NotAllowed.into());
+        }
+        self.store(server, record.clone())?;
+        ports.network.publish(&record);
+        let message = self.message(&*ports.cipher, server, channel, target.id())?;
+        events.push(Event::MessageUpdated(message));
+        Ok(())
+    }
+
+    /// The `Message` record `message_id` in one of my servers' known
+    /// channels; `not-found` otherwise.
+    fn find_message(&mut self, message_id: &str) -> CoreResult<(ServerId, ChannelId, Record)> {
+        let id =
+            model::parse_hex32(message_id).map(RecordId::from_bytes).ok_or(ErrorCode::NotFound)?;
+        for server in self.db.servers()? {
+            self.load(server)?;
+            let log = self.logs.get(&server).ok_or(ErrorCode::Internal)?;
+            let known = chat::known_channels(server);
+            let found = log.channel.iter().find(|r| {
+                r.id() == id
+                    && r.kind() == Kind::Message
+                    && matches!(r.scope(), Scope::Channel(c) if known.contains(&c))
+            });
+            if let Some(record) = found {
+                let Scope::Channel(channel) = record.scope() else { unreachable!("matched") };
+                return Ok((server, channel, record.clone()));
+            }
+        }
+        Err(ErrorCode::NotFound.into())
+    }
+
+    /// One shown message as JSON, with its index; `internal` if it isn't
+    /// shown (it should be: we just wrote it or it was found).
+    fn message(
+        &mut self,
+        cipher: &dyn GroupCipher,
+        server: ServerId,
+        channel: ChannelId,
+        id: RecordId,
+    ) -> CoreResult<Message> {
+        let me = self.me.as_ref().map(Me::key);
+        let shown = self.shown(cipher, server, channel)?;
+        let (index, s) = shown
+            .iter()
+            .enumerate()
+            .find(|(_, s)| s.record.id() == id)
+            .ok_or(ErrorCode::Internal)?;
+        Ok(message_json(s, index, channel, me))
+    }
+
+    /// A fresh key for `channel`, for `members` (we must be a moderator or
+    /// above). Every part is signed once, stored with the others in one
+    /// transaction, and only then published: a failure publishes nothing
+    /// (#91). A later attempt makes a new rotation, never re-signs a part.
+    fn rotate_channel(
+        &mut self,
+        ports: &Ports,
+        server: ServerId,
+        channel: ChannelId,
+        members: &BTreeSet<PublicKey>,
+        auth_deps: &[RecordId],
+    ) -> CoreResult<()> {
+        let cipher = &*ports.cipher;
+        let parts = cipher.rotate(server, channel, members).map_err(cipher_error)?;
+        let key = self.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+        let log = self.logs.get(&server).ok_or(ErrorCode::Internal)?;
+        let seq = chat::channel_seq(log, channel, &key);
+        let deps = chat::channel_deps(log, channel);
+        let mut signed = Vec::new();
+        for (i, part) in parts.into_iter().enumerate() {
+            signed.push(self.sign_channel(
+                server,
+                channel,
+                seq + i as u64,
+                deps.clone(),
+                auth_deps.to_vec(),
+                ports.clock.now_ms(),
+                Kind::KeyRotation,
+                part,
+            )?);
+        }
+        self.db.put_records(&signed)?;
+        let log = self.logs.get_mut(&server).ok_or(ErrorCode::Internal)?;
+        for record in &signed {
+            log.add(record.clone());
+        }
+        for record in &signed {
+            ports.network.publish(record);
+        }
+        chat::sync_cipher(cipher, server, log);
+        Ok(())
+    }
+
+    /// After members were removed (a kick or revoke, ours or read): every
+    /// known channel whose key removed members still hold gets a fresh one
+    /// if we may rotate (`notice: encryption-renewed`); otherwise the UI
+    /// learns it waits for a moderator (`notice: rekey-waiting`).
+    fn rekey(&mut self, ports: &Ports, server: ServerId, events: &mut Events) -> CoreResult<()> {
+        let Some(me) = self.me.as_ref().map(Me::key) else { return Ok(()) };
+        let view = self.view(server)?;
+        if !view.state.is_member(me) {
+            return Ok(());
+        }
+        let members = view.state.members.clone();
+        let may_rotate = view.state.role(me) >= authority::Role::Moderator;
+        let auth_deps = auth_deps(&view);
+        let cipher = &*ports.cipher;
+        cipher.membership_changed(server, &members);
+        let log = self.logs.get(&server).ok_or(ErrorCode::Internal)?;
+        chat::sync_cipher(cipher, server, log);
+        let server_id = model::hex_id(server.as_bytes());
+        for channel in chat::known_channels(server) {
+            // A probe: an empty plaintext, never sent.
+            if cipher.encrypt(server, channel, b"") != Err(CipherError::RotationRequired) {
+                continue;
+            }
+            // Fail closed: a rotation that didn't happen is never announced as
+            // one, and the channel stays blocked by `RotationRequired` until the
+            // next sync or send retries.
+            let renewed = may_rotate
+                && self.rotate_channel(ports, server, channel, &members, &auth_deps).is_ok();
+            let kind =
+                if renewed { NoticeKind::EncryptionRenewed } else { NoticeKind::RekeyWaiting };
+            events.push(Event::Notice { kind, server_id: server_id.clone() });
+        }
+        Ok(())
+    }
+
     /// The server of my default channel `channel_id`; `not-found` for any
     /// other. Loads the server.
     fn find_channel(&mut self, channel_id: &str) -> CoreResult<(ServerId, ChannelId)> {
@@ -1004,21 +1201,24 @@ fn auth_deps(view: &ServerView) -> Vec<RecordId> {
     heads[heads.len().saturating_sub(records::MAX_AUTH_DEPS)..].to_vec()
 }
 
+/// `sendState: "sent"` on my own messages (they were published).
 fn message_json(
-    record: &Record,
-    text: &str,
+    s: &chat::Shown,
     index: usize,
     channel: ChannelId,
-    send_state: Option<SendState>,
+    me: Option<PublicKey>,
 ) -> Message {
+    let mine = Some(s.record.author()) == me;
     Message {
-        id: model::hex_id(record.id().as_bytes()),
+        id: model::hex_id(s.record.id().as_bytes()),
         channel_id: model::hex_id(channel.as_bytes()),
         index,
-        author_id: model::hex_id(record.author().as_bytes()),
-        body: text.to_owned(),
-        created_at: record.ts(),
-        send_state,
+        author_id: model::hex_id(s.record.author().as_bytes()),
+        body: s.text.clone(),
+        created_at: s.record.ts(),
+        edited_at: s.edited_at,
+        deleted: s.deleted.then_some(true),
+        send_state: mine.then_some(SendState::Sent),
     }
 }
 
