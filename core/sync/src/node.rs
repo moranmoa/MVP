@@ -136,7 +136,8 @@ pub enum Via {
 
 #[derive(Debug)]
 pub enum NodeEvent {
-    Stored { log: String, record: Record, via: Via, at: SystemTime },
+    /// Boxed: events wait in a queue of up to 65,536 (keeps each slot small).
+    Stored { log: String, record: Box<Record>, via: Via, at: SystemTime },
     PeerConnected(PeerId),
     PeerDisconnected(PeerId),
     /// The app fell behind and `dropped` events were lost. The records are
@@ -152,7 +153,7 @@ pub struct LogState {
 }
 
 enum Command {
-    Append { record: Record, reply: oneshot::Sender<Result<()>> },
+    Append { record: Box<Record>, reply: oneshot::Sender<Result<()>> },
     Heads { log: String, reply: oneshot::Sender<Result<Vec<RecordId>>> },
     Open { log: String },
     State { log: String, reply: oneshot::Sender<Result<LogState>> },
@@ -279,7 +280,7 @@ impl Node {
     /// checks as a record from a peer.
     pub async fn append(&self, record: Record) -> Result<()> {
         let (reply, rx) = oneshot::channel();
-        self.send(Command::Append { record, reply })?;
+        self.send(Command::Append { record: Box::new(record), reply })?;
         rx.await?
     }
 
@@ -509,7 +510,7 @@ impl Task {
     fn on_command(&mut self, command: Command) {
         match command {
             Command::Append { record, reply } => {
-                let _ = reply.send(self.append_local(record));
+                let _ = reply.send(self.append_local(*record));
             }
             Command::Heads { log, reply } => {
                 let _ = reply.send(self.store.heads(&log).map_err(Into::into));
@@ -569,7 +570,7 @@ impl Task {
         if record.scope() == Scope::Control {
             self.refused.forget_prefix(&format!("{}/", record.server()));
         }
-        self.emit(NodeEvent::Stored { log, record, via, at });
+        self.emit(NodeEvent::Stored { log, record: Box::new(record), via, at });
     }
 
     fn emit(&mut self, event: NodeEvent) {
