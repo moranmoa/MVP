@@ -15,7 +15,7 @@ IMAGE=${IMAGE:-mvs-relay:test}
 P=mvs-api-two
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-  docker build -t "$IMAGE" --build-arg CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" "$core/../infra/relay"
+  docker build -t "$IMAGE" --build-arg CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" "$(mount "$core/../infra/relay")"
 fi
 
 cleanup() {
