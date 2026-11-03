@@ -79,7 +79,21 @@ export interface Member {
 
 /** Commands reject with this shape; `code` maps to a translated message. */
 export interface CoreError {
-  code: 'invalid-words' | 'not-allowed' | 'not-found' | 'recovery-check-required' | 'auth-cancelled' | 'too-many-attempts';
+  code:
+    | 'invalid-words'
+    | 'not-allowed'
+    | 'not-found'
+    | 'recovery-check-required'
+    | 'auth-cancelled'
+    | 'too-many-attempts'
+    // From the real core (core/api) and the desktop shell (desktop/src/sidecar.js):
+    | 'not-implemented'
+    | 'bad-request'
+    | 'internal'
+    | 'timeout'
+    | 'core-unavailable'
+    | 'core-restarted'
+    | 'too-large';
   /** 1-based word positions that were not recognised (restore). */
   positions?: number[];
 }
