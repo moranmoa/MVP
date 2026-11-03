@@ -29,10 +29,11 @@ on:
 permissions:
   contents: read
 
-# Never cancel a half-uploaded release; a second push of the same tag waits.
+# Never cancel a half-uploaded release: a second push of the same tag waits.
+# A newer push to a pull request replaces its dry run.
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -154,9 +155,11 @@ jobs:
       # Relay address baked into the app. It lives in the repository
       # variable MVS_RELAY_ADDR (Settings -> Variables), never in git: it
       # contains the owner's domain. Without it the app runs offline.
+      # Only a tag build reads it: pull-request dry runs (public artifacts on
+      # a public repo) always get {}, and the dry-run job asserts that.
       - name: Build-time config (relay)
         env:
-          RELAY: ${{ vars.MVS_RELAY_ADDR }}
+          RELAY: ${{ github.event_name == 'push' && vars.MVS_RELAY_ADDR || '' }}
         run: |
           node -e '
             const relay = process.env.RELAY || "";
@@ -164,8 +167,11 @@ jobs:
               console.error("::error::MVS_RELAY_ADDR is not a multiaddr"); process.exit(1);
             }
             require("fs").writeFileSync("desktop/build/mvs-config.json", JSON.stringify(relay ? { relay } : {}));
-            console.log(relay ? "relay configured" : "::warning::MVS_RELAY_ADDR not set: the app will run offline");
+            console.log(relay ? "relay configured" : "::warning::no relay address in this build: the app will run offline");
           '
+          if [ "$GITHUB_EVENT_NAME" != push ] && [ "$(cat desktop/build/mvs-config.json)" != "{}" ]; then
+            echo "::error::a non-tag build must not carry a relay address"; exit 1
+          fi
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
@@ -302,5 +308,20 @@ jobs:
           path: artifacts
       - name: Check artifacts, SHA256SUMS, manifest-body.json (unsigned)
         run: bash .github/scripts/collect-release.sh "$VERSION" "$CHANNEL" "$PLATFORMS"
+      - name: No relay address in dry-run builds
+        run: |
+          # The packaged app's resources/mvs-config.json must be {} (or absent,
+          # while desktop/ doesn't package it yet).
+          mkdir -p probe/win probe/linux
+          unzip -q -o "dist/mvs-${VERSION}-windows-x86_64.zip" 'resources/mvs-config.json' -d probe/win 2>/dev/null || true
+          tar -xzf "dist/mvs-${VERSION}-linux-x86_64.tar.gz" -C probe/linux ./resources/mvs-config.json 2>/dev/null || true
+          for c in probe/win/resources/mvs-config.json probe/linux/resources/mvs-config.json; do
+            if [ -f "$c" ]; then
+              [ "$(cat "$c")" = "{}" ] || { echo "::error::$c is not {}"; exit 1; }
+              echo "ok: $c is {}"
+            else
+              echo "not packaged yet: $c"
+            fi
+          done
       - name: Files that a tag would publish
         run: cat files

@@ -95,21 +95,33 @@ domain, so it lives in a **repository variable**, never in git:
 
 1. Settings → Secrets and variables → Actions → **Variables** → New
    repository variable.
-2. Name `MVS_RELAY_ADDR`, value the relay's native address with its peer ID:
-   `/dns4/<relay-domain>/tcp/4001/p2p/<relay peer id>`. The peer ID is in
+2. Name `MVS_RELAY_ADDR`, value the relay's **wss** address with its peer ID:
+   `/dns4/<relay-domain>/tcp/443/wss/p2p/<relay peer id>`. The peer ID is in
    `docker compose logs relay` ("relay node started peer_id=..."); see
    `infra/README.md`.
+
+   Why wss and not `/tcp/4001`: the domain's DNS record is proxied by
+   Cloudflare, which forwards only HTTP(S) and WebSocket on 443, so port 4001
+   isn't reachable through it. wss also keeps the home IP hidden behind
+   Cloudflare. Never use an `/ip4/...` address here: it would put your home
+   IP into a public download.
 
 Or with `gh` (PowerShell):
 
 ```powershell
-gh variable set MVS_RELAY_ADDR --repo moranmoa/MVP --body "/dns4/<relay-domain>/tcp/4001/p2p/<relay peer id>"
+gh variable set MVS_RELAY_ADDR --repo moranmoa/MVP --body "/dns4/<relay-domain>/tcp/443/wss/p2p/<relay peer id>"
 ```
 
+**Requires** `mvs-core` to dial WebSocket (libp2p `websocket` transport in
+`core/sync`). Until that's on main, a wss address doesn't connect.
+
 Without the variable the build still succeeds, with a warning, but the app
-runs offline and testers can't reach each other. The value ends up inside the
-released app, so anyone with the download can read it. That's expected: the
-rule only keeps it out of the repository's history.
+runs offline and testers can't reach each other. Only tag builds read the
+variable; pull-request dry runs always build with an empty config (the
+repository is public, and so are their artifacts). The value does end up
+inside the released app, so anyone with the download can read it. Whether
+that's acceptable for the domain is the owner's decision; the rule here only
+keeps it out of the repository and its CI artifacts.
 
 ### Protect release tags
 
