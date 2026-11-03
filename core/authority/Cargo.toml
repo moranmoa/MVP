@@ -8,6 +8,6 @@ publish = false
 records = { path = "../records" }
 
 [dev-dependencies]
-rand = "0.8"
+rand = "0.10"
 # The sealed-message size test seals a real message.
 groupkeys = { path = "../groupkeys" }
