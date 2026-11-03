@@ -54,7 +54,11 @@ fn a_new_server_starts_with_its_first_channel_in_the_creators_language() {
     let state = all_orders(&[genesis, general.clone()]);
     assert_eq!(
         state.channels,
-        [(GENERAL, Channel { name: "כללי".into(), adult: false, created: general.id() })].into()
+        [(
+            GENERAL,
+            Channel { name: "כללי".into(), adult: false, general: true, created: general.id() }
+        )]
+        .into()
     );
     assert_eq!(state.owner, Some(actor(0)));
 }
@@ -214,4 +218,108 @@ fn hostile_channel_bodies_are_never_accepted() {
     records.extend(refused);
     let state = all_orders(&records);
     assert!(state.channels.is_empty());
+}
+
+fn edit(seq: u64, deps: Vec<authority::RecordId>, channel: ChannelId, name: &str) -> Record {
+    rec(0, seq, deps, Action::ChannelEdit { channel, adult: false, name: name.into() })
+}
+
+fn delete(author: u8, seq: u64, deps: Vec<authority::RecordId>, channel: ChannelId) -> Record {
+    rec(author, seq, deps, Action::ChannelDelete { channel })
+}
+
+/// B4-3: only the owner renames or deletes channels (ש-10); the latest
+/// rename in linear order counts.
+#[test]
+fn the_owner_renames_and_deletes_channels() {
+    let (mut records, heads) = founded(&[1]);
+    let admin = rec(0, 2, heads, Action::Grant { target: actor(1), role: Role::Admin });
+    // #general first: the server's first channel can't be deleted.
+    let general = create(0, 20, vec![admin.id()], GENERAL, "general");
+    let created = create(0, 3, vec![general.id()], RANDOM, "random");
+    let by_admin = rec(
+        1,
+        1,
+        vec![created.id()],
+        Action::ChannelEdit { channel: RANDOM, adult: true, name: "x".into() },
+    );
+    let first = edit(4, vec![created.id()], RANDOM, "one");
+    let second = edit(5, vec![created.id()], RANDOM, "two");
+    records.extend([admin, general, created, by_admin.clone(), first.clone(), second.clone()]);
+    let state = all_orders(&records);
+    assert!(!state.accepted.contains(&by_admin.id()), "admins don't manage channels");
+    let latest = if first.id() > second.id() { "one" } else { "two" };
+    assert_eq!(state.channels[&RANDOM].name, latest, "the later rename in linear order counts");
+
+    let later = edit(6, vec![first.id(), second.id()], RANDOM, "three");
+    let gone = delete(0, 7, vec![later.id()], RANDOM);
+    let after = edit(8, vec![gone.id()], RANDOM, "ghost");
+    let again = create(0, 9, vec![gone.id()], RANDOM, "again");
+    let by_member = delete(1, 2, vec![later.id()], RANDOM);
+    records.extend([later, gone.clone(), after.clone(), again.clone(), by_member.clone()]);
+    let state = all_orders(&records);
+    assert!(state.accepted.contains(&gone.id()));
+    assert!(!state.channels.contains_key(&RANDOM));
+    assert!(state.deleted_channels.contains(&RANDOM));
+    for refused in [after, again, by_member] {
+        assert!(!state.accepted.contains(&refused.id()), "no edit, re-create or member delete");
+    }
+}
+
+/// ש-20: #general, the server's first channel, can't be deleted; later
+/// channels are ordinary.
+#[test]
+fn general_stays() {
+    let [genesis, general] =
+        sign_new_server(&key(0), NONCE, 0, b"test server", GENERAL, "general").unwrap();
+    let delete_general = delete(0, 2, vec![general.id()], GENERAL);
+    let renamed = edit(3, vec![general.id()], GENERAL, "כללי");
+    let second = rec(
+        0,
+        4,
+        vec![general.id()],
+        Action::ChannelCreate { channel: RANDOM, adult: false, name: "other".into() },
+    );
+    let records = [genesis, general, delete_general.clone(), renamed, second.clone()];
+    let state = all_orders(&records);
+    assert!(!state.accepted.contains(&delete_general.id()), "#general can't be deleted");
+    assert!(state.accepted.contains(&second.id()));
+    assert!(!state.channels[&RANDOM].general, "only the first channel is #general");
+    assert_eq!(state.channels[&GENERAL].name, "כללי", "but it can be renamed");
+    assert!(state.channels[&GENERAL].general);
+}
+
+#[test]
+fn channel_edit_and_delete_bodies_are_strict() {
+    let (mut records, heads) = founded(&[]);
+    let created = create(0, 2, heads, RANDOM, "random");
+    let id = RANDOM.as_bytes().to_vec();
+    let bodies: Vec<(Kind, Vec<u8>)> = vec![
+        (Kind::ChannelEdit, [id.clone(), vec![0, 2], b"x".to_vec()].concat()), // the #general bit
+        (Kind::ChannelEdit, [id.clone(), vec![1, 0], b"x".to_vec()].concat()), // history set
+        (Kind::ChannelEdit, [id.clone(), vec![0, 0]].concat()),                // empty name
+        (Kind::ChannelDelete, id[..31].to_vec()),
+        (Kind::ChannelDelete, [id.clone(), vec![0]].concat()),
+    ];
+    let mut refused = Vec::new();
+    for (seq, (kind, body)) in bodies.into_iter().enumerate() {
+        let record = Draft {
+            server: server(),
+            scope: Scope::Control,
+            seq: 10 + seq as u64,
+            deps: vec![created.id()],
+            auth_deps: vec![],
+            ts: 0,
+            kind,
+            body,
+        }
+        .sign(&key(0))
+        .unwrap();
+        assert_eq!(Action::from_record(&record), None);
+        refused.push(record);
+    }
+    records.push(created);
+    records.extend(refused);
+    let state = all_orders(&records);
+    assert_eq!(state.channels[&RANDOM].name, "random");
 }

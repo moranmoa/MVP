@@ -39,14 +39,17 @@
 //! Message text is encrypted on the wire, so its length can't be read here:
 //! the caller checks the plaintext with [`message_text_ok`] after decrypting.
 //!
-//! Channel existence, deletion and 18+ channels come with the channel
-//! records (B4-3).
+//! Records only count in a live channel: created by the owner's
+//! `ChannelCreate` and not deleted, at the record's `auth_deps`. A server
+//! without channel records (made before #113) keeps a derived #general and
+//! takes records in any channel, like `core/api`'s `known_channels`. 18+
+//! channels are B7.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use records::{Kind, PublicKey, Record, RecordId, Scope, ServerId, Stub};
 
-use crate::{Action, Actor, Cut, Resolver, Role, View};
+use crate::{Action, Actor, ChannelStatus, Cut, Resolver, Role, View};
 
 /// Most Unicode code points in a message's text, the same limit as the UI
 /// (on top of the record's 16 KiB body limit).
@@ -177,6 +180,8 @@ pub enum Refusal {
     NotAMember,
     /// The author's role doesn't allow this kind at its `auth_deps`.
     NotAllowed,
+    /// The channel isn't live at its `auth_deps`: never created, or deleted.
+    NoSuchChannel,
     /// An edit or delete whose body doesn't name a target in its deps, or
     /// whose target isn't a `Message`.
     BadTarget,
@@ -326,6 +331,13 @@ impl Context<'_> {
         let author = record.author();
         if view.is_kicked(author) || !view.is_member(author) {
             return Verdict::Refused(Refusal::NotAMember);
+        }
+        // Only live channels take records: created and not deleted. A server
+        // without channel records (made before #113) keeps a derived #general.
+        if let Scope::Channel(channel) = record.scope() {
+            if view.has_channels() && !matches!(view.channel(channel), ChannelStatus::Live { .. }) {
+                return Verdict::Refused(Refusal::NoSuchChannel);
+            }
         }
 
         let privileged = match (record.kind(), record.full()) {
