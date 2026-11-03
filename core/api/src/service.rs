@@ -928,7 +928,7 @@ impl Inner {
         let mut seen = HashMap::new();
         for channel in self.known(server)? {
             for s in self.shown(cipher, server, channel)? {
-                seen.insert(s.record.id(), announced(s, me, &*self.net));
+                seen.insert(s.record.id(), announced(&s, me, &*self.net));
             }
         }
         self.announced.insert(server, seen);
