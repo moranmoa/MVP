@@ -48,8 +48,8 @@ use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
 
-use records::{Draft, Kind, RecordError, Scope, SigningKey, GENESIS_NONCE_LEN};
-pub use records::{PublicKey, Record, RecordId, ServerId};
+pub use records::{ChannelId, PublicKey, Record, RecordId, ServerId};
+use records::{Draft, Kind, RecordError, Scope, SigningKey, GENESIS_NONCE_LEN, MAX_CUT_ENTRIES};
 
 mod incremental;
 pub use incremental::{Inserted, Resolver, Stats, MAX_PENDING};
@@ -84,9 +84,11 @@ pub enum Action {
     },
     Revoke {
         target: Actor,
+        cut: Cut,
     },
     Kick {
         target: Actor,
+        cut: Cut,
     },
     Post {
         text: String,
@@ -108,6 +110,16 @@ pub enum Action {
 }
 
 impl Action {
+    /// A kick with an empty cut.
+    pub fn kick(target: Actor) -> Action {
+        Action::Kick { target, cut: Cut::default() }
+    }
+
+    /// A revoke with an empty cut.
+    pub fn revoke(target: Actor) -> Action {
+        Action::Revoke { target, cut: Cut::default() }
+    }
+
     pub fn kind(&self) -> Kind {
         match self {
             Action::Genesis => Kind::Genesis,
@@ -121,7 +133,8 @@ impl Action {
         }
     }
 
-    /// Body encoding: target key (32 bytes), then the role byte for a grant;
+    /// Body encoding: target key (32 bytes), then the role byte for a grant
+    /// or the cut for a revoke or kick;
     /// UTF-8 text for a post; `expires_ms` (u64 LE) then `max_uses` (u32 LE)
     /// for an invite; the invite's record ID for a revoke-invite or a join.
     /// A genesis body (nonce, then server metadata) is not read here: write
@@ -134,7 +147,11 @@ impl Action {
                 body.push(role.code());
                 body
             }
-            Action::Revoke { target } | Action::Kick { target } => target.as_bytes().to_vec(),
+            Action::Revoke { target, cut } | Action::Kick { target, cut } => {
+                let mut body = target.as_bytes().to_vec();
+                cut.encode(&mut body);
+                body
+            }
             Action::Post { text } => text.as_bytes().to_vec(),
             Action::Invite { expires_ms, max_uses } => {
                 [&expires_ms.to_le_bytes()[..], &max_uses.to_le_bytes()].concat()
@@ -160,8 +177,15 @@ impl Action {
                     Role::from_code(*role).filter(|r| *r > Role::Member && *r < Role::Owner)?;
                 Some(Action::Grant { target: key(target)?, role })
             }
-            Kind::Revoke => Some(Action::Revoke { target: key(body)? }),
-            Kind::Kick => Some(Action::Kick { target: key(body)? }),
+            Kind::Revoke | Kind::Kick => {
+                let (target, cut) = body.split_at_checked(32)?;
+                let (target, cut) = (key(target)?, Cut::parse(cut)?);
+                Some(if record.kind() == Kind::Kick {
+                    Action::Kick { target, cut }
+                } else {
+                    Action::Revoke { target, cut }
+                })
+            }
             Kind::Post => Some(Action::Post { text: String::from_utf8(body.to_vec()).ok()? }),
             Kind::Invite => {
                 let (expires, uses) = body.split_at_checked(8)?;
@@ -172,16 +196,30 @@ impl Action {
             }
             Kind::RevokeInvite => Some(Action::RevokeInvite { invite: id(body)? }),
             Kind::Join => Some(Action::Join { invite: id(body)? }),
-            Kind::Message => None,
+            // Channel kinds are judged by the channel checks (B4-4); server,
+            // channel and leave records come in B4-3. Until then they are
+            // never accepted.
+            Kind::ServerEdit
+            | Kind::ServerClose
+            | Kind::ChannelCreate
+            | Kind::ChannelEdit
+            | Kind::ChannelDelete
+            | Kind::Leave
+            | Kind::AgeClaim
+            | Kind::Unban
+            | Kind::Message
+            | Kind::MessageEdit
+            | Kind::MessageDelete
+            | Kind::KeyRotation => None,
         }
     }
 
     /// The actor whose role is changed by a grant, revoke or kick.
     fn target(&self) -> Option<Actor> {
         match self {
-            Action::Grant { target, .. } | Action::Revoke { target } | Action::Kick { target } => {
-                Some(*target)
-            }
+            Action::Grant { target, .. }
+            | Action::Revoke { target, .. }
+            | Action::Kick { target, .. } => Some(*target),
             Action::Genesis
             | Action::Post { .. }
             | Action::Invite { .. }
@@ -215,6 +253,56 @@ impl Action {
 
     fn is_removal(&self) -> bool {
         matches!(self, Action::Revoke { .. } | Action::Kick { .. })
+    }
+}
+
+/// The channel heads a revoke, kick or leave was signed on, one per
+/// channel. Once the removal is accepted, the target's channel records that
+/// aren't ancestors of these heads are voided (GAP-2, B4-4).
+///
+/// Encoding (see `records::CUT_BYTES`): `count u8`, then `count` pairs of
+/// (channel ID, head record ID), strictly ascending by channel ID, at most
+/// `records::MAX_CUT_ENTRIES`. Anything else doesn't parse, so each cut has
+/// one encoding.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Cut(Vec<(ChannelId, RecordId)>);
+
+impl Cut {
+    /// A cut naming `heads`; `None` if a channel appears twice or there are
+    /// more than `records::MAX_CUT_ENTRIES`.
+    pub fn new(mut heads: Vec<(ChannelId, RecordId)>) -> Option<Cut> {
+        heads.sort();
+        let distinct = heads.windows(2).all(|pair| pair[0].0 != pair[1].0);
+        (distinct && heads.len() <= MAX_CUT_ENTRIES).then_some(Cut(heads))
+    }
+
+    pub fn heads(&self) -> &[(ChannelId, RecordId)] {
+        &self.0
+    }
+
+    fn encode(&self, out: &mut Vec<u8>) {
+        out.push(u8::try_from(self.0.len()).expect("at most MAX_CUT_ENTRIES"));
+        for (channel, head) in &self.0 {
+            out.extend_from_slice(channel.as_bytes());
+            out.extend_from_slice(head.as_bytes());
+        }
+    }
+
+    fn parse(bytes: &[u8]) -> Option<Cut> {
+        let (&count, pairs) = bytes.split_first()?;
+        let count = usize::from(count);
+        if count > MAX_CUT_ENTRIES || pairs.len() != count * 64 {
+            return None;
+        }
+        let heads: Vec<(ChannelId, RecordId)> = pairs
+            .chunks_exact(64)
+            .map(|pair| {
+                let (channel, head) = pair.split_at(32);
+                let channel = ChannelId::from_bytes(channel.try_into().expect("32 bytes"));
+                (channel, RecordId::from_bytes(head.try_into().expect("32 bytes")))
+            })
+            .collect();
+        heads.windows(2).all(|pair| pair[0].0 < pair[1].0).then_some(Cut(heads))
     }
 }
 
@@ -369,11 +457,11 @@ fn permitted(view: &impl View, record: &Record, action: &Action) -> bool {
                 && !view.is_kicked(*target)
                 && view.is_member(*target)
         }
-        Action::Revoke { target } => {
+        Action::Revoke { target, .. } => {
             let target_role = view.role_of(*target);
             author_role > target_role && target_role > Role::Member
         }
-        Action::Kick { target } => {
+        Action::Kick { target, .. } => {
             author_role >= Role::Moderator
                 && author_role > view.role_of(*target)
                 && !view.is_kicked(*target)
@@ -427,12 +515,12 @@ fn apply(state: &mut State, record: &Record, action: &Action) -> Option<(Actor, 
             state.roles.insert(*target, *role);
             Some((*target, write(*role, false, true)))
         }
-        Action::Revoke { target } => {
+        Action::Revoke { target, .. } => {
             // Only roles above member are revoked, so the target is a member.
             state.roles.remove(target);
             Some((*target, write(Role::Member, false, true)))
         }
-        Action::Kick { target } => {
+        Action::Kick { target, .. } => {
             state.roles.remove(target);
             state.kicked.insert(*target);
             state.members.remove(target);
@@ -696,11 +784,11 @@ impl<'a> Graph<'a> {
                 }
                 Action::Genesis => pass.genesis = Some(record.id()),
                 Action::Grant { .. } | Action::Join { .. } => {}
-                Action::Revoke { target } => {
+                Action::Revoke { target, .. } => {
                     pass.voided.extend(self.voids_of(i));
                     pass.revoke_targets.push(*target);
                 }
-                Action::Kick { target } => {
+                Action::Kick { target, .. } => {
                     pass.voided.extend(self.voids_of(i));
                     pass.kick_targets.push(*target);
                     pass.first_kicks.insert(*target, i);
@@ -723,10 +811,10 @@ impl<'a> Graph<'a> {
     /// everything.
     fn voids_of(&self, removal: usize) -> Vec<usize> {
         let (own, privileged_only, invites) = match &self.actions[removal] {
-            Some(Action::Revoke { target }) => {
+            Some(Action::Revoke { target, .. }) => {
                 (self.by_author.get(target), true, self.invites_by(*target))
             }
-            Some(Action::Kick { target }) => {
+            Some(Action::Kick { target, .. }) => {
                 (self.by_author.get(target), false, self.invites_by(*target))
             }
             Some(Action::RevokeInvite { invite }) => (None, false, vec![*invite]),

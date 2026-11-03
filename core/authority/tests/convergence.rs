@@ -7,7 +7,9 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use authority::{resolve, Action, Inserted, Record, RecordId, Resolver, Role, State, Stats};
+use authority::{
+    resolve, Action, ChannelId, Cut, Inserted, Record, RecordId, Resolver, Role, State, Stats,
+};
 use common::{actor, genesis, rec_ts, server};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -27,8 +29,8 @@ fn random_action(rng: &mut StdRng, author: u8, invites: &[RecordId]) -> Action {
             let role = *[Role::Member, Role::Moderator, Role::Admin].choose(rng).unwrap();
             Action::Grant { target, role }
         }
-        1 => Action::Revoke { target },
-        2 => Action::Kick { target },
+        1 => Action::Revoke { target, cut: random_cut(rng) },
+        2 => Action::Kick { target, cut: random_cut(rng) },
         5 => Action::Invite {
             expires_ms: *[0, 30, 60].choose(rng).unwrap(),
             max_uses: rng.gen_range(0..3),
@@ -43,6 +45,14 @@ fn random_action(rng: &mut StdRng, author: u8, invites: &[RecordId]) -> Action {
         }
         _ => Action::Post { text: format!("from {author}") },
     }
+}
+
+/// Up to 3 channel heads, so cuts go through the wire format.
+fn random_cut(rng: &mut StdRng) -> Cut {
+    let heads = (0..rng.gen_range(0..4u8))
+        .map(|n| (ChannelId::from_bytes([n; 32]), RecordId::from_bytes([rng.gen(); 32])))
+        .collect();
+    Cut::new(heads).expect("distinct channels")
 }
 
 /// Records in `known` that no other known record depends on.

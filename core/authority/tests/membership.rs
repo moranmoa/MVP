@@ -1,4 +1,4 @@
-﻿//! Membership (GAP-3): invites, joins, revoked invites, and who counts as a
+//! Membership (GAP-3): invites, joins, revoked invites, and who counts as a
 //! member. Every test runs the reference `resolve` and the incremental
 //! `Resolver` over many delivery orders and requires them to agree.
 
@@ -206,11 +206,11 @@ fn a_revoke_voids_every_join_it_had_not_seen() {
 #[test]
 fn a_kick_blocks_rejoining() {
     let (mut records, heads) = founded(&[1, 2]);
-    let kick = rec(0, 2, heads.clone(), Action::Kick { target: actor(1) });
+    let kick = rec(0, 2, heads.clone(), Action::kick(actor(1)));
     let link = invite(0, 3, vec![kick.id()], 0, 0);
     let rejoin = join(1, 1, &link);
     // Kicking a key that never joined bans it in advance.
-    let ban = rec(0, 4, vec![link.id()], Action::Kick { target: actor(5) });
+    let ban = rec(0, 4, vec![link.id()], Action::kick(actor(5)));
     let banned = rec(5, 0, vec![ban.id(), link.id()], Action::Join { invite: link.id() });
     // The owner and members can't join again.
     let owner = join(0, 5, &link);
@@ -233,7 +233,7 @@ fn a_kicked_moderators_invites_stop_working() {
     let moderator = rec(0, 2, heads, Action::Grant { target: actor(1), role: Role::Moderator });
     let link = invite(1, 1, vec![moderator.id()], 0, 0);
     let early = join(2, 0, &link);
-    let kick = rec(0, 3, vec![link.id(), early.id()], Action::Kick { target: actor(1) });
+    let kick = rec(0, 3, vec![link.id(), early.id()], Action::kick(actor(1)));
     let late = rec(3, 0, vec![kick.id(), link.id()], Action::Join { invite: link.id() });
     records.extend([moderator, link, early, kick, late]);
 
@@ -252,11 +252,7 @@ fn a_removed_moderators_links_stop_working_even_for_backdated_joins() {
         let moderator = rec(0, 2, heads, Action::Grant { target: actor(1), role: Role::Moderator });
         let link = invite(1, 1, vec![moderator.id()], 0, 0);
         let seen = join(2, 0, &link);
-        let removal = if kick {
-            Action::Kick { target: actor(1) }
-        } else {
-            Action::Revoke { target: actor(1) }
-        };
+        let removal = if kick { Action::kick(actor(1)) } else { Action::revoke(actor(1)) };
         let removal = rec(0, 3, vec![link.id(), seen.id()], removal);
         // Joins on the invite alone, the attack: several keys, so some sort
         // before the removal and some after.
@@ -283,7 +279,7 @@ fn a_removed_moderators_links_stop_working_even_for_backdated_joins() {
 fn a_revoke_voids_invites_signed_on_pre_revoke_heads() {
     let (mut records, heads) = founded(&[1]);
     let moderator = rec(0, 2, heads, Action::Grant { target: actor(1), role: Role::Moderator });
-    let revoke = rec(0, 3, vec![moderator.id()], Action::Revoke { target: actor(1) });
+    let revoke = rec(0, 3, vec![moderator.id()], Action::revoke(actor(1)));
     // Signed after the revoke, pointing at the heads from before it.
     let backdated = invite(1, 1, vec![moderator.id()], 0, 0);
     let via = join(2, 0, &backdated);
@@ -302,7 +298,7 @@ fn a_kick_voids_a_concurrent_join_and_its_posts() {
     let joined = join(1, 0, &link);
     let post = rec(1, 1, vec![joined.id()], Action::Post { text: "hi".into() });
     // The owner kicks the key without having seen the join.
-    let kick = rec(0, 2, vec![link.id()], Action::Kick { target: actor(1) });
+    let kick = rec(0, 2, vec![link.id()], Action::kick(actor(1)));
 
     let state = all_orders(&[g, link, joined.clone(), post, kick]);
     assert!(!state.accepted.contains(&joined.id()));
