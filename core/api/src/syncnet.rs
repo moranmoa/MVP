@@ -12,17 +12,18 @@
 //!   user as an error or notice; today `SyncNetwork::start` fails and the
 //!   sidecar exits with a log line.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use libp2p::Multiaddr;
-use records::{Record, Scope, ServerId};
-use sync::{log_name, log_of, Node, NodeConfig, NodeEvent, Store};
+use records::{ChannelId, Record, Scope, ServerId};
+use sync::{log_name, log_of, Access, Node, NodeConfig, NodeEvent, ServerSecret, Store};
 use tokio::runtime::Runtime;
 
+use crate::access::{KeyBinder, MemberReadGate};
 use crate::gate::MemberGate;
 use crate::ports::Network;
 
@@ -46,7 +47,11 @@ pub struct SyncNetwork {
     runtime: Runtime,
     node: Node,
     store: PathBuf,
-    opened: Mutex<HashSet<String>>,
+    /// Servers opened members-only (GAP-4), with the channels opened.
+    opened: Mutex<HashMap<ServerId, BTreeSet<ChannelId>>>,
+    /// Servers fetched at least once (the first fetch waits for the pull).
+    fetched: Mutex<HashSet<ServerId>>,
+    binder: Arc<KeyBinder>,
     hints: Mutex<Option<Receiver<()>>>,
     waker: SyncSender<()>,
 }
@@ -66,7 +71,14 @@ impl SyncNetwork {
             bootstrap: Vec::new(),
             allow_lan: false,
         };
-        let (node, mut events) = runtime.block_on(Node::start(config))?;
+        // GAP-4: our pulls carry bindings signed with the identity key (once
+        // unlocked), and channel logs are served to members only.
+        let binder = Arc::new(KeyBinder::locked());
+        let access = Access {
+            binder: Some(binder.clone()),
+            read_gate: Some(Arc::new(MemberReadGate::new())),
+        };
+        let (node, mut events) = runtime.block_on(Node::start_with(config, access))?;
         // Events are only hints: a stored record wakes the core's sync loop
         // (`Core::run_sync_loop`), which re-reads the store. Coalesced (one
         // pending hint is enough) and drained, so the node never blocks.
@@ -83,7 +95,9 @@ impl SyncNetwork {
             runtime,
             node,
             store: data_dir.join("store.db"),
-            opened: Mutex::new(HashSet::new()),
+            opened: Mutex::new(HashMap::new()),
+            fetched: Mutex::new(HashSet::new()),
+            binder,
             hints: Mutex::new(Some(hints)),
             waker,
         })
@@ -97,17 +111,6 @@ impl SyncNetwork {
     /// Wakes the sync loop now, e.g. so it sees its stop flag.
     pub fn wake(&self) {
         let _ = self.waker.try_send(());
-    }
-
-    /// Starts syncing `log` if not already; true the first time.
-    fn open(&self, log: &str) -> bool {
-        let first = self.opened.lock().expect("not poisoned").insert(log.to_owned());
-        if first {
-            if let Err(e) = self.node.open(log) {
-                eprintln!("mvs-core: sync can't open a log: {e}");
-            }
-        }
-        first
     }
 
     /// Every record of `log` in sync's store, decoded again.
@@ -125,8 +128,9 @@ impl SyncNetwork {
 }
 
 impl Network for SyncNetwork {
+    /// The server must have been opened (`open_server`): logs are never
+    /// opened by their plain names, which anyone could ask for (GAP-4).
     fn publish(&self, record: &Record) {
-        self.open(&log_of(record));
         if let Err(e) = self.runtime.block_on(self.node.append(record.clone())) {
             eprintln!("mvs-core: sync didn't take a record: {e}");
         }
@@ -134,7 +138,7 @@ impl Network for SyncNetwork {
 
     fn fetch(&self, server: ServerId) -> Vec<Record> {
         let log = log_name(server, Scope::Control);
-        let first = self.open(&log);
+        let first = self.fetched.lock().expect("not poisoned").insert(server);
         let mut records = self.read(&log);
         // A server seen for the first time: give the pull a moment.
         let deadline = Instant::now() + FIRST_FETCH_WAIT;
@@ -142,11 +146,45 @@ impl Network for SyncNetwork {
             std::thread::sleep(POLL);
             records = self.read(&log);
         }
-        // And the default channel (the only one so far).
-        let channel = log_name(server, Scope::Channel(crate::model::default_channel(server)));
-        self.open(&channel);
-        records.extend(self.read(&channel));
+        // And every channel opened for it.
+        let channels = self.opened.lock().expect("not poisoned").get(&server).cloned();
+        for channel in channels.unwrap_or_default() {
+            records.extend(self.read(&log_name(server, Scope::Channel(channel))));
+        }
         records
+    }
+
+    fn unlock(&self, key: &records::SigningKey) {
+        self.binder.unlock(key);
+    }
+
+    fn lock(&self) {
+        self.binder.lock();
+    }
+
+    fn open_server(&self, server: ServerId, secret: &[u8; 32], channels: &BTreeSet<ChannelId>) {
+        let mut opened = self.opened.lock().expect("not poisoned");
+        let have = match opened.get_mut(&server) {
+            Some(have) => have,
+            None => {
+                if let Err(e) = self.node.open_server(server, ServerSecret::from_bytes(*secret)) {
+                    eprintln!("mvs-core: sync can't open a server: {e}");
+                    return;
+                }
+                opened.entry(server).or_default()
+            }
+        };
+        for channel in channels {
+            if have.contains(channel) {
+                continue;
+            }
+            match self.runtime.block_on(self.node.open_channel(server, *channel)) {
+                Ok(()) => {
+                    have.insert(*channel);
+                }
+                Err(e) => eprintln!("mvs-core: sync can't open a channel: {e}"),
+            }
+        }
     }
 }
 
