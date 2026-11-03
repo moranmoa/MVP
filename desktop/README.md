@@ -61,3 +61,21 @@ Tests use `test/fake-core.js`, which speaks the sidecar's line protocol
 process; the shell never touches keys (no `safeStorage`).
 
 The microphone permission is decided with voice (phase 2).
+
+## With the real core
+
+Build `mvs-core` from `core/` into `desktop/.core/` (git-ignored), then run the
+app against it with a real keychain (a session D-Bus and an unlocked
+gnome-keyring in the container, test only):
+
+```bash
+MSYS_NO_PATHCONV=1 docker run --rm -v "$PWD/../core":/w -v "$PWD/.core":/out -w /w rust:1.90-bookworm sh -c 'cargo build --release --locked --bin mvs-core && cp target/release/mvs-core /out/'
+```
+
+```bash
+docker compose run --rm real-core
+```
+
+`test/real-core.test.mjs`: createIdentity → getRecoveryWords (same words) →
+checkRecoveryWords → getRecoveryWords refused → createServer → listServers,
+and the recovery words never appear in the main process's stdout or stderr.
