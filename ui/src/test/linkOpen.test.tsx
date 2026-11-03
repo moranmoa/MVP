@@ -10,7 +10,7 @@ import { MockCore } from '../core/mock';
 import { cleanInviteLink } from '../core/sanitize';
 
 const settings: Settings = { locale: 'en', theme: 'light', uiScale: 1, fontSize: 15 };
-const LINK = `mvs://join/${'a'.repeat(64)}/${'b'.repeat(64)}`;
+const LINK = `mvs://join/${'a'.repeat(64)}/${'b'.repeat(64)}/${'e'.repeat(64)}`;
 
 async function setup() {
   const core = new MockCore({ demo: true, speed: 0, simulateActivity: false });
@@ -41,7 +41,7 @@ describe('mvs:// links from the OS', () => {
     const { join, openLink } = await setup();
     openLink(LINK);
     const field = (await screen.findByLabelText('Invite link')) as HTMLInputElement;
-    const other = `mvs://join/${'c'.repeat(64)}/${'d'.repeat(64)}`;
+    const other = `mvs://join/${'c'.repeat(64)}/${'d'.repeat(64)}/${'f'.repeat(64)}`;
     openLink(other);
     expect(field.value).toBe(LINK);
     await act(async () => {
@@ -53,7 +53,7 @@ describe('mvs:// links from the OS', () => {
 
   it('ignore anything that is not exactly an invite link', async () => {
     const { join, openLink } = await setup();
-    for (const bad of [`${LINK}?--inspect`, 'mvs://join/xyz', 'https://evil.example/join', `mvs://evil/${'a'.repeat(64)}/${'b'.repeat(64)}`]) {
+    for (const bad of [`${LINK}?--inspect`, 'mvs://join/xyz', 'https://evil.example/join', `mvs://evil/${'a'.repeat(64)}/${'b'.repeat(64)}/${'e'.repeat(64)}`, `mvs://join/${'a'.repeat(64)}/${'b'.repeat(64)}`]) {
       openLink(bad);
     }
     expect(screen.queryByLabelText('Invite link')).toBeNull();
