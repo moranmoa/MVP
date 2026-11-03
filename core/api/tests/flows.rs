@@ -1044,3 +1044,55 @@ fn a_failed_re_key_fails_closed() {
         .collect();
     assert_eq!(bodies, ["before", "after"]);
 }
+
+/// Sync announces what is new: `message.added` once per message,
+/// `message.updated` when an edit or delete changes it; history already
+/// there at the first sync isn't announced again.
+#[test]
+fn sync_announces_new_and_changed_messages_once() {
+    use api::crypto::GroupKeysCipher;
+
+    let world = World::new();
+    let open = |words: &str, name: &str| {
+        let cipher = Arc::new(GroupKeysCipher::locked());
+        let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
+        peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        peer.core.update_profile(profile).unwrap();
+        peer
+    };
+    let owner = open(OWNER_WORDS, "Owner");
+    let guest = open(LEGAL, "Guest");
+    let server = owner.core.create_server("News", AgeRestriction::None).unwrap();
+    guest.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    let first = owner.core.send_message(&channel, "first", None).unwrap();
+    guest.core.sync_now().unwrap();
+    guest.events.take();
+
+    let second = owner.core.send_message(&channel, "second", None).unwrap();
+    guest.core.sync_now().unwrap();
+    let added = |events: Vec<Event>| -> Vec<(String, String)> {
+        events
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::MessageAdded(m) => Some(("added".into(), m.id)),
+                Event::MessageUpdated(m) => Some(("updated".into(), m.id)),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(added(guest.events.take()), [("added".into(), second.id.clone())]);
+    guest.core.sync_now().unwrap();
+    assert!(added(guest.events.take()).is_empty(), "nothing new, nothing announced");
+
+    owner.core.edit_message(&first.id, "first!").unwrap();
+    guest.core.sync_now().unwrap();
+    assert_eq!(added(guest.events.take()), [("updated".into(), first.id.clone())]);
+
+    // The owner's own send was announced by the command, not again by sync.
+    owner.events.take();
+    owner.core.sync_now().unwrap();
+    assert!(added(owner.events.take()).is_empty());
+}
