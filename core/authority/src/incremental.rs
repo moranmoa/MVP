@@ -720,8 +720,13 @@ impl Resolver {
         let Some(Some(Action::Invite { .. })) = self.actions.get(&invite) else {
             return false;
         };
+        // A removal of its author it doesn't descend from kills it.
         let author = self.known[&invite].author();
-        self.kick_targets.contains_key(&author) || self.revoke_targets.contains_key(&author)
+        [&self.kick_targets, &self.revoke_targets].into_iter().any(|targets| {
+            targets.get(&author).is_some_and(|removals| {
+                removals.iter().any(|removal| !self.is_control_ancestor(*removal, &[invite]))
+            })
+        })
     }
 
     /// Whether one of `author`'s removals in `targets` isn't an ancestor of

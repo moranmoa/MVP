@@ -196,3 +196,50 @@ fn demoting_an_admin_to_moderator_is_a_revoke_then_a_grant() {
     assert!(!state.accepted.contains(&kick_moderator.id()));
     assert!(state.kicked.contains(&actor(3)) && !state.kicked.contains(&actor(2)));
 }
+
+/// Records that descend from a removal are judged by the state there, which
+/// still refuses them while it lasts.
+#[test]
+fn records_signed_after_a_removal_are_refused_by_state() {
+    let (mut records, heads) = founded(&[1, 2]);
+    let moderator =
+        rec(0, 2, heads.clone(), Action::Grant { target: actor(1), role: Role::Moderator });
+    let revoke = rec(0, 3, vec![moderator.id()], Action::revoke(actor(1)));
+    // A demoted moderator's kick that knows the demotion: refused.
+    let demoted_kick = rec(1, 1, vec![revoke.id()], Action::kick(actor(2)));
+    let kick = rec(0, 4, vec![demoted_kick.id()], Action::kick(actor(2)));
+    // The kicked actor's post that knows the kick: refused.
+    let kicked_post = rec(2, 1, vec![kick.id()], Action::Post { text: "still here".into() });
+    records.extend([moderator, revoke, demoted_kick.clone(), kick.clone(), kicked_post.clone()]);
+    let state = all_orders(&records);
+    assert!(!state.accepted.contains(&demoted_kick.id()));
+    assert!(!state.accepted.contains(&kicked_post.id()));
+    assert!(state.accepted.contains(&kick.id()));
+}
+
+/// A re-granted moderator's new invite admits people; the invites they
+/// signed before the revoke stay dead.
+#[test]
+fn a_regranted_moderators_new_invite_works() {
+    let (mut records, heads) = founded(&[1]);
+    let moderator = rec(0, 2, heads, Action::Grant { target: actor(1), role: Role::Moderator });
+    let old_link = invite(1, 1, vec![moderator.id()]);
+    let revoke = rec(0, 3, vec![old_link.id()], Action::revoke(actor(1)));
+    let regrant =
+        rec(0, 4, vec![revoke.id()], Action::Grant { target: actor(1), role: Role::Moderator });
+    let new_link = invite(1, 2, vec![regrant.id()]);
+    let through_new = join(3, 0, vec![], &new_link);
+    let through_old = join(4, 0, vec![regrant.id()], &old_link);
+    records.extend([
+        moderator,
+        old_link,
+        revoke,
+        regrant,
+        new_link,
+        through_new.clone(),
+        through_old.clone(),
+    ]);
+    let state = all_orders(&records);
+    assert!(state.is_member(actor(3)), "the new invite works");
+    assert!(!state.is_member(actor(4)), "the pre-revoke invite stays dead");
+}

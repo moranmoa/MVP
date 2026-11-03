@@ -886,14 +886,15 @@ impl<'a> Graph<'a> {
     /// what it voids is read from the record itself, so the cache key says
     /// everything.
     fn voids_of(&self, removal: usize) -> Vec<usize> {
-        let (own, privileged_only, invites) = match &self.actions[removal] {
+        // `inviter`: whose invites stop admitting; `named`: one invite.
+        let (own, privileged_only, inviter, named) = match &self.actions[removal] {
             Some(Action::Revoke { target, .. }) => {
-                (self.by_author.get(target), true, self.invites_by(*target))
+                (self.by_author.get(target), true, Some(*target), None)
             }
             Some(Action::Kick { target, .. }) => {
-                (self.by_author.get(target), false, self.invites_by(*target))
+                (self.by_author.get(target), false, Some(*target), None)
             }
-            Some(Action::RevokeInvite { invite }) => (None, false, vec![*invite]),
+            Some(Action::RevokeInvite { invite }) => (None, false, None, Some(*invite)),
             _ => return Vec::new(),
         };
         let mut voids = self.voids.borrow_mut();
@@ -920,6 +921,16 @@ impl<'a> Graph<'a> {
                 (!privileged_only || self.actions[i].as_ref().is_some_and(Action::is_privileged))
                     && !below[i]
             });
+            // The removed actor's invites signed knowing the removal (after a
+            // new grant) keep working.
+            let invites: Vec<RecordId> = inviter
+                .map(|inviter| self.invites_by(inviter))
+                .into_iter()
+                .flatten()
+                .filter(|&i| !below[i])
+                .map(|i| self.records[i].id())
+                .chain(named)
+                .collect();
             let joins =
                 invites.iter().filter_map(|invite| self.joins.get(invite)).flatten().copied();
             let mut voided: Vec<usize> = own
@@ -933,11 +944,9 @@ impl<'a> Graph<'a> {
         voided.clone()
     }
 
-    /// The invites `author` signed.
-    fn invites_by(&self, author: Actor) -> Vec<RecordId> {
+    /// Positions of the invites `author` signed.
+    fn invites_by(&self, author: Actor) -> Vec<usize> {
         let mine = self.by_author.get(&author).into_iter().flatten();
-        mine.filter(|&&i| matches!(self.actions[i], Some(Action::Invite { .. })))
-            .map(|&i| self.records[i].id())
-            .collect()
+        mine.filter(|&&i| matches!(self.actions[i], Some(Action::Invite { .. }))).copied().collect()
     }
 }
