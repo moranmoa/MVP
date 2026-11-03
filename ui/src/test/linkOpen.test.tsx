@@ -10,7 +10,7 @@ import { MockCore } from '../core/mock';
 import { cleanInviteLink } from '../core/sanitize';
 
 const settings: Settings = { locale: 'en', theme: 'light', uiScale: 1, fontSize: 15 };
-const LINK = `mvs://join/${'a'.repeat(64)}/${'b'.repeat(64)}`;
+const LINK = `mvs://join/${'a'.repeat(64)}/${'b'.repeat(64)}/${'e'.repeat(64)}`;
 
 async function setup() {
   const core = new MockCore({ demo: true, speed: 0, simulateActivity: false });
@@ -41,7 +41,7 @@ describe('mvs:// links from the OS', () => {
     const { join, openLink } = await setup();
     openLink(LINK);
     const field = (await screen.findByLabelText('Invite link')) as HTMLInputElement;
-    const other = `mvs://join/${'c'.repeat(64)}/${'d'.repeat(64)}`;
+    const other = `mvs://join/${'c'.repeat(64)}/${'d'.repeat(64)}/${'f'.repeat(64)}`;
     openLink(other);
     expect(field.value).toBe(LINK);
     await act(async () => {
@@ -53,17 +53,32 @@ describe('mvs:// links from the OS', () => {
 
   it('ignore anything that is not exactly an invite link', async () => {
     const { join, openLink } = await setup();
-    for (const bad of [`${LINK}?--inspect`, 'mvs://join/xyz', 'https://evil.example/join', `mvs://evil/${'a'.repeat(64)}/${'b'.repeat(64)}`]) {
+    for (const bad of [`${LINK}?--inspect`, 'mvs://join/xyz', 'https://evil.example/join', `mvs://evil/${'a'.repeat(64)}/${'b'.repeat(64)}/${'e'.repeat(64)}`, `mvs://join/${'a'.repeat(64)}/${'b'.repeat(64)}`]) {
       openLink(bad);
     }
     expect(screen.queryByLabelText('Invite link')).toBeNull();
     expect(join).not.toHaveBeenCalled();
   });
 
-  it('cleanInviteLink accepts only the canonical format', () => {
-    expect(cleanInviteLink(` ${LINK}/ `)).toBe(LINK);
-    expect(cleanInviteLink(`${LINK}x`)).toBe('');
-    expect(cleanInviteLink(42)).toBe('');
-    expect(cleanInviteLink(LINK + ' '.repeat(300))).toBe('');
+  it('cleanInviteLink accepts only server/invite/secret, three lower-case 64-hex parts (GAP-4)', () => {
+    const [S, I, K] = ['a', 'b', 'e'].map((c) => c.repeat(64));
+    expect(LINK).toHaveLength(205);
+    expect(cleanInviteLink(LINK)).toBe(LINK);
+    expect(cleanInviteLink(` ${LINK}/ `)).toBe(LINK); // trimmed, trailing slash dropped
+    expect(cleanInviteLink(LINK.toUpperCase())).toBe(LINK); // canonical lower case
+    for (const bad of [
+      `mvs://join/${S}/${I}`, // the old 2-part form: no secret
+      `mvs://join/${S}/${I}/${K}/${K}`, // a 4th part
+      `mvs://join/${S}/${I}/${K.slice(1)}`, // 63 hex
+      `mvs://join/${S}/${I}/${'g'.repeat(64)}`, // not hex
+      `mvs://join/${S}//${K}`, // empty part
+      `${LINK}x`,
+      `${LINK}?x=1`,
+      LINK + ' '.repeat(300), // over 256 characters
+      42,
+      null,
+    ]) {
+      expect(cleanInviteLink(bad), String(bad)).toBe('');
+    }
   });
 });
