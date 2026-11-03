@@ -168,7 +168,9 @@ fn create_identity_server_grant_kick() {
     owner.core.sync_now().unwrap();
     owner.events.take();
     owner.core.kick_member(&server.id, &dave_id).unwrap();
-    assert_eq!(names(&owner.events.take()), ["members.changed", "notice"]);
+    // This stand-in cipher never says a key is held, so no rotation and no
+    // notice here; the real re-key is in `a_kick_re_keys_the_channel`.
+    assert_eq!(names(&owner.events.take()), ["members.changed"]);
     let last = cipher.0.lock().unwrap().last().cloned().unwrap();
     assert_eq!(last.len(), 2);
 }
@@ -785,4 +787,108 @@ impl GroupCipher for Spy {
         self.saw(c);
         self.inner.rotate(s, c, m)
     }
+}
+
+fn notices(peer: &Peer) -> Vec<NoticeKind> {
+    peer.events
+        .take()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Notice { kind, .. } => Some(kind),
+            _ => None,
+        })
+        .collect()
+}
+
+/// M2: a kick re-keys the channel, so the kicked member can't read what
+/// comes next and the others can still write. A kick nobody re-keyed for
+/// is re-keyed by the next moderator who reads it; a plain member is told
+/// it waits for one.
+#[test]
+fn a_kick_re_keys_the_channel() {
+    use api::crypto::GroupKeysCipher;
+
+    let world = World::new();
+    let open = |words: &str, name: &str, cipher: Arc<GroupKeysCipher>| {
+        let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
+        peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        peer.core.update_profile(profile).unwrap();
+        peer
+    };
+    let owner = open(OWNER_WORDS, "Owner", Arc::new(GroupKeysCipher::locked()));
+    let guest = open(LEGAL, "Guest", Arc::new(GroupKeysCipher::locked()));
+    let carol_cipher = Arc::new(GroupKeysCipher::locked());
+    let carol = open(
+        "letter advice cage absurd amount doctor acoustic avoid letter advice cage above",
+        "Carol",
+        carol_cipher.clone(),
+    );
+    let dan = open("zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong", "Dan", Arc::new(GroupKeysCipher::locked()));
+    // A moderator whose build has no group encryption: its kick re-keys nothing.
+    let moderator = world.peer();
+    let moderator_id = sign_up(&moderator, "Mod").id;
+
+    let server = owner.core.create_server("Kicks", AgeRestriction::None).unwrap();
+    for peer in [&guest, &carol, &dan, &moderator] {
+        peer.core.join_server(&server.invite_link).unwrap();
+    }
+    owner.core.sync_now().unwrap();
+    owner.core.grant_role(&server.id, &moderator_id, Role::Moderator).unwrap();
+    let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    owner.core.send_message(&channel, "before", None).unwrap();
+    for peer in [&guest, &carol, &dan] {
+        peer.core.sync_now().unwrap();
+        assert_eq!(peer.core.get_message_count(&channel).unwrap(), 1);
+    }
+
+    // Our own kick: a fresh key at once.
+    let carol_id = carol.core.get_identity().unwrap().unwrap().id;
+    owner.events.take();
+    owner.core.kick_member(&server.id, &carol_id).unwrap();
+    assert_eq!(notices(&owner), [NoticeKind::EncryptionRenewed]);
+    let after = owner.core.send_message(&channel, "after", None).unwrap();
+
+    guest.core.sync_now().unwrap();
+    assert_eq!(guest.core.get_message_count(&channel).unwrap(), 2);
+    guest.core.send_message(&channel, "still here", None).unwrap();
+    owner.core.sync_now().unwrap();
+    assert_eq!(owner.core.get_message_count(&channel).unwrap(), 3);
+
+    // Carol holds every record but nothing after her kick opens for her.
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let held = world.network.fetch(server_key);
+    for record in held.iter().filter(|r| r.kind() == Kind::KeyRotation) {
+        let _ = carol_cipher.apply_rotation(record);
+    }
+    let rotations = held.iter().filter(|r| r.kind() == Kind::KeyRotation).map(|r| r.id()).collect();
+    carol_cipher.set_accepted(server_key, &rotations);
+    let after_record =
+        held.iter().find(|r| hex::encode(r.id().as_bytes()) == after.id).expect("published");
+    let Scope::Channel(ch) = after_record.scope() else { panic!("a channel record") };
+    assert!(carol_cipher.decrypt(server_key, ch, after_record.author(), after_record.body()).is_err());
+    carol.core.sync_now().unwrap();
+    assert!(carol.core.list_servers().unwrap().is_empty());
+
+    // A kick nobody re-keyed for (the moderator's build can't).
+    let dan_id = dan.core.get_identity().unwrap().unwrap().id;
+    moderator.core.sync_now().unwrap();
+    moderator.core.kick_member(&server.id, &dan_id).unwrap();
+    guest.events.take();
+    guest.core.sync_now().unwrap();
+    assert_eq!(notices(&guest), [NoticeKind::RekeyWaiting]);
+    assert_eq!(
+        guest.core.send_message(&channel, "anyone?", None).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+    // The owner reads the kick and re-keys; then the guest can write again.
+    owner.events.take();
+    owner.core.sync_now().unwrap();
+    assert_eq!(notices(&owner), [NoticeKind::EncryptionRenewed]);
+    guest.core.sync_now().unwrap();
+    guest.core.send_message(&channel, "back", None).unwrap();
+    owner.core.sync_now().unwrap();
+    let bodies: Vec<String> =
+        owner.core.get_messages(&channel, 0, 10).unwrap().messages.into_iter().map(|m| m.body).collect();
+    assert_eq!(bodies, ["before", "after", "still here", "back"]);
 }

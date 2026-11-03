@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::chat;
 use crate::db::Db;
 use crate::model::{self, GenesisBody, Log, ServerView};
-use crate::ports::{CipherError, CipherOutcome, GroupCipher, Ports, SharedSecrets};
+use crate::ports::{CipherError, GroupCipher, Ports, SharedSecrets};
 use crate::types::*;
 
 const DEFAULT_STORAGE_LIMIT: u64 = 5 * 1024 * 1024 * 1024;
@@ -532,7 +532,13 @@ impl Core {
             )?;
             inner.store(server, record.clone())?;
             ports.network.publish(&record);
-            let index = inner.message_count(cipher, server, channel)?.saturating_sub(1);
+            // Its place among the shown messages, by ID: ordered by claimed time,
+            // it need not be last (#92).
+            let index = inner
+                .shown(cipher, server, channel)?
+                .iter()
+                .position(|s| s.record.id() == record.id())
+                .ok_or(ErrorCode::Internal)?;
             let message = message_json(&record, body, index, channel, Some(SendState::Sent));
             events.push(Event::MessageAdded(message.clone()));
             Ok(message)
