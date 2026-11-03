@@ -126,13 +126,12 @@ the usual `join.status` and `server.added` events. Tests:
 ## Windows uninstall
 
 `build/installer.nsh`: the uninstaller asks whether to delete the local data
-(`%APPDATA%MVS`); the default is keep. `/S` keeps it, `/S /DELETEDATA` deletes
+(`%APPDATA%\MVS`); the default is keep. `/S` keeps it, `/S /DELETEDATA` deletes
 it, an update never deletes it. The identity key in Windows Credential
 Manager is never touched. The `mvs://` registration is always removed.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File test
-sis-uninstall.ps1 -Installer "distMVS Setup 0.1.0.exe"
+powershell -ExecutionPolicy Bypass -File test\nsis-uninstall.ps1 -Installer "dist\MVS Setup 0.1.0.exe"
 ```
 
 Build the installer with `electronuserland/builder:wine` (see
