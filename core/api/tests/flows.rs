@@ -1317,8 +1317,15 @@ fn deletes_and_edits_prune_old_bodies_from_the_db() {
     }
     drop((owner, guest));
 
-    for db in [&owner_db, &guest_db] {
-        let bytes = std::fs::read(db).unwrap();
+    for path in [&owner_db, &guest_db] {
+        // The db and its WAL and rollback journal, if any.
+        let mut bytes = std::fs::read(path).unwrap();
+        for suffix in ["-wal", "-journal"] {
+            let mut side = path.as_os_str().to_owned();
+            side.push(suffix);
+            bytes.extend(std::fs::read(side).unwrap_or_default());
+        }
+        let db = path;
         for body in &old_bodies {
             assert!(
                 !contains(&bytes, body),

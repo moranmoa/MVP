@@ -139,7 +139,9 @@ fn two_users_chat_through_a_relay() {
     owner.core.sync_now().unwrap();
     old.dedup();
     for (name, dir) in [("owner", &owner._dir), ("guest", &guest._dir)] {
-        for file in ["core.db", "store.db"] {
+        // Right after the prune, with the peers still running: the db files
+        // and their WAL and rollback journals.
+        for file in ["core.db", "core.db-wal", "core.db-journal", "store.db", "store.db-wal", "store.db-journal"] {
             let bytes = std::fs::read(dir.join(file)).unwrap_or_default();
             for body in &old {
                 assert!(
