@@ -21,3 +21,13 @@ hex = "0.4"
 zeroize = "1"
 # MIT. SQLite itself is public domain. Same version and features as `sync`.
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+# MIT OR Apache-2.0. Sets the data dir's ACL through its handle (as `sync`'s
+# key file does).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+] }

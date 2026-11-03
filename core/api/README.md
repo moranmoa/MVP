@@ -28,11 +28,34 @@ the core holds its lock, so a sink may call back into the core. The core is
 `Send + Sync`, and commands run synchronously, so a shell wraps them in its
 own async layer.
 
+## Sidecar: `mvs-core`
+
+The Electron shell (decision 7) runs the core as a child process:
+`mvs-core --data-dir <dir>`. The dir is created if missing, made owner-only
+(mode 0700 on Unix; on Windows a protected ACL with one entry for the
+current user, inherited by `core.db`), and the core refuses to start if
+that fails. Secrets stay in the OS keychain. A bad argument exits with 2.
+
+| | One JSON object per line, UTF-8, `\n`-terminated |
+| --- | --- |
+| stdin | `{ "id": <number or string>, "cmd", "args" }`, `id` chosen by the shell |
+| stdout, response | `{ "type": "response", "id", "ok" }` or `{ "type": "response", "id", "error": { "code", "positions"? } }` |
+| stdout, event | `{ "type": "event", "event", "payload" }` |
+| stderr | Logs: startup, counts, error kinds. Never words, keys or text |
+
+- Requests run one at a time, in order. A request's events are written
+  before its response.
+- A line that isn't a request (not JSON, no `cmd`, no number or string
+  `id`) gets a `bad-request` response, with `id` echoed when it is a number
+  or string and `null` otherwise. A line over 1 MiB (`sidecar::MAX_LINE`)
+  is dropped whole and answered the same way. Serving goes on in both cases.
+- When stdin closes, the process exits 0.
+
 ## What works
 
 | Area | Commands | Backed by |
 | --- | --- | --- |
-| Identity | `getIdentity`, `createIdentity` (with progress events), `checkRecoveryWords`, `getRecoveryWords` (only until the check passes, then `not-allowed` until the app lock, #31), `restoreIdentity`, `updateProfile` (length caps; the avatar must be a base64 PNG, JPEG, WebP or GIF `data:` URL) | `identity::Vault` in the OS keychain; the profile is in SQLite, sealed with the identity's storage key |
+| Identity | `getIdentity`, `createIdentity` (with progress events), `getRecoveryChallenge` and `checkRecoveryWords` (B19 §6: 3 stable positions, `{ ok }` or `{ ok: false, wrong }`, the 5th failure burns the challenge, which survives a restart), `getRecoveryWords` (only until the check passes, and it lifts a burn; after that `not-allowed` until the app lock), `restoreIdentity`, `updateProfile` (length caps; the avatar must be a base64 PNG, JPEG, WebP or GIF `data:` URL) | `identity::Vault` in the OS keychain; the profile is in SQLite, sealed with the identity's storage key |
 | Servers | `createServer` (after the recovery check), `listServers`, `listChannels`, `listMembers`, `joinServer`, `cancelJoin` | Genesis, invite and join records (`records`); roles from one `authority::Resolver` per server, loaded once and fed record by record |
 | Records | — | Only records the resolver has joined are stored, used as heads (at most 64, the latest) or read for members. Records waiting on deps are held in memory, bounded by the resolver's pending limit; what it evicts is dropped, and sync redelivers it |
 | Moderation | `kickMember`, plus additions `grantRole` and `revokeRole` | `authority` rules. Dry run on the live resolver: a record it does not accept is refused (`not-allowed`), never stored or sent, and the log is rebuilt from the store. TODO(records B4): `Resolver::would_accept` |
@@ -90,3 +113,6 @@ Run from `core/`.
   - dispatcher errors;
   - diagnostics hold no secrets.
 - `tests/conformance.rs`: the shared JSON fixture. See `CONFORMANCE.md`.
+- `tests/sidecar.rs`: the line protocol in process (ids, events before
+  their response, malformed lines, the 1 MiB limit, end of input), and the
+  binary's usage error.

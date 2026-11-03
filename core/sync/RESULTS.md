@@ -93,11 +93,13 @@ Everything a peer sends is untrusted. The node enforces these limits:
 | `have` list in a pull | Only the first 64 ids are used. |
 | Pull response page | At most 2,000 records or 4 MiB, under the CBOR codec's 10 MiB cap. |
 | Inbound pulls | Per peer: a burst of 30, then 10 per second; buckets survive reconnects (4,096 peers remembered). All peers together: a burst of 100, then 50 per second. Answered on a blocking thread with a read-only store connection, at most 8 at once, so a large log never stalls the network task. |
+| Served pull bytes | Per peer: a 16 MiB burst, then 2 MiB/s. All peers together: a 32 MiB burst, then 8 MiB/s. A page is cut to the remaining budget; under 64 KiB the pull is dropped. |
 | "More" in a response | Followed only if the page added something new. |
 | Gossip messages | One maximal record plus 4 KiB of framing. Only records that passed the ingest checks are forwarded. Messages are deduplicated by content. |
 | Pushed records waiting for deps | At most 10,000 records or 16 MiB, expiring after 60 s; copies of one record are kept once. Re-parking a record counts against the same cap. |
 | Events to the app | A 65,536-event buffer; when the app falls behind, new events are dropped (the records are still stored) and a `Lagged { dropped }` event follows, telling the app to re-read the open logs from the store. |
-| Connections | 256 incoming, 64 pending incoming, 128 outgoing, 384 in total, 2 per peer. |
+| Connections | 256 incoming, 64 pending incoming, 128 outgoing, 384 in total, 2 per peer, 8 direct incoming per IP address. Idle connections close after 5 minutes. |
+| Node key | `node.key` is created owner-only (Unix 0600; Windows a protected single-entry ACL for the current user, as for the updater's root keys) and never overwritten; an existing key is tightened to 0600 on Unix. |
 
 Who may write is the `Authorizer`'s call. The harness uses `AcceptAll`, which lets anyone write; the integration layer (T1) supplies the real one. Serving only members (GAP-4) is not done yet: today anyone who knows a log's name can pull it.
 

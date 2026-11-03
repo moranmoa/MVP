@@ -7,9 +7,17 @@ each other and pass along encrypted traffic when a direct connection fails.
 | --- | --- | --- |
 | `relay` | Bootstrap (DHT entry point) and circuit relay | Closed alpha |
 | `caddy` | `wss://` with automatic TLS in front of the relay | When browsers join (`--profile proxy`) |
+| `seeder` | Placeholder for the update seeder; exits with "not built yet" | With the updater, B8 (`--profile seeder`) |
 | `coturn` | TURN relay for voice and the Web client | Phase 2 (`--profile voice`) |
 
-The update seeder joins here together with the updater in the MVP.
+The bootstrap node and the relay are one service: the relay's DHT is what
+clients bootstrap from, and a second container on the same PC would add
+nothing. A second bootstrap node at another provider comes before the open
+alpha (GAP-9).
+
+The seeder stays a placeholder until B8 builds it. A headless sync node is
+deliberately not run as a seeder: until sync pulls are gated on membership
+(GAP-4) it would hand every server's log to anyone who asks.
 
 ## Run on this PC
 
@@ -69,6 +77,55 @@ And in the relay itself (`relay/src/main.rs`):
   docker run --rm -v infra_relay-data:/data debian:bookworm-slim chmod 600 /data/node.key
   ```
 
+- Circuit limits come from `MAX_CIRCUITS`, `MAX_CIRCUITS_PER_PEER`,
+  `MAX_CIRCUIT_SECS` and `MAX_CIRCUIT_BYTES`. The compose file sets them to
+  **256 circuits, 8 per peer, 1 h and 32 MiB per circuit** (decision R11;
+  libp2p's defaults are 16 / 4 / 2 min / 128 KiB). An empty value in `.env`
+  means libp2p's default. The relay logs the values in effect at startup.
+  32 MiB is about 8 times a 10,000-message catch-up (below) and stays this
+  low on purpose: until sync pulls are gated on membership (GAP-4), the
+  relay carries circuits for any peer. Review after the alpha using the
+  `stats` line (`circuits_denied`, `circuits_open`).
+- When the relay accepts a reservation, it puts the peer's circuit address
+  (`<external>/p2p/<relay>/p2p-circuit`) into the DHT. Without this, a peer
+  reachable only through the relay was usually not findable: the DHT only
+  learned its direct addresses (identify runs before the reservation).
+  Kademlia's routing table keeps addresses with no time limit (its
+  `record_ttl` applies to stored records, not to peer addresses), so the
+  relay removes the circuit addresses itself when the reservation times
+  out or the peer's last connection closes, which ends the reservation.
+- `EXTERNAL_ADDRS` must not be empty: reservations then carry no address and
+  no client can listen on a circuit. The relay warns at startup.
+
+### Relay-only catch-up (measured)
+
+[`test/relay-catchup.sh`](test/relay-catchup.sh): two sync peers on separate
+Docker networks that share only the relay, so a circuit is their only path.
+p1 writes 10,000 messages while p2 is off, then p2 starts. Result on one PC
+(2026-11-03, Docker Desktop, `sync-peer` from main):
+
+| Circuit limits | Result |
+| --- | --- |
+| libp2p defaults (128 KiB, 2 min) | 0 / 10,000 after 60 s: every circuit is cut during the first page |
+| `MAX_CIRCUIT_BYTES` 1 MiB | 8,000 / 10,000 after 45 s: each new circuit gets about one page (2,000 messages) before it is cut |
+| 4 MiB | 10,000 in 1.0 s |
+| 16 MiB | 10,000 in 1.2 s |
+| 256 MiB, 1 h (first draft) | 10,000 in 0.9–1.2 s (3 runs) |
+| compose values (R11: 32 MiB, 1 h, 8 per peer) | 10,000 in 1.1–1.2 s (3 runs) |
+
+So a 10,000-message catch-up is about 4 MB through the relay. Before the
+reservation fix above, only 1 run in 5 formed a circuit at all. There is no
+WAN latency in this setup; over the internet, add a few round trips per
+page (5 pages). Run it again with:
+
+```
+bash infra/test/relay-catchup.sh                       # the compose file's limits
+MAX_CIRCUIT_BYTES= MAX_CIRCUIT_SECS= bash infra/test/relay-catchup.sh   # libp2p's defaults for those
+```
+
+It uses its own containers, networks and ports and leaves the live relay
+alone.
+
 ### Reproducible builds
 
 `relay/Cargo.lock` is committed and the image builds with `--locked`, so a
@@ -118,6 +175,43 @@ relay.example.org {
 }
 ```
 
+### wss with Nginx Proxy Manager (proxy on another machine)
+
+When the proxy runs elsewhere on the LAN (for example NPM in a VM), leave
+the `caddy` profile off and:
+
+1. In `.env`, set `WS_BIND` to this PC's LAN address so the proxy can reach
+   port 4002. Then allow 4002/tcp in Windows Firewall **only from the
+   proxy's address**; no other machine needs it.
+2. In NPM, **Hosts → Proxy Hosts → Add Proxy Host**:
+   - Domain Names: `<relay-domain>`
+   - Scheme `http`, Forward Hostname/IP: this PC's LAN address, Forward
+     Port `4002`
+   - **Websockets Support: on** (without it the upgrade fails and browsers
+     get no connection). Block Common Exploits: on. Cache Assets: off.
+   - SSL tab: request a Let's Encrypt certificate, Force SSL on, HTTP/2 on.
+   - Advanced tab, custom Nginx configuration:
+
+     ```
+     access_log off;
+     proxy_read_timeout 1h;
+     proxy_send_timeout 1h;
+     ```
+
+     `access_log off` keeps visitors' IPs off NPM's disk (it logs every
+     request by default). The timeouts stop nginx's 60 s default from
+     cutting quiet WebSocket connections; libp2p pings every 15 s, so this is
+     a safety margin.
+3. Router: forward 443 (and 80, for the certificate) to the NPM machine, and
+   4001 TCP + UDP to this PC.
+4. `EXTERNAL_ADDRS` in `.env` lists `/dns4/<relay-domain>/tcp/443/wss` and
+   the 4001 addresses.
+
+Check from outside your network: `https://<relay-domain>/` should answer
+(an error page from the relay's WebSocket port is fine: TLS and the proxy
+work), and a browser client dialing
+`/dns4/<relay-domain>/tcp/443/wss/p2p/<peer_id>` connects.
+
 Things to know about hosting at home:
 
 - Peers can only bootstrap while this PC is on.
@@ -147,7 +241,19 @@ Kept simple and private: nothing here publishes who connects.
   that the port is open. Keep any status page private: it would show when
   your PC is off.
 - **Caddy** keeps no access log (there is no `log` directive), so visitor IPs
-  are not written to disk.
+  are not written to disk. With NPM, the `access_log off;` line above does
+  the same.
+
+### What reaches the disk
+
+No connection logs. At `RUST_LOG=info` the relay writes its startup lines
+(own peer ID, listen addresses, circuit limits), warnings and the counts-only
+`stats` line, and nothing per connection. Who is connected to whom lives
+only in the process's memory and is gone on restart. Docker's `json-file`
+log keeps those lines (rotated, at most 50 MB). `RUST_LOG=debug` is for
+short troubleshooting only, because it writes peer IDs and possibly IP
+addresses into that file; set it back to `info` and recreate the container
+(`docker compose up -d relay`), which also drops the old log.
 
 ## Backing up the relay key
 

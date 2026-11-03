@@ -228,6 +228,16 @@ function cleanJoin(j: JoinStatus): JoinStatus {
 
 const cleanRange = (r: MessageRange): MessageRange => ({ ...r, messages: r.messages.map(cleanMessage) });
 
+/** mvs://join/<server id, 32 bytes hex>/<invite record id, 32 bytes hex>, as the desktop shell checks it. */
+const INVITE_LINK = /^mvs:\/\/join\/([0-9a-f]{64})\/([0-9a-f]{64})\/?$/;
+
+/** The canonical invite link, or '' when it is not exactly that format. */
+export function cleanInviteLink(raw: unknown): string {
+  if (typeof raw !== 'string' || raw.length > 200) return '';
+  const m = INVITE_LINK.exec(raw.trim().toLowerCase());
+  return m ? `mvs://join/${m[1]}/${m[2]}` : '';
+}
+
 const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[E] } = {
   'identity.changed': cleanIdentity,
   'server.added': cleanServer,
@@ -237,6 +247,7 @@ const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[
   'message.added': cleanMessage,
   'message.updated': cleanMessage,
   'join.status': cleanJoin,
+  'link.open': (p) => ({ link: cleanInviteLink(p?.link) }),
   'update.ready': (u) => ({ version: cleanName(u.version, 32), waitingForCall: u.waitingForCall === true }),
 };
 

@@ -1,0 +1,43 @@
+# Node and Electron are not needed on the host: tests run here.
+# Build the UI first (cd ../ui && docker compose run --rm ui npm run build).
+services:
+  # Unit tests, then the app itself under Xvfb with the security checks.
+  # Electron runs as a normal user with its own sandbox on; seccomp/AppArmor
+  # are relaxed only so that sandbox can create its namespaces in Docker.
+  test:
+    image: mcr.microsoft.com/playwright:v1.56.1-noble
+    working_dir: /repo/desktop
+    volumes:
+      - ..:/repo
+      - desktop_node_modules:/repo/desktop/node_modules
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    shm_size: 512m
+    command: >
+      sh -c "chown pwuser /repo/desktop/node_modules &&
+             runuser -u pwuser -- sh -c 'npm ci --no-audit --no-fund && npm test && xvfb-run -a npm run e2e'"
+
+  # The real core behind the bridge (build mvs-core into .core/ first, see
+  # README). Keyring: a session bus and an unlocked gnome-keyring, test only.
+  real-core:
+    build: { context: ., dockerfile: Dockerfile.e2e }
+    working_dir: /repo/desktop
+    volumes:
+      - ..:/repo
+      - desktop_node_modules:/repo/desktop/node_modules
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    shm_size: 512m
+    environment:
+      MVS_CORE_PATH: /repo/desktop/.core/mvs-core
+    command:
+      - sh
+      - -c
+      - >-
+        chown pwuser /repo/desktop/node_modules &&
+        runuser -u pwuser -- dbus-run-session -- sh -c 'echo -n test | gnome-keyring-daemon --unlock --components=secrets >/dev/null && npm ci --no-audit --no-fund >/dev/null && xvfb-run -a node --test test/real-core.test.mjs'
+
+volumes:
+  desktop_node_modules:

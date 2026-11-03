@@ -40,7 +40,7 @@ use serde_bytes::ByteBuf;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::limits::{Pending, RateLimiter, Refused};
+use crate::limits::{Pending, PerIp, RateLimiter, Refused};
 use crate::store::MAX_HAVE;
 use crate::{log_name, log_of, valid_log_name, Append, Authorizer, Record, RecordId, Scope, Store};
 
@@ -90,6 +90,20 @@ const MAX_CONNECTIONS: u32 = 384;
 const MAX_PENDING_INCOMING: u32 = 64;
 /// A direct and a relayed connection to the same peer can briefly coexist.
 const MAX_CONNECTIONS_PER_PEER: u32 = 2;
+/// Direct incoming connections from one IP address (IPv6: one /64). PeerIds are free to
+/// make, so the per-peer cap alone doesn't stop one machine taking every
+/// incoming slot. Relayed connections all come from the relay and aren't counted.
+const MAX_CONNECTIONS_PER_IP: usize = 8;
+/// Connections with nothing going on are closed after this long.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Bytes of served pull pages: per peer, and for all peers together.
+const SERVED_BYTES_BURST: u32 = 16 * 1024 * 1024;
+const SERVED_BYTES_RATE: u32 = 2 * 1024 * 1024;
+const ALL_SERVED_BYTES_BURST: u32 = 32 * 1024 * 1024;
+const ALL_SERVED_BYTES_RATE: u32 = 8 * 1024 * 1024;
+/// Below this much budget a pull is dropped rather than answered with a
+/// sliver (a page always carries at least one record, up to ~19 KiB).
+const MIN_PAGE_BUDGET: usize = 64 * 1024;
 
 pub struct NodeConfig {
     /// Bootstrap/relay node, ending in /p2p/<peer id>.
@@ -236,6 +250,9 @@ impl Node {
             refused: Refused::new(MAX_REFUSED),
             inbound_pulls: RateLimiter::new(PULL_BURST, PULL_RATE, MAX_TRACKED_PEERS),
             all_inbound_pulls: RateLimiter::new(GLOBAL_PULL_BURST, GLOBAL_PULL_RATE, 1),
+            served_bytes: RateLimiter::new(SERVED_BYTES_BURST, SERVED_BYTES_RATE, MAX_TRACKED_PEERS),
+            all_served_bytes: RateLimiter::new(ALL_SERVED_BYTES_BURST, ALL_SERVED_BYTES_RATE, 1),
+            per_ip: PerIp::new(MAX_CONNECTIONS_PER_IP),
             answers,
             answering: 0,
             decoded,
@@ -305,10 +322,11 @@ impl Node {
 
 fn load_or_create_key(path: &std::path::Path) -> Result<identity::Keypair> {
     if let Ok(bytes) = std::fs::read(path) {
+        crate::keyfile::tighten(path)?;
         return Ok(identity::Keypair::from_protobuf_encoding(&bytes)?);
     }
     let key = identity::Keypair::generate_ed25519();
-    std::fs::write(path, key.to_protobuf_encoding()?)?;
+    crate::keyfile::write_secret(path, &key.to_protobuf_encoding()?)?;
     Ok(key)
 }
 
@@ -365,10 +383,11 @@ fn build_swarm(key: identity::Keypair) -> Result<Swarm<Behaviour>> {
                 .with_max_established(Some(MAX_CONNECTIONS));
             Ok(Behaviour {
                 relay_client,
-                identify: identify::Behaviour::new(identify::Config::new(
-                    IDENTIFY_VERSION.into(),
-                    key.public(),
-                )),
+                // Push address changes (e.g. a new relay circuit) to peers at
+                // once instead of waiting for the next identify round.
+                identify: identify::Behaviour::new(
+                    identify::Config::new(IDENTIFY_VERSION.into(), key.public()).with_push_listen_addr_updates(true),
+                ),
                 ping: ping::Behaviour::new(ping::Config::new()),
                 kad,
                 gossipsub,
@@ -379,7 +398,7 @@ fn build_swarm(key: identity::Keypair) -> Result<Swarm<Behaviour>> {
                 limits: connection_limits::Behaviour::new(limits),
             })
         })?
-        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(3600)))
+        .with_swarm_config(|c| c.with_idle_connection_timeout(IDLE_TIMEOUT))
         .build())
 }
 
@@ -387,7 +406,9 @@ fn topic(log: &str) -> gossipsub::IdentTopic {
     gossipsub::IdentTopic::new(format!("log/{log}"))
 }
 
-type Answer = (ResponseChannel<SyncResponse>, SyncResponse);
+/// A finished answer: who asked, where to reply, the page, and the bytes
+/// reserved for it when the request came in.
+type Answer = (PeerId, ResponseChannel<SyncResponse>, SyncResponse, usize);
 /// A pulled page after decoding: (peer, log), the records that verified
 /// and belong to the log, and whether the peer said there is more.
 type Decoded = ((PeerId, String), Vec<Record>, bool);
@@ -414,6 +435,11 @@ struct Task {
     refused: Refused,
     inbound_pulls: RateLimiter<PeerId>,
     all_inbound_pulls: RateLimiter<()>,
+    /// Byte budgets for served pages (tokens are bytes).
+    served_bytes: RateLimiter<PeerId>,
+    all_served_bytes: RateLimiter<()>,
+    /// Direct incoming connections per remote IP (IPv6: per /64).
+    per_ip: PerIp,
     /// Finished answers coming back from blocking threads.
     answers: mpsc::UnboundedSender<Answer>,
     answering: usize,
@@ -469,10 +495,7 @@ impl Task {
                     None => return,
                 },
                 event = self.swarm.select_next_some() => self.on_swarm_event(event),
-                Some((channel, response)) = answers.recv() => {
-                    self.answering = self.answering.saturating_sub(1);
-                    let _ = self.swarm.behaviour_mut().sync.send_response(channel, response);
-                }
+                Some((peer, channel, response, reserved)) = answers.recv() => self.send_answer(peer, channel, response, reserved),
                 Some((key, records, more)) = decoded.recv() => self.on_decoded(key, records, more),
                 _ = anti_entropy.tick() => {
                     self.pending.expire(Instant::now(), PENDING_TTL);
@@ -610,6 +633,11 @@ impl Task {
     fn on_swarm_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
         match event {
             SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, .. } => {
+                if !self.admit_by_ip(connection_id, &endpoint) {
+                    debug!(%peer_id, "too many connections from one address");
+                    self.swarm.close_connection(connection_id);
+                    return;
+                }
                 if peer_id != self.relay_peer {
                     self.track_connection(peer_id, connection_id, &endpoint);
                 }
@@ -627,6 +655,7 @@ impl Task {
                 }
             }
             SwarmEvent::ConnectionClosed { peer_id, connection_id, num_established, .. } => {
+                self.per_ip.release(connection_id);
                 for conns in [&mut self.relayed, &mut self.direct] {
                     if let Some(set) = conns.get_mut(&peer_id) {
                         set.remove(&connection_id);
@@ -744,16 +773,45 @@ impl Task {
             debug!(%peer, "too many pulls being answered");
             return;
         }
+        // A ~100-byte request can ask for a 4 MiB page: the page is cut to the
+        // bytes this peer, and all peers together, may still be sent now.
+        let budget = self.served_bytes.available(peer, now).min(self.all_served_bytes.available((), now));
+        if budget < MIN_PAGE_BUDGET {
+            debug!(%peer, "served-bytes budget exhausted");
+            return;
+        }
+        let max_bytes = budget.min(PAGE_BYTES);
+        // Reserved now, so answers running at the same time can't all spend
+        // the same budget; the unused part is refunded when the page is sent.
+        self.served_bytes.charge(peer, now, max_bytes);
+        self.all_served_bytes.charge((), now, max_bytes);
         self.answering += 1;
         let reader = self.reader.clone();
         let answers = self.answers.clone();
         tokio::task::spawn_blocking(move || {
             let response = match reader.lock() {
-                Ok(store) => answer(&store, &request),
+                Ok(store) => answer(&store, &request, max_bytes),
                 Err(_) => empty_response(),
             };
-            let _ = answers.send((channel, response));
+            let _ = answers.send((peer, channel, response, max_bytes));
         });
+    }
+
+    /// Sends a finished answer and charges its size to the byte budgets.
+    fn send_answer(&mut self, peer: PeerId, channel: ResponseChannel<SyncResponse>, response: SyncResponse, reserved: usize) {
+        self.answering = self.answering.saturating_sub(1);
+        let bytes: usize = response.records.iter().map(|r| r.len()).sum();
+        let now = Instant::now();
+        // Settle the reservation: refund what wasn't used, or charge the
+        // overshoot (a page always carries at least one record).
+        if bytes < reserved {
+            self.served_bytes.refund(peer, now, reserved - bytes);
+            self.all_served_bytes.refund((), now, reserved - bytes);
+        } else {
+            self.served_bytes.charge(peer, now, bytes - reserved);
+            self.all_served_bytes.charge((), now, bytes - reserved);
+        }
+        let _ = self.swarm.behaviour_mut().sync.send_response(channel, response);
     }
 
     /// Checks a pushed message. Accept forwards it to our mesh peers; Reject
@@ -925,6 +983,15 @@ impl EventSink {
 }
 
 impl Task {
+    /// Counts a direct incoming connection against its remote IP; false if
+    /// that IP already has [`MAX_CONNECTIONS_PER_IP`].
+    fn admit_by_ip(&mut self, id: ConnectionId, endpoint: &ConnectedPoint) -> bool {
+        match incoming_ip(endpoint) {
+            Some(ip) => self.per_ip.admit(id, ip),
+            None => true,
+        }
+    }
+
     /// Records a new connection, and keeps at most one kind per peer: a
     /// direct connection replaces any relayed one.
     fn track_connection(&mut self, peer: PeerId, id: ConnectionId, endpoint: &ConnectedPoint) {
@@ -949,6 +1016,20 @@ impl Task {
             }
         }
     }
+}
+
+/// The remote IP of a direct incoming connection; None for outgoing and
+/// relayed ones (a relayed connection's address is the relay's).
+fn incoming_ip(endpoint: &ConnectedPoint) -> Option<std::net::IpAddr> {
+    let ConnectedPoint::Listener { send_back_addr, .. } = endpoint else { return None };
+    if is_relayed(endpoint) {
+        return None;
+    }
+    send_back_addr.iter().find_map(|p| match p {
+        Protocol::Ip4(ip) => Some(ip.into()),
+        Protocol::Ip6(ip) => Some(ip.into()),
+        _ => None,
+    })
 }
 
 fn is_relayed(endpoint: &ConnectedPoint) -> bool {
@@ -1065,14 +1146,14 @@ fn empty_response() -> SyncResponse {
 /// page, straight from the stored bytes (they passed the ingest checks when
 /// they were stored). At most [`MAX_HAVE`] `have` ids are looked at, and
 /// malformed ones are skipped. The caller checks the log is open.
-fn answer(store: &Store, request: &SyncRequest) -> SyncResponse {
+fn answer(store: &Store, request: &SyncRequest, max_bytes: usize) -> SyncResponse {
     let have: Vec<RecordId> = request
         .have
         .iter()
         .take(MAX_HAVE)
         .filter_map(|b| <[u8; 32]>::try_from(b.as_slice()).ok().map(RecordId::from_bytes))
         .collect();
-    match store.missing_since(&request.log, &have, PAGE, PAGE_BYTES) {
+    match store.missing_since(&request.log, &have, PAGE, max_bytes) {
         Ok((page, more)) => SyncResponse { records: page.into_iter().map(|s| ByteBuf::from(s.bytes)).collect(), more },
         Err(err) => {
             warn!(%err, "missing_since failed");
@@ -1113,12 +1194,12 @@ mod tests {
     fn malformed_and_excess_have_ids_are_ignored() {
         let (store, chain) = store_with(5, 0);
         let have = vec![ByteBuf::from(vec![1, 2, 3]), ByteBuf::from(chain[4].id().as_bytes().to_vec())];
-        assert!(answer(&store, &request(&chan(), have)).records.is_empty());
+        assert!(answer(&store, &request(&chan(), have), PAGE_BYTES).records.is_empty());
         // 100,000 have ids cost the same as MAX_HAVE.
         let flood = vec![ByteBuf::from(vec![0xee; 32]); 100_000];
-        assert_eq!(answer(&store, &request(&chan(), flood)).records.len(), 5);
+        assert_eq!(answer(&store, &request(&chan(), flood), PAGE_BYTES).records.len(), 5);
         // An unknown log name is just empty (SQL parameter, never SQL text).
-        assert!(answer(&store, &request("x'; DROP TABLE records; --", vec![])).records.is_empty());
+        assert!(answer(&store, &request("x'; DROP TABLE records; --", vec![]), PAGE_BYTES).records.is_empty());
         assert_eq!(store.count(&chan()).unwrap(), 5);
     }
 
@@ -1126,7 +1207,7 @@ mod tests {
     fn response_pages_fit_the_codec_limit() {
         // 400 records of ~16 KiB is ~6.5 MB; a page stops at PAGE_BYTES.
         let (store, _) = store_with(400, 16 * 1024 - 8);
-        let response = answer(&store, &request(&chan(), vec![]));
+        let response = answer(&store, &request(&chan(), vec![]), PAGE_BYTES);
         assert!(response.more);
         let size: usize = response.records.iter().map(|b| b.len()).sum();
         assert!(size <= PAGE_BYTES + records::MAX_RECORD_BYTES, "page is {size} bytes");
@@ -1237,6 +1318,35 @@ mod tests {
         // dial when that's all we have; one through a LAN relay is not.
         assert!(reachable(&a(relay), false));
         assert!(!reachable(&a(&relay.replace("8.8.8.8", "192.168.1.5")), false));
+    }
+
+    #[test]
+    fn only_direct_incoming_connections_count_per_ip() {
+        let a = |s: &str| s.parse::<Multiaddr>().unwrap();
+        let incoming = |local: &str, remote: &str| ConnectedPoint::Listener { local_addr: a(local), send_back_addr: a(remote) };
+        let direct = incoming("/ip4/0.0.0.0/tcp/4001", "/ip4/203.0.113.7/tcp/51000");
+        assert_eq!(incoming_ip(&direct), Some("203.0.113.7".parse().unwrap()));
+        let relayed = incoming(
+            "/ip4/198.51.100.1/tcp/4001/p2p/12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc/p2p-circuit",
+            "/p2p/12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc",
+        );
+        assert_eq!(incoming_ip(&relayed), None);
+        let outgoing = ConnectedPoint::Dialer {
+            address: a("/ip4/203.0.113.7/tcp/4001"),
+            role_override: libp2p::core::Endpoint::Dialer,
+            port_use: libp2p::core::transport::PortUse::Reuse,
+        };
+        assert_eq!(incoming_ip(&outgoing), None);
+    }
+
+    #[test]
+    fn a_small_byte_budget_gives_a_small_page() {
+        let (store, _) = store_with(50, 10_000);
+        let full = answer(&store, &request(&chan(), vec![]), PAGE_BYTES);
+        let cut = answer(&store, &request(&chan(), vec![]), 64 * 1024);
+        assert_eq!(full.records.len(), 50);
+        assert!(cut.more && cut.records.len() < 10, "{} records", cut.records.len());
+        assert!(cut.records.iter().map(|r| r.len()).sum::<usize>() <= 64 * 1024);
     }
 
     #[test]
