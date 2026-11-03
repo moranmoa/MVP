@@ -3,20 +3,24 @@
 mod common;
 
 use common::*;
-use groupkeys::{Applied, Error, Rotation, WRAP_LEN};
+use groupkeys::{
+    Applied, Error, Part, Rotation, MAX_PARTS, PART_HEADER_LEN as H, WRAPS_PER_PART, WRAP_LEN,
+};
 use records::RecordId;
 
-/// A valid epoch-0 body for members 1 and 2: header is 74 bytes, then the
-/// u16 count, then two wraps.
+/// A valid one-part epoch-0 body for members 1 and 2: the 34-byte part
+/// header, the 74-byte rotation header, the u16 count, then two wraps.
 fn body() -> Vec<u8> {
-    let (body, _) =
+    let (mut parts, _) =
         Rotation::create(SERVER, pk(1), CHANNEL, 0, None, &members(&[1, 2]), &mut rng(7)).unwrap();
-    assert_eq!(body.len(), 76 + 2 * WRAP_LEN);
+    assert_eq!(parts.len(), 1);
+    let body = parts.remove(0);
+    assert_eq!(body.len(), H + 76 + 2 * WRAP_LEN);
     body
 }
 
 fn decode(body: &[u8]) -> Result<Rotation, Error> {
-    Rotation::decode(RecordId::from_bytes([1; 32]), SERVER, pk(1), body)
+    Rotation::decode(SERVER, pk(1), body)
 }
 
 #[test]
@@ -24,45 +28,99 @@ fn decode_is_strict() {
     assert!(decode(&body()).is_ok());
 
     // A huge count with no wraps behind it is refused before any allocation.
-    let mut huge = body()[..76].to_vec();
-    huge[74..76].copy_from_slice(&u16::MAX.to_le_bytes());
+    let mut huge = body()[..H + 76].to_vec();
+    huge[H + 74..H + 76].copy_from_slice(&u16::MAX.to_le_bytes());
+    assert_eq!(decode(&huge), Err(Error::TooManyRecipients(u16::MAX as usize)));
+    huge[H + 74..H + 76].copy_from_slice(&(WRAPS_PER_PART as u16).to_le_bytes());
     assert_eq!(decode(&huge), Err(Error::Truncated));
 
-    let mut zero = body()[..76].to_vec();
-    zero[74..76].copy_from_slice(&0u16.to_le_bytes());
+    let mut zero = body()[..H + 76].to_vec();
+    zero[H + 74..H + 76].copy_from_slice(&0u16.to_le_bytes());
     assert_eq!(decode(&zero), Err(Error::NoRecipients));
 
     let mut fewer = body();
-    fewer[74..76].copy_from_slice(&1u16.to_le_bytes());
+    fewer[H + 74..H + 76].copy_from_slice(&1u16.to_le_bytes());
     assert_eq!(decode(&fewer), Err(Error::TrailingBytes));
 
     let mut cut = body();
     cut.pop();
     assert_eq!(decode(&cut), Err(Error::Truncated));
+    assert_eq!(decode(&body()[..H - 1]), Err(Error::Truncated));
 
     let mut version = body();
-    version[0] = 2;
+    version[H] = 2;
     assert_eq!(decode(&version), Err(Error::UnsupportedVersion(2)));
 
     let mut tag = body();
-    tag[41] = 2;
+    tag[H + 41] = 2;
     assert_eq!(decode(&tag), Err(Error::BadEpochLink));
 
     let mut epoch_without_prev = body();
-    epoch_without_prev[33] = 1;
+    epoch_without_prev[H + 33] = 1;
     assert_eq!(decode(&epoch_without_prev), Err(Error::BadEpochLink));
 
     // The second wrap repeats the first recipient.
     let mut duplicate = body();
-    let (first, second) = duplicate[76..].split_at_mut(WRAP_LEN);
+    let (first, second) = duplicate[H + 76..].split_at_mut(WRAP_LEN);
     second[..32].copy_from_slice(&first[..32]);
     assert_eq!(decode(&duplicate), Err(Error::NotCanonical));
 
     // Swapped wraps are no longer ascending.
     let mut swapped = body();
-    let (first, second) = swapped[76..].split_at_mut(WRAP_LEN);
+    let (first, second) = swapped[H + 76..].split_at_mut(WRAP_LEN);
     first.swap_with_slice(second);
     assert_eq!(decode(&swapped), Err(Error::NotCanonical));
+}
+
+#[test]
+fn part_header_is_strict() {
+    // Part index and count: none, past the count, more than 32.
+    for (part, parts) in [(0, 0), (1, 1), (5, 2), (0, MAX_PARTS as u8 + 1)] {
+        let mut bad = body();
+        bad[32] = part;
+        bad[33] = parts;
+        assert_eq!(decode(&bad), Err(Error::BadPart), "part {part} of {parts}");
+    }
+
+    // The rotation ID must be the one the rotator and header give: a changed
+    // ID, a changed header byte, or another rotator all fail.
+    let mut id = body();
+    id[0] ^= 1;
+    assert_eq!(decode(&id), Err(Error::RotationIdMismatch));
+    let mut channel = body();
+    channel[H + 1] ^= 1;
+    assert_eq!(decode(&channel), Err(Error::RotationIdMismatch));
+    let mut ephemeral = body();
+    ephemeral[H + 50] ^= 1;
+    assert_eq!(decode(&ephemeral), Err(Error::RotationIdMismatch));
+    assert_eq!(Rotation::decode(SERVER, pk(2), &body()), Err(Error::RotationIdMismatch));
+
+    // A one-part body claiming to be part 1 of 2 decodes as a part but
+    // doesn't assemble alone.
+    let mut half = body();
+    half[33] = 2;
+    assert!(Part::decode(pk(1), &half).is_ok());
+    assert_eq!(decode(&half), Err(Error::MissingParts));
+}
+
+#[test]
+fn assembly_is_strict() {
+    let everyone: std::collections::BTreeSet<_> =
+        (0..=WRAPS_PER_PART as u8).map(|n| pk(n.wrapping_add(10))).collect();
+    let (parts, _) =
+        Rotation::create(SERVER, pk(1), CHANNEL, 0, None, &everyone, &mut rng(3)).unwrap();
+    assert_eq!(parts.len(), 2);
+    let part = |n: usize| Part::decode(pk(1), &parts[n]).unwrap();
+    assert!(Rotation::assemble(SERVER, vec![part(1), part(0)]).is_ok());
+    assert_eq!(Rotation::assemble(SERVER, vec![part(0)]), Err(Error::MissingParts));
+    assert_eq!(Rotation::assemble(SERVER, vec![]), Err(Error::MissingParts));
+    assert_eq!(Rotation::assemble(SERVER, vec![part(0), part(0)]), Err(Error::PartMismatch));
+
+    // A part of another rotation by the same rotator, made to claim index 1.
+    let (other, _) =
+        Rotation::create(SERVER, pk(1), CHANNEL, 0, None, &everyone, &mut rng(4)).unwrap();
+    let stranger = Part::decode(pk(1), &other[1]).unwrap();
+    assert_eq!(Rotation::assemble(SERVER, vec![part(0), stranger]), Err(Error::PartMismatch));
 }
 
 /// Pins the v1 formats: a fixed RNG must keep producing these exact bytes.
@@ -71,15 +129,15 @@ fn decode_is_strict() {
 fn v1_format_is_pinned() {
     let rotation = body();
     let mut view = peer(1);
-    // A fixed rotation ID, not a signed record: the pin covers this crate's
+    // A fixed record ID, not a signed record: the pin covers this crate's
     // format only, not the record envelope.
-    let id = RecordId::from_bytes([0x42; 32]);
-    assert_eq!(view.apply(id, pk(1), &rotation), Ok((Applied::Key, vec![])));
-    view.accept(id);
+    let record = RecordId::from_bytes([0x42; 32]);
+    assert_eq!(view.apply(record, pk(1), &rotation), Ok((Applied::Key, vec![])));
+    view.accept(record);
     let ciphertext = view.encrypt(&members(&[1, 2]), b"shalom", &mut rng(8)).unwrap();
     assert_eq!(blake3::hash(&rotation).to_hex().as_str(), GOLDEN_ROTATION);
     assert_eq!(blake3::hash(&ciphertext).to_hex().as_str(), GOLDEN_MESSAGE);
 }
 
-const GOLDEN_ROTATION: &str = "412a9501496e7354dd86be6b1391a6e6381bacb04e99def9a672a414a0687eea";
-const GOLDEN_MESSAGE: &str = "83176bb213b73b24e1111b2564b31b4aed18638495935c6d871f8e71900d5b8f";
+const GOLDEN_ROTATION: &str = "2c967939a6e91a12f66a18316c51fed930660d9d79c78307d4aaae02fa1fe665";
+const GOLDEN_MESSAGE: &str = "03e92f185789ec9fd65c99631cdf6dc0332b32578575e7c22c8a140561732896";

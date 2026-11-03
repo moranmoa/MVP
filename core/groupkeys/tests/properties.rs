@@ -30,11 +30,13 @@ proptest! {
         prop_assume!(!seeds.contains(&outsider));
         let people: Vec<(SigningKey, PublicKey)> = seeds.iter().map(|s| identity(*s)).collect();
         let recipients: BTreeSet<PublicKey> = people.iter().map(|(_, p)| *p).collect();
-        let (body, key) =
+        let (parts, key) =
             Rotation::create(SERVER, pk(1), CHANNEL, 0, None, &recipients, &mut rng(rng_seed)).unwrap();
-        prop_assert_eq!(body.len(), groupkeys::ROTATION_HEADER_LEN - 32 + groupkeys::WRAP_LEN * recipients.len());
-        let signed = sign(1, body);
-        let rotation = Rotation::decode(signed.id, SERVER, signed.author, &signed.body).unwrap();
+        prop_assert_eq!(parts.len(), 1);
+        prop_assert_eq!(parts[0].len(), groupkeys::PART_HEADER_LEN + groupkeys::ROTATION_HEADER_LEN - 32 + groupkeys::WRAP_LEN * recipients.len());
+        let signed = sign(1, parts);
+        let rotation = Rotation::decode(SERVER, signed.author, signed.body()).unwrap();
+        prop_assert_eq!(rotation.id(), signed.id);
         prop_assert_eq!(rotation.recipients().copied().collect::<BTreeSet<_>>(), recipients);
         for (secret, _) in &people {
             prop_assert_eq!(*rotation.unwrap_key(&MemberSecret::new(secret)).unwrap().as_bytes(), *key.as_bytes());
@@ -54,11 +56,12 @@ proptest! {
     ) {
         let people: Vec<(SigningKey, PublicKey)> = seeds.iter().map(|s| identity(*s)).collect();
         let recipients: BTreeSet<PublicKey> = people.iter().map(|(_, p)| *p).collect();
-        let (mut body, key) =
+        let (mut parts, key) =
             Rotation::create(SERVER, pk(1), CHANNEL, 0, None, &recipients, &mut rng(rng_seed)).unwrap();
+        let body = &mut parts[0];
         let at = at.index(body.len());
         body[at] ^= flip;
-        if let Ok(rotation) = Rotation::decode(groupkeys_id(&body), SERVER, pk(1), &body) {
+        if let Ok(rotation) = Rotation::decode(SERVER, pk(1), body) {
             let mut opened = 0;
             for (secret, _) in &people {
                 if let Ok(got) = rotation.unwrap_key(&MemberSecret::new(secret)) {
@@ -105,12 +108,12 @@ proptest! {
         rng_seed in any::<u64>(),
     ) {
         let key = EpochKey::from_bytes(key_bytes);
-        let first = sign(1, vec![1]);
+        let rotation = records::RecordId::from_bytes([1; 32]);
         let ctx = groupkeys::MessageContext {
             server: SERVER,
             channel: CHANNEL,
             epoch: 3,
-            rotation: first.id,
+            rotation,
             author: pk(2),
         };
         let mut ciphertext = seal(&key, &ctx, &text, &mut rng(rng_seed)).unwrap();
@@ -119,8 +122,4 @@ proptest! {
         ciphertext[at] ^= flip;
         prop_assert!(open(&key, &ctx, &ciphertext).is_err());
     }
-}
-
-fn groupkeys_id(body: &[u8]) -> records::RecordId {
-    records::RecordId::from_bytes(*blake3::hash(body).as_bytes())
 }

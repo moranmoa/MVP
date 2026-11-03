@@ -13,6 +13,7 @@ use records::RecordId;
 #[derive(Clone)]
 enum Event {
     Rotation(Signed),
+    /// The part records authority accepts.
     Accepted(Vec<RecordId>),
 }
 
@@ -83,7 +84,9 @@ fn outsider_rotation_is_never_head_unless_accepted() {
     assert_eq!(mallory.decrypt(pk(1), &ciphertext), Err(Error::NoKey));
 
     // Only if authority accepts it does it become head.
-    alice.accept(evil.id);
+    for record in evil.records() {
+        alice.accept(record);
+    }
     assert_eq!(alice.head().unwrap().id(), evil.id);
 }
 
@@ -96,7 +99,7 @@ fn nothing_accepted_means_no_head() {
     assert!(view.head().is_none());
     assert_eq!(view.rotation_need(&everyone), RotationNeed::Initial);
     assert_eq!(view.encrypt(&everyone, b"x", &mut rng(2)), Err(Error::NoKey));
-    view.set_accepted([first.id]);
+    view.set_accepted(first.records());
     assert_eq!(view.head().unwrap().id(), first.id);
 }
 
@@ -114,7 +117,7 @@ fn head_is_the_same_in_every_order_of_rotations_and_acceptances() {
         Event::Rotation(first.clone()),
         Event::Rotation(second.clone()),
         Event::Rotation(evil.clone()),
-        Event::Accepted(vec![first.id, second.id]),
+        Event::Accepted([first.records(), second.records()].concat()),
     ];
     for order in permutations(events.len()) {
         for me in 1..=3 {
@@ -129,7 +132,7 @@ fn head_is_the_same_in_every_order_of_rotations_and_acceptances() {
         Event::Rotation(first.clone()),
         Event::Rotation(second.clone()),
         Event::Rotation(evil.clone()),
-        Event::Accepted(vec![first.id]),
+        Event::Accepted(first.records()),
     ];
     for order in permutations(events.len()) {
         assert_eq!(run(2, &events, &order), Some(first.id), "order {order:?}");
@@ -154,7 +157,7 @@ fn rotations_built_on_a_non_accepted_one_still_link() {
         Event::Rotation(first.clone()),
         Event::Rotation(voided.clone()),
         Event::Rotation(on_top.clone()),
-        Event::Accepted(vec![first.id, on_top.id]),
+        Event::Accepted([first.records(), on_top.records()].concat()),
     ];
     for order in permutations(events.len()) {
         assert_eq!(run(2, &events, &order), Some(on_top.id), "order {order:?}");
@@ -180,7 +183,7 @@ fn non_accepted_keys_still_read_and_say_so() {
     assert_eq!((opened.rotation, opened.accepted), (revoked.id, true));
 
     for view in [&mut alice, &mut bob] {
-        view.set_accepted([first.id]);
+        view.set_accepted(first.records());
         assert!(!view.is_accepted(&revoked.id));
         assert_eq!(view.head().unwrap().id(), first.id);
     }
@@ -200,11 +203,17 @@ fn non_accepted_keys_still_read_and_say_so() {
 
 #[test]
 fn an_unreadable_head_counts_as_missing_me() {
-    // Lifted into a record by another author, the body names member 2 but
-    // their wrap can't open; they must ask for a rotation.
+    // The rotator broke every wrap: the body names member 2 but their wrap
+    // can't open; they must ask for a rotation.
     let everyone = members(&[1, 2]);
-    let lifted = sign(3, rotate(&peer(1), 1, &everyone, 1).body);
+    let mut parts = peer(1).rotate(pk(1), &everyone, &mut rng(1)).unwrap();
+    // Flip the last byte (in the tag) of every wrap, counting from the end.
+    let len = parts[0].len();
+    for wrap in 0..everyone.len() {
+        parts[0][len - 1 - wrap * groupkeys::WRAP_LEN] ^= 1;
+    }
+    let broken = sign(1, parts);
     let mut bob = peer(2);
-    assert_eq!(apply(&mut bob, &lifted), Applied::WrapInvalid);
+    assert_eq!(apply(&mut bob, &broken), Applied::WrapInvalid);
     assert_eq!(bob.rotation_need(&everyone), RotationNeed::Add { missing: vec![pk(2)] });
 }

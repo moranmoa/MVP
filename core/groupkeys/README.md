@@ -27,16 +27,16 @@ All domain-separation and KDF strings start with `mvs/`.
 | Item | What it does |
 | --- | --- |
 | `MemberSecret::new(&identity)` | The X25519 secret of the identity, derived once and shared by `Arc` with every channel |
-| `ChannelKeys::new(server, channel, secret)`, `with_limit(.., limit)` | One member's view of one channel; `limit` caps rotations on probation (default `MAX_UNACCEPTED`) |
-| `apply(record_id, author, body)` | Take in a rotation (idempotent, any order). Returns whether we got a key, and the IDs evicted from probation to make room |
-| `set_accepted(ids)`, `accept(id)` | The rotations `authority` accepts (allow-list); recomputes the head |
+| `ChannelKeys::new(server, channel, secret)`, `with_limits(.., rotations, bytes)` | One member's view of one channel; the limits cap what is on probation (default `MAX_UNACCEPTED` = 64 rotations, `MAX_UNACCEPTED_BYTES` = 2 MiB) |
+| `apply(record_id, author, body)` | Take in one rotation part from a `KeyRotation` record (idempotent, any order). Says whether the rotation is still incomplete, whether we got a key, or whether it was refused, and returns the part records evicted to make room |
+| `set_accepted(record_ids)`, `accept(record_id)` | The part records `authority` accepts (allow-list); a rotation counts as accepted only when all its parts are. Recomputes the head |
 | `head()` | The rotation new messages use: linked, accepted, highest epoch, lowest ID |
 | `rotation_need(members)` | `Initial`, `Required { removed }`, `Add { missing }` or `None` |
-| `rotate(rotator, members, rng)` | Body for the next rotation (epoch = head + 1, prev = head) |
+| `rotate(rotator, members, rng)` | Part bodies for the next rotation (epoch = head + 1, prev = head), one `KeyRotation` record each |
 | `encrypt(members, plaintext, rng)` | Seal under the head key. Refuses with `RotationRequired` while a removed member still holds it |
 | `decrypt(author, ciphertext)` | Open with whichever epoch key the header names |
 | `decrypt_with_rotation(author, ciphertext)` | The same, and says which rotation and epoch opened it and whether it is accepted, so the caller can flag a message sent under a superseded or non-accepted key |
-| `Rotation::create / decode / unwrap_key`, `seal / open` | The lower layer, for other callers and tests |
+| `Rotation::create / assemble / decode / unwrap_key`, `Part::decode`, `rotation_id`, `seal / open` | The lower layer, for other callers and tests |
 
 ## Crypto, and why
 
@@ -87,7 +87,7 @@ as the KDF (already used for record IDs). No primitive is implemented here.
 **Messages: XChaCha20-Poly1305, random 24-byte nonce.** The key is
 `BLAKE3.derive_key(ctx, epoch_key)`. A random 192-bit nonce makes collisions
 negligible however many messages an epoch has. The AD is
-`server || channel || epoch || rotation record ID || author || header`, so a
+`server || channel || epoch || rotation ID || author || header`, so a
 ciphertext opens only in the channel, epoch and author it was made for:
 copied into another channel or server, re-posted under another author, or
 with its epoch rewritten, it fails. `decrypt` also refuses an author who wasn't
@@ -95,34 +95,47 @@ a recipient of that epoch.
 
 ## Formats and size overhead
 
-Rotation body (little-endian), carried in a signed record whose author is the
-rotator:
+A rotation is split into 1 to 32 parts (R7 / D31). Each part is the body of
+its own signed `KeyRotation` record whose author is the rotator
+(little-endian):
 
 ```text
-ver u8 | channel [32] | epoch u64 | prev tag u8 (+ RecordId [32]) | ephemeral [32]
+rotation ID [32] | part u8 | parts u8            <- records' part header (34)
+| ver u8 | channel [32] | epoch u64 | prev tag u8 (+ rotation ID [32]) | ephemeral [32]
+                                                  <- rotation header, identical in every part
 | count u16 | count * (recipient Ed25519 key [32] | sealed epoch key [48])
 ```
 
+`rotation ID = BLAKE3.derive_key("mvs/groupkeys v1 rotation id", rotator ||
+rotation header)`. `prev` and message key hints name it. A part whose ID
+doesn't match its author and header is refused at decode, so nobody but the
+rotator can add a part to a rotation, and a part lifted into someone else's
+record goes nowhere. A rotation is used only once every part is there, all
+from the same author with the same header, every part but the last holds
+exactly 203 wraps, and the recipients ascend across parts: the one way
+`create` splits them. Two different records for one part (or parts that
+disagree on the count) get the whole rotation **refused**: it can never be
+head, whatever authority says.
+
 Message ciphertext: `ver u8 | epoch u64 | key hint [8] | nonce [24] | sealed`.
-The key hint is the first 8 bytes of the rotation's record ID, used to pick
-the key (two concurrent rotations can share an epoch number); the full ID is
-in the AD.
+The key hint is the first 8 bytes of the rotation ID, used to pick the key
+(two concurrent rotations can share an epoch number); the full ID is in the
+AD.
 
 | Item | Bytes |
 | --- | --- |
 | Message overhead | **57** (1 + 8 + 8 + 24 + 16 tag) |
 | Largest plaintext in a `Message` record (16,384 limit) | **16,327** |
-| Rotation header (epoch > 0) | **108** (76 for epoch 0) |
+| Part header (records) + rotation header (epoch > 0) | **34 + 108** (34 + 76 for epoch 0) |
 | Per member in a rotation | **80** (32 key + 32 sealed key + 16 tag) |
-| Members that fit 16,384 bytes | **203** |
-| 500 members | **40,108** (spec estimate: about 40 KB) |
+| Members per 16,384-byte part | **203** |
+| Most members per rotation | **6,496** (32 parts) |
+| 500 members | **3 parts, 40,426** (spec estimate: about 40 KB) |
+| Largest complete rotation | **512 KiB** |
 
 Tests check all of these: the largest ciphertext is signed into a real
-`Message` record, and a 203-member rotation fits 16,384 bytes.
-
-`records` has no rotation kind yet, and its largest body is 16 KiB, so a
-rotation tops out at 203 members per record. See decision B below. Tests carry
-rotations in `Message` envelopes for now.
+`Message` record, and a 407-member rotation splits into three parts, each
+signed into a real `KeyRotation` record.
 
 ## Rules
 
@@ -134,8 +147,7 @@ rotations in `Message` envelopes for now.
 - **Concurrent rotations resolve deterministically.** A rotation is *linked*
   if it is epoch 0, or its `prev` is linked and exactly one epoch below. The
   head is the linked, accepted rotation with the highest epoch, and between
-  rotations of the same epoch the **lowest record ID** wins, the tie-break
-  `authority` uses. This depends only on the rotations held and the accepted
+  rotations of the same epoch the **lowest rotation ID** wins. This depends only on the rotations held and the accepted
   set, so every peer converges (tested over every order of rotations and
   acceptances). A rotation that is not accepted still links the
   rotations built on it: linking only checks the epoch counter, and a later
@@ -199,6 +211,11 @@ ready to paste into the log, is in
 
 ### B. Channels bigger than 203 members
 
+**Decided and built:** option 2, as `KeyRotation` parts (R7, PR #58) of at
+most 16 KiB, up to 32 per rotation. One change from the table below: the
+rotation's ID is derived from the rotator and header (see Formats), not taken
+from part 0's record ID.
+
 | Option | Security | Sync per rotation | Effort | Past 500 (e.g. 5,000) |
 | --- | --- | --- | --- | --- |
 | 1. `KeyRotation` kind with a ~48 KiB limit | Same as today | One 40 KB record to every member: about 20 MB in total across 500 members | Smallest: a kind and a limit in `records`. But `MAX_RECORD_BYTES` roughly triples for **every** record, so the worst-case memory of PR #7's pending queue (4,096 records) also roughly triples | No: tops out at about 613 members |
@@ -218,8 +235,8 @@ ready to paste into the log, is in
   while a removed member still holds the head key.
 - Integrity and context: any change to a ciphertext, its epoch, or the
   server, channel or author it's bound to makes decryption fail. A rotation
-  body moved to another channel is refused, and one re-signed by another
-  author opens for nobody.
+  part moved to another channel is refused, and one re-signed by another
+  author is refused at decode (its rotation ID doesn't match).
 - Malformed keys: small-order member keys and ephemeral keys are refused.
 
 **Doesn't protect:**
@@ -245,17 +262,20 @@ ready to paste into the log, is in
   keeps sending under the old key, which the kicked member can still read.
   This window is inherent in a system without a central server.
 
-- **Memory (GAP-8, fixed in #19).** Anyone can sign rotation records, so only
-  rotations `authority` has accepted at some point, and their ancestors, are
-  protected. Every other held rotation is on probation; building on a rotation
-  doesn't protect it, so a chain of junk can't shield itself. Past
-  `MAX_UNACCEPTED` (64, so at most 1 MiB per channel at 16 KiB a record) the
-  oldest by arrival is dropped together with every held rotation built on it,
-  keys and all, and `apply` returns their IDs so sync can fetch them again.
-  The cost: a flood can push out an honest rotation that is still waiting for
-  its prev or its verdict, and only redelivery brings it back (the same trade
-  as PR #7's pending queue). There is no wall clock in this crate, so "age" is
-  arrival order.
+- **Memory (GAP-8, fixed in #19, per rotation since parts).** Anyone can sign
+  rotation records, so only rotations with a part `authority` has accepted at
+  some point, and their ancestors, are protected. Every other held rotation,
+  complete or not, is on probation; building on a rotation doesn't protect it,
+  so a chain of junk can't shield itself. Two limits, counted per rotation:
+  at most `MAX_UNACCEPTED` (64) rotations and `MAX_UNACCEPTED_BYTES` (2 MiB)
+  of their parts. Past either, the oldest by arrival is dropped together with
+  every held rotation built on it, all parts and keys, and `apply` returns
+  their part records so sync can fetch them again. A complete rotation is at
+  most 512 KiB, so the largest honest one always fits beside three full junk
+  ones. The cost: a flood can push out an honest rotation that is still
+  waiting for parts, its prev or its verdict, and only redelivery brings it
+  back (the same trade as PR #7's pending queue). There is no wall clock in
+  this crate, so "age" is arrival order.
 - **The identity secret (fixed in #20).** `ChannelKeys` holds no
   `SigningKey`. A client derives one `MemberSecret` (the X25519 scalar,
   zeroized on drop) from its identity and shares it with every channel by
@@ -291,7 +311,10 @@ docker run --rm -v "${PWD}:/work" -v cargo-registry:/usr/local/cargo/registry -v
 Run from `core/`. `tests/scenarios.rs`: a kicked member can't decrypt the next
 epoch; tampered ciphertext, AD or epoch is rejected; concurrent rotations
 converge over every delivery order; offline catch-up in reverse order; a new
-member can't read history; size limits. `tests/properties.rs` (proptest):
+member can't read history; size limits; a 407-member rotation splits into
+three parts that sign as `KeyRotation` records and assemble in any order; a
+part lifted into another author's record is refused. `tests/properties.rs`
+(proptest):
 wrap/unwrap round trip for random member sets, a tampered rotation never yields
 a different key, channel round trip, and any byte flip in a sealed message is
 rejected.
@@ -301,10 +324,15 @@ non-member's rotation wrapped for exactly the members never becomes head until
 every order of rotations and acceptances, also when authority withdraws an
 acceptance; rotations built on a non-accepted one still link; non-accepted keys
 still read, flagged `accepted: false`. `tests/format.rs`: strict decoding (huge
-count, count mismatch, prev tag, version, duplicate or unsorted recipients) and
-the v1 formats pinned with a fixed RNG. `tests/bounded_memory.rs` (#19): a
-flood of 400 unaccepted rotations of every shape keeps memory at the cap while
-the accepted chain still works; an evicted waiting rotation is returned and
+count, count mismatch, prev tag, version, duplicate or unsorted recipients;
+part index and count out of range; a changed rotation ID, header or rotator;
+missing, duplicated or foreign parts at assembly) and the v1 formats pinned
+with a fixed RNG. `tests/bounded_memory.rs` (#19): a flood of 400 unaccepted
+rotations of every shape keeps memory at the cap while the accepted chain
+still works; 64 junk rotations of 32 parts stay within 2 MiB; the largest
+honest rotation fits even with junk parts arriving between its own, and
+becomes head once accepted; contradicting parts get a rotation refused in
+either order; an evicted waiting rotation is returned and
 links on redelivery; accepted rotations, even waiting ones, are never evicted;
 ancestors of an accepted rotation are kept, and an unaccepted parent goes with
 its child; a chain of 1,000 junk rotations built on the head stays at the cap

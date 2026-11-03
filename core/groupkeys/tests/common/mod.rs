@@ -37,17 +37,38 @@ pub fn peer(n: u8) -> ChannelKeys {
     ChannelKeys::new(SERVER, CHANNEL, secret(n))
 }
 
-/// A rotation as it travels: the body of a signed channel record.
+/// One part as it travels: the body of a signed `KeyRotation` record.
 #[derive(Clone)]
-pub struct Signed {
-    pub id: RecordId,
+pub struct SignedPart {
+    pub record: RecordId,
     pub author: PublicKey,
     pub body: Vec<u8>,
 }
 
-/// There is no rotation kind in `records` yet, so the tests borrow
-/// `Message` for the envelope; that only matters for the ID and signature.
-pub fn sign(author: u8, body: Vec<u8>) -> Signed {
+/// A rotation as it travels: all its parts, signed.
+#[derive(Clone)]
+pub struct Signed {
+    /// The rotation ID.
+    pub id: RecordId,
+    pub author: PublicKey,
+    pub parts: Vec<SignedPart>,
+}
+
+impl Signed {
+    /// The records `authority` would accept for this rotation.
+    pub fn records(&self) -> Vec<RecordId> {
+        self.parts.iter().map(|part| part.record).collect()
+    }
+
+    /// The body of a rotation that fits in one part.
+    pub fn body(&self) -> &[u8] {
+        assert_eq!(self.parts.len(), 1, "a one-part rotation");
+        &self.parts[0].body
+    }
+}
+
+/// Signs one part body in a `KeyRotation` record by key `author`.
+pub fn sign_part(author: u8, body: Vec<u8>) -> SignedPart {
     let record = Draft {
         server: SERVER,
         scope: Scope::Channel(CHANNEL),
@@ -55,30 +76,56 @@ pub fn sign(author: u8, body: Vec<u8>) -> Signed {
         deps: vec![],
         auth_deps: vec![],
         ts: 0,
-        kind: Kind::Message,
+        kind: Kind::KeyRotation,
         body,
     }
     .sign(&key(author))
     .expect("fits the record limits");
     let record = Record::decode(&record.encode()).unwrap();
-    Signed { id: record.id(), author: record.author(), body: record.body().to_vec() }
+    SignedPart { record: record.id(), author: record.author(), body: record.body().to_vec() }
+}
+
+/// Signs every part body of a rotation by key `author`.
+pub fn sign(author: u8, parts: Vec<Vec<u8>>) -> Signed {
+    let id = RecordId::from_bytes(parts[0][..32].try_into().unwrap());
+    Signed {
+        id,
+        author: pk(author),
+        parts: parts.into_iter().map(|body| sign_part(author, body)).collect(),
+    }
 }
 
 /// `rotator` rotates on top of `view`'s head, for `members`.
 pub fn rotate(view: &ChannelKeys, rotator: u8, members: &BTreeSet<PublicKey>, seed: u64) -> Signed {
-    let body = view.rotate(pk(rotator), members, &mut rng(seed)).unwrap();
-    sign(rotator, body)
+    let parts = view.rotate(pk(rotator), members, &mut rng(seed)).unwrap();
+    sign(rotator, parts)
 }
 
 /// Applies a rotation that `authority` accepts, as every rotation in the
-/// scenario tests is.
+/// scenario tests is. Returns what the last part did.
 pub fn apply(view: &mut ChannelKeys, rotation: &Signed) -> Applied {
     let applied = store(view, rotation);
-    view.accept(rotation.id);
+    for record in rotation.records() {
+        view.accept(record);
+    }
     applied
 }
 
-/// Applies a rotation `authority` hasn't accepted (yet).
+/// Applies a rotation `authority` hasn't accepted (yet). Returns what the
+/// last part did.
 pub fn store(view: &mut ChannelKeys, rotation: &Signed) -> Applied {
-    view.apply(rotation.id, rotation.author, &rotation.body).unwrap().0
+    push(view, rotation).0
+}
+
+/// Applies every part of a rotation; returns what the last part did and
+/// every record evicted on the way.
+pub fn push(view: &mut ChannelKeys, rotation: &Signed) -> (Applied, Vec<RecordId>) {
+    let mut evicted = Vec::new();
+    let mut applied = Applied::Duplicate;
+    for part in &rotation.parts {
+        let (last, out) = view.apply(part.record, part.author, &part.body).unwrap();
+        applied = last;
+        evicted.extend(out);
+    }
+    (applied, evicted)
 }
