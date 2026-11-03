@@ -260,6 +260,7 @@ enum Command {
     State { log: String, reply: oneshot::Sender<Result<LogState>> },
     Presence { server: ServerId, reply: oneshot::Sender<PresenceState> },
     Peers { reply: oneshot::Sender<Vec<PeerId>> },
+    ListenAddrs { reply: oneshot::Sender<Vec<Multiaddr>> },
     Prune { id: RecordId, reply: oneshot::Sender<Result<bool>> },
     Shutdown { reply: oneshot::Sender<()> },
 }
@@ -500,6 +501,14 @@ impl Node {
         let (reply, rx) = oneshot::channel();
         self.send(Command::Prune { id, reply })?;
         rx.await?
+    }
+
+    /// The addresses the node listens on right now (empty until the listener
+    /// is up; a relay circuit shows once reserved).
+    pub async fn listen_addrs(&self) -> Result<Vec<Multiaddr>> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::ListenAddrs { reply })?;
+        Ok(rx.await?)
     }
 
     pub async fn peers(&self) -> Result<Vec<PeerId>> {
@@ -875,6 +884,9 @@ impl Task {
             }
             Command::Prune { id, reply } => {
                 let _ = reply.send(self.store.prune(&id, &*self.stub_gate).map_err(Into::into));
+            }
+            Command::ListenAddrs { reply } => {
+                let _ = reply.send(self.swarm.listeners().cloned().collect());
             }
             Command::Peers { reply } => {
                 let _ = reply.send(self.connected.iter().copied().collect());
@@ -2163,8 +2175,21 @@ mod tests {
         }
     }
 
-    fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    /// The TCP port `node` actually listens on (it was started on port 0).
+    /// Tests used to pick a free port first and bind it later; on Windows a
+    /// parallel test could get the same port in between, and nodes of two
+    /// tests then met each other.
+    async fn port_of(node: &Node) -> u16 {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            for addr in node.listen_addrs().await.unwrap() {
+                if let Some(Protocol::Tcp(port)) = addr.iter().find(|p| matches!(p, Protocol::Tcp(_))) {
+                    return port;
+                }
+            }
+            assert!(Instant::now() < deadline, "node never listened");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     async fn test_node(name: &str, listen: Option<u16>, bootstrap: Option<u16>, access: Access) -> Node {
@@ -2208,13 +2233,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_message_is_sent_then_delivered_once_a_member_stored_it() {
         use crate::testutil::{message, test_key};
-        let secret = ServerSecret::from_bytes([9; 32]);
+        let secret = ServerSecret::from_bytes([10; 32]);
         let key = |n: u8| -> Option<Arc<dyn Binder>> { Some(Arc::new(test_key(n))) };
-        let port = free_port();
         // The author (test key 1, who signs `message`) counts only key 0 as a member.
         let members: Arc<dyn ReadGate> = Arc::new(OnlyReader(test_key(0).identity()));
         let (author, mut events) =
-            test_node_events("author", Some(port), None, Access { binder: key(1), read_gate: Some(members), stub_gate: None }).await;
+            test_node_events("author", None, None, Access { binder: key(1), read_gate: Some(members), stub_gate: None }).await;
+        let port = port_of(&author).await;
         author.open_server(server(), secret.clone()).unwrap();
         author.open_channel(server(), channel()).await.unwrap();
 
@@ -2271,10 +2296,10 @@ mod tests {
         use crate::testutil::{genesis, message, test_key};
         let secret = ServerSecret::from_bytes([9; 32]);
         let key = |n: u8| -> Option<Arc<dyn Binder>> { Some(Arc::new(test_key(n))) };
-        let port = free_port();
         // The owner's node serves channels to test key 1 only.
         let reader: Arc<dyn ReadGate> = Arc::new(OnlyReader(test_key(1).identity()));
-        let owner = test_node("owner", Some(port), None, Access { binder: key(0), read_gate: Some(reader), stub_gate: None }).await;
+        let owner = test_node("owner", None, None, Access { binder: key(0), read_gate: Some(reader), stub_gate: None }).await;
+        let port = port_of(&owner).await;
         owner.open_server(server(), secret.clone()).unwrap();
         owner.open_channel(server(), channel()).await.unwrap();
         owner.append(genesis()).await.unwrap();
@@ -2330,7 +2355,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn two_nodes_sync_over_websocket() {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let node = |name: &str, listen: String, bootstrap: Vec<Multiaddr>| {
             let dir = std::env::temp_dir().join(format!("sync-ws-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
@@ -2345,7 +2369,8 @@ mod tests {
                 allow_lan: true,
             }
         };
-        let (a, _a_events) = Node::start(node("a", format!("/ip4/127.0.0.1/tcp/{port}/ws"), vec![])).await.unwrap();
+        let (a, _a_events) = Node::start(node("a", "/ip4/127.0.0.1/tcp/0/ws".into(), vec![])).await.unwrap();
+        let port = port_of(&a).await;
         let ws = format!("/ip4/127.0.0.1/tcp/{port}/ws").parse().unwrap();
         let (b, _b_events) = Node::start(node("b", "/ip4/127.0.0.1/tcp/0".into(), vec![ws])).await.unwrap();
         a.append(crate::testutil::message(0, &[], 0)).await.unwrap();
@@ -2365,8 +2390,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn members_are_online_within_5_s_and_offline_within_30_s_of_leaving() {
         use crate::testutil::test_key;
-        let secret = ServerSecret::from_bytes([9; 32]);
-        let port = free_port();
+        let secret = ServerSecret::from_bytes([11; 32]);
         let id = |n: u8| test_key(n).identity();
         let node = |name: &'static str, n: u8, listen, bootstrap, gate: Arc<dyn ReadGate>| {
             let secret = secret.clone();
@@ -2378,7 +2402,8 @@ mod tests {
             }
         };
         // The owner (key 0) counts key 1 as a member, not key 2.
-        let owner = node("p-owner", 0, Some(port), None, Arc::new(OnlyReader(id(1)))).await;
+        let owner = node("p-owner", 0, None, None, Arc::new(OnlyReader(id(1)))).await;
+        let port = port_of(&owner).await;
         let started = Instant::now();
         let member = node("p-member", 1, None, Some(port), Arc::new(AcceptAll)).await;
         let stranger = node("p-stranger", 2, None, Some(port), Arc::new(AcceptAll)).await;
@@ -2442,9 +2467,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_newcomer_gets_the_stub_of_a_message_everyone_pruned() {
         use crate::testutil::{delete, message, DeletedOnly};
-        let port = free_port();
         let access = || Access { stub_gate: Some(Arc::new(DeletedOnly)), ..Access::default() };
-        let old = test_node("pruner", Some(port), None, access()).await;
+        let old = test_node("pruner", None, None, access()).await;
+        let port = port_of(&old).await;
         old.open(&chan()).unwrap();
         let m = message(0, &[], 100);
         let d = delete(1, &m);
