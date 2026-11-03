@@ -343,7 +343,8 @@ fn print_body(body: &ManifestBody) {
         body.channel, body.version, body.issued_at, body.expires_at
     );
     for (platform, a) in &body.artifacts {
-        println!("  {platform}: {} ({} bytes)", a.sha256, a.size);
+        let unpacked = a.unpacked_bytes.map(|n| format!(", {n} unpacked")).unwrap_or_default();
+        println!("  {platform}: {} ({} bytes{unpacked})", a.sha256, a.size);
     }
     if !body.revoked.is_empty() {
         let revoked: Vec<String> = body.revoked.iter().map(ToString::to_string).collect();

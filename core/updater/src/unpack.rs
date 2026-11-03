@@ -25,7 +25,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};
 
-use crate::{Error, Version};
+use crate::{Error, VerifiedArtifact};
 
 /// Longest single path component, in bytes (NTFS and ext4 allow 255).
 pub const MAX_COMPONENT_BYTES: usize = 255;
@@ -75,19 +75,23 @@ pub fn check_entry_name(name: &str) -> Result<Vec<&str>, Error> {
     Ok(parts)
 }
 
-/// Unpacks `archive` (a verified `.zip`, `archive_len` bytes) into
+/// Unpacks `archive`, the `.zip` that `artifact` proves was verified, into
 /// `versions_dir/<version>`, via `<version>.partial`. `required` (e.g.
-/// `MVS.exe`) must be a regular file in the archive. Returns the new folder.
+/// `mvs.exe`) must be a regular file in the archive. Returns the new folder.
+///
+/// Size budget: the manifest's signed `unpacked_bytes`, which must then
+/// match exactly; without it, [`MAX_EXPANSION`] × the archive size. Never
+/// more than [`MAX_UNPACKED_BYTES`].
 ///
 /// Fails if `versions_dir/<version>` already exists: the caller decides
 /// whether a leftover folder may be removed.
 pub fn unpack_zip<R: Read + Seek>(
     archive: R,
-    archive_len: u64,
+    artifact: &VerifiedArtifact,
     versions_dir: &Path,
-    version: Version,
     required: &str,
 ) -> Result<PathBuf, Error> {
+    let version = artifact.version();
     let final_dir = versions_dir.join(version.to_string());
     if final_dir.exists() {
         return Err(bad(format!("{} already exists", final_dir.display())));
@@ -98,7 +102,11 @@ pub fn unpack_zip<R: Read + Seek>(
     }
     fs::create_dir_all(versions_dir)?;
     fs::create_dir(&partial)?;
-    match extract(archive, archive_len, &partial, required) {
+    let budget = artifact
+        .unpacked_bytes()
+        .unwrap_or_else(|| artifact.size().saturating_mul(MAX_EXPANSION))
+        .min(MAX_UNPACKED_BYTES);
+    match extract(archive, budget, artifact.unpacked_bytes(), &partial, required) {
         Ok(()) => {
             fs::rename(&partial, &final_dir)?;
             Ok(final_dir)
@@ -110,12 +118,17 @@ pub fn unpack_zip<R: Read + Seek>(
     }
 }
 
-fn extract<R: Read + Seek>(archive: R, archive_len: u64, dest: &Path, required: &str) -> Result<(), Error> {
+fn extract<R: Read + Seek>(
+    archive: R,
+    budget: u64,
+    exact: Option<u64>,
+    dest: &Path,
+    required: &str,
+) -> Result<(), Error> {
     let mut zip = zip::ZipArchive::new(archive).map_err(|e| bad(format!("not a zip archive: {e}")))?;
     if zip.len() > MAX_ENTRIES {
         return Err(bad(format!("{} entries, more than {MAX_ENTRIES}", zip.len())));
     }
-    let budget = archive_len.saturating_mul(MAX_EXPANSION).min(MAX_UNPACKED_BYTES);
     let mut written: u64 = 0;
     // Lowercased path -> is a folder. Every file's parent folders are
     // recorded too, so a file and a folder cannot share a name either.
@@ -168,6 +181,9 @@ fn extract<R: Read + Seek>(archive: R, archive_len: u64, dest: &Path, required: 
     if !files.contains(required) {
         return Err(bad(format!("payload has no {required}")));
     }
+    if let Some(expected) = exact.filter(|&e| e != written) {
+        return Err(bad(format!("unpacked {written} bytes, the manifest says {expected}")));
+    }
     sync_dir(dest);
     Ok(())
 }
@@ -202,6 +218,7 @@ fn sync_dir(dir: &Path) {
 mod tests {
     use super::*;
     use std::io::{Cursor, Write};
+    use crate::Version;
     use zip::write::SimpleFileOptions;
 
     fn v(s: &str) -> Version {
@@ -239,7 +256,31 @@ mod tests {
     }
 
     fn unpack(tmp: &Tmp, bytes: &[u8]) -> Result<PathBuf, Error> {
-        unpack_zip(Cursor::new(bytes), bytes.len() as u64, &tmp.0.join("versions"), v("1.2.0"), "MVS.exe")
+        unpack_signed(tmp, bytes, None)
+    }
+
+    fn unpack_signed(tmp: &Tmp, bytes: &[u8], unpacked: Option<u64>) -> Result<PathBuf, Error> {
+        let artifact = VerifiedArtifact::for_tests_sized(v("1.2.0"), bytes.len() as u64, unpacked);
+        unpack_zip(Cursor::new(bytes), &artifact, &tmp.0.join("versions"), "MVS.exe")
+    }
+
+    #[test]
+    fn signed_unpacked_size_replaces_the_ratio_and_must_match() {
+        let tmp = Tmp::new("signed");
+        // Compresses far beyond MAX_EXPANSION: refused by the ratio alone...
+        let zeros = vec![0u8; 1024 * 1024];
+        let bytes = zip_of(&[("MVS.exe", b"exe"), ("app.asar", &zeros)]);
+        let total = 3 + zeros.len() as u64;
+        assert!(unpack(&tmp, &bytes).is_err());
+        // ...accepted with the signed size,
+        unpack_signed(&tmp, &bytes, Some(total)).unwrap();
+        fs::remove_dir_all(tmp.0.join("versions")).unwrap();
+        // ...and refused when the signed size is smaller or larger than the truth.
+        for wrong in [total - 1, total + 1] {
+            let err = unpack_signed(&tmp, &bytes, Some(wrong)).unwrap_err();
+            assert!(matches!(err, Error::Unpack(_)), "{wrong}: {err:?}");
+            assert!(!tmp.0.join("versions").join("1.2.0").exists());
+        }
     }
 
     #[test]
