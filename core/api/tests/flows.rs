@@ -98,7 +98,8 @@ fn create_identity_server_grant_kick() {
     let server = owner.core.create_server("Team", AgeRestriction::None).unwrap();
     assert_eq!(server.owner_id, created.identity.id);
     assert!(server.invite_link.starts_with("mvs://join/"));
-    assert_eq!(owner.core.list_channels(&server.id).unwrap()[0].name, "general");
+    // Named in the creator's language (Hebrew here), as stored (UX-04).
+    assert_eq!(owner.core.list_channels(&server.id).unwrap()[0].name, "כללי");
 
     let alice_id = sign_up(&alice, "Alice").id;
     let bob_id = sign_up(&bob, "Bob").id;
@@ -1095,4 +1096,104 @@ fn sync_announces_new_and_changed_messages_once() {
     owner.events.take();
     owner.core.sync_now().unwrap();
     assert!(added(owner.events.take()).is_empty());
+}
+
+/// Channels are authority's (`State.channels`, #113): #general from
+/// `sign_new_server`, one the owner creates, and not one a member tries to.
+#[test]
+fn channels_come_from_channel_create_records() {
+    use api::crypto::GroupKeysCipher;
+
+    let world = World::new();
+    let open = |words: &str, name: &str| {
+        let cipher = Arc::new(GroupKeysCipher::locked());
+        let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
+        peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        peer.core.update_profile(profile).unwrap();
+        peer
+    };
+    let owner = open(OWNER_WORDS, "Owner");
+    let guest = open(LEGAL, "Guest");
+    let server = owner.core.create_server("Rooms", AgeRestriction::None).unwrap();
+    guest.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    let names = |peer: &Peer| -> Vec<String> {
+        peer.core.list_channels(&server.id).unwrap().into_iter().map(|c| c.name).collect()
+    };
+    assert_eq!(names(&owner), ["general"]);
+
+    // A ChannelCreate each: the owner's is accepted, the guest's isn't.
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let heads = |w: &World| -> Vec<records::RecordId> {
+        let mut ids: Vec<_> = w
+            .network
+            .fetch(server_key)
+            .iter()
+            .filter(|r| r.scope() == Scope::Control)
+            .map(|r| r.id())
+            .collect();
+        ids.sort();
+        ids
+    };
+    let create = |words: &str, seq: u64, id: u8, name: &str| {
+        let key = identity::RecoveryPhrase::parse(words).unwrap().identity();
+        let action = authority::Action::ChannelCreate {
+            channel: records::ChannelId::from_bytes([id; 32]),
+            adult: false,
+            name: name.into(),
+        };
+        let mut deps = heads(&world);
+        deps.truncate(records::MAX_DEPS);
+        let record =
+            authority::sign_control(key.signing_key(), server_key, seq, deps, 5, &action).unwrap();
+        world.network.publish(&record);
+    };
+    create(OWNER_WORDS, 10, 0x51, "random");
+    create(LEGAL, 10, 0x52, "guests-only");
+    for peer in [&owner, &guest] {
+        peer.core.sync_now().unwrap();
+    }
+    let mut got = names(&guest);
+    got.sort();
+    assert_eq!(got, ["general", "random"]);
+
+    // The new channel works end to end; the refused one isn't a channel.
+    let random = hex::encode([0x51; 32]);
+    owner.core.send_message(&random, "in random", None).unwrap();
+    guest.core.sync_now().unwrap();
+    assert_eq!(guest.core.get_messages(&random, 0, 9).unwrap().messages[0].body, "in random");
+    assert_eq!(
+        guest.core.get_message_count(&hex::encode([0x52; 32])).unwrap_err().code,
+        ErrorCode::NotFound
+    );
+}
+
+/// #general is named in the creator's language when created, and keeps that
+/// name for everyone after, whatever their own language.
+#[test]
+fn general_is_named_in_the_creators_language() {
+    let world = World::new();
+    let make = |locale: Locale| {
+        let peer = world.peer();
+        let input =
+            NewIdentityInput { locale, country: "IL".into(), birth_date: "1990-05-01".into() };
+        let words = peer.core.create_identity(input).unwrap().words;
+        let positions = peer.core.get_recovery_challenge().unwrap().positions;
+        let answers: BTreeMap<usize, String> =
+            positions.iter().map(|p| (*p, words[p - 1].clone())).collect();
+        assert!(peer.core.check_recovery_words(answers).unwrap().ok);
+        let profile = ProfileInput { display_name: "X".into(), bio: None, avatar_data_url: None };
+        peer.core.update_profile(profile).unwrap();
+        peer
+    };
+    let hebrew = make(Locale::He);
+    let english = make(Locale::En);
+    let he_server = hebrew.core.create_server("א", AgeRestriction::None).unwrap();
+    let en_server = english.core.create_server("A", AgeRestriction::None).unwrap();
+    assert_eq!(hebrew.core.list_channels(&he_server.id).unwrap()[0].name, "כללי");
+    assert_eq!(english.core.list_channels(&en_server.id).unwrap()[0].name, "general");
+    // The English speaker joins the Hebrew server: the stored name stays.
+    english.core.join_server(&he_server.invite_link).unwrap();
+    assert_eq!(english.core.list_channels(&he_server.id).unwrap()[0].name, "כללי");
 }

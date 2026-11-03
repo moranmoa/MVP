@@ -200,6 +200,11 @@ impl Store {
         Ok(self.get(id)?.and_then(|bytes| Record::decode(&bytes).ok()))
     }
 
+    /// Read access to a server's stored control log (for a [`crate::ReadGate`]).
+    pub fn control_log(&self, server: crate::ServerId) -> ControlLog<'_> {
+        ControlLog { conn: &self.conn, log: log_name(server, Scope::Control) }
+    }
+
     /// Records of the log that nothing else in the log depends on.
     pub fn heads(&self, log: &str) -> rusqlite::Result<Vec<RecordId>> {
         let mut stmt = self.conn.prepare_cached("SELECT id FROM heads WHERE log = ?1 ORDER BY id")?;

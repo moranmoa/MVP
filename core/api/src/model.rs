@@ -24,6 +24,18 @@ const CODE_ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 pub(crate) const COLORS: [&str; 8] =
     ["#5865f2", "#2f9e44", "#e8590c", "#d6336c", "#1098ad", "#7048e8", "#f08c00", "#0ca678"];
 
+/// #general's name for a server from before #113, which has no record of it.
+pub(crate) const GENERAL: &str = "general";
+
+/// #general's name as created, in the creator's language. Stored in the
+/// record, so it doesn't change with anyone's UI language later (UX-04).
+pub(crate) fn general_name(locale: Option<crate::types::Locale>) -> &'static str {
+    match locale {
+        Some(crate::types::Locale::He) => "כללי",
+        Some(crate::types::Locale::En) | None => GENERAL,
+    }
+}
+
 pub(crate) fn default_channel(server: ServerId) -> ChannelId {
     ChannelId::from_bytes(blake3::derive_key(DEFAULT_CHANNEL_CTX, server.as_bytes()))
 }
