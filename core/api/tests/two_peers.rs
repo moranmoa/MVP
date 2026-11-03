@@ -117,27 +117,31 @@ fn two_users_chat_through_a_relay() {
         .collect();
     assert_eq!(bodies, ["שלום, מה נשמע?", "hi!"]);
 
-    // The stranger holds the same records (the log is public to sync) but
-    // was never in a rotation: nothing opens.
+    // GAP-4: a stranger with only the server ID gets nothing. Even with the
+    // secret from the link it gets the control log (a joiner needs it
+    // before its join exists) but no channel record: the read gate serves
+    // channels to members only.
     let server_id =
         records::ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
-    let mut held = Vec::new();
-    eventually("the stranger to hold both messages", || {
-        held = stranger.net.fetch(server_id);
-        held.iter().filter(|r| r.kind() == Kind::Message).count() == 2
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(stranger.net.fetch(server_id).is_empty(), "no secret, nothing");
+    let secret: [u8; 32] =
+        hex::decode(server.invite_link.rsplit('/').next().unwrap()).unwrap().try_into().unwrap();
+    let general = BTreeSet::from([records::ChannelId::from_bytes(
+        hex::decode(&channel).unwrap().try_into().unwrap(),
+    )]);
+    stranger.net.open_server(server_id, &secret, &general);
+    eventually("the stranger to get the control log", || {
+        stranger.net.fetch(server_id).iter().any(|r| r.kind() == Kind::Genesis)
     });
-    let rotations: BTreeSet<records::RecordId> =
-        held.iter().filter(|r| r.kind() == Kind::KeyRotation).map(|r| r.id()).collect();
-    assert!(!rotations.is_empty());
-    for record in held.iter().filter(|r| r.kind() == Kind::KeyRotation) {
-        let _ = stranger.cipher.apply_rotation(record);
-    }
-    stranger.cipher.set_accepted(server_id, &rotations);
-    for message in held.iter().filter(|r| r.kind() == Kind::Message) {
-        let Scope::Channel(ch) = message.scope() else { panic!("a channel record") };
-        assert!(stranger.cipher.decrypt(server_id, ch, message.author(), message.body()).is_err());
-    }
-    eprintln!("the stranger can't read: done");
+    std::thread::sleep(Duration::from_secs(5));
+    let held = stranger.net.fetch(server_id);
+    assert!(
+        held.iter().all(|r| r.scope() == Scope::Control),
+        "a non-member got channel records: {}",
+        held.iter().filter(|r| r.scope() != Scope::Control).count()
+    );
+    eprintln!("the stranger gets no channel records: done");
 }
 
 /// The app's background sync (`Core::run_sync_loop`, as mvs-core runs it):
