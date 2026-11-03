@@ -1,12 +1,8 @@
 //! Two cores exchange records through a real relay, over `SyncNetwork`.
-//! Needs a relay: set `RELAY` to its multiaddr and run with `--ignored`,
-//! in a container on the relay's network, e.g. from `core/`:
-//!
-//! ```text
-//! docker run --rm --network infra_default -e RELAY=/dns4/relay/tcp/4001/p2p/<id> \
-//!   -v "$PWD:/work" -w /work rust:1.90-bookworm \
-//!   cargo test --release -p api --test two_peers -- --ignored --nocapture
-//! ```
+//! Needs a relay (`RELAY`, its multiaddr) and `--ignored`. Run it with
+//! `bash core/api/tests/two_peers.sh`, which starts a throwaway relay on its
+//! own Docker network (as `infra/test/relay-catchup.sh` does) and runs this
+//! test next to it. Never point it at the live relay or its network.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
