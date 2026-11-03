@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
-import { PHONE_QUERY, useMediaQuery } from '../../app/media';
+import { phoneQuery, useMediaQuery } from '../../app/media';
+import { useSettings } from '../../app/settings';
 import type { Id } from '../../core';
 import { Dialog } from '../../components/common';
 import { ShieldIcon } from '../../components/icons';
@@ -24,17 +25,19 @@ export function Shell() {
   const servers = useStore(store, (s) => s.servers);
   const notice = useStore(store, (s) => s.notice);
   const intl = useIntl();
+  const { uiScale } = useSettings().settings;
 
   const [serverId, setServerId] = useState<Id | 'home'>(() => servers[0]?.id ?? 'home');
   const [channelByServer, setChannelByServer] = useState<Record<Id, Id>>({});
   const [membersOpen, setMembersOpen] = useState(() => {
     const stored = localStorage.getItem(MEMBERS_KEY);
-    return stored === null ? window.innerWidth >= 1000 : stored === '1';
+    // Open by default only when there is room for it at the current UI scale.
+    return stored === null ? window.innerWidth / uiScale >= 1000 : stored === '1';
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [dialog, setDialog] = useState<ShellDialog>(null);
   // On a phone the channel list and the chat are two pages; this is the one shown.
-  const phone = useMediaQuery(PHONE_QUERY);
+  const phone = useMediaQuery(phoneQuery(uiScale));
   const [phoneView, setPhoneView] = useState<'nav' | 'chat'>('nav');
   // The phone member sheet has its own state: it is never saved, and every
   // page switch closes it, so a channel tap always lands on the chat.

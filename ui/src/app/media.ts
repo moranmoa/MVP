@@ -1,7 +1,12 @@
 import { useSyncExternalStore } from 'react';
 
-/** Phone width. In CSS media queries rem is always 16px, whatever the UI scale. */
-export const PHONE_QUERY = '(max-width: 40rem)';
+/**
+ * Phone width at the given UI scale. In media queries rem is always 16px, so the
+ * scale is applied here; the CSS uses a container query on #root, which sees it.
+ */
+export function phoneQuery(uiScale: number): string {
+  return `(max-width: ${40 * uiScale}rem)`;
+}
 
 /** True while the media query matches; follows window resizes. */
 export function useMediaQuery(query: string): boolean {
