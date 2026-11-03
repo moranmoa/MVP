@@ -35,9 +35,10 @@
 //!   deps point at state from before the removal. When two kicks of the same
 //!   target are concurrent, only the first in linear order is accepted (the
 //!   target is already kicked by the second), so only its voids apply.
-//! - Channels: only the owner creates them (ש-10), each channel ID once.
-//!   A new server's first channel is created with its genesis
-//!   ([`sign_new_server`]).
+//! - Channels: only the owner creates, renames and deletes them (ש-10),
+//!   each channel ID once; the latest edit counts, and a deleted ID isn't
+//!   reused. A new server's first channel, #general, is created with its
+//!   genesis ([`sign_new_server`]) and can't be deleted (ש-20).
 //! - Ties between concurrent records are broken by the record ID.
 //!
 //! Records come from the `records` crate, so they are signed and their IDs are
@@ -121,11 +122,22 @@ pub enum Action {
     },
     /// The owner creates a channel. Body: the channel ID, `history u8`
     /// (reserved for D30, must be 0), flags (bit 0: 18+, the rest 0), then
-    /// the name, 1 to [`MAX_CHANNEL_NAME`] code points.
+    /// the name, 1 to [`MAX_CHANNEL_NAME`] code points. The server's first
+    /// channel in linear order is its #general.
     ChannelCreate {
         channel: ChannelId,
         adult: bool,
         name: String,
+    },
+    /// The owner renames a channel or changes its 18+ flag. Body: as a create.
+    ChannelEdit {
+        channel: ChannelId,
+        adult: bool,
+        name: String,
+    },
+    /// The owner deletes a channel, never #general. Body: the channel ID.
+    ChannelDelete {
+        channel: ChannelId,
     },
 }
 
@@ -151,6 +163,8 @@ impl Action {
             Action::RevokeInvite { .. } => Kind::RevokeInvite,
             Action::Join { .. } => Kind::Join,
             Action::ChannelCreate { .. } => Kind::ChannelCreate,
+            Action::ChannelEdit { .. } => Kind::ChannelEdit,
+            Action::ChannelDelete { .. } => Kind::ChannelDelete,
         }
     }
 
@@ -178,9 +192,11 @@ impl Action {
                 [&expires_ms.to_le_bytes()[..], &max_uses.to_le_bytes()].concat()
             }
             Action::RevokeInvite { invite } | Action::Join { invite } => invite.as_bytes().to_vec(),
-            Action::ChannelCreate { channel, adult, name } => {
+            Action::ChannelCreate { channel, adult, name }
+            | Action::ChannelEdit { channel, adult, name } => {
                 [channel.as_bytes().as_slice(), &[0, u8::from(*adult)], name.as_bytes()].concat()
             }
+            Action::ChannelDelete { channel } => channel.as_bytes().to_vec(),
         }
     }
 
@@ -220,7 +236,7 @@ impl Action {
             }
             Kind::RevokeInvite => Some(Action::RevokeInvite { invite: id(body)? }),
             Kind::Join => Some(Action::Join { invite: id(body)? }),
-            Kind::ChannelCreate => {
+            Kind::ChannelCreate | Kind::ChannelEdit => {
                 let (channel, rest) = body.split_first_chunk::<32>()?;
                 let [history, flags, name @ ..] = rest else { return None };
                 // No history mode is defined before D30, and only the 18+ flag.
@@ -228,19 +244,21 @@ impl Action {
                     return None;
                 }
                 let name = String::from_utf8(name.to_vec()).ok().filter(|n| channel_name_ok(n))?;
-                Some(Action::ChannelCreate {
-                    channel: ChannelId::from_bytes(*channel),
-                    adult: *flags == 1,
-                    name,
+                let (channel, adult) = (ChannelId::from_bytes(*channel), *flags == 1);
+                Some(if record.kind() == Kind::ChannelCreate {
+                    Action::ChannelCreate { channel, adult, name }
+                } else {
+                    Action::ChannelEdit { channel, adult, name }
                 })
             }
+            Kind::ChannelDelete => Some(Action::ChannelDelete {
+                channel: ChannelId::from_bytes(body.try_into().ok()?),
+            }),
             // Channel kinds are judged by the channel checks (B4-4); server,
             // channel and leave records come in B4-3. Until then they are
             // never accepted.
             Kind::ServerEdit
             | Kind::ServerClose
-            | Kind::ChannelEdit
-            | Kind::ChannelDelete
             | Kind::Leave
             | Kind::AgeClaim
             | Kind::Unban
@@ -262,7 +280,9 @@ impl Action {
             | Action::Invite { .. }
             | Action::RevokeInvite { .. }
             | Action::Join { .. }
-            | Action::ChannelCreate { .. } => None,
+            | Action::ChannelCreate { .. }
+            | Action::ChannelEdit { .. }
+            | Action::ChannelDelete { .. } => None,
         }
     }
 
@@ -272,6 +292,16 @@ impl Action {
         match self {
             Action::Join { .. } => Some(author),
             _ => self.target(),
+        }
+    }
+
+    /// The channel a channel create, edit or delete is about.
+    fn channel(&self) -> Option<ChannelId> {
+        match self {
+            Action::ChannelCreate { channel, .. }
+            | Action::ChannelEdit { channel, .. }
+            | Action::ChannelDelete { channel } => Some(*channel),
+            _ => None,
         }
     }
 
@@ -288,7 +318,11 @@ impl Action {
         self.target().is_some()
             || matches!(
                 self,
-                Action::Invite { .. } | Action::RevokeInvite { .. } | Action::ChannelCreate { .. }
+                Action::Invite { .. }
+                    | Action::RevokeInvite { .. }
+                    | Action::ChannelCreate { .. }
+                    | Action::ChannelEdit { .. }
+                    | Action::ChannelDelete { .. }
             )
     }
 
@@ -448,6 +482,8 @@ pub struct State {
     pub invites: BTreeMap<RecordId, Invite>,
     /// Created channels by ID.
     pub channels: BTreeMap<ChannelId, Channel>,
+    /// Deleted channels: their IDs aren't created again.
+    pub deleted_channels: BTreeSet<ChannelId>,
     /// Accepted posts, in display order.
     pub posts: Vec<RecordId>,
     pub accepted: BTreeSet<RecordId>,
@@ -459,6 +495,8 @@ pub struct Channel {
     pub name: String,
     /// 18+: hidden from members without an 18+ claim (ש-12).
     pub adult: bool,
+    /// The server's #general: it can't be deleted (ש-20).
+    pub general: bool,
     /// The `ChannelCreate` record.
     pub created: RecordId,
 }
@@ -495,8 +533,11 @@ trait View {
     fn has_joined(&self, actor: Actor) -> bool;
     /// An accepted invite as it stands at this point.
     fn invite(&self, id: RecordId) -> Option<Invite>;
-    /// Whether the channel has been created at this point.
-    fn has_channel(&self, id: ChannelId) -> bool;
+    /// Where the channel stands at this point.
+    fn channel(&self, id: ChannelId) -> ChannelStatus;
+    /// Whether any channel has been created at this point. A server without
+    /// channel records (made before #113) keeps a derived #general.
+    fn has_channels(&self) -> bool;
 
     fn role_of(&self, actor: Actor) -> Role {
         if self.owner() == Some(actor) {
@@ -532,9 +573,25 @@ impl View for State {
         self.invites.get(&id).copied()
     }
 
-    fn has_channel(&self, id: ChannelId) -> bool {
-        self.channels.contains_key(&id)
+    fn channel(&self, id: ChannelId) -> ChannelStatus {
+        match self.channels.get(&id) {
+            Some(channel) => ChannelStatus::Live { general: channel.general },
+            None if self.deleted_channels.contains(&id) => ChannelStatus::Deleted,
+            None => ChannelStatus::Never,
+        }
     }
+
+    fn has_channels(&self) -> bool {
+        !self.channels.is_empty() || !self.deleted_channels.is_empty()
+    }
+}
+
+/// A channel at a point in the log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChannelStatus {
+    Never,
+    Live { general: bool },
+    Deleted,
 }
 
 fn permitted(view: &impl View, record: &Record, action: &Action) -> bool {
@@ -591,7 +648,16 @@ fn permitted(view: &impl View, record: &Record, action: &Action) -> bool {
         // In the MVP only the owner manages channels (ש-10), and a channel ID
         // is created once.
         Action::ChannelCreate { channel, .. } => {
-            author_role == Role::Owner && !view.has_channel(*channel)
+            author_role == Role::Owner && view.channel(*channel) == ChannelStatus::Never
+        }
+        Action::ChannelEdit { channel, .. } => {
+            author_role == Role::Owner
+                && matches!(view.channel(*channel), ChannelStatus::Live { .. })
+        }
+        // #general can't be deleted (ש-20).
+        Action::ChannelDelete { channel } => {
+            author_role == Role::Owner
+                && view.channel(*channel) == ChannelStatus::Live { general: false }
         }
     }
 }
@@ -641,15 +707,33 @@ fn apply(state: &mut State, record: &Record, action: &Action) -> Option<(Actor, 
         Action::Post { .. }
         | Action::Invite { .. }
         | Action::RevokeInvite { .. }
-        | Action::ChannelCreate { .. } => None,
+        | Action::ChannelCreate { .. }
+        | Action::ChannelEdit { .. }
+        | Action::ChannelDelete { .. } => None,
     }
 }
 
-/// Adds an accepted channel creation to the state.
+/// Applies an accepted channel create, edit or delete to the state.
 fn apply_channel(state: &mut State, record: &Record, action: &Action) {
-    if let Action::ChannelCreate { channel, adult, name } = action {
-        let entry = Channel { name: name.clone(), adult: *adult, created: record.id() };
-        state.channels.insert(*channel, entry);
+    match action {
+        Action::ChannelCreate { channel, adult, name } => {
+            // The first channel is #general.
+            let general = !state.has_channels();
+            let entry =
+                Channel { name: name.clone(), adult: *adult, general, created: record.id() };
+            state.channels.insert(*channel, entry);
+        }
+        Action::ChannelEdit { channel, adult, name } => {
+            if let Some(entry) = state.channels.get_mut(channel) {
+                entry.name = name.clone();
+                entry.adult = *adult;
+            }
+        }
+        Action::ChannelDelete { channel } => {
+            state.channels.remove(channel);
+            state.deleted_channels.insert(*channel);
+        }
+        _ => {}
     }
 }
 
@@ -896,7 +980,10 @@ impl<'a> Graph<'a> {
                     pass.state.posts.push(record.id());
                     continue;
                 }
-                Action::Invite { .. } | Action::ChannelCreate { .. } => continue,
+                Action::Invite { .. }
+                | Action::ChannelCreate { .. }
+                | Action::ChannelEdit { .. }
+                | Action::ChannelDelete { .. } => continue,
                 Action::RevokeInvite { invite } => {
                     pass.voided.extend(self.voids_of(i));
                     pass.revoked_invites.push(*invite);
