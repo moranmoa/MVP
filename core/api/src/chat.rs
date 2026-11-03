@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use authority::{check_channel, message_text_ok, ChannelGraph, Resolver, Verdict};
+use authority::{check_channel, message_text_ok, ChannelGraph, Resolver, State, Verdict};
 use records::{ChannelId, Kind, PublicKey, Record, RecordId, Scope, ServerId, MAX_DEPS};
 
 use crate::model::Log;
@@ -76,11 +76,16 @@ fn accepted(resolver: &Resolver, record: &Record, graph: &Graph) -> bool {
     check_channel(resolver, record, graph) == Verdict::Accept
 }
 
-/// The channels authority knows for `server`: only the default one until
-/// channel records arrive (B4-3). Nothing about any other channel ever
-/// reaches the cipher, whatever records name it.
-pub(crate) fn known_channels(server: ServerId) -> BTreeSet<ChannelId> {
-    BTreeSet::from([crate::model::default_channel(server)])
+/// The channels authority knows for `server`: those its accepted
+/// `ChannelCreate` records made (`State.channels`, #113). A server from
+/// before #113 has none and keeps its derived #general. Nothing about any
+/// other channel ever reaches the cipher, whatever records name it.
+pub(crate) fn known_channels(server: ServerId, state: &State) -> BTreeSet<ChannelId> {
+    let mut known: BTreeSet<ChannelId> = state.channels.keys().copied().collect();
+    if known.is_empty() {
+        known.insert(crate::model::default_channel(server));
+    }
+    known
 }
 
 fn in_known(record: &Record, known: &BTreeSet<ChannelId>) -> bool {
@@ -94,7 +99,7 @@ fn in_known(record: &Record, known: &BTreeSet<ChannelId>) -> bool {
 /// a rotation it already holds is a no-op (`Applied::Duplicate`).
 /// TODO(perf): replay only after an unlock, once the core drives it.
 pub(crate) fn sync_cipher(cipher: &dyn GroupCipher, server: ServerId, log: &Log) {
-    let known = known_channels(server);
+    let known = known_channels(server, log.resolver.state());
     cipher.set_channels(server, &known);
     let graph = Graph::new(&log.channel);
     let rotations: Vec<&Record> = log
@@ -154,7 +159,7 @@ pub(crate) fn messages(
     channel: ChannelId,
     log: &Log,
 ) -> Vec<Shown> {
-    if !known_channels(server).contains(&channel) {
+    if !known_channels(server, log.resolver.state()).contains(&channel) {
         return Vec::new();
     }
     let records = channel_records(log, channel);

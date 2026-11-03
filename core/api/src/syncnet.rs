@@ -14,12 +14,13 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use libp2p::Multiaddr;
 use records::{Record, Scope, ServerId};
-use sync::{log_name, log_of, Node, NodeConfig, Store};
+use sync::{log_name, log_of, Node, NodeConfig, NodeEvent, Store};
 use tokio::runtime::Runtime;
 
 use crate::gate::MemberGate;
@@ -30,11 +31,24 @@ use crate::ports::Network;
 const FIRST_FETCH_WAIT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(200);
 
+/// A `--relay` address: a multiaddr that ends in `/p2p/<peer id>`, so Noise
+/// checks it reached that very relay. Without the peer ID it would accept
+/// whatever answers at the address (behind Cloudflare, anyone), so it is
+/// refused (#114).
+pub fn relay_addr(text: &str) -> Result<Multiaddr, String> {
+    let addr: Multiaddr = text.parse().map_err(|_| "not a multiaddr".to_owned())?;
+    match addr.iter().last() {
+        Some(libp2p::multiaddr::Protocol::P2p(_)) => Ok(addr),
+        _ => Err("must end in /p2p/<relay peer id>".to_owned()),
+    }
+}
 pub struct SyncNetwork {
     runtime: Runtime,
     node: Node,
     store: PathBuf,
     opened: Mutex<HashSet<String>>,
+    hints: Mutex<Option<Receiver<()>>>,
+    waker: SyncSender<()>,
 }
 
 impl SyncNetwork {
@@ -53,17 +67,36 @@ impl SyncNetwork {
             allow_lan: false,
         };
         let (node, mut events) = runtime.block_on(Node::start(config))?;
-        // Events are only hints, and nothing needs them yet: the gate keys
-        // its rejects by the control log's count, and reads go to the store.
-        // Drained so the node never blocks on a full channel.
-        // TODO(sync): a push hint to the UI instead of `syncNow`.
-        runtime.spawn(async move { while events.recv().await.is_some() {} });
+        // Events are only hints: a stored record wakes the core's sync loop
+        // (`Core::run_sync_loop`), which re-reads the store. Coalesced (one
+        // pending hint is enough) and drained, so the node never blocks.
+        let (hint, hints) = std::sync::mpsc::sync_channel(1);
+        let waker = hint.clone();
+        runtime.spawn(async move {
+            while let Some(event) = events.recv().await {
+                if matches!(event, NodeEvent::Stored { .. } | NodeEvent::Lagged { .. }) {
+                    let _ = hint.try_send(());
+                }
+            }
+        });
         Ok(SyncNetwork {
             runtime,
             node,
             store: data_dir.join("store.db"),
             opened: Mutex::new(HashSet::new()),
+            hints: Mutex::new(Some(hints)),
+            waker,
         })
+    }
+
+    /// The hints for `Core::run_sync_loop` (once; `None` after).
+    pub fn take_hints(&self) -> Option<Receiver<()>> {
+        self.hints.lock().expect("not poisoned").take()
+    }
+
+    /// Wakes the sync loop now, e.g. so it sees its stop flag.
+    pub fn wake(&self) {
+        let _ = self.waker.try_send(());
     }
 
     /// Starts syncing `log` if not already; true the first time.
@@ -142,5 +175,27 @@ mod tests {
         assert_eq!(fetched.iter().map(Record::id).collect::<Vec<_>>(), [genesis.id()]);
         drop(net);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod relay_tests {
+    use super::relay_addr;
+
+    #[test]
+    fn a_relay_must_name_its_peer_id() {
+        let id = "12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc";
+        assert!(relay_addr(&format!("/dns4/relay.example/tcp/443/p2p/{id}")).is_ok());
+        assert!(relay_addr(&format!("/ip4/1.2.3.4/tcp/4001/p2p/{id}")).is_ok());
+        for bad in [
+            "/dns4/relay.example/tcp/443",
+            "/ip4/1.2.3.4/tcp/4001",
+            // A peer ID that isn't last doesn't pin the relay either.
+            &format!("/p2p/{id}/ip4/1.2.3.4/tcp/4001"),
+            "relay.example:443",
+            "",
+        ] {
+            assert!(relay_addr(bad).is_err(), "{bad} should be refused");
+        }
     }
 }

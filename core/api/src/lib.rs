@@ -28,5 +28,5 @@ pub use ports::{
     CipherError, CipherOutcome, Clock, CollectingSink, EventSink, FixedClock, GroupCipher,
     LoopbackNetwork, Network, Opened, PendingGroupKeys, Ports, SharedSecrets, SystemClock,
 };
-pub use service::{Config, Core, CHALLENGE_POSITIONS, MAX_CHECK_FAILURES};
+pub use service::{Config, Core, CHALLENGE_POSITIONS, MAX_CHECK_FAILURES, SYNC_EVERY};
 pub use types::*;
