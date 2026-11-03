@@ -578,6 +578,15 @@ legend {
   box-shadow: var(--shadow);
 }
 
+.brand {
+  margin: 0 0 0.75rem;
+  font-size: 1.125rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  unicode-bidi: isolate;
+}
+
 .onb-top {
   display: flex;
   justify-content: space-between;
@@ -1861,6 +1870,21 @@ meter {
   .icon-button {
     width: 2.75rem;
     height: 2.75rem;
+  }
+
+  .msg-actions button {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+
+  .composer textarea {
+    min-height: 2.75rem;
+  }
+
+  button.primary,
+  button.secondary,
+  .file-button {
+    min-height: 2.75rem;
   }
 
   .channel,

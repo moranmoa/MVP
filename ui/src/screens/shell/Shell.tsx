@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
@@ -36,6 +36,12 @@ export function Shell() {
   // On a phone the channel list and the chat are two pages; this is the one shown.
   const phone = useMediaQuery(PHONE_QUERY);
   const [phoneView, setPhoneView] = useState<'nav' | 'chat'>('nav');
+  // The phone member sheet has its own state: it is never saved, and every
+  // page switch closes it, so a channel tap always lands on the chat.
+  const [phoneMembers, setPhoneMembers] = useState(false);
+  // Where focus goes after a phone page switch or after the sheet closes.
+  const focusNext = useRef<'chat' | 'channel' | 'members-button' | null>(null);
+  const shellRef = useRef<HTMLDivElement>(null);
 
   const channels = useStore(store, (s) => (serverId === 'home' ? undefined : s.channels[serverId]));
   const channelId = serverId === 'home' ? undefined : (channelByServer[serverId] ?? channels?.[0]?.id);
@@ -72,17 +78,55 @@ export function Shell() {
   }, [servers, serverId, server, channels, channelId]);
 
   const toggleMembers = () => {
+    if (phone) {
+      if (phoneMembers) focusNext.current = 'members-button';
+      setPhoneMembers((o) => !o);
+      return;
+    }
     setMembersOpen((o) => {
       localStorage.setItem(MEMBERS_KEY, o ? '0' : '1');
       return !o;
     });
   };
 
+  const goPhone = (view: 'nav' | 'chat') => {
+    setPhoneMembers(false);
+    setPhoneView(view);
+    if (phone) focusNext.current = view === 'chat' ? 'chat' : 'channel';
+  };
   const selectServer = (id: Id | 'home') => {
     setServerId(id);
+    setPhoneMembers(false);
     setPhoneView('nav');
   };
-  const showMembers = !!server && membersOpen && (!phone || phoneView === 'chat');
+  const sheetOpen = phone && phoneMembers && phoneView === 'chat';
+  const showMembers = !!server && (phone ? sheetOpen : membersOpen);
+
+  // Keyboard and screen-reader users keep their place when the phone pages switch:
+  // the chat heading after opening a channel, the open channel after going back,
+  // and the members button after the sheet closes.
+  useEffect(() => {
+    const target = focusNext.current;
+    if (!target) return;
+    focusNext.current = null;
+    const root = shellRef.current;
+    const el =
+      target === 'chat'
+        ? root?.querySelector<HTMLElement>('.chat-title')
+        : target === 'channel'
+          ? root?.querySelector<HTMLElement>('.channel[aria-current="page"]')
+          : root?.querySelector<HTMLElement>('.members-button');
+    el?.focus();
+  });
+
+  // While the sheet covers the screen, everything under it is inert.
+  useEffect(() => {
+    const root = shellRef.current;
+    if (!root || !sheetOpen) return;
+    const under = [...root.children].filter((el) => !el.classList.contains('members')) as HTMLElement[];
+    under.forEach((el) => (el.inert = true));
+    return () => under.forEach((el) => (el.inert = false));
+  }, [sheetOpen]);
   const layout = [
     'shell',
     showMembers ? 'with-members' : '',
@@ -91,10 +135,12 @@ export function Shell() {
   ];
 
   return (
-    <div className={layout.filter(Boolean).join(' ')}>
-      <a className="skip-link" href="#chat-main">
-        <FormattedMessage id="a11y.skipToChat" />
-      </a>
+    <div ref={shellRef} className={layout.filter(Boolean).join(' ')}>
+      {!(phone && server && phoneView === 'nav') && (
+        <a className="skip-link" href="#chat-main">
+          <FormattedMessage id="a11y.skipToChat" />
+        </a>
+      )}
       {!identity.recoveryChecked && (
         <div className="banner" role="status">
           <ShieldIcon />
@@ -118,7 +164,7 @@ export function Shell() {
           channelId={channelId}
           onSelectChannel={(id) => {
             setChannelByServer((m) => ({ ...m, [server.id]: id }));
-            setPhoneView('chat');
+            goPhone('chat');
           }}
           onOpenSettings={() => setSettingsOpen(true)}
         />
@@ -129,9 +175,9 @@ export function Shell() {
             key={channelId}
             server={server}
             channelId={channelId}
-            membersOpen={membersOpen}
+            membersOpen={phone ? phoneMembers : membersOpen}
             onToggleMembers={toggleMembers}
-            onBack={phone ? () => setPhoneView('nav') : undefined}
+            onBack={phone ? () => goPhone('nav') : undefined}
           />
         ) : (
           <Home

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
@@ -57,6 +57,12 @@ export function MemberList({ server, onClose }: { server: ServerSummary; onClose
 
   const open = members.find((m) => m.id === openId);
   const flagged = useMemo(() => lookalikeIds(members), [members]);
+  const headingId = useId();
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const isSheet = !!onClose;
+  useEffect(() => {
+    if (isSheet) closeRef.current?.focus();
+  }, [isSheet]);
 
   const group = (list: Member[], titleId: string) =>
     list.length > 0 && (
@@ -94,13 +100,37 @@ export function MemberList({ server, onClose }: { server: ServerSummary; onClose
     );
 
   return (
-    <aside className="members" aria-label={intl.formatMessage({ id: 'members.label' })}>
+    <aside
+      className="members"
+      // On a phone the list covers the whole screen, so it behaves as a modal
+      // dialog: labelled by its heading, focus moves in, Esc closes it (Shell
+      // makes everything underneath inert and returns focus on close).
+      {...(onClose
+        ? {
+            role: 'dialog',
+            'aria-modal': true,
+            'aria-labelledby': headingId,
+            onKeyDown: (e: KeyboardEvent) => {
+              if (e.key === 'Escape' && !open) {
+                e.preventDefault();
+                onClose();
+              }
+            },
+          }
+        : { 'aria-label': intl.formatMessage({ id: 'members.label' }) })}
+    >
       {onClose && (
         <header className="members-header">
-          <h2>
+          <h2 id={headingId}>
             <FormattedMessage id="members.label" />
           </h2>
-          <button type="button" className="icon-button" onClick={onClose} aria-label={intl.formatMessage({ id: 'members.close' })}>
+          <button
+            ref={closeRef}
+            type="button"
+            className="icon-button"
+            onClick={onClose}
+            aria-label={intl.formatMessage({ id: 'members.close' })}
+          >
             <CloseIcon />
           </button>
         </header>

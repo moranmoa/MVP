@@ -1,4 +1,4 @@
-# ui – MVP interface shell
+# ui – MVS interface shell
 
 React + TypeScript + Vite. A plain web app with no desktop-shell APIs, so it
 can sit unchanged inside Tauri or Electron. Today it talks to a **mock core**

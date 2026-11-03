@@ -82,7 +82,7 @@ export function ChatView({
           </button>
         )}
         <HashIcon />
-        <h2>
+        <h2 className="chat-title" tabIndex={-1}>
           <bdi>{channelName}</bdi>
         </h2>
         {channel?.adult && (
@@ -93,7 +93,7 @@ export function ChatView({
         <span className="spacer" />
         <button
           type="button"
-          className={`icon-button ${membersOpen ? 'pressed' : ''}`}
+          className={`icon-button members-button ${membersOpen ? 'pressed' : ''}`}
           aria-pressed={membersOpen}
           onClick={onToggleMembers}
           aria-label={intl.formatMessage({ id: 'chat.toggleMembers' })}

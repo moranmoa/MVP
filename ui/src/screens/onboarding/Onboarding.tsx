@@ -142,6 +142,9 @@ function LanguageStep({ onNext, onRestore }: { onNext: () => void; onRestore: ()
   const intl = useIntl();
   return (
     <>
+      <p className="brand">
+        <FormattedMessage id="app.name" />
+      </p>
       <h1>
         <FormattedMessage id="onb.language.title" />
       </h1>

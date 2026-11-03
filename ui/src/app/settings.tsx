@@ -93,6 +93,7 @@ export function SettingsProvider({ children, initial }: { children: ReactNode; i
   useEffect(() => {
     const root = document.documentElement;
     root.lang = settings.locale;
+    document.title = messagesFor(settings.locale)['app.name'];
     root.dir = directionOf(settings.locale);
     root.dataset.theme = settings.theme;
     root.style.fontSize = `${16 * settings.uiScale}px`;
