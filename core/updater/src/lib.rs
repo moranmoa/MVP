@@ -20,6 +20,7 @@
 
 mod artifact;
 mod error;
+mod layout;
 mod manifest;
 mod policy;
 mod rollback;
@@ -28,6 +29,9 @@ mod version;
 
 pub use artifact::{hash_reader, store_artifact, verify_artifact, StoredArtifact, VerifiedArtifact};
 pub use error::Error;
+pub use layout::{
+    read_state_file, save_state, write_atomic, UpdateDirs, UpdateLock, APP_EXE, LAUNCHER_EXE, MAX_STATE_FILE_BYTES,
+};
 pub use manifest::{
     is_valid_name, Artifact, ManifestBody, SignatureEntry, SignedManifest, VerifiedManifest, FORMAT,
     MAX_CLOCK_SKEW_SECS, MAX_MANIFEST_BYTES, MAX_NOTES_BYTES, MAX_NOTES_LANGUAGES, MAX_SIGNATURES, MAX_VALIDITY_SECS,
