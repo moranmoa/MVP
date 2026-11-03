@@ -59,3 +59,19 @@ it is active, and as "offline" within 30 s after it closes the app.
 - A harness check, if cheap: presence settles on all 4 peers.
 
 **Out of scope:** typing indicators and per-device presence.
+
+## Additions (tech lead, #141)
+
+1. **The answerer's binding only goes to members.** A pull answer carries
+   our binding only if the requester's bound identity passes our
+   `ReadGate` (a member, not kicked). That check runs on the answering
+   thread, like a channel pull's. So a holder of a leaked link, or a kicked
+   member, can still pull the control log, but can't learn who is online.
+   Tested: a bound non-member gets answers with no binding, and never sees
+   the answerer online.
+2. **`NobodyOnline` means "nobody reachable from here".** Others may be
+   online but out of reach from this device (NAT, relay down). The UI copy
+   (`rail.serverNobodyOnline`) should not promise more.
+3. **Bounded.** At most `MAX_PRESENCE` = 256 identities per server. A new
+   identity past the cap is not tracked until an entry expires; the bound
+   is tested.
