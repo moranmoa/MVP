@@ -1,6 +1,7 @@
 # GAP-4: members-only sync (design note)
 
-**Status: proposal, for the tech lead's and the security lead's OK before building.**
+**Status: approved by both leads (#96), built in core/sync. GAP-4 closes
+once core/api switches to `open_server` (see "What api does next").**
 
 **Names, not server IDs, on the wire.** Each server gets a 32-byte random
 *server secret*, made by the owner at creation, kept in the local store and
@@ -59,3 +60,48 @@ api.
 This PR is core/sync only. The api side (the link, the store, the binding
 callback, `ReadGate`) goes to dev-identity. Building waits for the
 security lead's OK too.
+
+## As built (core/sync)
+
+The security lead's amendments are all in:
+
+- **Sealing:** XChaCha20-Poly1305 with a random 192-bit nonce; a key per
+  log, `derive_key("mvs/gossip/v1", secret ‖ scope)`; AD = version ‖ handle.
+  A message that doesn't open is `Reject`, and an opened record still goes
+  through decode, the derived log and the store.
+- **No handles in the DHT:** nothing publishes them there. If discovery
+  ever needs a DHT key, it gets its own `mvs/dht/v1` derivation.
+- **The binding signs the control handle:** `mvs/peer-binding/v1 ‖ len ‖
+  peer id ‖ control handle ‖ expiry`. The expiry may be at most 24 h ahead,
+  with ±10 min skew allowed. A verified binding is cached per peer and
+  dropped when the peer disconnects.
+
+The code:
+
+- **`src/access.rs`:** `ServerSecret` (zeroized on drop, `Debug` redacted),
+  `Handle` (`derive_key("mvs/topic/v1", secret ‖ scope)`, scope `0x00` or
+  `0x01 ‖ channel`, pinned by a test), sealing, `Binding`, and two traits:
+  - `Binder`: signs bindings; implemented for a plain `SigningKey`.
+  - `ReadGate`: who may read channels; not monotone.
+- **`Node::start_with(config, Access { binder, read_gate })`,
+  `open_server(server, secret)` and `open_channel(server, channel)`:** a
+  pull for a handle needs a valid binding from the Noise-authenticated
+  peer. A channel pull additionally runs the `ReadGate`, on the answering
+  thread over the read-only store. The control log is served to any bound
+  peer.
+- **The plain-name path is kept:** `Node::start` and `Node::open(log)` work
+  as before, until api switches. A sealed log is never served, accepted or
+  opened by its plain name.
+- **The sync protocol is now `/mvs/sync/0.3.0`.**
+- **The harness** syncs a sealed server, with a fixed test secret.
+
+## What api does next (dev-identity)
+
+- **Secret:** a random secret per server, made at creation, kept in the
+  local store, and carried in the invite link (with dev-ui for the link
+  format). Never logged, and never in an https URL.
+- **Binder:** implemented over the identity key.
+- **`ReadGate`:** implemented over the current authority `State`: a member,
+  and not kicked.
+- **Opening servers:** start the node with `Node::start_with`, and open
+  servers with `open_server` / `open_channel` instead of `open(log)`.
