@@ -4,7 +4,7 @@ import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import { phoneQuery, useMediaQuery } from '../../app/media';
 import { useSettings } from '../../app/settings';
-import { useCore, type Id } from '../../core';
+import { useCore, useCoreEvent, type Id } from '../../core';
 import { Dialog } from '../../components/common';
 import { ShieldIcon } from '../../components/icons';
 import { RecoveryCheck, RecoveryWordsPanel } from '../onboarding/RecoveryWords';
@@ -37,6 +37,18 @@ export function Shell() {
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [dialog, setDialog] = useState<ShellDialog>(null);
+  // An mvs:// link from the OS (desktop app) opens the join dialog pre-filled.
+  // It never joins by itself: that waits for the Join button.
+  const [invite, setInvite] = useState<string | undefined>();
+  useCoreEvent(
+    'link.open',
+    ({ link }) => {
+      if (!link) return; // guardCore blanks anything that isn't an exact invite link
+      setInvite(link);
+      setDialog('join');
+    },
+    [],
+  );
   // The reminder can show the words again (the panel loads them on demand).
   const [showWords, setShowWords] = useState(false);
   const closeCheck = () => {
@@ -210,9 +222,14 @@ export function Shell() {
       />
       <JoinDialog
         open={dialog === 'join'}
-        onClose={() => setDialog(null)}
+        initialLink={invite}
+        onClose={() => {
+          setDialog(null);
+          setInvite(undefined);
+        }}
         onJoined={(id) => {
           setDialog(null);
+          setInvite(undefined);
           setServerId(id);
         }}
       />
