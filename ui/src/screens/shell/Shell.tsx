@@ -44,10 +44,13 @@ export function Shell() {
     'link.open',
     ({ link }) => {
       if (!link) return; // guardCore blanks anything that isn't an exact invite link
+      // While the join dialog is open, a new link must not replace the one the
+      // person is looking at just before they press Join (security review of #80).
+      if (dialog === 'join') return;
       setInvite(link);
       setDialog('join');
     },
-    [],
+    [dialog],
   );
   // The reminder can show the words again (the panel loads them on demand).
   const [showWords, setShowWords] = useState(false);

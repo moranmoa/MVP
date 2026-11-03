@@ -37,6 +37,20 @@ describe('mvs:// links from the OS', () => {
     expect(join).toHaveBeenCalledWith(LINK);
   });
 
+  it('do not swap the link while the join dialog is open', async () => {
+    const { join, openLink } = await setup();
+    openLink(LINK);
+    const field = (await screen.findByLabelText('Invite link')) as HTMLInputElement;
+    const other = `mvs://join/${'c'.repeat(64)}/${'d'.repeat(64)}`;
+    openLink(other);
+    expect(field.value).toBe(LINK);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Join' }));
+    });
+    expect(join).toHaveBeenCalledWith(LINK);
+    expect(join).not.toHaveBeenCalledWith(other);
+  });
+
   it('ignore anything that is not exactly an invite link', async () => {
     const { join, openLink } = await setup();
     for (const bad of [`${LINK}?--inspect`, 'mvs://join/xyz', 'https://evil.example/join', `mvs://evil/${'a'.repeat(64)}/${'b'.repeat(64)}`]) {
