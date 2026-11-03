@@ -3,7 +3,7 @@
 The single source of truth for who does what, in which order, and what blocks the closed alpha.
 Owner: pm (see [`docs/TEAM.md`](TEAM.md)). Updated whenever a PR lands; if this board disagrees with a PR, a review or a chat, **the board wins until it is corrected here**.
 
-Last updated: 2026-11-03, refresh 6. `main` has PRs #1–#18, #22–#35, #46, #48–#68, #70–#85. Open: #69 (draft), #86, plus Dependabot #36–#45, #47. **B1 (Electron shell) and T13 (sidecar) are merged.**
+Last updated: 2026-11-03, refresh 7. `main` has PRs #1–#18, #22–#35, #46, #48–#68, #70–#89, #93. Open: #69 (T12, Windows jobs failing), plus Dependabot #36–#45, #47. Issues #90–#92 are T15 follow-ups. **Two `mvs-core` peers chat encrypted through a relay (#89).**
 
 **Contents:** [Rules](#rules) · [Milestones](#milestones) · [Open PRs](#open-prs) · [Board](#board) · [Dependency map and critical path](#dependency-map-and-critical-path) · [Next assignments](#next-assignments) · [File ownership](#file-ownership) · [Risks and blockers](#risks-and-blockers) · [Owner decisions](#owner-decisions)
 
@@ -27,7 +27,7 @@ Last updated: 2026-11-03, refresh 6. `main` has PRs #1–#18, #22–#35, #46, #4
 
 | | Name | Done when |
 | --- | --- | --- |
-| **M1** | Talks to itself | One desktop build runs the real Rust core behind the UI (no mock): create an identity from 12 words, create a server, post encrypted messages, restart and see them again. Two instances on one machine sync. |
+| **M1** | Talks to itself | One desktop build runs the real Rust core behind the UI (no mock): create an identity from 12 words, create a server, post encrypted messages, restart and see them again. Two instances on one machine sync. **`mvs-core` answers every message command for real** (send, get, count, edit, delete, retry; none `not-implemented`) (T15 criterion, product-lead; #89 unlocks the cipher at identity load, create and restore). Proof: chat against the real core in the Electron build (dev-ui). |
 | **M2** | Two real users chat | Two people on different machines and networks (incl. one behind NAT/CGNAT, via relay) join by link, chat with real send states, kick works and re-keys, offline catch-up works. B5 success criteria measured and committed. Threat-model P0 gaps closed. |
 | **M3** | Closed alpha release | Installers for Windows, macOS, Linux from CI (signed or documented-unsigned); in-app P2P update with rollback; relay + seeder running behind the owner's domain; P0 bugs closed; testers have instructions. |
 
@@ -35,12 +35,11 @@ Last updated: 2026-11-03, refresh 6. `main` has PRs #1–#18, #22–#35, #46, #4
 
 | PR | What | Author | Required verdicts | Status | Next step |
 | --- | --- | --- | --- | --- | --- |
-| [#86](https://github.com/moranmoa/MVP/pull/86) | **GAP-5** `GroupCipher` over groupkeys in `core/api/src/crypto/**` (Option A from tech-lead) | dev-crypto | tech-lead, sec-lead (crypto) | in review | verdicts pending; dev-identity's encrypted two-user chat test (T15) builds on it |
-| [#69](https://github.com/moranmoa/MVP/pull/69) | **T12** install/uninstall tests (Windows + Linux), `docs/release/INSTALL-TESTS.md` keyed to INS-01..16 | devops | tech-lead, product-lead (owner requirement) | in progress | draft until the first CI run is green |
+| [#69](https://github.com/moranmoa/MVP/pull/69) | **T12** install/uninstall tests (Windows + Linux), `docs/release/INSTALL-TESTS.md` keyed to INS-01..16 | devops | tech-lead, product-lead (owner requirement) | in progress | Windows jobs fail on a script bug; back with devops. Its first green Windows run also closes the B1 Windows acceptance item |
 
-Merged since the first board: #5–#18 (#18 = T1), #22–#35, #46, #48–#60, #61 (T4 ops part 1), #62 (B4-4), #63 + #79 + #81 (T12 scripts and checks), #64 (GAP-19), #65 (CI: Windows sync + api, Electron version-age), #66 (decision 7 spec), #67 (board), #68 + #72 (T13 sidecar), #70 (groupkeys rotation parts), #71 (B1-1), #73 + #76 (B1-2), #74 + #75 + #78 + #80 + #82 (B1-3), #77 (B2-f), #83 + #84 + #85 (sync adapter, T14).
+Merged since the first board: #5–#18 (#18 = T1), #22–#35, #46, #48–#60, #61 (T4 ops part 1), #62 (B4-4), #63 + #79 + #81 (T12 scripts and checks), #64 (GAP-19), #65 (CI), #66 (decision 7), #67 + #88 (board), #68 + #72 (T13), #70 (groupkeys rotation parts), #71–#82 (B1), #77 (B2-f), #83–#85 (T14 sync adapter), #86 + #93 (GAP-5 `GroupCipher`), #87 (sync clippy), #89 (T15 encrypted two-user chat).
 
-**Merge order for core**: #86 (GAP-5) next. Every later core PR rebases and keeps every crate in `members`. **Dependabot #36–#45, #47:** #62 and #64 are in, so they can now go **one at a time** after #86 (K7). Crypto/identity majors (#37 argon2, #39 bip39, #42 curve25519-dalek, #36 rand, #44 rand_chacha) need sec-lead and can change derived keys or golden vectors; UI tool majors (#38 vite, #40 typescript, #43, #45, #47) go to dev-ui; #41 actions to dev-updater/devops (check that no job name changes).
+**Merge order for core**: no core PR open. Every core PR rebases and keeps every crate in `members`. **Dependabot crypto majors go to dev-crypto, one at a time in this order: #42 curve25519-dalek, #37 argon2, #39 bip39, #36 rand, #44 rand_chacha** (sec-lead reviews; they can change derived keys or golden vectors). UI tool majors (#38 vite, #40 typescript, #43, #45, #47) go to dev-ui; #41 actions to dev-updater/devops (check that no job name changes) (K7).
 
 ---
 
@@ -61,15 +60,15 @@ Merged since the first board: #5–#18 (#18 = T1), #22–#35, #46, #48–#60, #6
 | R4 | Updater audit: root-rotation chain DoS, QA-14, QA-15 | dev-updater | done | #8 | S1 | S | M3 |
 | QA-16 | `spike-peer` hangs when relay is unreachable | dev-sync | done | #5 | – | S | M2 |
 | T2 | All crypto domain strings `mvs/…`, pinned by tests | each crate owner | done | #5 #7 #8 #9 #11 | – | S | M1 |
-| B4 | MVP record kinds: server edit/close, channels, invite + revoke, **Join + member set (GAP-3; #18 borrows a control `Post` tagged `mvs/join/v1` until `Kind::Join` exists)**, edit/delete tombstones, leave, age claim, kick blocks rejoin (ש-4), **kick-undo (owner only) + the removed-members list behind `listRemovedMembers`**; revoke-only demotion (D28); `Kind::KeyRotation` 16 KiB per part, split into ≤ 32 parts (R7); **`auth_deps` format for channel messages (GAP-2)**; `#general` auto-named (UX-04) | core-5 (records-authority-dev-b4) | in progress (stage 1 #46, B4-1 formats #58 and B4-4 channel checks #62 merged; left: kick-undo + removed-members list, `#general`, D28 demotion, age claim) | #46 #58 #62 | R1 ✔; D30 for history flag; GAP-2 format decision by tech-lead + sec-lead | L | M1 |
+| B4 | MVP record kinds: server edit/close, channels, invite + revoke, **Join + member set (GAP-3; #18 borrows a control `Post` tagged `mvs/join/v1` until `Kind::Join` exists)**, edit/delete tombstones, leave, age claim, kick blocks rejoin (ש-4), **kick-undo (owner only) + the removed-members list behind `listRemovedMembers`**; revoke-only demotion (D28); `Kind::KeyRotation` 16 KiB per part, split into ≤ 32 parts (R7); **`auth_deps` format for channel messages (GAP-2)**; `#general` auto-named (UX-04) | core-5 (records-authority-dev-b4) | in progress (stage 1 #46, B4-1 formats #58 and B4-4 channel checks #62 merged; next: the **4,000-code-point limit** in the core (B6/QA-17); then kick-undo + removed-members list, `#general`, D28 demotion, age claim) | #46 #58 #62 | R1 ✔; D30 for history flag; GAP-2 format decision by tech-lead + sec-lead | L | M1 |
 | B4-sync | Verify records at ingest and before gossip forward (GAP-1, with T1); roles only from the signed log; **F1** answer pulls off the swarm task (`spawn_blocking` + read-only connection); **F3** dropped `Stored` events must surface (`Lagged` event or sequence number) so T1 re-reads the store | dev-sync | done (also direct connections + `/mvs/kad`) | #55 | R2, B4 kinds | M | M1 |
 | F2 | Sync: filter dialled addresses, with a "LAN allowed" switch for the harness | dev-sync | todo | – | #5 | S | M2 |
 | F4 | Sync: `make_room` scans all 4,096 buckets per new peer when full; switch to LRU if the limit grows | dev-sync | todo | – | #5 | S | – |
-| GAP-4 | Answer sync only for members: peer-ID ↔ identity binding, secret-derived topic names | dev-sync | todo | – | B4 (member set), B4-sync | M | M2 |
+| GAP-4 | Answer sync only for members: peer-ID ↔ identity binding, secret-derived topic names | dev-sync | todo (design note first) | – | B4 (member set), B4-sync | M | M2 |
 | GAP-6 | Clients: Kademlia client mode, filter private addresses, `/mvs/kad/1.0.0` (relay side in T4a; ship together) | dev-sync | in progress (`/mvs/kad` client side in #55) | – | B4-sync | S | M2 |
 | B23 | Name sanitising in core: bidi controls, invisible chars (QA-06; QA-13 fixed in the UI by #10, core-side check still needed) | core-5 | todo | – | B4 | S | M2 |
 | T1 | **Integration crate `core/api`** — the single glue crate (no `core/node`; confirmed by tech-lead): wires sync → records → authority → groupkeys, verifies peer input (GAP-1 with B4-sync) and exposes the `CoreApi` facade matching `ui/src/core/api.ts` commands, events and error codes. First PR: identity, server create, roles, kick, age gate, SQLite, conformance fixtures; `Network` and `GroupCipher` are stand-in adapters until #5 and #9 land; messages answer `not-implemented`. **Parity also covers the spec additions:** `getRecoveryChallenge`, `leaveServer`, `updateServer`, `closeServer`, `createChannel`/`updateChannel`/`deleteChannel`, `revokeInvite`, `confirmJoin`, `listPendingJoins`, `cancelPendingMessage`, `listRemovedMembers`, `undoKick` | dev-identity (lead), dev-crypto (crypto module, GAP-5) | done | #18 | B2, R2, B3, B4 (initial kinds) | L | M1 |
-| GAP-5 | Wire encryption into T1 in `core/api/src/crypto`: `Kind::KeyRotation`, `may_rotate`, feed `set_voided` from authority | dev-crypto | in review (`GroupCipher`; rotation parts in #70) | #70 #86 | T1 skeleton, B4 (`KeyRotation`) | M | M1 |
+| GAP-5 | Wire encryption into T1 in `core/api/src/crypto`: `Kind::KeyRotation`, `may_rotate`, feed `set_voided` from authority | dev-crypto | done | #70 #86 #93 | T1 skeleton, B4 (`KeyRotation`) | M | M1 |
 
 ### Shell, packaging, release
 
@@ -77,10 +76,11 @@ Merged since the first board: #5–#18 (#18 = T1), #22–#35, #46, #48–#60, #6
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | S4/6 | Spike 4+6: voice + footprint, **Tauri vs Electron** | dev-voice-shell | done: recommends **Electron**, owner decided (decision 7) | #59 | – | M | M1 |
 | S5 | Spike 5: browser peer (rust-libp2p → WASM) joins the network | dev-web | done | #29 | S2 | M | – |
-| B1 | Desktop shell, **Electron** (decision 7), in small PRs: **B1-1** secure skeleton; **B1-2** bridge to the `mvs-core` sidecar (T13), real `CoreApi` over IPC, minimal IPC surface (GAP-17); **B1-3** packaging: NSIS per-user with keep/delete data, AppImage/.deb (feeds B9, T12). Mock stays at `?demo` | dev-voice-shell | done (product-lead acceptance pending): B1-1 #71; B1-2 #73 #76; B1-3 #74 #75 #78 #80 #82 (incl. `mvs://` links open the join dialog, never join silently) | #71–#82 | T1 ✔, S4/6 ✔; B1-2 needs T13 | L | M1 |
+| B1 | Desktop shell, **Electron** (decision 7), in small PRs: **B1-1** secure skeleton; **B1-2** bridge to the `mvs-core` sidecar (T13), real `CoreApi` over IPC, minimal IPC surface (GAP-17); **B1-3** packaging: NSIS per-user with keep/delete data, AppImage/.deb (feeds B9, T12). Mock stays at `?demo` | dev-voice-shell | done, **accepted for M1** (product-lead on #88). Open: Windows (accepted on #69's first green Windows run or one manual screenshot; macOS goes to R8): B1-1 #71; B1-2 #73 #76; B1-3 #74 #75 #78 #80 #82 (incl. `mvs://` links open the join dialog, never join silently) | #71–#82 | T1 ✔, S4/6 ✔; B1-2 needs T13 | L | M1 |
 | T13 | `mvs-core` sidecar binary in `core/api`: runs the core in its own process for the Electron shell (decision 7) | dev-identity | done | #68 #72 | T1 ✔ | M | M1 |
 | T14 | Sync adapter in `core/api`: `MemberGate` + `SyncNetwork` over `sync::Node` (`mvs-core --relay`); gate rejects keyed by the control-log count | dev-identity (+ dev-sync `ControlLog::count`) | done | #83 #84 #85 | T1, B4-sync | M | M1 |
-| T15 | Encrypted two-user chat test through the relay (two `mvs-core` instances, real `GroupCipher`, relay-only path) | dev-identity | todo | – | #86 (GAP-5), T14 ✔, T4 | M | M2 |
+| T15 | Encrypted two-user chat through the relay (two `mvs-core` instances, real `GroupCipher`, relay-only path). **All six message commands real in `mvs-core`** (send, get, count, edit, delete, retry) | dev-identity | in progress (send/get/count + two peers through a relay in #89; `mvs-core` unlocks the cipher at identity load, create and restore; left: edit, delete, retry, replies; follow-ups #90, #91, #92) | #89 | GAP-5 ✔, T14 ✔ | M | **M1** |
+| T16 | Re-key on kick through `core/api`: a kick rotates the channel key and the kicked member can no longer read new messages (M2 "kick works and re-keys") | dev-identity | todo | – | T15, B4 | M | M2 |
 | B10 | CI: ui job (#8), `qa/` smoke on every PR (#49), Electron version-age check (decision 7), advisories blocking, `ring` exception permanent (D29) | dev-updater | in progress (ui job #8, smoke #49, Electron version-age check #65 merged; advisories blocking after T3) | #8 #49 #65 | #13 for smoke; T3 for blocking | S | M2 |
 | T3 | libp2p 0.54 → current (clears `ring 0.16` advisories, rcgen, hickory) | dev-sync | todo | – | #5 merged | M | M2 |
 | B9 | Installers: release workflow + archives + `SHA256SUMS` + unsigned manifest body (in #17); then EXE/MSI, DMG, AppImage/deb/rpm via the shell plug-in point (`MVS_SHELL=electron` in `release.yml`, packages from B1-3); third-party notices; SmartScreen/Gatekeeper notes | devops | in progress (pipeline merged in #17; packaging skeleton next, final packaging blocked on B1) | #17 | B1; D-sign | M | M3 |
@@ -153,6 +153,7 @@ B-items: `docs/reviews/po-review-1.md` §8. T2 and T5–T8 are as written in the
 | T4 | One compose file runs relay, seeder and bootstrap, with a templated hostname and no IPs in git. TLS comes from the reverse proxy, which forwards only WebSocket; TCP/UDP ports are documented. Relay circuit limits are raised so 10,000 missed messages catch up over a relay-only path, measured. Restart policies and a health check are in place. No connection logs on disk at the relay or bootstrap; only in-memory metadata and aggregate counters. |
 | T9 | The go/no-go checklist covers the spec's Definition of Done, M3 "done when", all Blocker/High bugs closed, SC-01..04 results committed, and tester instructions (install, unsigned-build warnings if relevant, how to export diagnostics). |
 | T11 | Each spec has RTL and LTR layouts, all states, exact Hebrew and English strings, keyboard and screen-reader behaviour, and acceptance checks; product-lead approves it before dev-ui starts the item (B17 may start from UX-01 now). |
+| T15 | Two `mvs-core` peers exchange encrypted messages through a relay-only path, and a non-member peer fetches the records but opens nothing. In `mvs-core` (not only in tests) `sendMessage`, `getMessages`, `getMessageCount`, `editMessage`, `deleteMessage` and `retryMessage` all work; none answers `not-implemented`. **M1 depends on this** (product-lead, #88). |
 
 ---
 
@@ -183,11 +184,11 @@ graph LR
   B3 --> T1
   B4 --> T1
   B4S --> T1
-  T1 --> G5[GAP-5 wire encryption #86]:::review
+  T1 --> G5[GAP-5 wire encryption #86]:::done
   S46[S4/6 spike: Electron #59]:::done --> B1[B1 Electron shell #71-#82]:::done
   T1 --> T13[T13 mvs-core sidecar #68]:::done --> B1
   T1 --> B1
-  G5 --> M1((M1 talks to itself))
+  G5 --> T15[T15 all message commands real #89]:::prog --> M1((M1 talks to itself))
   B1 --> M1
   B17[B17 mixed direction #24]:::done --> M1
   B19[B19 recovery words #28]:::done --> M1
@@ -233,7 +234,8 @@ B9 installers (MVS_SHELL=electron, B1-3 packages) ─► B8 in-app update ─►
 - **Longest chain:** B9 (M) → B8 (M). T1, T13, B1, B4-sync and the shell decision are done.
 - **Non-code gates on the path:** D-sign (B9). D30 still gates the B4 history flag, off the path.
 - **Biggest lever:** devops lands T12 (#69) and wires `MVS_SHELL=electron` into `release.yml`; dev-updater starts B8 against the B1 build.
-- **Path to M2:** GAP-5 (#86) → T15 encrypted two-user chat through the relay → T4 go-live → B5 real-network run; GAP-4 members-only sync; rest of B4.
+- **M1 gate:** T15 rest (edit/delete/retry), then dev-ui's real-core chat in the Electron build.
+- **Path to M2:** T16 re-key on kick, GAP-4 members-only sync, T4 go-live → B5 real-network run; rest of B4.
 
 ---
 
@@ -243,18 +245,18 @@ What each agent picks up **after its current PR merges**, the lead who assigns i
 
 | Agent | Assigned by | Now | Next (in order) | Writes | Must not touch |
 | --- | --- | --- | --- | --- | --- |
-| **core-5** (records-authority-dev-b4) | tech-lead → core sub-lead | – (#62 merged) | 1. Rest of B4 (kick-undo + removed-members list, `#general`, D28 demotion). 2. B7 age-claim records. 3. B23 core name sanitising. | `core/records/**`, `core/authority/**` | `core/sync`, `core/groupkeys`, `core/api` |
-| **tech-lead** | manager | reviews #86, #69 | 1. Review T15 and the rest of B4. 2. Dependabot one at a time after #86. | – (`core/records` + `core/authority` handed to core-5) | – |
-| **dev-sync** | tech-lead → dev-identity | – (#64, #84 merged) | 1. **Sync clippy `large_enum_variant` fix** (small). 2. GAP-6 rest (client mode, private-address filter) + F2. 3. GAP-4 members-only sync. 4. Receipt ack for B6 (ש-11). 5. T3 libp2p upgrade (alone, see conflicts). 6. B5 run with qa after T4 go-live. F4 when the peer limit grows. | `core/sync/**`, `core/spike-peer/**` | `core/records`, `infra/` |
-| **dev-identity** (core sub-lead) | tech-lead | – (#68, #72, #77, #83, #85 merged) | 1. **T15** encrypted two-user chat test through the relay, on #86. 2. GAP-17 IPC surface review with dev-voice-shell. 3. B15 diagnostics. | `core/api/**`, `core/identity/**` | `ui/**` (contract changes go to dev-ui) |
-| **dev-crypto** | tech-lead → dev-identity | #86 (GAP-5) | 1. Land **#86** (`GroupCipher`). 2. D30 + D31 recommendation to the owner. 3. B3 acceptance: relay sees only ciphertext; 500-member rotation size. | `core/groupkeys/**`; T1 `src/crypto/**` after skeleton | rest of T1 crate, `core/records` |
+| **core-5** (records-authority-dev-b4) | tech-lead → core sub-lead | – (#62 merged) | 1. **4,000-code-point limit** in the core (B6/QA-17). 2. Rest of B4 (kick-undo + removed-members list, `#general`, D28 demotion). 3. B7 age-claim records. 4. B23 core name sanitising. | `core/records/**`, `core/authority/**` | `core/sync`, `core/groupkeys`, `core/api` |
+| **tech-lead** | manager | reviews #69 | 1. Review T15 rest, T16, GAP-4 design note, rest of B4. 2. Dependabot one at a time (crypto majors via dev-crypto). | – (`core/records` + `core/authority` handed to core-5) | – |
+| **dev-sync** | tech-lead → dev-identity | – (#87 merged) | 1. **GAP-4** members-only sync: design note first. 2. GAP-6 rest (client mode, private-address filter) + F2. 3. Receipt ack for B6 (ש-11). 4. T3 libp2p upgrade (alone, see conflicts). 5. B5 run with qa after T4 go-live. F4 when the peer limit grows. | `core/sync/**`, `core/spike-peer/**` | `core/records`, `infra/` |
+| **dev-identity** (core sub-lead) | tech-lead | – (#89 merged) | 1. **T15 rest: edit, delete, retry** (M1 gate). 2. **T16** re-key on kick (M2). 3. Issues #91 and #92; #90 before the open alpha. 4. GAP-17 IPC surface review with dev-voice-shell. 5. B15 diagnostics. | `core/api/**`, `core/identity/**` | `ui/**` (contract changes go to dev-ui) |
+| **dev-crypto** | tech-lead → dev-identity | – (#86, #93 merged) | 1. **Crypto Dependabot majors**, one at a time: #42, #37, #39, #36, #44 (sec-lead reviews). 2. D30 + D31 recommendation to the owner. 3. B3 acceptance: relay sees only ciphertext; 500-member rotation size. | `core/groupkeys/**`; T1 `src/crypto/**` after skeleton | rest of T1 crate, `core/records` |
 | **dev-updater** | tech-lead → dev-identity | – (#65 merged) | 1. B10: advisories blocking after T3; never rename CI jobs (6 required checks). 2. **B8** in-app update after B1 + B9. | `core/updater/**`, `.github/workflows/ci.yml`, `.github/scripts/npm-licenses.mjs`, `.github/scripts/install-cargo-deny.sh`, `.github/dependabot.yml`, `core/deny.toml` | `release.yml`, `.github/scripts/manifest-body.mjs` |
 | **dev-voice-shell** | tech-lead → dev-ui | – (B1 merged: #71–#82) | 1. B1 acceptance fixes if product-lead asks. 2. T12 packages with devops (#69). 3. B9 shell packaging in `release.yml` via devops. | `desktop/**` (new), `ui/src/core/ipc.ts` (new) | other `ui/src/**`, `release.yml` (send devops a patch) |
 | **dev-web** | tech-lead → dev-ui | – (#29 merged) | 1. **B14** UI perf harness in the real shell (B1 is merged, start now). | spike dir, later `perf/**` (new) | `ui/**`, `qa/**` |
-| **dev-ui** (client sub-lead) | tech-lead | – (#28, #34, #50, #54, #60 merged) | 1. Rest of **B12** (U2, U5, U6, UX-17, QA-19), then B20, then B24 from the #35 spec. 2. B7 once B4 age claims land. 3. B21 incl. the channel-list drawer. 4. B11e, B18, B11a–d from the approved specs (#26), mock first. 5. B13 strings. 6. UX-10 link handling. | `ui/**` (sole writer, incl. `ui/src/i18n/*.json`) | `ui/src/core/ipc.ts`, `desktop/**` |
+| **dev-ui** (client sub-lead) | tech-lead | – (#28, #34, #50, #54, #60 merged) | 1. **Chat against the real core in the Electron build (M1 proof)**. 2. Rest of **B12** (U2, U5, U6, UX-17, QA-19), then B20, then B24 from the #35 spec. 3. B7 once B4 age claims land. 4. B21 incl. the channel-list drawer. 5. B11e, B18, B11a–d from the approved specs (#26), mock first. 6. B13 strings. 7. UX-10 link handling. | `ui/**` (sole writer, incl. `ui/src/i18n/*.json`) | `ui/src/core/ipc.ts`, `desktop/**` |
 | **devops** | tech-lead | #69 (T12) | 1. Land **#69** (T12). 2. **T4** go-live on `<relay-domain>` (never commit the real name). 3. **B9**: `MVS_SHELL=electron` in `release.yml`. 4. macOS runner for R8. 5. UX-10 landing page with dev-ui. | `infra/**`, `.github/workflows/release.yml`, `.github/scripts/manifest-body.mjs`, `docs/release/**`, `packaging/**` (new) | `ci.yml` (dev-updater) |
-| **sec-lead** | manager | – (#15 merged) | 1. Verdict on #86 (GAP-5 crypto). 2. Crypto Dependabot majors one at a time. 3. Review T15 and the B1 IPC surface (GAP-17) (`PR-CHECKLIST.md`). 4. Key custody for D-sign / D23. | `docs/security/**` | crate code (findings go to owners) |
-| **qa** | manager | – (#27 merged) | 1. Re-test B19 on `main` and QA-17 after #60. 2. T12 manual install pass (INS-01..16). 3. B5 run with dev-sync. 4. **T7** on the real shell (B1 merged, start now). | `qa/**` | `ui/**`, `ci.yml` (ask dev-updater) |
+| **sec-lead** | manager | – (#15 merged) | 1. Crypto Dependabot majors one at a time (from dev-crypto). 2. Review T16 (re-key on kick), GAP-4 design note, issue #90 (member DoS). 3. Review the B1 IPC surface (GAP-17) (`PR-CHECKLIST.md`). 4. Key custody for D-sign / D23. | `docs/security/**` | crate code (findings go to owners) |
+| **qa** | manager | – (#27 merged) | 1. Re-test B19 on `main` and QA-17 after #60. 2. T12 manual install pass (INS-01..16). 3. B5 run with dev-sync. 4. **T7** on the real shell once dev-ui's real-core chat lands (#89 is in). | `qa/**` | `ui/**`, `ci.yml` (ask dev-updater) |
 | **product-lead** | manager | – | 1. **B13**: spec updates + string table. 2. Acceptance of B1-1..3 and T13 when they land. 3. Review of product/UX/business/QA/board PRs. | `docs/spec.md`, `docs/reviews/po-*` | `ui/src/i18n/*` |
 | **ux** | product-lead | – (#22, #26, #35 merged) | 1. **T8** on the real shell (B1 merged, start now). 2. Visual check of dev-ui PRs against the specs. | `docs/ux/**`, `docs/reviews/ux-*` | `ui/**` |
 | **biz** | product-lead | – (#16 merged) | 1. Answer the owner's questions on §5 (5.1–5.13). 2. Tester recruitment wave 1 with product-lead. | `docs/business/**` | – |
