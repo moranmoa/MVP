@@ -47,6 +47,8 @@ export interface MockOptions {
   updateAfterMs?: number;
   /** Add members and messages written the way an attacker would (see SECURITY.md). */
   hostile?: boolean;
+  /** `getRecoveryWords()` fails, to show the load error state. */
+  wordsError?: boolean;
   /** Keep the account across reloads. */
   storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 }
@@ -526,7 +528,11 @@ export class MockCore implements CoreApi {
     if (!c || given.join() !== c.positions.join()) throw err({ code: 'not-allowed' });
     const wrong = c.positions.filter((p) => this.words[p - 1] !== (answers[p] ?? '').trim().toLowerCase());
     if (wrong.length) {
-      if (++c.failures >= MAX_CHECK_FAILURES) c.burned = true;
+      // The 5th failure locks at once, so nobody types the words a 6th time to find out.
+      if (++c.failures >= MAX_CHECK_FAILURES) {
+        c.burned = true;
+        throw err({ code: 'too-many-attempts' });
+      }
       return { ok: false, wrong };
     }
     this.challenge = null;
@@ -539,6 +545,7 @@ export class MockCore implements CoreApi {
   }
 
   async getRecoveryWords(): Promise<string[]> {
+    if (this.options.wordsError) throw err({ code: 'not-found' });
     // The real core asks for OS authentication here; success lifts a burned challenge.
     if (this.challenge?.burned) this.challenge = null;
     return [...this.words];

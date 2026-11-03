@@ -772,6 +772,22 @@ legend {
   gap: 0.75rem;
 }
 
+/* The fields go to one column when the card is narrow for its text size,
+   e.g. at 200% or on a phone (B19 §4). Container units follow the zoom. */
+.check-form {
+  container-type: inline-size;
+}
+
+@container (max-width: 30em) {
+  .check-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.words-english {
+  margin-block-start: 0.75rem;
+}
+
 .check-fields input {
   width: 100%;
   min-width: 0;
@@ -1998,9 +2014,6 @@ meter {
     grid-template-rows: repeat(6, auto);
   }
 
-  .check-fields {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -40,8 +40,8 @@ export interface CoreCommands {
   /**
    * Answers for exactly the current challenge's positions (otherwise rejects
    * with `not-allowed`). Returns the wrong positions; on success the account
-   * is marked checked. The 5th failed check burns the challenge; after that it
-   * rejects with `too-many-attempts`.
+   * is marked checked. The 5th failed check burns the challenge and itself
+   * rejects with `too-many-attempts`, as does every check after it.
    */
   checkRecoveryWords(answers: Record<number, string>): Promise<RecoveryCheckResult>;
   /**

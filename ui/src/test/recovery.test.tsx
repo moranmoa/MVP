@@ -75,7 +75,9 @@ describe('recovery challenge (mock core)', () => {
     await expect(core.checkRecoveryWords({ [other]: words[other - 1] })).rejects.toMatchObject({ code: 'not-allowed' });
 
     const wrongAll = Object.fromEntries(positions.map((p) => [p, 'nope']));
-    for (let i = 0; i < 5; i++) expect(await core.checkRecoveryWords(wrongAll)).toEqual({ ok: false, wrong: positions });
+    for (let i = 0; i < 4; i++) expect(await core.checkRecoveryWords(wrongAll)).toEqual({ ok: false, wrong: positions });
+    // The 5th failure locks right away.
+    await expect(core.checkRecoveryWords(wrongAll)).rejects.toMatchObject({ code: 'too-many-attempts' });
     await expect(core.checkRecoveryWords(wrongAll)).rejects.toMatchObject({ code: 'too-many-attempts' });
     await expect(core.getRecoveryChallenge()).rejects.toMatchObject({ code: 'too-many-attempts' });
 

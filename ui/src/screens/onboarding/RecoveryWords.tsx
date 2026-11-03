@@ -92,7 +92,7 @@ export function RecoveryWordsPanel({ load, onDone }: { load: () => Promise<strin
     <>
       <WordsWarning />
       {intl.locale === 'he' && (
-        <p className="muted small">
+        <p className="muted small words-english">
           <FormattedMessage id="onb.words.english" />
         </p>
       )}
@@ -115,7 +115,8 @@ export function RecoveryWordsPanel({ load, onDone }: { load: () => Promise<strin
       <div className="actions">
         <button
           type="button"
-          className="secondary"
+          // The only thing to do before the first reveal, so it leads until then.
+          className={seen ? 'secondary' : 'primary'}
           aria-expanded={shown}
           aria-controls="word-grid"
           disabled={view.state === 'loading'}
@@ -209,7 +210,7 @@ export function RecoveryCheck({
 
   const errorId = 'check-error';
   return (
-    <form onSubmit={submit} className="stack">
+    <form onSubmit={submit} className="stack check-form">
       <p className="muted">
         <FormattedMessage id="onb.check.hint" />
       </p>
