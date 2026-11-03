@@ -12,8 +12,8 @@ use authority::{
 };
 use common::{actor, genesis, rec_ts, server};
 use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
-use rand::{Rng, SeedableRng};
+use rand::seq::{IndexedRandom, SliceRandom};
+use rand::{RngExt, SeedableRng};
 use records::Kind;
 
 const ACTORS: u8 = 5;
@@ -24,8 +24,8 @@ const DELIVERIES_PER_SCENARIO: usize = 3;
 /// invites the author has seen.
 fn random_action(rng: &mut StdRng, author: u8, invites: &[RecordId], cuts: bool) -> Action {
     let cut = |rng: &mut StdRng| if cuts { random_cut(rng) } else { Cut::default() };
-    let target = actor(rng.gen_range(0..ACTORS));
-    match rng.gen_range(0..8) {
+    let target = actor(rng.random_range(0..ACTORS));
+    match rng.random_range(0..8) {
         0 => {
             let role = *[Role::Member, Role::Moderator, Role::Admin].choose(rng).unwrap();
             Action::Grant { target, role }
@@ -34,11 +34,11 @@ fn random_action(rng: &mut StdRng, author: u8, invites: &[RecordId], cuts: bool)
         2 => Action::Kick { target, cut: cut(rng) },
         5 => Action::Invite {
             expires_ms: *[0, 30, 60].choose(rng).unwrap(),
-            max_uses: rng.gen_range(0..3),
+            max_uses: rng.random_range(0..3),
         },
         6 | 7 if !invites.is_empty() => {
             let invite = *invites.choose(rng).unwrap();
-            if rng.gen_bool(0.75) {
+            if rng.random_bool(0.75) {
                 Action::Join { invite }
             } else {
                 Action::RevokeInvite { invite }
@@ -50,8 +50,8 @@ fn random_action(rng: &mut StdRng, author: u8, invites: &[RecordId], cuts: bool)
 
 /// Up to 3 channel heads, two of them sometimes in one channel, so cuts go through the wire format.
 fn random_cut(rng: &mut StdRng) -> Cut {
-    let heads = (0..rng.gen_range(0..4u8))
-        .map(|n| (ChannelId::from_bytes([n / 2; 32]), RecordId::from_bytes([rng.gen(); 32])))
+    let heads = (0..rng.random_range(0..4u8))
+        .map(|n| (ChannelId::from_bytes([n / 2; 32]), RecordId::from_bytes([rng.random(); 32])))
         .collect();
     Cut::new(heads).expect("at most 3 heads")
 }
@@ -76,10 +76,10 @@ fn random_scenario(rng: &mut StdRng, steps: usize, cuts: bool) -> Vec<Record> {
     let mut seq = vec![1u64; usize::from(ACTORS)];
 
     for _ in 0..steps {
-        let actor = rng.gen_range(0..ACTORS);
+        let actor = rng.random_range(0..ACTORS);
         let a = usize::from(actor);
-        if rng.gen_bool(0.3) {
-            let other = rng.gen_range(0..usize::from(ACTORS));
+        if rng.random_bool(0.3) {
+            let other = rng.random_range(0..usize::from(ACTORS));
             let theirs = known[other].clone();
             known[a].extend(theirs);
         } else {
@@ -91,7 +91,7 @@ fn random_scenario(rng: &mut StdRng, steps: usize, cuts: bool) -> Vec<Record> {
                 deps.push(*invite);
             }
             // Timestamps around the invite expiries above.
-            let record = rec_ts(actor, seq[a], deps, rng.gen_range(0..100), action);
+            let record = rec_ts(actor, seq[a], deps, rng.random_range(0..100), action);
             seq[a] += 1;
             known[a].insert(record.id());
             all.insert(record.id(), record.clone());
@@ -129,7 +129,7 @@ fn all_delivery_orders_converge() {
     let mut totals = Stats::default();
     for seed in 0..SCENARIOS {
         let mut rng = StdRng::seed_from_u64(seed);
-        let steps = rng.gen_range(5..40);
+        let steps = rng.random_range(5..40);
         let records = random_scenario(&mut rng, steps, true);
         let expected = resolve(server(), &records);
         accepted_removals += expected.kicked.len();
