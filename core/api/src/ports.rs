@@ -205,6 +205,21 @@ pub trait GroupCipher: Send + Sync {
     fn set_accepted(&self, server: ServerId, accepted: &BTreeSet<records::RecordId>) {
         let _ = (server, accepted);
     }
+
+    /// The unsigned `KeyRotation` part bodies (at most 32) of a fresh key for
+    /// `members`, built on the channel's current key. Service signs every
+    /// part with our identity and publishes **all of them or none**, and never
+    /// re-signs a part (a second record for one part gets the rotation
+    /// refused); to retry, it resends the same records.
+    fn rotate(
+        &self,
+        server: ServerId,
+        channel: records::ChannelId,
+        members: &BTreeSet<PublicKey>,
+    ) -> Result<Vec<Vec<u8>>, CipherError> {
+        let _ = (server, channel, members);
+        Err(CipherError::Unavailable)
+    }
 }
 
 /// A decrypted channel message.

@@ -14,6 +14,7 @@ mod db;
 mod dispatch;
 mod gate;
 mod model;
+pub mod crypto;
 mod ports;
 mod service;
 pub mod sidecar;
@@ -24,7 +25,7 @@ pub use dispatch::NOT_YET;
 pub use gate::MemberGate;
 pub use ports::{
     CipherOutcome, Clock, CollectingSink, EventSink, FixedClock, GroupCipher, LoopbackNetwork,
-    Network, PendingGroupKeys, Ports, SharedSecrets, SystemClock,
+    Network, PendingGroupKeys, Ports, SharedSecrets, SystemClock, CipherError, Opened,
 };
 pub use service::{Config, Core, CHALLENGE_POSITIONS, MAX_CHECK_FAILURES};
 pub use types::*;

@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 identity = { path = "../identity" }
 records = { path = "../records" }
+groupkeys = { path = "../groupkeys" }
 authority = { path = "../authority" }
 # The P2P layer; core/api is its integration layer (T1).
 sync = { path = "../sync" }
