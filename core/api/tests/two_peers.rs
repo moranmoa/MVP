@@ -43,8 +43,10 @@ fn sign_up(peer: &Peer, name: &str) {
     let input =
         NewIdentityInput { locale: Locale::He, country: "IL".into(), birth_date: "1990-05-01".into() };
     let words = peer.core.create_identity(input).unwrap().words;
-    let answers: BTreeMap<usize, String> = [(1, words[0].clone())].into();
-    assert!(peer.core.check_recovery_words(answers).unwrap());
+    let positions = peer.core.get_recovery_challenge().unwrap().positions;
+    let answers: BTreeMap<usize, String> =
+        positions.iter().map(|p| (*p, words[p - 1].clone())).collect();
+    assert!(peer.core.check_recovery_words(answers).unwrap().ok);
     let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
     peer.core.update_profile(profile).unwrap();
 }
