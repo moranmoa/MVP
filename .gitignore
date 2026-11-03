@@ -4,6 +4,7 @@
 *.pem
 secrets/
 infra/data/
+infra/relay-key.tgz
 
 # Build output
 target/
