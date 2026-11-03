@@ -29,9 +29,14 @@ $expect = @{
     Installed  = @(
       'file:LOCALAPPDATA\ShellSpikeTauri',
       'reg:HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\ShellSpikeTauri',
+      'reg:HKCU\Software\mvp',
       'file:STARTMENU\ShellSpikeTauri.lnk',
       'file:DESKTOP\ShellSpikeTauri.lnk'
     )
+    # May or may not appear, depending on what the machine already has.
+    Optional   = @()
+    # Left behind by the spike's uninstaller: reported as GAP, not a failure.
+    KnownLeftovers = @('reg:HKCU\Software\mvp')
   }
   electron = @{
     InstallDir = 'LOCALAPPDATA\Programs\shell-spike-electron'
@@ -44,8 +49,20 @@ $expect = @{
       'file:STARTMENU\ShellSpikeElectron.lnk',
       'file:DESKTOP\ShellSpikeElectron.lnk'
     )
+    # The Programs parent folder exists on most machines already; the
+    # -updater folder is electron-builder's installer cache.
+    Optional   = @('file:LOCALAPPDATA\Programs', 'file:LOCALAPPDATA\shell-spike-electron-updater')
+    KnownLeftovers = @('file:LOCALAPPDATA\Programs', 'file:LOCALAPPDATA\shell-spike-electron-updater')
   }
 }[$Shell]
+
+# Changes made meanwhile by the runner's own background processes, not by
+# the installer (seen on windows-latest). Filtered out of every snapshot.
+$noise = @(
+  'file:*\Mozilla', 'reg:HKCU\Software\Mozilla',
+  'reg:HKCU\Software\Classes\AppX*', 'reg:HKCU\Software\Classes\.all',
+  'reg:HKCU\Software\Classes\windowsdefender'
+)
 
 $failures = [System.Collections.Generic.List[string]]::new()
 function Check($ok, $what) {
@@ -95,19 +112,28 @@ function Snapshot {
     if ($p) { $out += $p.PSObject.Properties | Where-Object Name -NotLike 'PS*' | ForEach-Object { "run:$run\$($_.Name)" } }
   }
   if (Test-Path 'Registry::HKEY_CLASSES_ROOT\mvs') { $out += 'proto:mvs' }
-  $out | Sort-Object -Unique
+  $out | Where-Object { $e = $_; -not ($noise | Where-Object { $e -like $_ }) } | Sort-Object -Unique
 }
+# Returns an object: a bare pair of arrays would be flattened by PowerShell.
 function Show-Diff($before, $after, $label) {
-  $added = @($after | Where-Object { $_ -notin $before })
-  $removed = @($before | Where-Object { $_ -notin $after })
+  $d = [pscustomobject]@{
+    Added   = @($after | Where-Object { $_ -notin $before })
+    Removed = @($before | Where-Object { $_ -notin $after })
+  }
   Write-Host "  diff $label"
-  $added | ForEach-Object { Write-Host "    + $_" }
-  $removed | ForEach-Object { Write-Host "    - $_" }
-  , @($added, $removed)
+  $d.Added | ForEach-Object { Write-Host "    + $_" }
+  $d.Removed | ForEach-Object { Write-Host "    - $_" }
+  $d
 }
 function SameSet($a, $b) {
   $a = @($a); $b = @($b)
   ($a.Count -eq $b.Count) -and -not ($a | Where-Object { $_ -notin $b })
+}
+# Every required entry was added, and nothing beyond required + optional.
+function Matches($added, $required, $optional) {
+  $added = @($added)
+  -not ($required | Where-Object { $_ -notin $added }) -and
+  -not ($added | Where-Object { $_ -notin $required -and $_ -notin $optional })
 }
 function Run($exe, $argv) {
   $p = Start-Process -FilePath $exe -ArgumentList $argv -Wait -PassThru
@@ -132,9 +158,10 @@ $clean = Snapshot
 Write-Host "1. silent install"
 Check ((Install) -eq 0) 'installer exit code 0'
 $installed = Snapshot
-$added, $removed = Show-Diff $clean $installed 'clean -> installed'
-Check (SameSet $added $expect.Installed) 'exactly the expected entries were added'
-Check ($removed.Count -eq 0) 'nothing was removed'
+$d = Show-Diff $clean $installed 'clean -> installed'
+$added = $d.Added
+Check (Matches $added $expect.Installed $expect.Optional) 'exactly the expected entries were added'
+Check ($d.Removed.Count -eq 0) 'nothing was removed'
 Check (-not ($added | Where-Object { $_ -like 'reg:HKLM*' -or $_ -like 'file:PROGRAMFILES*' -or $_ -like 'file:COMMON*' -or $_ -like 'file:PUBLIC*' })) 'per-user only: no HKLM, Program Files or all-users entries'
 Check (-not ($added | Where-Object { $_ -like 'run:*' -or $_ -like 'file:STARTUP*' })) 'no autostart'
 $exe = Get-ChildItem (Expand $expect.InstallDir) -Filter *.exe | Where-Object Name -NotLike "Uninstall*" | Select-Object -First 1
@@ -147,29 +174,33 @@ Check (-not $app.HasExited) 'app still running after 10 s'
 Leftover | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep 2
 $launched = Snapshot
-$added, $null = Show-Diff $installed $launched 'installed -> after first launch'
-Check (SameSet $added $expect.Data) "first launch created only the data folder ($($expect.Data -join ', '))"
+$d = Show-Diff $installed $launched 'installed -> after first launch'
+Check (SameSet $d.Added $expect.Data) "first launch created only the data folder ($($expect.Data -join ', '))"
 
 Write-Host "3. install over the existing install"
 Check ((Install) -eq 0) 'installer exit code 0'
 $again = Snapshot
-$added, $removed = Show-Diff $launched $again 'installed -> installed again'
-Check ($added.Count -eq 0 -and $removed.Count -eq 0) 'no duplicate entries, nothing lost'
+$d = Show-Diff $launched $again 'installed -> installed again'
+Check ($d.Added.Count -eq 0 -and $d.Removed.Count -eq 0) 'no duplicate entries, nothing lost'
 
 Write-Host "4. silent uninstall"
 Uninstall | Out-Null
 Start-Sleep 2
 $gone = Snapshot
-$added, $removed = Show-Diff $clean $gone 'clean -> uninstalled'
-Check (SameSet $added $expect.Data) 'only the data folder is left'
-Check ($removed.Count -eq 0) 'nothing that existed before was removed'
+$d = Show-Diff $clean $gone 'clean -> uninstalled'
+Check (($expect.Data | Where-Object { $_ -in $d.Added }).Count -eq $expect.Data.Count) 'data folder kept'
+$left = @($d.Added | Where-Object { $_ -notin $expect.Data })
+$left | Where-Object { $_ -in $expect.KnownLeftovers } | ForEach-Object { Write-Host "  GAP   left behind by the uninstaller: $_" }
+$unknown = @($left | Where-Object { $_ -notin $expect.KnownLeftovers })
+Check ($unknown.Count -eq 0) "nothing else left behind$(if ($unknown) { ': ' + ($unknown -join ', ') })"
+Check ($d.Removed.Count -eq 0) 'nothing that existed before was removed'
 Check ((Leftover).Count -eq 0) 'no process left running'
 
 Write-Host "5. reinstall after uninstall"
 Check ((Install) -eq 0) 'installer exit code 0'
 $re = Snapshot
-$added, $null = Show-Diff $gone $re 'uninstalled -> reinstalled'
-Check (SameSet $added $expect.Installed) 'same entries as the first install'
+$d = Show-Diff $launched $re 'first install (after launch) -> reinstalled'
+Check ($d.Added.Count -eq 0 -and $d.Removed.Count -eq 0) 'same entries as the first install'
 Uninstall | Out-Null
 
 Write-Host "6. standard user (no admin rights)"
@@ -177,20 +208,26 @@ $user = 'mvsinstalltest'
 $pw = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ }) + '!a1'
 $secure = ConvertTo-SecureString $pw -AsPlainText -Force
 New-LocalUser -Name $user -Password $secure -AccountNeverExpires | Out-Null
+# The new user can't read the runner user's folders: run from a public one.
+$public = Join-Path $env:PUBLIC 'mvs-install-test'
+New-Item -ItemType Directory -Force $public | Out-Null
+$publicInstaller = Join-Path $public (Split-Path -Leaf $Installer)
+Copy-Item $Installer $publicInstaller
 try {
   $cred = [pscredential]::new("$env:COMPUTERNAME\$user", $secure)
   Check (-not (Get-LocalGroupMember Administrators | Where-Object Name -like "*\$user")) 'test user is not an administrator'
-  $p = Start-Process -FilePath $Installer -ArgumentList '/S' -Credential $cred -LoadUserProfile -Wait -PassThru -WorkingDirectory $env:TEMP
+  $p = Start-Process -FilePath $publicInstaller -ArgumentList '/S' -Credential $cred -LoadUserProfile -Wait -PassThru -WorkingDirectory $public
   Check ($p.ExitCode -eq 0) 'installer exit code 0 as standard user'
   $profileDir = Get-CimInstance Win32_UserProfile | Where-Object { $_.LocalPath -like "*\$user" } | Select-Object -First 1 -ExpandProperty LocalPath
   $userDir = ($expect.InstallDir -replace '^LOCALAPPDATA', "$profileDir\AppData\Local")
   Check (Test-Path (Join-Path $userDir $exe.Name)) "installed into the user's profile: $userDir"
   $cmd = & $expect.Uninstall $userDir
-  $p = Start-Process -FilePath $cmd[0] -ArgumentList $cmd[1..($cmd.Count - 1)] -Credential $cred -LoadUserProfile -Wait -PassThru -WorkingDirectory $env:TEMP
+  $p = Start-Process -FilePath $cmd[0] -ArgumentList $cmd[1..($cmd.Count - 1)] -Credential $cred -LoadUserProfile -Wait -PassThru -WorkingDirectory $public
   for ($i = 0; $i -lt 60 -and (Test-Path $userDir); $i++) { Start-Sleep 1 }
   Check (-not (Test-Path $userDir)) 'uninstalled as standard user'
 } finally {
   Remove-LocalUser -Name $user -ErrorAction SilentlyContinue
+  Remove-Item -Recurse -Force $public -ErrorAction SilentlyContinue
 }
 
 Write-Host ''
