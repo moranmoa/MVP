@@ -87,7 +87,7 @@ that fails. Secrets stay in the OS keychain. A bad argument exits with 2.
 
 | Trait | Today | Later |
 | --- | --- | --- |
-| `Network` | `LoopbackNetwork`, in-process, for tests. `syncNow` pulls from it | TODO(sync, PR #5): push and pull through `sync`; `syncNow` goes away |
+| `Network` | `LoopbackNetwork` (tests, and `mvs-core` without `--relay`). `syncnet::SyncNetwork` over `sync::Node` with `mvs-core --relay <multiaddr>`: records are read back from sync's store and decoded again, node events are only hints, and `MemberGate` is the storage gate. `syncNow` pulls the control logs | TODO: channel logs and messages, push instead of `syncNow`, the #64 start-failure notice |
 | `GroupCipher` | `PendingGroupKeys`: never claims a renewal, so the kick notice isn't sent | TODO(groupkeys, PR #9): rotate on kick, encrypt messages, emit `notice` |
 | `EventSink` | `CollectingSink` for tests | The shell's emitter |
 | `SecretStore` | `identity::MemoryStore` in tests | `identity::OsKeychain` |
