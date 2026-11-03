@@ -122,19 +122,21 @@ fn write_new(path: &Path, contents: &str, secret: bool) -> Result<(), String> {
     }
     // Windows checks access when a handle is opened, so a reader that opened
     // the file before the ACL change would keep its handle. No sharing at
-    // all while ours is open closes that window (icacls only needs
-    // READ_CONTROL / WRITE_DAC, which share modes do not restrict).
+    // all while ours is open closes that window. WRITE_DAC lets us replace
+    // the ACL through this same handle.
     #[cfg(windows)]
     if secret {
         use std::os::windows::fs::OpenOptionsExt;
-        opts.share_mode(0);
+        use windows_sys::Win32::Foundation::GENERIC_WRITE;
+        use windows_sys::Win32::Storage::FileSystem::WRITE_DAC;
+        opts.share_mode(0).access_mode(GENERIC_WRITE | WRITE_DAC);
     }
     let mut f = opts.open(path).map_err(err)?;
     if secret {
-        if let Err(e) = restrict_to_owner(path) {
+        if let Err(e) = restrict_to_owner(&f, path) {
             drop(f);
             let _ = fs::remove_file(path);
-            return Err(format!("could not restrict access to {}: {e}; no key was written", path.display()));
+            return Err(format!("could not restrict access to {}: {e}; no key was written", shown(path)));
         }
     }
     f.write_all(contents.as_bytes()).map_err(err)?;
@@ -142,16 +144,29 @@ fn write_new(path: &Path, contents: &str, secret: bool) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn restrict_to_owner(_path: &Path) -> Result<(), String> {
+fn restrict_to_owner(_file: &fs::File, _path: &Path) -> Result<(), String> {
     Ok(()) // created with mode 0600 above
 }
 
-/// Replaces the inherited ACL with a single entry: full control for the
-/// current user's SID. Uses the system's own `whoami` and `icacls` by full
-/// path, and checks the result.
+/// Replaces the file's whole DACL, through our open handle, with a protected
+/// one holding a single entry: full control for the current user's SID. No
+/// inherited entries and no defaults from the token (SYSTEM, Administrators,
+/// logon session) survive. The result is then checked with the system's
+/// own `icacls`.
 #[cfg(windows)]
-fn restrict_to_owner(path: &Path) -> Result<(), String> {
+fn restrict_to_owner(file: &fs::File, path: &Path) -> Result<(), String> {
+    use std::os::windows::io::AsRawHandle;
     use std::process::Command;
+    use std::ptr::{null, null_mut};
+    use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR,
+    };
+
     let system32 = PathBuf::from(std::env::var_os("SystemRoot").ok_or("SystemRoot is not set")?).join("System32");
     let run = |exe: &str, args: &[&std::ffi::OsStr]| -> Result<String, String> {
         let out = Command::new(system32.join(exe)).args(args).output().map_err(|e| format!("{exe}: {e}"))?;
@@ -169,9 +184,39 @@ fn restrict_to_owner(path: &Path) -> Result<(), String> {
         .filter(|s| s.starts_with("S-1-") && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
         .ok_or_else(|| format!("cannot read the current user's SID from {who:?}"))?
         .to_string();
-    let grant = format!("*{sid}:F");
-    run("icacls.exe", &[path.as_os_str(), "/inheritance:r".as_ref(), "/grant:r".as_ref(), grant.as_ref()])?;
-    // icacls lists one ACE per line after the path; expect exactly ours.
+
+    // P = protected (no inheritance); FA = full access; one ACE for our SID.
+    let sddl: Vec<u16> = format!("D:P(A;;FA;;;{sid})").encode_utf16().chain([0]).collect();
+    let mut sd: PSECURITY_DESCRIPTOR = null_mut();
+    // SAFETY: `sddl` is NUL-terminated; `sd` is freed with LocalFree below.
+    if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut sd, null_mut()) } == 0 {
+        return Err(format!("building the ACL failed: {}", std::io::Error::last_os_error()));
+    }
+    let (mut present, mut defaulted, mut dacl): (i32, i32, *mut ACL) = (0, 0, null_mut());
+    // SAFETY: `sd` is a valid descriptor from the call above; `dacl` points into it.
+    let rc = unsafe {
+        if GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted) == 0 || present == 0 {
+            Err(format!("reading the ACL failed: {}", std::io::Error::last_os_error()))
+        } else {
+            match SetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                dacl,
+                null(),
+            ) {
+                ERROR_SUCCESS => Ok(()),
+                code => Err(format!("setting the ACL failed: {}", std::io::Error::from_raw_os_error(code as i32))),
+            }
+        }
+    };
+    // SAFETY: allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW.
+    unsafe { LocalFree(sd) };
+    rc?;
+
+    // Independent check: icacls lists one ACE per line after the path.
     let listing = run("icacls.exe", &[path.as_os_str()])?;
     let aces = listing.lines().filter(|l| l.contains(":(")).count();
     if aces != 1 {
@@ -181,7 +226,7 @@ fn restrict_to_owner(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn restrict_to_owner(_path: &Path) -> Result<(), String> {
+fn restrict_to_owner(_file: &fs::File, _path: &Path) -> Result<(), String> {
     Err("don't know how to restrict file access on this platform".into())
 }
 
