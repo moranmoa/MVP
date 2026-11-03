@@ -11,7 +11,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { app, BrowserWindow, Menu, dialog, protocol, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, crashReporter, dialog, protocol, session, shell } = require('electron');
 const sec = require('./security');
 
 // Before ready: app:// behaves like a real origin (standard + secure), so the
@@ -20,6 +20,8 @@ protocol.registerSchemesAsPrivileged([
   { scheme: sec.SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
 ]);
 app.enableSandbox();
+// Crash dumps stay on this computer; nothing is ever uploaded.
+crashReporter.start({ uploadToServer: false });
 
 /** The built UI: next to the app when packaged, ../ui/dist (or MVS_UI_DIR) in a checkout. */
 const UI_ROOT = app.isPackaged

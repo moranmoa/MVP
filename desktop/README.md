@@ -32,9 +32,10 @@ On a machine with Node: `npm ci && npm start` (set `MVS_DEMO=1` for the demo dat
 | CSP from `ui/csp.ts` (via the built `index.html`) sent as a header, plus `frame-ancestors 'none'`; start refused without a CSP or with a loose one | `cspFromIndexHtml`, `responseHeaders` | unit + e2e (header present, inline script blocked) |
 | `nosniff`, COOP/CORP same-origin, `no-referrer` | `responseHeaders` | unit |
 | No network requests except `app://mvs` (and `data:`/`blob:`) | `webRequest.onBeforeRequest` | e2e |
-| `window.open` denied; http(s) links go to the OS browser only after a confirm dialog; other schemes dropped | `setWindowOpenHandler`, `isExternalWebUrl` | unit + e2e |
+| `window.open` denied; https links go to the OS browser only after a confirm dialog; everything else (http, file, other schemes, credentials in the URL) dropped | `setWindowOpenHandler`, `isExternalWebUrl` | unit + e2e |
 | Navigation and redirects off `app://mvs` blocked; `<webview>` attachment blocked | `will-navigate`, `will-redirect`, `will-attach-webview` | e2e |
 | No permissions (microphone, notifications, devices, screen capture) | `setPermissionRequestHandler` / `CheckHandler`, `setDevicePermissionHandler`, `setDisplayMediaRequestHandler` | unit + e2e |
+| Crash reporter on with uploads off | `crashReporter.start({ uploadToServer: false })` | – |
 | No default menu (so no DevTools) in packaged builds; `MVS_UI_DIR` only in a checkout | `main.js` | – (B1-3, packaged build) |
 
 The microphone permission is decided with voice (phase 2). There is no

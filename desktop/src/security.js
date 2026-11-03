@@ -111,11 +111,11 @@ function isInternalUrl(url) {
   }
 }
 
-/** Links that may be offered to the OS browser (after the user confirms). */
+/** Links that may be offered to the OS browser (after the user confirms): https only. */
 function isExternalWebUrl(url) {
   try {
     const u = new URL(url);
-    return (u.protocol === 'https:' || u.protocol === 'http:') && !!u.hostname && !u.username && !u.password;
+    return u.protocol === 'https:' && !!u.hostname && !u.username && !u.password;
   } catch {
     return false;
   }

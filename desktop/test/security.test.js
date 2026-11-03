@@ -93,9 +93,9 @@ test('only app://mvs is internal', () => {
   }
 });
 
-test('only plain http(s) links may be offered to the OS browser', () => {
+test('only plain https links may be offered to the OS browser', () => {
   assert.equal(sec.isExternalWebUrl('https://example.org/a?b=c'), true);
-  for (const url of ['file:///C:/Windows/System32/calc.exe', 'javascript:alert(1)', 'smb://host/share', 'ms-settings:', 'https://user:pw@example.org/', 'app://mvs/', 'data:,x', '']) {
+  for (const url of ['http://example.org/', 'file:///C:/Windows/System32/calc.exe', 'javascript:alert(1)', 'smb://host/share', 'ms-settings:', 'https://user:pw@example.org/', 'app://mvs/', 'data:,x', '']) {
     assert.equal(sec.isExternalWebUrl(url), false, url);
   }
 });
