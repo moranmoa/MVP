@@ -164,7 +164,10 @@ rotations in `Message` envelopes for now.
 
 ## Decisions for the owner
 
-Nothing below is built yet; it waits for your decision.
+Nothing below is built yet; it waits for your decision. These are spec
+decision log rows 30 and 31. The owner-facing version, in Hebrew with lines
+ready to paste into the log, is in
+[`DECISIONS-D30-D31.md`](DECISIONS-D30-D31.md).
 
 ### A. What new members see
 
