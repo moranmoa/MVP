@@ -722,3 +722,49 @@ fn stubs_round_trip_through_the_store_format() {
     assert_eq!(Entry::Pruned(stub.clone()).id(), message.id());
     assert!(rotation(1, 9, &heads).prune().is_none(), "rotations aren't pruned");
 }
+
+/// B4-3: once a server has channel records, records only count in a live
+/// channel at their `auth_deps`: created and not deleted.
+#[test]
+fn records_only_count_in_live_channels() {
+    let (mut control, heads) = founded(&[1]);
+    let general = rec(
+        0,
+        2,
+        heads.clone(),
+        Action::ChannelCreate { channel: GENERAL, adult: false, name: "general".into() },
+    );
+    let random = rec(
+        0,
+        3,
+        vec![general.id()],
+        Action::ChannelCreate { channel: RANDOM, adult: false, name: "random".into() },
+    );
+    let gone = rec(0, 4, vec![random.id()], Action::ChannelDelete { channel: RANDOM });
+    control.extend([general.clone(), random.clone(), gone.clone()]);
+    let r = resolver(&control);
+    let store = Store::default();
+    let in_channel = |channel, seq, auth: &[RecordId]| {
+        channel_record(1, seq, channel, vec![], auth.to_vec(), Kind::Message, b"hi".to_vec())
+    };
+    let nowhere = ChannelId::from_bytes([7; 32]);
+    let no_channel = Verdict::Refused(Refusal::NoSuchChannel);
+    assert_eq!(check_channel(&r, &in_channel(GENERAL, 0, &[gone.id()]), &store), Verdict::Accept);
+    assert_eq!(check_channel(&r, &in_channel(nowhere, 1, &[gone.id()]), &store), no_channel);
+    assert_eq!(
+        check_channel(&r, &in_channel(RANDOM, 2, &[gone.id()]), &store),
+        no_channel,
+        "deleted"
+    );
+    assert_eq!(
+        check_channel(&r, &in_channel(RANDOM, 3, &[random.id()]), &store),
+        Verdict::Accept,
+        "judged where its auth_deps are: before the delete"
+    );
+    // Before its create, the channel doesn't exist yet.
+    assert_eq!(check_channel(&r, &in_channel(RANDOM, 4, &[general.id()]), &store), no_channel);
+    // A server without channel records (made before #113) takes any channel.
+    let (legacy, legacy_heads) = founded(&[1]);
+    let r = resolver(&legacy);
+    assert_eq!(check_channel(&r, &in_channel(nowhere, 5, &legacy_heads), &store), Verdict::Accept);
+}

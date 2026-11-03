@@ -38,7 +38,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use records::{ChannelId, Record, RecordId, Scope, ServerId};
 
-use crate::{apply, full_run, permitted, Action, Actor, Channel, Invite, Role, State, View, Write};
+use crate::{
+    apply, full_run, permitted, Action, Actor, Channel, ChannelStatus, Invite, Role, State, View,
+    Write,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -114,8 +117,12 @@ pub struct Resolver {
     /// accepted or not.
     invite_joins: HashMap<RecordId, Vec<RecordId>>,
     invite_revokes: HashMap<RecordId, Vec<RecordId>>,
-    /// Channel -> the records creating it, accepted or not.
-    channel_creates: HashMap<ChannelId, Vec<RecordId>>,
+    /// Channel -> the records creating, editing or deleting it, in linear
+    /// order, accepted or not.
+    channel_ops: HashMap<ChannelId, Vec<RecordId>>,
+    /// Every channel create, in linear order, accepted or not. The first
+    /// accepted one is #general.
+    channel_creates: Vec<RecordId>,
 
     // What the reference run would hold for the joined records.
     state: State,
@@ -168,7 +175,8 @@ impl Resolver {
             touch: HashMap::new(),
             invite_joins: HashMap::new(),
             invite_revokes: HashMap::new(),
-            channel_creates: HashMap::new(),
+            channel_ops: HashMap::new(),
+            channel_creates: Vec::new(),
             state: State::default(),
             writes: HashMap::new(),
             genesis: None,
@@ -301,8 +309,14 @@ impl Resolver {
             let i = list.partition_point(|other| pos[other] < at);
             list.insert(i, id);
         }
-        if let Some(Action::ChannelCreate { channel, .. }) = &action {
-            self.channel_creates.entry(*channel).or_default().push(id);
+        if let Some(channel) = action.as_ref().and_then(Action::channel) {
+            let pos = &self.pos;
+            let ops = self.channel_ops.entry(channel).or_default();
+            ops.insert(ops.partition_point(|other| pos[other] < at), id);
+            if matches!(action, Some(Action::ChannelCreate { .. })) {
+                let creates = &mut self.channel_creates;
+                creates.insert(creates.partition_point(|other| pos[other] < at), id);
+            }
         }
         self.actions.insert(id, action);
 
@@ -397,20 +411,31 @@ impl Resolver {
                 self.refresh_adult(author);
                 return Ok(());
             }
-            Action::ChannelCreate { channel, adult, name } => {
-                // Only the owner creates channels, and the first create of a
-                // channel in linear order wins, like a use of an invite.
-                let creates = &self.channel_creates[&channel];
-                if self.owner_unsettled || creates.len() > 1 {
+            Action::ChannelCreate { .. }
+            | Action::ChannelEdit { .. }
+            | Action::ChannelDelete { .. } => {
+                // Only the owner manages channels, and each op is judged by the
+                // channel's earlier ops, like uses of an invite: one landing ahead
+                // of others re-resolves. So does a create landing ahead of another
+                // channel's: the first channel is #general.
+                let channel = action.channel().expect("a channel op");
+                let later = self.channel_ops[&channel]
+                    .iter()
+                    .any(|other| *other != id && self.pos[other] > at);
+                let general_race = matches!(action, Action::ChannelCreate { .. })
+                    && self
+                        .channel_creates
+                        .iter()
+                        .any(|other| *other != id && self.pos[other] > at);
+                if self.owner_unsettled || later || general_race {
                     return Err(Fallback::Other);
                 }
                 if voided {
                     self.excluded.insert(id);
                 } else if allowed {
                     self.state.accepted.insert(id);
-                    let entry = Channel { name, adult, created: id };
-                    self.state.channels.insert(channel, entry);
                 }
+                self.refresh_channel(channel);
                 return Ok(());
             }
             Action::Join { invite } => {
@@ -592,6 +617,58 @@ impl Resolver {
         Ok(())
     }
 
+    /// The first accepted channel create before position `at`: #general.
+    fn first_create(&self, at: usize) -> Option<RecordId> {
+        self.channel_creates
+            .iter()
+            .take_while(|create| self.pos[*create] < at)
+            .find(|create| self.state.accepted.contains(*create))
+            .copied()
+    }
+
+    /// Recomputes a channel's entry in the state from its accepted ops.
+    fn refresh_channel(&mut self, channel: ChannelId) {
+        let general = self.first_create(self.order.len());
+        let mut entry: Option<Channel> = None;
+        let mut deleted = false;
+        for op in self.channel_ops.get(&channel).into_iter().flatten() {
+            if !self.state.accepted.contains(op) {
+                continue;
+            }
+            match &self.actions[op] {
+                Some(Action::ChannelCreate { adult, name, .. }) => {
+                    let created = Channel {
+                        name: name.clone(),
+                        adult: *adult,
+                        general: general == Some(*op),
+                        created: *op,
+                    };
+                    entry = Some(created);
+                }
+                Some(Action::ChannelEdit { adult, name, .. }) => {
+                    if let Some(entry) = entry.as_mut() {
+                        entry.name = name.clone();
+                        entry.adult = *adult;
+                    }
+                }
+                Some(Action::ChannelDelete { .. }) => {
+                    entry = None;
+                    deleted = true;
+                }
+                _ => {}
+            }
+        }
+        match entry {
+            Some(entry) => self.state.channels.insert(channel, entry),
+            None => self.state.channels.remove(&channel),
+        };
+        if deleted {
+            self.state.deleted_channels.insert(channel);
+        } else {
+            self.state.deleted_channels.remove(&channel);
+        }
+    }
+
     /// Recomputes whether `actor` counts as 18+: their latest accepted age
     /// claim in linear order.
     fn refresh_adult(&mut self, actor: Actor) {
@@ -700,7 +777,9 @@ impl Resolver {
                 Action::Invite { .. } | Action::Join { .. } => return Err(Fallback::Other),
                 // Only the owner creates channels, and the owner's role never
                 // changes, so this is never reached; re-resolve to be safe.
-                Action::ChannelCreate { .. } => return Err(Fallback::Other),
+                Action::ChannelCreate { .. }
+                | Action::ChannelEdit { .. }
+                | Action::ChannelDelete { .. } => return Err(Fallback::Other),
                 // The author's membership changed under it.
                 Action::AgeClaim { .. } => {
                     if now {
@@ -927,13 +1006,30 @@ impl AtPosition<'_> {
 }
 
 impl View for AtPosition<'_> {
-    fn has_channel(&self, id: ChannelId) -> bool {
+    /// The channel's accepted ops before this position, in order.
+    fn channel(&self, id: ChannelId) -> ChannelStatus {
         let r = self.resolver;
-        r.channel_creates
-            .get(&id)
-            .into_iter()
-            .flatten()
-            .any(|create| r.pos[create] < self.at && r.state.accepted.contains(create))
+        let mut status = ChannelStatus::Never;
+        for op in r.channel_ops.get(&id).into_iter().flatten() {
+            if r.pos[op] >= self.at {
+                break;
+            }
+            if !r.state.accepted.contains(op) {
+                continue;
+            }
+            status = match r.actions[op] {
+                Some(Action::ChannelCreate { .. }) => {
+                    ChannelStatus::Live { general: r.first_create(self.at) == Some(*op) }
+                }
+                Some(Action::ChannelDelete { .. }) => ChannelStatus::Deleted,
+                _ => status,
+            };
+        }
+        status
+    }
+
+    fn has_channels(&self) -> bool {
+        self.resolver.first_create(self.at).is_some()
     }
 
     fn owner(&self) -> Option<Actor> {
