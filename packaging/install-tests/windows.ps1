@@ -208,26 +208,53 @@ $user = 'mvsinstalltest'
 $pw = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ }) + '!a1'
 $secure = ConvertTo-SecureString $pw -AsPlainText -Force
 New-LocalUser -Name $user -Password $secure -AccountNeverExpires | Out-Null
-# The new user can't read the runner user's folders: run from a public one.
-$public = Join-Path $env:PUBLIC 'mvs-install-test'
-New-Item -ItemType Directory -Force $public | Out-Null
-$publicInstaller = Join-Path $public (Split-Path -Leaf $Installer)
-Copy-Item $Installer $publicInstaller
+# A folder both users can read; the new user can't read the runner's.
+$shared = 'C:\mvs-test'
+New-Item -ItemType Directory -Force $shared | Out-Null
+icacls $shared /grant '*S-1-5-32-545:(OI)(CI)RX' | Out-Null # BUILTIN\Users
+$sharedInstaller = Join-Path $shared (Split-Path -Leaf $Installer)
+Copy-Item $Installer $sharedInstaller
 try {
   $cred = [pscredential]::new("$env:COMPUTERNAME\$user", $secure)
   Check (-not (Get-LocalGroupMember Administrators | Where-Object Name -like "*\$user")) 'test user is not an administrator'
-  $p = Start-Process -FilePath $publicInstaller -ArgumentList '/S' -Credential $cred -LoadUserProfile -Wait -PassThru -WorkingDirectory $public
-  Check ($p.ExitCode -eq 0) 'installer exit code 0 as standard user'
-  $profileDir = Get-CimInstance Win32_UserProfile | Where-Object { $_.LocalPath -like "*\$user" } | Select-Object -First 1 -ExpandProperty LocalPath
+  # Create the profile first, then run with the user's own environment:
+  # Start-Process -Credential otherwise hands over the runner's LOCALAPPDATA,
+  # APPDATA and TEMP.
+  Start-Process -FilePath cmd.exe -ArgumentList '/c', 'exit' -Credential $cred -LoadUserProfile -Wait -WorkingDirectory $shared
+  $profileDir = Get-CimInstance Win32_UserProfile | Where-Object { $_.LocalPath -like "*\$user*" } | Select-Object -First 1 -ExpandProperty LocalPath
+  Write-Host "  profile: $profileDir"
+  $userEnv = @{
+    USERPROFILE  = $profileDir
+    LOCALAPPDATA = "$profileDir\AppData\Local"
+    APPDATA      = "$profileDir\AppData\Roaming"
+    TEMP         = "$profileDir\AppData\Local\Temp"
+    TMP          = "$profileDir\AppData\Local\Temp"
+    USERNAME     = $user
+  }
+  function RunAsUser($exe, $argv) {
+    $p = Start-Process -FilePath $exe -ArgumentList $argv -Credential $cred -LoadUserProfile -Wait -PassThru `
+      -WorkingDirectory $shared -Environment $userEnv
+    $p.ExitCode
+  }
+  Check ((RunAsUser $sharedInstaller @('/S')) -eq 0) 'installer exit code 0 as standard user'
   $userDir = ($expect.InstallDir -replace '^LOCALAPPDATA', "$profileDir\AppData\Local")
-  Check (Test-Path (Join-Path $userDir $exe.Name)) "installed into the user's profile: $userDir"
-  $cmd = & $expect.Uninstall $userDir
-  $p = Start-Process -FilePath $cmd[0] -ArgumentList $cmd[1..($cmd.Count - 1)] -Credential $cred -LoadUserProfile -Wait -PassThru -WorkingDirectory $public
-  for ($i = 0; $i -lt 60 -and (Test-Path $userDir); $i++) { Start-Sleep 1 }
-  Check (-not (Test-Path $userDir)) 'uninstalled as standard user'
+  $userExe = Join-Path $userDir $exe.Name
+  for ($i = 0; $i -lt 60 -and -not (Test-Path $userExe); $i++) { Start-Sleep 1 }
+  $installedOk = Test-Path $userExe
+  Check $installedOk "installed into the user's profile: $userDir"
+  if ($installedOk) {
+    $cmd = & $expect.Uninstall $userDir
+    RunAsUser $cmd[0] $cmd[1..($cmd.Count - 1)] | Out-Null
+    for ($i = 0; $i -lt 60 -and (Test-Path $userDir); $i++) { Start-Sleep 1 }
+    Check (-not (Test-Path $userDir)) 'uninstalled as standard user'
+  } else {
+    Write-Host "  where $($exe.Name) went:"
+    Get-ChildItem C:\Users -Recurse -Depth 6 -Filter $exe.Name -ErrorAction SilentlyContinue |
+      ForEach-Object { Write-Host "    $($_.FullName)" }
+  }
 } finally {
   Remove-LocalUser -Name $user -ErrorAction SilentlyContinue
-  Remove-Item -Recurse -Force $public -ErrorAction SilentlyContinue
+  Remove-Item -Recurse -Force $shared -ErrorAction SilentlyContinue
 }
 
 Write-Host ''
