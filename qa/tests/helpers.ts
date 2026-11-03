@@ -7,6 +7,8 @@ export const he = {
   languageTitle: 'בחירת שפה',
   wordsTitle: 'מילות השחזור שלך',
   wordsGrid: '12 מילות שחזור, לפי הסדר',
+  wordsHidden: '12 מילות שחזור, מוסתרות',
+  reveal: 'הצגת המילים',
   written: 'כתבתי אותן',
   checkTitle: 'בדיקה קצרה',
   verify: 'בדיקה',
@@ -69,8 +71,14 @@ export async function onboard(page: Page, opts: OnboardOptions = {}): Promise<st
   return words;
 }
 
+/** Shows the words (B19: hidden until the user asks) and returns them. */
 export async function readWords(page: Page): Promise<string[]> {
-  return page.getByRole('list', { name: he.wordsGrid }).locator('.word').allTextContents();
+  const grid = page.getByRole('list', { name: he.wordsGrid });
+  const reveal = page.getByRole('button', { name: he.reveal });
+  await expect(grid.or(reveal)).toBeVisible({ timeout: 10_000 });
+  if (!(await grid.isVisible())) await reveal.click();
+  await expect(grid.locator('.word')).toHaveCount(12);
+  return grid.locator('.word').allTextContents();
 }
 
 /** Fills whichever 3 positions the check asks for ("מילה מספר N"). */
