@@ -10,6 +10,7 @@
 //! crates are merged.
 
 mod chat;
+mod access;
 pub mod crypto;
 mod datadir;
 mod db;
@@ -22,6 +23,7 @@ pub mod sidecar;
 pub mod syncnet;
 pub mod types;
 
+pub use access::{KeyBinder, MemberReadGate, BINDING_PREFIX};
 pub use dispatch::NOT_YET;
 pub use gate::MemberGate;
 pub use ports::{
