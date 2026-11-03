@@ -90,6 +90,27 @@ These override anything below that disagrees.
 - **Fuses.** `OnlyLoadAppFromAsar` and asar integrity stay on for versioned
   copies too. The launcher sets no `NODE_OPTIONS` or
   `ELECTRON_RUN_AS_NODE`, and clears them if they are inherited.
+- **An installer upgrade wipes `$INSTDIR`, including `versions/`.** So the
+  state files (`state.json`, `.bak`, `policy.json`, `root.json`,
+  `db-snapshot.json`, the lock) live **outside** `$INSTDIR`, in
+  `%LOCALAPPDATA%\MVS\update\`. A recorded version whose folder is gone
+  means "start the base". That is not a failed start and does not count
+  toward rollback. When the launcher finds that the base version changed
+  (the installer ran), it re-bases `InstallState` on it.
+- **Shared `userData`.** The base copy and `versions/<v>` share `userData`
+  (same app name), so the single instance and the `mvs://` hand-off work
+  across versions. An older version must never open a newer `core.db`
+  schema without the §0 snapshot restore: B8-3 gets a launcher test for
+  this.
+- **Shortcuts.** They are repointed only if `$INSTDIR\mvs-launcher.exe`
+  exists (`IfFileExists`), so builds from before B8-3 keep working
+  shortcuts.
+- **Linux is deferred.** The AppImage is a single read-only file and the
+  .deb installs to root-owned `/opt`. In-app updates are **Windows-only**
+  in the closed alpha. Linux comes later, per-user under
+  `~/.local/share/MVS/versions/`; until then Linux users update with the
+  package or a new AppImage, and the protocol's "version too old" check
+  covers them. This replaces the Linux rows in §7.
 
 Spec: `docs/spec.md` "עדכונים", which requires:
 - signed updates with automatic rollback;
