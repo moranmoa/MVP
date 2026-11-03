@@ -117,6 +117,40 @@ fn two_users_chat_through_a_relay() {
         .collect();
     assert_eq!(bodies, ["שלום, מה נשמע?", "hi!"]);
 
+    // B6-p over the relay: the owner edits its message and deletes the
+    // guest's; both cores prune, in their own db and in sync's store.
+    let server_key =
+        records::ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let messages = owner.net.fetch(server_key);
+    let mut old: Vec<Vec<u8>> = messages
+        .iter()
+        .filter(|r| r.kind() == Kind::Message)
+        .map(|r| r.body()[..64].to_vec())
+        .collect();
+    assert_eq!(old.len(), 2);
+    owner.core.edit_message(&sent.id, "edited").unwrap();
+    let hi = owner.core.get_messages(&channel, 0, 10).unwrap().messages[1].id.clone();
+    owner.core.delete_message(&hi).unwrap();
+    eventually("the guest to see the edit and the delete", || {
+        guest.core.sync_now().unwrap();
+        let got = guest.core.get_messages(&channel, 0, 10).unwrap().messages;
+        got.len() == 2 && got[0].body == "edited" && got[1].deleted == Some(true)
+    });
+    owner.core.sync_now().unwrap();
+    old.dedup();
+    for (name, dir) in [("owner", &owner._dir), ("guest", &guest._dir)] {
+        for file in ["core.db", "store.db"] {
+            let bytes = std::fs::read(dir.join(file)).unwrap_or_default();
+            for body in &old {
+                assert!(
+                    !bytes.windows(body.len()).any(|w| w == body.as_slice()),
+                    "{name}'s {file} still holds an old ciphertext"
+                );
+            }
+        }
+    }
+    eprintln!("B6-p: old bodies gone from both dbs");
+
     // GAP-4: a stranger with only the server ID gets nothing. Even with the
     // secret from the link it gets the control log (a joiner needs it
     // before its join exists) but no channel record: the read gate serves
