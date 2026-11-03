@@ -368,9 +368,14 @@ the ones an honest kick legitimately races with.
 
 Details:
 
-- **Witnesses are found by a fixpoint**, the same as authority's voiding loop. A
-  witness that is itself voided (say its author was kicked concurrently) stops
-  counting, so repeat until nothing changes. The result still depends only on
+- **Only concurrent witnesses count:** the kick must not be among the
+  witness's control ancestors. An honest member who built on R before learning
+  of the kick saves it; a colluder who builds on R after the kick can't revive
+  a backdated message (added in the #62 review).
+- **Witnesses are evaluated descendants first.** A witness that is itself
+  voided (say its author was kicked concurrently) doesn't count. A witness is
+  always a strict descendant, so evaluating in reverse topological order with
+  memoisation settles it without iterating, and the result depends only on
   the record set.
 - **Scope: non-privileged records only** (posts and channel messages). For the
   target's privileged records (grants, revokes, kicks, rotations), keep
