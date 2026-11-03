@@ -48,6 +48,35 @@ All of it is in `docker-compose.yml`:
 - coturn has the restart, log and limit settings but not the read-only root
   yet: that is untested until voice is switched on.
 
+And in the relay itself (`relay/src/main.rs`):
+
+- Connection limits: at most `MAX_CONNECTIONS` (default 512) established
+  connections, 8 per peer and 64 half-open incoming ones. New connections
+  are also refused once the process uses `MAX_MEMORY_MB` (default 200, below
+  the container's 256 MB). Raise both together with the compose `memory`.
+- The DHT runs on `/mvs/kad/1.0.0`, not the IPFS default, so it can't merge
+  with the public IPFS DHT. Only public addresses that peers announce go into
+  it: private, loopback, link-local and CGNAT addresses are dropped, so a
+  client's home network layout is never handed out.
+- `node.key` is created readable by its owner only (0600), and the relay
+  **refuses to start** if the file is readable by group or others. Keys
+  created before this check are 0644. Fix once, with the relay stopped:
+
+  ```
+  docker run --rm -v infra_relay-data:/data debian:bookworm-slim chmod 600 /data/node.key
+  ```
+
+### Reproducible builds
+
+`relay/Cargo.lock` is committed and the image builds with `--locked`, so a
+rebuild uses exactly the reviewed dependency versions. The image build also
+runs the relay's tests. Base images (`rust`, `debian`, `caddy`, `coturn`) are
+pinned by digest. To update one, take the new digest from
+`docker buildx imagetools inspect <image:tag>`, then update the
+`Dockerfile`/compose line in a PR. Update dependencies with
+`cargo update` in `relay/` in a PR of their own; the CI licence job checks
+the result.
+
 ## Making it public
 
 A reverse proxy only carries HTTP and WebSocket traffic, so it covers part of it:

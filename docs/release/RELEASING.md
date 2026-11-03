@@ -52,6 +52,42 @@ Covered in `core/updater/SECURITY.md` (PR #8). In short:
   synced folder), then `updater make-root --threshold 1 --pub E:\mvs-keys\root.pub --out root.json`.
   `root.json` (public) is what the app embeds.
 
+### Protect release tags
+
+Pushing a `v*` tag starts the release workflow, so only the owner should be
+able to create, move or delete one. The repo has no ruleset yet. Create one
+(Settings → Rules → Rulesets → New tag ruleset):
+
+- Name `release tags`, enforcement **Active**.
+- Target tags: include by pattern `v*`.
+- Rules: **Restrict creations**, **Restrict updates**, **Restrict deletions**.
+- Bypass list: **Repository admin** (that's you) → Always.
+
+Or in one command (PowerShell, logged in to `gh` as the owner):
+
+```powershell
+@'
+{"name":"release tags","target":"tag","enforcement":"active",
+ "conditions":{"ref_name":{"include":["refs/tags/v*"],"exclude":[]}},
+ "rules":[{"type":"creation"},{"type":"update"},{"type":"deletion"}],
+ "bypass_actors":[{"actor_id":5,"actor_type":"RepositoryRole","bypass_mode":"always"}]}
+'@ | gh api repos/moranmoa/MVP/rulesets --method POST --input -
+```
+
+Check: `gh api repos/moranmoa/MVP/rulesets` lists `release tags`.
+
+What this does and doesn't cover:
+
+- It blocks anyone without the admin role, which matters as soon as there
+  are other collaborators.
+- The agent sessions currently push with **your** GitHub login, which is an
+  admin, so the ruleset does not stop them. Their instructions say not to tag.
+  The technical control is a separate account or fine-grained token for
+  the agents, without admin and without permission to bypass this ruleset.
+- Either way, a rogue tag only produces an unsigned **draft**. Nothing can be
+  installed through the updater until you sign its manifest offline, and the
+  signing step shows you the version and hashes first.
+
 ## Cutting a release (owner)
 
 PowerShell on your normal (online) PC, in the repo:

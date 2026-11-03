@@ -20,6 +20,7 @@ libp2p = { version = "0.54", features = [
     "relay",
     "kad",
     "macros",
+    "memory-connection-limits",
 ] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tracing = "0.1"
