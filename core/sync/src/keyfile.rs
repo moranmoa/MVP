@@ -39,15 +39,24 @@ pub(crate) fn write_secret(path: &Path, contents: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
-/// Makes an existing secret file owner-only where that is cheap to do
-/// (Unix). Keys written by older versions may have been world-readable.
+/// Makes an existing secret file owner-only again: keys written by older
+/// versions may have been readable by others. Unix: mode 0600. Windows: the
+/// same protected single-entry ACL as a new key, set through a handle opened
+/// only to change the ACL.
 pub(crate) fn tighten(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{READ_CONTROL, WRITE_DAC};
+        let file = fs::OpenOptions::new().access_mode(READ_CONTROL | WRITE_DAC).open(path)?;
+        restrict_to_owner(&file, path).map_err(|err| io::Error::other(format!("could not restrict the key file: {err}")))?;
+    }
+    #[cfg(not(any(unix, windows)))]
     let _ = path;
     Ok(())
 }

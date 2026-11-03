@@ -40,7 +40,7 @@ use serde_bytes::ByteBuf;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::limits::{Pending, RateLimiter, Refused};
+use crate::limits::{Pending, PerIp, RateLimiter, Refused};
 use crate::store::MAX_HAVE;
 use crate::{log_name, log_of, valid_log_name, Append, Authorizer, Record, RecordId, Scope, Store};
 
@@ -90,7 +90,7 @@ const MAX_CONNECTIONS: u32 = 384;
 const MAX_PENDING_INCOMING: u32 = 64;
 /// A direct and a relayed connection to the same peer can briefly coexist.
 const MAX_CONNECTIONS_PER_PEER: u32 = 2;
-/// Direct incoming connections from one IP address. PeerIds are free to
+/// Direct incoming connections from one IP address (IPv6: one /64). PeerIds are free to
 /// make, so the per-peer cap alone doesn't stop one machine taking every
 /// incoming slot. Relayed connections all come from the relay and aren't counted.
 const MAX_CONNECTIONS_PER_IP: usize = 8;
@@ -252,8 +252,7 @@ impl Node {
             all_inbound_pulls: RateLimiter::new(GLOBAL_PULL_BURST, GLOBAL_PULL_RATE, 1),
             served_bytes: RateLimiter::new(SERVED_BYTES_BURST, SERVED_BYTES_RATE, MAX_TRACKED_PEERS),
             all_served_bytes: RateLimiter::new(ALL_SERVED_BYTES_BURST, ALL_SERVED_BYTES_RATE, 1),
-            per_ip: HashMap::new(),
-            ip_of_connection: HashMap::new(),
+            per_ip: PerIp::new(MAX_CONNECTIONS_PER_IP),
             answers,
             answering: 0,
             decoded,
@@ -407,7 +406,9 @@ fn topic(log: &str) -> gossipsub::IdentTopic {
     gossipsub::IdentTopic::new(format!("log/{log}"))
 }
 
-type Answer = (PeerId, ResponseChannel<SyncResponse>, SyncResponse);
+/// A finished answer: who asked, where to reply, the page, and the bytes
+/// reserved for it when the request came in.
+type Answer = (PeerId, ResponseChannel<SyncResponse>, SyncResponse, usize);
 /// A pulled page after decoding: (peer, log), the records that verified
 /// and belong to the log, and whether the peer said there is more.
 type Decoded = ((PeerId, String), Vec<Record>, bool);
@@ -437,9 +438,8 @@ struct Task {
     /// Byte budgets for served pages (tokens are bytes).
     served_bytes: RateLimiter<PeerId>,
     all_served_bytes: RateLimiter<()>,
-    /// Direct incoming connections per remote IP, and which IP each one is from.
-    per_ip: HashMap<std::net::IpAddr, usize>,
-    ip_of_connection: HashMap<ConnectionId, std::net::IpAddr>,
+    /// Direct incoming connections per remote IP (IPv6: per /64).
+    per_ip: PerIp,
     /// Finished answers coming back from blocking threads.
     answers: mpsc::UnboundedSender<Answer>,
     answering: usize,
@@ -495,7 +495,7 @@ impl Task {
                     None => return,
                 },
                 event = self.swarm.select_next_some() => self.on_swarm_event(event),
-                Some((peer, channel, response)) = answers.recv() => self.send_answer(peer, channel, response),
+                Some((peer, channel, response, reserved)) = answers.recv() => self.send_answer(peer, channel, response, reserved),
                 Some((key, records, more)) = decoded.recv() => self.on_decoded(key, records, more),
                 _ = anti_entropy.tick() => {
                     self.pending.expire(Instant::now(), PENDING_TTL);
@@ -655,14 +655,7 @@ impl Task {
                 }
             }
             SwarmEvent::ConnectionClosed { peer_id, connection_id, num_established, .. } => {
-                if let Some(ip) = self.ip_of_connection.remove(&connection_id) {
-                    if let Some(n) = self.per_ip.get_mut(&ip) {
-                        *n -= 1;
-                        if *n == 0 {
-                            self.per_ip.remove(&ip);
-                        }
-                    }
-                }
+                self.per_ip.release(connection_id);
                 for conns in [&mut self.relayed, &mut self.direct] {
                     if let Some(set) = conns.get_mut(&peer_id) {
                         set.remove(&connection_id);
@@ -788,6 +781,10 @@ impl Task {
             return;
         }
         let max_bytes = budget.min(PAGE_BYTES);
+        // Reserved now, so answers running at the same time can't all spend
+        // the same budget; the unused part is refunded when the page is sent.
+        self.served_bytes.charge(peer, now, max_bytes);
+        self.all_served_bytes.charge((), now, max_bytes);
         self.answering += 1;
         let reader = self.reader.clone();
         let answers = self.answers.clone();
@@ -796,17 +793,24 @@ impl Task {
                 Ok(store) => answer(&store, &request, max_bytes),
                 Err(_) => empty_response(),
             };
-            let _ = answers.send((peer, channel, response));
+            let _ = answers.send((peer, channel, response, max_bytes));
         });
     }
 
     /// Sends a finished answer and charges its size to the byte budgets.
-    fn send_answer(&mut self, peer: PeerId, channel: ResponseChannel<SyncResponse>, response: SyncResponse) {
+    fn send_answer(&mut self, peer: PeerId, channel: ResponseChannel<SyncResponse>, response: SyncResponse, reserved: usize) {
         self.answering = self.answering.saturating_sub(1);
         let bytes: usize = response.records.iter().map(|r| r.len()).sum();
         let now = Instant::now();
-        self.served_bytes.charge(peer, now, bytes);
-        self.all_served_bytes.charge((), now, bytes);
+        // Settle the reservation: refund what wasn't used, or charge the
+        // overshoot (a page always carries at least one record).
+        if bytes < reserved {
+            self.served_bytes.refund(peer, now, reserved - bytes);
+            self.all_served_bytes.refund((), now, reserved - bytes);
+        } else {
+            self.served_bytes.charge(peer, now, bytes - reserved);
+            self.all_served_bytes.charge((), now, bytes - reserved);
+        }
         let _ = self.swarm.behaviour_mut().sync.send_response(channel, response);
     }
 
@@ -982,14 +986,10 @@ impl Task {
     /// Counts a direct incoming connection against its remote IP; false if
     /// that IP already has [`MAX_CONNECTIONS_PER_IP`].
     fn admit_by_ip(&mut self, id: ConnectionId, endpoint: &ConnectedPoint) -> bool {
-        let Some(ip) = incoming_ip(endpoint) else { return true };
-        let n = self.per_ip.entry(ip).or_default();
-        if *n >= MAX_CONNECTIONS_PER_IP {
-            return false;
+        match incoming_ip(endpoint) {
+            Some(ip) => self.per_ip.admit(id, ip),
+            None => true,
         }
-        *n += 1;
-        self.ip_of_connection.insert(id, ip);
-        true
     }
 
     /// Records a new connection, and keeps at most one kind per peer: a

@@ -158,6 +158,59 @@ impl Refused {
     }
 }
 
+/// Direct incoming connections per source address. IPv6 is counted per /64
+/// (one ordinary customer prefix holds 2^64 addresses), IPv4 per address;
+/// an IPv4-mapped IPv6 address counts as the IPv4 one.
+pub(crate) struct PerIp {
+    counts: HashMap<std::net::IpAddr, usize>,
+    by_connection: HashMap<libp2p::swarm::ConnectionId, std::net::IpAddr>,
+    max: usize,
+}
+
+/// The address a connection from `ip` is counted under.
+pub(crate) fn ip_bucket(ip: std::net::IpAddr) -> std::net::IpAddr {
+    use std::net::{IpAddr, Ipv6Addr};
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                let s = v6.segments();
+                IpAddr::V6(Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+            }
+        },
+    }
+}
+
+impl PerIp {
+    pub fn new(max: usize) -> Self {
+        Self { counts: HashMap::new(), by_connection: HashMap::new(), max }
+    }
+
+    /// Counts a new connection from `ip`; false (and not counted) if its
+    /// bucket is already full.
+    pub fn admit(&mut self, id: libp2p::swarm::ConnectionId, ip: std::net::IpAddr) -> bool {
+        let bucket = ip_bucket(ip);
+        let n = self.counts.entry(bucket).or_default();
+        if *n >= self.max {
+            return false;
+        }
+        *n += 1;
+        self.by_connection.insert(id, bucket);
+        true
+    }
+
+    pub fn release(&mut self, id: libp2p::swarm::ConnectionId) {
+        let Some(bucket) = self.by_connection.remove(&id) else { return };
+        if let Some(n) = self.counts.get_mut(&bucket) {
+            *n -= 1;
+            if *n == 0 {
+                self.counts.remove(&bucket);
+            }
+        }
+    }
+}
+
 /// Token bucket per key: `burst` requests at once, refilled at `per_sec`.
 ///
 /// A key's bucket is kept after it disconnects, so reconnecting doesn't buy a
@@ -216,6 +269,16 @@ impl<K: Hash + Eq + Clone> RateLimiter<K> {
         self.available(key.clone(), now);
         if let Some((tokens, _)) = self.buckets.get_mut(&key) {
             *tokens -= cost as f64;
+        }
+    }
+
+    /// Gives back tokens reserved with [`RateLimiter::charge`] but not used
+    /// (never above the burst).
+    pub fn refund(&mut self, key: K, now: Instant, amount: usize) {
+        self.available(key.clone(), now);
+        let burst = self.burst;
+        if let Some((tokens, _)) = self.buckets.get_mut(&key) {
+            *tokens = (*tokens + amount as f64).min(burst);
         }
     }
 
@@ -387,6 +450,27 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_is_capped_per_64_not_per_address() {
+        use libp2p::swarm::ConnectionId;
+        let mut per_ip = PerIp::new(8);
+        // Nine addresses in one /64: the ninth is refused.
+        let admitted: Vec<bool> = (1..=9u16)
+            .map(|i| per_ip.admit(ConnectionId::new_unchecked(i as usize), format!("2001:db8:1:2::{i:x}").parse().unwrap()))
+            .collect();
+        assert_eq!(admitted, [vec![true; 8], vec![false]].concat());
+        // Another /64 has its own count.
+        assert!(per_ip.admit(ConnectionId::new_unchecked(100), "2001:db8:1:3::1".parse().unwrap()));
+        // Closing one frees a slot in that /64.
+        per_ip.release(ConnectionId::new_unchecked(1));
+        assert!(per_ip.admit(ConnectionId::new_unchecked(101), "2001:db8:1:2:ffff::9".parse().unwrap()));
+        // IPv4 counts per address, and an IPv4-mapped IPv6 address counts as that IPv4 one.
+        let mut per_ip = PerIp::new(1);
+        assert!(per_ip.admit(ConnectionId::new_unchecked(1), "203.0.113.7".parse().unwrap()));
+        assert!(!per_ip.admit(ConnectionId::new_unchecked(2), "::ffff:203.0.113.7".parse().unwrap()));
+        assert!(per_ip.admit(ConnectionId::new_unchecked(3), "203.0.113.8".parse().unwrap()));
+    }
+
+    #[test]
     fn byte_budget_is_spent_after_the_fact_and_refills() {
         let start = Instant::now();
         let mut bytes = RateLimiter::new(1000, 100, 10);
@@ -397,6 +481,15 @@ mod tests {
         // ...and is back above zero only after it has refilled: 500 / 100 per s.
         assert_eq!(bytes.available("peer", start + Duration::from_secs(4)), 0);
         assert_eq!(bytes.available("peer", start + Duration::from_secs(7)), 200);
+
+        // Reserve a page up front, then refund what the page didn't use.
+        let mut bytes = RateLimiter::new(1000, 100, 10);
+        bytes.charge("peer", start, 800);
+        assert_eq!(bytes.available("peer", start), 200, "a second answer can't spend the reserved part");
+        bytes.refund("peer", start, 600);
+        assert_eq!(bytes.available("peer", start), 800);
+        bytes.refund("peer", start, 10_000);
+        assert_eq!(bytes.available("peer", start), 1000, "never above the burst");
     }
 
     #[test]
