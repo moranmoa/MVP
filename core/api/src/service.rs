@@ -468,14 +468,9 @@ impl Core {
                 server_id: server_id.to_owned(),
                 members: inner.members_json(&after)?,
             });
-            if matches!(action, Action::Kick { .. }) {
-                let members: BTreeSet<PublicKey> = after.members().iter().map(|m| m.key).collect();
-                if ports.cipher.membership_changed(server, &members) == CipherOutcome::Renewed {
-                    events.push(Event::Notice {
-                        kind: NoticeKind::EncryptionRenewed,
-                        server_id: server_id.to_owned(),
-                    });
-                }
+            // M2: removed members must not read what comes next.
+            if matches!(action, Action::Kick { .. } | Action::Revoke { .. }) {
+                inner.rekey(ports, server, events)?;
             }
             Ok(())
         })
@@ -517,29 +512,7 @@ impl Core {
             chat::sync_cipher(cipher, server, log);
             let sealed = match cipher.encrypt(server, channel, body.as_bytes()) {
                 Err(CipherError::NoKey | CipherError::RotationRequired) if may_rotate => {
-                    let parts = cipher.rotate(server, channel, &members).map_err(cipher_error)?;
-                    // All parts or none, each signed once (see `GroupCipher::rotate`).
-                    let seq = chat::channel_seq(log, channel, &key);
-                    let deps = chat::channel_deps(log, channel);
-                    let mut signed = Vec::new();
-                    for (i, part) in parts.into_iter().enumerate() {
-                        signed.push(inner.sign_channel(
-                            server,
-                            channel,
-                            seq + i as u64,
-                            deps.clone(),
-                            auth_deps.clone(),
-                            ports.clock.now_ms(),
-                            Kind::KeyRotation,
-                            part,
-                        )?);
-                    }
-                    for record in signed {
-                        inner.store(server, record.clone())?;
-                        ports.network.publish(&record);
-                    }
-                    let log = inner.logs.get_mut(&server).ok_or(ErrorCode::Internal)?;
-                    chat::sync_cipher(cipher, server, log);
+                    inner.rotate_channel(ports, server, channel, &members, &auth_deps)?;
                     cipher.encrypt(server, channel, body.as_bytes()).map_err(cipher_error)?
                 }
                 other => other.map_err(cipher_error)?,
@@ -616,7 +589,7 @@ impl Core {
         // Fetch without the lock, so UI commands don't wait on the network.
         let fetched: Vec<(ServerId, Vec<Record>)> =
             servers.into_iter().map(|s| (s, self.ports.network.fetch(s))).collect();
-        self.run(|inner, _, events| {
+        self.run(|inner, ports, events| {
             let Some(me) = inner.me.as_ref() else { return Ok(()) };
             let me = me.key();
             for (server, records) in fetched {
@@ -640,6 +613,8 @@ impl Core {
                         server_id: model::hex_id(server.as_bytes()),
                         members: inner.members_json(&after)?,
                     });
+                    // M2: a kick or revoke we read, that nobody re-keyed for.
+                    inner.rekey(ports, server, events)?;
                 }
             }
             Ok(())
@@ -724,6 +699,83 @@ impl Core {
 }
 
 impl Inner {
+    /// A fresh key for `channel`, for `members` (we must be a moderator or
+    /// above). Every part is signed once, stored with the others in one
+    /// transaction, and only then published: a failure publishes nothing
+    /// (#91). A later attempt makes a new rotation, never re-signs a part.
+    fn rotate_channel(
+        &mut self,
+        ports: &Ports,
+        server: ServerId,
+        channel: ChannelId,
+        members: &BTreeSet<PublicKey>,
+        auth_deps: &[RecordId],
+    ) -> CoreResult<()> {
+        let cipher = &*ports.cipher;
+        let parts = cipher.rotate(server, channel, members).map_err(cipher_error)?;
+        let key = self.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+        let log = self.logs.get(&server).ok_or(ErrorCode::Internal)?;
+        let seq = chat::channel_seq(log, channel, &key);
+        let deps = chat::channel_deps(log, channel);
+        let mut signed = Vec::new();
+        for (i, part) in parts.into_iter().enumerate() {
+            signed.push(self.sign_channel(
+                server,
+                channel,
+                seq + i as u64,
+                deps.clone(),
+                auth_deps.to_vec(),
+                ports.clock.now_ms(),
+                Kind::KeyRotation,
+                part,
+            )?);
+        }
+        self.db.put_records(&signed)?;
+        let log = self.logs.get_mut(&server).ok_or(ErrorCode::Internal)?;
+        for record in &signed {
+            log.add(record.clone());
+        }
+        for record in &signed {
+            ports.network.publish(record);
+        }
+        chat::sync_cipher(cipher, server, log);
+        Ok(())
+    }
+
+    /// After members were removed (a kick or revoke, ours or read): every
+    /// known channel whose key removed members still hold gets a fresh one
+    /// if we may rotate (`notice: encryption-renewed`); otherwise the UI
+    /// learns it waits for a moderator (`notice: rekey-waiting`).
+    fn rekey(&mut self, ports: &Ports, server: ServerId, events: &mut Events) -> CoreResult<()> {
+        let Some(me) = self.me.as_ref().map(Me::key) else { return Ok(()) };
+        let view = self.view(server)?;
+        if !view.state.is_member(me) {
+            return Ok(());
+        }
+        let members = view.state.members.clone();
+        let may_rotate = view.state.role(me) >= authority::Role::Moderator;
+        let auth_deps = auth_deps(&view);
+        let cipher = &*ports.cipher;
+        cipher.membership_changed(server, &members);
+        let log = self.logs.get(&server).ok_or(ErrorCode::Internal)?;
+        chat::sync_cipher(cipher, server, log);
+        let server_id = model::hex_id(server.as_bytes());
+        for channel in chat::known_channels(server) {
+            // A probe: an empty plaintext, never sent.
+            if cipher.encrypt(server, channel, b"") != Err(CipherError::RotationRequired) {
+                continue;
+            }
+            let kind = if may_rotate {
+                self.rotate_channel(ports, server, channel, &members, &auth_deps)?;
+                NoticeKind::EncryptionRenewed
+            } else {
+                NoticeKind::RekeyWaiting
+            };
+            events.push(Event::Notice { kind, server_id: server_id.clone() });
+        }
+        Ok(())
+    }
+
     /// The server of my default channel `channel_id`; `not-found` for any
     /// other. Loads the server.
     fn find_channel(&mut self, channel_id: &str) -> CoreResult<(ServerId, ChannelId)> {

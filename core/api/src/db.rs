@@ -102,6 +102,15 @@ impl Db {
             .map_err(internal)
     }
 
+    /// All of `records` or none, in one transaction.
+    pub fn put_records(&self, records: &[Record]) -> Result<(), CoreError> {
+        let tx = self.conn.unchecked_transaction().map_err(internal)?;
+        for record in records {
+            self.put_record(record)?;
+        }
+        tx.commit().map_err(internal)
+    }
+
     pub fn records(&self, server: ServerId) -> Result<Vec<Record>, CoreError> {
         let mut stmt = self
             .conn
