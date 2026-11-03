@@ -758,7 +758,7 @@ impl Inner {
         let view = ServerView::build(server, &log).ok_or(ErrorCode::Internal)?;
         let profile =
             sign(&view, view.deps(None), &model::profile_action(&me.profile.display_name))?;
-        for record in &log.records {
+        for record in log.records.iter().chain(&log.channel) {
             self.db.put_record(record)?;
         }
         self.logs.insert(server, log);

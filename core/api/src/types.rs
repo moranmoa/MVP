@@ -5,6 +5,8 @@
 use serde::{Deserialize, Serialize};
 
 pub type Id = String;
+/// Milliseconds since the Unix epoch.
+pub type Timestamp = u64;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,6 +92,39 @@ pub struct Channel {
     pub adult: bool,
     pub unread: bool,
     pub mentions: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SendState {
+    Pending,
+    Sent,
+    Received,
+    Failed,
+}
+
+/// `Message` in types.ts. TODO: replies, edits, deletes, mentions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Message {
+    pub id: Id,
+    pub channel_id: Id,
+    /// Position in the channel as shown, oldest first.
+    pub index: usize,
+    pub author_id: Id,
+    pub body: String,
+    pub created_at: Timestamp,
+    /// Only on messages written on this device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_state: Option<SendState>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageRange {
+    pub channel_id: Id,
+    pub start: usize,
+    pub messages: Vec<Message>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,6 +355,8 @@ pub enum Event {
     MembersChanged { server_id: Id, members: Vec<Member> },
     #[serde(rename = "join.status")]
     JoinStatus(JoinStatus),
+    #[serde(rename = "message.added")]
+    MessageAdded(Message),
     #[serde(rename = "update.ready")]
     UpdateReady(UpdateInfo),
     #[serde(rename = "notice", rename_all = "camelCase")]
