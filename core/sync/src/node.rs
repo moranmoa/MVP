@@ -1245,12 +1245,7 @@ impl Task {
                 Some(gate) if !gate.allows(&store) => (empty_response(), Vec::new()),
                 _ => answer_with_ids(&store, &log, &request.have, max_bytes),
             };
-            if let Some((member, binding)) = ours {
-                if member.allows(&store) {
-                    response.acks = acks.iter().map(|id| ByteBuf::from(id.as_bytes().to_vec())).collect();
-                    response.binding = Some(binding);
-                }
-            }
+            for_members_only(&mut response, ours, &acks, &store);
             let _ = answers.send((peer, channel, response, max_bytes, ids));
         });
     }
@@ -1697,6 +1692,18 @@ fn decode_page(log: &str, page: &[ByteBuf]) -> Vec<Record> {
 
 fn empty_response() -> SyncResponse {
     SyncResponse { records: Vec::new(), more: false, acks: Vec::new(), binding: None }
+}
+
+/// Adds our binding (presence) and the requester's receipt acks to an
+/// answer, only if our read gate accepts the requester as a member: a
+/// leaked-link holder learns neither who we are nor what we stored.
+fn for_members_only(response: &mut SyncResponse, ours: Option<(ReadCheck, Binding)>, acks: &[RecordId], store: &Store) {
+    if let Some((member, binding)) = ours {
+        if member.allows(store) {
+            response.acks = acks.iter().map(|id| ByteBuf::from(id.as_bytes().to_vec())).collect();
+            response.binding = Some(binding);
+        }
+    }
 }
 
 /// Answers a pull: what the requester is missing from `request.log`, one
@@ -2190,5 +2197,82 @@ mod tests {
         assert_eq!(b.peers().await.unwrap(), vec![a.peer_id()]);
         a.shutdown().await.unwrap();
         b.shutdown().await.unwrap();
+    }
+
+    /// Presence (M2) end to end: a member is online on both sides within
+    /// 5 s; a bound non-member learns only who pulls from it (GAP-4b); a member that
+    /// leaves is offline within 30 s.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn members_are_online_within_5_s_and_offline_within_30_s_of_leaving() {
+        use crate::testutil::test_key;
+        let secret = ServerSecret::from_bytes([9; 32]);
+        let port = free_port();
+        let id = |n: u8| test_key(n).identity();
+        let node = |name: &'static str, n: u8, listen, bootstrap, gate: Arc<dyn ReadGate>| {
+            let secret = secret.clone();
+            async move {
+                let access = Access { binder: Some(Arc::new(test_key(n))), read_gate: Some(gate) };
+                let node = test_node(name, listen, bootstrap, access).await;
+                node.open_server(server(), secret).unwrap();
+                node
+            }
+        };
+        // The owner (key 0) counts key 1 as a member, not key 2.
+        let owner = node("p-owner", 0, Some(port), None, Arc::new(OnlyReader(id(1)))).await;
+        let started = Instant::now();
+        let member = node("p-member", 1, None, Some(port), Arc::new(AcceptAll)).await;
+        let stranger = node("p-stranger", 2, None, Some(port), Arc::new(AcceptAll)).await;
+        async fn online(n: &Node) -> PresenceState {
+            n.presence(server()).await.unwrap()
+        }
+        while !(online(&owner).await.online.contains(&id(1)) && online(&member).await.online.contains(&id(0))) {
+            assert!(started.elapsed() < Duration::from_secs(5), "member not online on both sides within 5 s");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(online(&member).await.reachability, Reachability::Online);
+        tokio::time::sleep(ANTI_ENTROPY + Duration::from_secs(1)).await;
+        // The stranger is bound (reported to the owner; the app filters), but
+        // never gets the owner's binding, so it sees nobody.
+        assert!(online(&owner).await.online.contains(&id(2)));
+        // Residual GAP-4b (PRESENCE.md): members pull from the stranger too,
+        // and a pull carries the requester's binding, so the stranger learns
+        // who pulls from it. Its answers never told it anything (below).
+        assert_eq!(online(&stranger).await.online.len(), 2);
+        // Our own identity is never listed.
+        assert!(!online(&owner).await.online.contains(&id(0)));
+
+        member.shutdown().await.unwrap();
+        let left = Instant::now();
+        while online(&owner).await.online.contains(&id(1)) {
+            assert!(left.elapsed() < Duration::from_secs(30), "member still online 30 s after leaving");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(online(&owner).await.last_seen.is_some());
+        owner.shutdown().await.unwrap();
+        stranger.shutdown().await.unwrap();
+    }
+
+    /// The answer side of presence: our binding and acks go only to a
+    /// requester our read gate accepts as a member.
+    #[test]
+    fn our_binding_and_acks_go_to_members_only() {
+        use crate::testutil::test_key;
+        let store = Store::in_memory().unwrap();
+        let control = ServerSecret::from_bytes([9; 32]).handle(Scope::Control);
+        let binding = Binding::sign(&test_key(0), &PeerId::random(), &control, unix_now() + 3600);
+        let acks = [RecordId::from_bytes([1; 32])];
+        let gate: Arc<dyn ReadGate> = Arc::new(OnlyReader(test_key(1).identity()));
+        let answer_to = |n: u8| {
+            let mut response = empty_response();
+            let check = ReadCheck { gate: gate.clone(), identity: test_key(n).identity(), server: server() };
+            for_members_only(&mut response, Some((check, binding.clone())), &acks, &store);
+            response
+        };
+        let member = answer_to(1);
+        assert_eq!(member.binding, Some(binding.clone()));
+        assert_eq!(member.acks.len(), 1);
+        let stranger = answer_to(2);
+        assert_eq!(stranger.binding, None);
+        assert!(stranger.acks.is_empty());
     }
 }

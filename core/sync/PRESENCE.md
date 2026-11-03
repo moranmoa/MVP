@@ -75,3 +75,24 @@ it is active, and as "offline" within 30 s after it closes the app.
 3. **Bounded.** At most `MAX_PRESENCE` = 256 identities per server. A new
    identity past the cap is not tracked until an entry expires; the bound
    is tested.
+
+## Residual (GAP-4b, security lead) and as built
+
+- **Residual.** Our *requester* binding still goes to whoever answers on
+  the handle. So a node run by a leaked-link holder learns which members
+  pull from it, which is every connected member, every 5 s. Only answers
+  are limited to members. The end-to-end test asserts this residual
+  explicitly. Secret rotation on kick (GAP-4b) fixes it later.
+- **As built.**
+  - `src/presence.rs` holds who is online: a 15 s TTL, at most 256 per
+    server, per-peer connections. It is unit-tested.
+  - The node marks an identity seen on every verified binding: a
+    requester's in `who_may_read`, and an answerer's in `on_response`. Our
+    own identity is skipped. Expiry runs on the 1 s tick, and entries go on
+    the last disconnect.
+  - `for_members_only` attaches our binding and acks only when the read
+    gate accepts the requester; it is unit-tested.
+  - The API is `NodeEvent::Presence` and `Node::presence(server)`, which
+    gives `PresenceState { online, last_seen, reachability }`.
+  - The end-to-end test: online on both sides within 5 s, and offline
+    within 30 s of leaving (here at once, through the disconnect).
