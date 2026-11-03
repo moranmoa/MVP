@@ -59,14 +59,15 @@ use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
 
-pub use records::{ChannelId, PublicKey, Record, RecordId, ServerId};
+pub use records::{ChannelId, PublicKey, Record, RecordId, ServerId, Stub};
 use records::{Draft, Kind, RecordError, Scope, SigningKey, GENESIS_NONCE_LEN, MAX_CUT_ENTRIES};
 
 mod channel;
 mod incremental;
 pub use channel::{
-    check_channel, check_channel_with, message_text_ok, privileged_only, witness, ChannelGraph,
-    Context, Refusal, Removal, Verdict, Void, VoidRule, MAX_MESSAGE_CODE_POINTS, MAX_WITNESS_DEPTH,
+    check_channel, check_channel_with, check_stub, message_text_ok, privileged_only, witness,
+    ChannelGraph, Context, Entry, Refusal, Removal, Verdict, Void, VoidRule,
+    MAX_MESSAGE_CODE_POINTS, MAX_WITNESS_DEPTH,
 };
 pub use incremental::{Inserted, Resolver, Stats, MAX_PENDING};
 

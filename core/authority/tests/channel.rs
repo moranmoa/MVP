@@ -7,8 +7,9 @@ mod common;
 use std::collections::HashMap;
 
 use authority::{
-    check_channel, check_channel_with, message_text_ok, privileged_only, Action, ChannelGraph,
-    ChannelId, Cut, Record, RecordId, Refusal, Resolver, Role, Verdict, MAX_MESSAGE_CODE_POINTS,
+    check_channel, check_channel_with, check_stub, message_text_ok, privileged_only, Action,
+    ChannelGraph, ChannelId, Cut, Entry, Record, RecordId, Refusal, Resolver, Role, Stub, Verdict,
+    MAX_MESSAGE_CODE_POINTS,
 };
 use common::{actor, founded, key, rec, server};
 mod rng;
@@ -18,14 +19,22 @@ use rng::{SliceRandom, StdRng};
 const GENERAL: ChannelId = ChannelId::from_bytes([5; 32]);
 const RANDOM: ChannelId = ChannelId::from_bytes([6; 32]);
 
-/// The caller's channel store: records by ID, ancestry through deps.
+/// The caller's channel store: records (in full or pruned) by ID, ancestry
+/// through deps.
 #[derive(Default)]
-struct Store(HashMap<RecordId, Record>);
+struct Store(HashMap<RecordId, Entry>);
 
 impl Store {
     fn add(&mut self, record: &Record) -> RecordId {
-        self.0.insert(record.id(), record.clone());
+        self.0.insert(record.id(), Entry::Full(record.clone()));
         record.id()
+    }
+
+    /// Keeps only the stub of a held record.
+    fn prune(&mut self, record: &Record) -> Stub {
+        let stub = record.prune().expect("prunable");
+        self.0.insert(stub.id(), Entry::Pruned(stub.clone()));
+        stub
     }
 }
 
@@ -36,19 +45,26 @@ impl ChannelGraph for Store {
             if next == ancestor {
                 return true;
             }
-            if let Some(record) = self.0.get(&next) {
-                stack.extend_from_slice(record.deps());
+            if let Some(entry) = self.0.get(&next) {
+                stack.extend_from_slice(entry.deps());
             }
         }
         false
     }
 
     fn record(&self, id: RecordId) -> Option<Record> {
+        match self.0.get(&id)? {
+            Entry::Full(record) => Some(record.clone()),
+            Entry::Pruned(_) => None,
+        }
+    }
+
+    fn entry(&self, id: RecordId) -> Option<Entry> {
         self.0.get(&id).cloned()
     }
 
     fn children(&self, id: RecordId) -> Vec<RecordId> {
-        self.0.values().filter(|r| r.deps().contains(&id)).map(Record::id).collect()
+        self.0.values().filter(|e| e.deps().contains(&id)).map(Entry::id).collect()
     }
 }
 
@@ -564,4 +580,145 @@ fn a_fake_cut_head_holds_back_nothing_already_kept() {
     assert_eq!(check_channel(&r, &seen, &store), Verdict::Accept, "ancestor of a held head");
     assert_eq!(check_channel(&r, &replied, &store), Verdict::Accept, "witnessed");
     assert_eq!(check_channel(&r, &alone, &store), Verdict::Pending { missing: vec![fake] });
+}
+
+fn edit(author: u8, seq: u64, target: &Record, deps: Vec<RecordId>, auth: &[RecordId]) -> Record {
+    let body = [target.id().as_bytes().as_slice(), b"new text"].concat();
+    channel_record(author, seq, GENERAL, deps, auth.to_vec(), Kind::MessageEdit, body)
+}
+
+fn delete(author: u8, seq: u64, target: &Record, auth: &[RecordId]) -> Record {
+    let body = target.id().as_bytes().to_vec();
+    channel_record(
+        author,
+        seq,
+        GENERAL,
+        vec![target.id()],
+        auth.to_vec(),
+        Kind::MessageDelete,
+        body,
+    )
+}
+
+/// B6-p: a deleted message is kept as a stub. A new member syncing it gets
+/// the same verdict as for the full record, and the delete naming it isn't
+/// left waiting for a body that's gone.
+#[test]
+fn a_deleted_message_prunes_to_a_stub_that_still_counts() {
+    let (control, heads) = founded(&[1, 2]);
+    let r = resolver(&control);
+    let mut store = Store::default();
+    let message = message(1, 0, vec![], &heads);
+    let gone = delete(1, 1, &message, &heads);
+    store.add(&message);
+    store.add(&gone);
+    let stub = store.prune(&message);
+    assert_eq!(check_stub(&r, &stub, &store), Verdict::Accept);
+    assert_eq!(check_channel(&r, &gone, &store), Verdict::Accept, "the target is held as a stub");
+    // A reply to the deleted message doesn't wait on it either.
+    let reply = self::message(2, 0, vec![message.id()], &heads);
+    assert_eq!(check_channel(&r, &reply, &store), Verdict::Accept);
+}
+
+/// A stub stands in only once an accepted delete or edit replaced it.
+/// Otherwise the verdict is pending on the stub's own ID: fetch the full
+/// record. A peer serving stubs can't make messages disappear.
+#[test]
+fn a_stub_without_an_accepted_replacement_is_pending() {
+    let (control, heads) = founded(&[1, 2]);
+    let r = resolver(&control);
+    let mut store = Store::default();
+    let message = message(1, 0, vec![], &heads);
+    let stub = store.prune(&message);
+    let fetch = Verdict::Pending { missing: vec![message.id()] };
+    assert_eq!(check_stub(&r, &stub, &store), fetch, "nothing replaced it");
+    // A delete that isn't accepted (a member deleting another's) doesn't count.
+    store.add(&delete(2, 0, &message, &heads));
+    assert_eq!(check_stub(&r, &stub, &store), fetch, "the delete is refused");
+    store.add(&delete(1, 1, &message, &heads));
+    assert_eq!(check_stub(&r, &stub, &store), Verdict::Accept);
+}
+
+/// An edit replaces the message's text, and a newer edit an older edit;
+/// a delete replaces both. Edits are pruned on the same terms.
+#[test]
+fn edits_replace_text_and_prune_too() {
+    let (control, heads) = founded(&[1]);
+    let r = resolver(&control);
+    let mut store = Store::default();
+    let message = message(1, 0, vec![], &heads);
+    let first = edit(1, 1, &message, vec![message.id()], &heads);
+    store.add(&message);
+    store.add(&first);
+    let message_stub = store.prune(&message);
+    assert_eq!(check_stub(&r, &message_stub, &store), Verdict::Accept, "replaced by the edit");
+
+    let first_stub = store.prune(&first);
+    let fetch = Verdict::Pending { missing: vec![first.id()] };
+    assert_eq!(check_stub(&r, &first_stub, &store), fetch, "the latest edit is still the text");
+    let second = edit(1, 2, &message, vec![message.id(), first.id()], &heads);
+    store.add(&second);
+    assert_eq!(check_stub(&r, &first_stub, &store), Verdict::Accept, "a newer edit replaced it");
+
+    // An older edit doesn't replace a newer one it doesn't descend from.
+    let second_stub = store.prune(&second);
+    assert_eq!(
+        check_stub(&r, &second_stub, &store),
+        Verdict::Pending { missing: vec![second.id()] }
+    );
+    store.add(&delete(1, 3, &message, &heads));
+    assert_eq!(check_stub(&r, &second_stub, &store), Verdict::Accept, "the delete replaced all");
+}
+
+/// A stub is judged like its record (a kicked author's backdated message
+/// stays voided). Pruning a reply doesn't take away its witness: the delete
+/// that replaced it descends from the message too and witnesses it.
+#[test]
+fn a_stub_is_judged_the_same_and_pruning_keeps_witnesses() {
+    let (mut control, heads) = founded(&[1, 2, 3]);
+    let mut store = Store::default();
+    let old_head = store.add(&message(3, 0, vec![], &heads));
+    let target = message(1, 0, vec![old_head], &heads);
+    let reply = message(2, 0, vec![target.id()], &heads);
+    let alone = message(1, 1, vec![old_head], &heads);
+    store.add(&target);
+    store.add(&reply);
+    store.add(&alone);
+    let moderator =
+        rec(0, 2, heads.clone(), Action::Grant { target: actor(3), role: Role::Moderator });
+    let kick = rec(
+        0,
+        3,
+        vec![moderator.id()],
+        Action::Kick { target: actor(1), cut: cut(&[(GENERAL, old_head)]) },
+    );
+    control.extend([moderator.clone(), kick.clone()]);
+    let r = resolver(&control);
+    assert_eq!(check_channel(&r, &target, &store), Verdict::Accept, "witnessed by the reply");
+
+    // 2 deletes their reply and it is pruned: the delete still witnesses.
+    store.add(&delete(2, 1, &reply, &heads));
+    store.prune(&reply);
+    assert_eq!(check_channel(&r, &target, &store), Verdict::Accept, "the delete saw it too");
+    // The kicked author's unwitnessed message, deleted by the moderator after
+    // the kick (a delete that knows the kick isn't a witness) and pruned:
+    // judged like the record, voided.
+    assert_eq!(check_channel(&r, &alone, &store), Verdict::Voided { by: kick.id() });
+    let cleanup = delete(3, 1, &alone, &[kick.id()]);
+    assert_eq!(check_channel(&r, &cleanup, &store), Verdict::Accept);
+    store.add(&cleanup);
+    let full = check_channel(&r, &alone, &store);
+    let stub = store.prune(&alone);
+    assert_eq!(check_stub(&r, &stub, &store), full);
+    assert_eq!(full, Verdict::Voided { by: kick.id() });
+}
+
+#[test]
+fn stubs_round_trip_through_the_store_format() {
+    let (_, heads) = founded(&[1]);
+    let message = message(1, 0, vec![], &heads);
+    let stub: Stub = message.prune().unwrap();
+    assert_eq!(Stub::decode(&stub.encode()).unwrap(), stub);
+    assert_eq!(Entry::Pruned(stub.clone()).id(), message.id());
+    assert!(rotation(1, 9, &heads).prune().is_none(), "rotations aren't pruned");
 }
