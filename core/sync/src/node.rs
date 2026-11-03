@@ -52,7 +52,7 @@ use rand_core::{OsRng, RngCore};
 use zeroize::Zeroizing;
 
 use crate::access::{self, Binder, Binding, Handle, ReadGate, ServerSecret};
-use crate::limits::{Acks, Pending, PerIp, RateLimiter, Refused};
+use crate::limits::{Acks, DialBackoff, Pending, PerIp, RateLimiter, Refused};
 use crate::store::MAX_HAVE;
 use crate::{
     log_name, log_of, valid_log_name, Append, Authorizer, ChannelId, NoStubs, Record, RecordId, Scope, ServerId, Store,
@@ -147,6 +147,10 @@ const MAX_PENDING_STUBS: usize = 10_000;
 /// of a relay restart (plus the discovery tick).
 const RELAY_BACKOFF_MIN: Duration = Duration::from_secs(1);
 const RELAY_BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// Re-dialling a peer from the DHT after failed dials (jittered): 5 s,
+/// doubling to 5 min.
+const DIAL_BACKOFF_MIN: Duration = Duration::from_secs(5);
+const DIAL_BACKOFF_MAX: Duration = Duration::from_secs(300);
 
 pub struct NodeConfig {
     /// Bootstrap/relay node, ending in /p2p/<peer id>.
@@ -393,6 +397,7 @@ impl Node {
             own: HashSet::new(),
             acks: Acks::new(ACKS_PER_AUTHOR, MAX_ACK_AUTHORS, ACK_TTL),
             soon: HashSet::new(),
+            dial_backoff: DialBackoff::new(DIAL_BACKOFF_MIN, DIAL_BACKOFF_MAX, MAX_TRACKED_PEERS),
             pending_stubs: HashMap::new(),
         };
         for log in config.logs {
@@ -708,6 +713,8 @@ struct Task {
     acks: Acks<(ServerId, PublicKey)>,
     /// Logs to pull again shortly (to pick up acks after writing).
     soon: HashSet<String>,
+    /// Peers from the DHT whose dials failed, and when to try them again.
+    dial_backoff: DialBackoff<PeerId>,
     /// Peers' stubs the stub gate couldn't accept yet, by id: stored with
     /// the delete or edit that replaced them when it arrives.
     pending_stubs: HashMap<RecordId, Stub>,
@@ -1010,6 +1017,7 @@ impl Task {
     fn on_swarm_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
         match event {
             SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, .. } => {
+                self.dial_backoff.connected(&peer_id);
                 if !self.admit_by_ip(connection_id, &endpoint) {
                     debug!(%peer_id, "too many connections from one address");
                     self.swarm.close_connection(connection_id);
@@ -1096,12 +1104,29 @@ impl Task {
                 // Reservation refused or lost: the next discovery tick asks again.
                 self.circuit = None;
             }
+            SwarmEvent::OutgoingConnectionError { peer_id: Some(peer), error, .. } if peer != self.relay_peer => {
+                // Back off this peer, and forget circuit addresses that failed
+                // (a reservation that ended): the relay denies each such dial.
+                self.dial_backoff.failed(peer, Instant::now(), |wait| jittered(wait, OsRng.next_u32()));
+                if let libp2p::swarm::DialError::Transport(failed) = &error {
+                    for (addr, _) in failed {
+                        if addr.iter().any(|p| p == Protocol::P2pCircuit) {
+                            self.swarm.behaviour_mut().kad.remove_address(&peer, addr);
+                        }
+                    }
+                }
+                debug!(%peer, %error, "dial failed");
+            }
             SwarmEvent::Behaviour(BehaviourEvent::Kad(kad::Event::OutboundQueryProgressed {
                 result: kad::QueryResult::GetClosestPeers(Ok(ok)),
                 ..
             })) => {
+                let now = Instant::now();
                 for peer in ok.peers {
-                    if peer.peer_id == *self.swarm.local_peer_id() || self.connected.contains(&peer.peer_id) {
+                    if peer.peer_id == *self.swarm.local_peer_id()
+                        || self.connected.contains(&peer.peer_id)
+                        || !self.dial_backoff.may_dial(&peer.peer_id, now)
+                    {
                         continue;
                     }
                     // Peer-supplied addresses: never let them point us into our own LAN.
