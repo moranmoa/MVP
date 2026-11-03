@@ -350,9 +350,82 @@ impl<K: Hash + Eq + Clone> Acks<K> {
     }
 }
 
+/// When a peer found through the DHT may be dialled again after failed
+/// dials: the wait doubles from `min` up to `max`, and a connection resets
+/// it. A peer whose relay reservation ended stays in DHT answers for a
+/// while; without this every node re-dialled its circuit every discovery
+/// round, and the relay denied each one.
+pub(crate) struct DialBackoff<K> {
+    peers: HashMap<K, (Duration, Instant)>,
+    min: Duration,
+    max: Duration,
+    max_peers: usize,
+}
+
+impl<K: Hash + Eq + Clone> DialBackoff<K> {
+    pub fn new(min: Duration, max: Duration, max_peers: usize) -> Self {
+        DialBackoff { peers: HashMap::new(), min, max, max_peers }
+    }
+
+    pub fn may_dial(&self, peer: &K, now: Instant) -> bool {
+        self.peers.get(peer).is_none_or(|(_, until)| now >= *until)
+    }
+
+    /// A dial failed: wait `jitter(wait)` before the next one, where the
+    /// wait doubles each time.
+    pub fn failed(&mut self, peer: K, now: Instant, jitter: impl FnOnce(Duration) -> Duration) {
+        if !self.peers.contains_key(&peer) && self.peers.len() >= self.max_peers {
+            self.peers.retain(|_, (_, until)| *until > now);
+            if self.peers.len() >= self.max_peers {
+                return;
+            }
+        }
+        let wait = match self.peers.get(&peer) {
+            Some((last, _)) => (*last * 2).min(self.max),
+            None => self.min,
+        };
+        self.peers.insert(peer, (wait, now + jitter(wait)));
+    }
+
+    pub fn connected(&mut self, peer: &K) {
+        self.peers.remove(peer);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_dials_back_off_per_peer_until_connected() {
+        let now = Instant::now();
+        let (min, max) = (Duration::from_secs(5), Duration::from_secs(300));
+        let mut backoff = DialBackoff::new(min, max, 2);
+        let same = |d: Duration| d;
+        assert!(backoff.may_dial(&"a", now));
+        backoff.failed("a", now, same);
+        assert!(!backoff.may_dial(&"a", now + Duration::from_secs(4)));
+        assert!(backoff.may_dial(&"a", now + min));
+        assert!(backoff.may_dial(&"b", now)); // per peer
+        // Doubling, capped.
+        let mut t = now;
+        let mut waits = Vec::new();
+        for _ in 0..8 {
+            backoff.failed("a", t, same);
+            let until = backoff.peers[&"a"].1;
+            waits.push((until - t).as_secs());
+            t = until;
+        }
+        assert_eq!(waits, [10, 20, 40, 80, 160, 300, 300, 300]);
+        // Discovery every 3 s now dials a dead circuit about once per 5 min.
+        backoff.connected(&"a");
+        assert!(backoff.may_dial(&"a", t));
+        // Bounded.
+        backoff.failed("b", now, same);
+        backoff.failed("c", now, same);
+        backoff.failed("d", now, same);
+        assert!(backoff.peers.len() <= 2);
+    }
 
     #[test]
     fn acks_are_capped_per_answer_per_author_and_in_time() {
