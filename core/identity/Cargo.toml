@@ -8,7 +8,7 @@ publish = false
 default = ["os-keychain"]
 # The real OS keychain (Windows Credential Manager, macOS Keychain, Linux
 # Secret Service). Without it only `MemoryStore` is available.
-os-keychain = ["dep:keyring"]
+os-keychain = ["dep:keyring", "dep:keyring-core"]
 
 [dependencies]
 records = { path = "../records" }
@@ -29,6 +29,12 @@ strsim = "0.11"
 # macOS Keychain, and Secret Service over zbus (pure Rust, so no libdbus is
 # linked in).
 keyring = { version = "4", optional = true }
+# MIT OR Apache-2.0. Entries with store modifiers (Windows: target name,
+# Local persistence). Already in the tree through keyring.
+keyring-core = { version = "1", optional = true }
+# MIT OR Apache-2.0. NFC for the app lock passphrase. Already in the tree
+# through bip39.
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 hex = "0.4"

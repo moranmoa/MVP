@@ -26,5 +26,5 @@ pub use phrase::{
 };
 #[cfg(feature = "os-keychain")]
 pub use store::OsKeychain;
-pub use store::{MemoryStore, SecretStore, StoreError};
-pub use vault::{Vault, VaultError, VaultState};
+pub use store::{MemoryStore, SecretStore, StoreError, KEYCHAIN_SERVICE};
+pub use vault::{Vault, VaultError, VaultState, ENTRY_RECOVERY_CHECK, ENTRY_SECRET};

@@ -5,10 +5,11 @@ use std::fmt;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use hkdf::Hkdf;
 use sha2::Sha256;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
-/// HKDF-Extract salt. Frozen: changing it changes every user's identity.
-const SALT: &[u8] = b"mvp/identity/v1";
+/// HKDF-Extract salt. Frozen for the alpha: changing it changes every
+/// user's identity.
+const SALT: &[u8] = b"mvs/identity/v1";
 /// HKDF-Expand labels. Each purpose has its own; none is a prefix of another
 /// once the fixed-length suffixes are counted.
 const INFO_IDENTITY: &[u8] = b"identity/ed25519";
@@ -45,9 +46,10 @@ pub struct Identity {
 
 impl Identity {
     pub(crate) fn from_seed(seed: &[u8; 64]) -> Identity {
-        let (prk, _) = Hkdf::<Sha256>::extract(Some(SALT), seed);
+        let (mut prk, _) = Hkdf::<Sha256>::extract(Some(SALT), seed);
         let mut prk_bytes = Zeroizing::new([0u8; KEY_LEN]);
         prk_bytes.copy_from_slice(&prk);
+        prk.as_mut_slice().zeroize();
         let signing = SigningKey::from_bytes(&expand(&prk_bytes, INFO_IDENTITY));
         let storage = StorageKey(expand(&prk_bytes, INFO_STORAGE));
         Identity { signing, storage, prk: prk_bytes }

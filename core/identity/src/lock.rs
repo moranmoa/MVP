@@ -15,6 +15,7 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rand_core::{OsRng, RngCore};
+use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroizing;
 
 const VERSION: u8 = 1;
@@ -29,9 +30,9 @@ const LOCKED_LEN: usize = HEADER_LEN + NONCE_LEN + ENTROPY_LEN + TAG_LEN;
 
 /// Upper bounds when reading a stored blob, so a corrupted entry cannot make
 /// unlocking take forever or exhaust memory.
-const MAX_M_KIB: u32 = 1 << 20; // 1 GiB
-const MAX_T: u32 = 64;
-const MAX_P: u32 = 16;
+const MAX_M_KIB: u32 = 256 * 1024; // 256 MiB
+const MAX_T: u32 = 10;
+const MAX_P: u32 = 8;
 
 /// Argon2id cost for the app lock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +53,22 @@ impl Default for LockParams {
     }
 }
 
+impl LockParams {
+    /// The lowest cost a new lock may use: OWASP's Argon2id minimum (19 MiB,
+    /// 2 passes, 1 lane).
+    pub const MIN: LockParams = LockParams { m_kib: 19 * 1024, t: 2, p: 1 };
+
+    fn at_least_min(self) -> bool {
+        self.m_kib >= LockParams::MIN.m_kib
+            && self.t >= LockParams::MIN.t
+            && self.p >= LockParams::MIN.p
+    }
+
+    fn within_max(self) -> bool {
+        self.m_kib <= MAX_M_KIB && self.t <= MAX_T && self.p <= MAX_P
+    }
+}
+
 pub(crate) enum Decoded {
     Plain(Zeroizing<[u8; ENTROPY_LEN]>),
     Locked,
@@ -61,6 +78,7 @@ pub(crate) enum Decoded {
 pub(crate) enum LockError {
     Corrupt,
     WrongPassphrase,
+    WeakParams,
 }
 
 pub(crate) fn encode_plain(entropy: &[u8; ENTROPY_LEN]) -> Zeroizing<Vec<u8>> {
@@ -87,6 +105,11 @@ pub(crate) fn seal(
     passphrase: &str,
     params: LockParams,
 ) -> Result<Vec<u8>, LockError> {
+    // Also refuse a cost above what `open` accepts, or the lock could never
+    // be opened.
+    if !params.at_least_min() || !params.within_max() {
+        return Err(LockError::WeakParams);
+    }
     let mut salt = [0u8; SALT_LEN];
     OsRng.fill_bytes(&mut salt);
     let mut nonce = [0u8; NONCE_LEN];
@@ -118,7 +141,7 @@ pub(crate) fn open(
     }
     let u32_at = |i: usize| u32::from_le_bytes(blob[i..i + 4].try_into().expect("4 bytes"));
     let params = LockParams { m_kib: u32_at(2), t: u32_at(6), p: u32_at(10) };
-    if params.m_kib > MAX_M_KIB || params.t > MAX_T || params.p > MAX_P {
+    if !params.within_max() {
         return Err(LockError::Corrupt);
     }
     let (header, rest) = blob.split_at(HEADER_LEN);
@@ -145,6 +168,9 @@ fn kek(
     let params =
         Params::new(params.m_kib, params.t, params.p, Some(32)).map_err(|_| LockError::Corrupt)?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    // NFC, so the same text typed on another OS or keyboard gives the same
+    // key (Hebrew niqqud and geresh can arrive composed or decomposed).
+    let passphrase: Zeroizing<String> = Zeroizing::new(passphrase.nfc().collect());
     let mut key = Zeroizing::new([0u8; 32]);
     argon
         .hash_password_into(passphrase.as_bytes(), salt, &mut *key)

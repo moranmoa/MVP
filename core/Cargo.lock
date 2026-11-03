@@ -1524,10 +1524,12 @@ dependencies = [
  "hex",
  "hkdf 0.12.4",
  "keyring",
+ "keyring-core",
  "rand_core 0.6.4",
  "records",
  "sha2 0.10.9",
  "strsim",
+ "unicode-normalization",
  "zeroize",
 ]
 

@@ -2,14 +2,33 @@
 
 use std::fmt;
 
+use sha2::{Digest, Sha256};
+
+use crate::derive::Identity;
 use crate::lock::{self, Decoded, LockError, LockParams};
 use crate::phrase::RecoveryPhrase;
 use crate::store::{SecretStore, StoreError};
 
-/// The 128-bit entropy, plain or app-locked. Everything else is derived.
-const ENTRY_SECRET: &str = "identity";
-/// Present once the user has passed the recovery-word check. Not secret.
-const ENTRY_CHECKED: &str = "recovery-check-done";
+/// Entry holding the 128-bit entropy, plain or app-locked. Everything else
+/// is derived. Frozen for the alpha.
+pub const ENTRY_SECRET: &str = "identity-secret-v1";
+/// Entry written once the user passes the recovery-word check. Holds a tag
+/// of the identity it was passed for (not secret), so a flag left over from
+/// another identity never counts. Frozen for the alpha.
+pub const ENTRY_RECOVERY_CHECK: &str = "identity-recovery-check-v1";
+const CHECK_TAG_DOMAIN: &[u8] = b"mvs/identity/recovery-check/v1";
+const CHECK_TAG_LEN: usize = 16;
+
+/// First 16 bytes of SHA-256(domain || identity public key).
+fn check_tag(identity: &Identity) -> [u8; CHECK_TAG_LEN] {
+    let digest = Sha256::new()
+        .chain_update(CHECK_TAG_DOMAIN)
+        .chain_update(identity.public_key().as_bytes())
+        .finalize();
+    let mut tag = [0u8; CHECK_TAG_LEN];
+    tag.copy_from_slice(&digest[..CHECK_TAG_LEN]);
+    tag
+}
 
 /// What the store holds right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,7 +50,11 @@ pub enum VaultError {
     /// The app lock is on; use [`Vault::unlock`].
     Locked,
     WrongPassphrase,
+    /// Empty or only whitespace.
     EmptyPassphrase,
+    /// [`Vault::with_lock_params`] was given a cost below [`LockParams::MIN`]
+    /// (or above what unlocking accepts).
+    WeakLockParams,
     /// The stored entry is unreadable.
     Corrupt,
     /// The user has not passed the recovery-word check yet. Creating a
@@ -54,6 +77,7 @@ impl fmt::Display for VaultError {
             VaultError::Locked => f.write_str("the app lock is on"),
             VaultError::WrongPassphrase => f.write_str("wrong app lock passphrase"),
             VaultError::EmptyPassphrase => f.write_str("the app lock passphrase is empty"),
+            VaultError::WeakLockParams => f.write_str("app lock cost is outside the allowed range"),
             VaultError::Corrupt => f.write_str("the stored identity is unreadable"),
             VaultError::RecoveryCheckRequired => f.write_str("recovery-word check required"),
         }
@@ -73,6 +97,7 @@ impl From<LockError> for VaultError {
         match e {
             LockError::Corrupt => VaultError::Corrupt,
             LockError::WrongPassphrase => VaultError::WrongPassphrase,
+            LockError::WeakParams => VaultError::WeakLockParams,
         }
     }
 }
@@ -90,7 +115,8 @@ impl<S: SecretStore> Vault<S> {
     }
 
     /// Argon2id cost for app locks set from now on. Existing locks keep the
-    /// cost they were made with.
+    /// cost they were made with. Below [`LockParams::MIN`], setting a lock
+    /// fails with [`VaultError::WeakLockParams`].
     pub fn with_lock_params(mut self, params: LockParams) -> Vault<S> {
         self.params = params;
         self
@@ -111,9 +137,10 @@ impl<S: SecretStore> Vault<S> {
     /// [`Vault::confirm_recovery_check`] (now or after a reminder).
     pub fn create(&self) -> Result<RecoveryPhrase, VaultError> {
         self.ensure_empty()?;
+        // Flag first: if this fails, nothing is stored yet.
+        self.store.delete(ENTRY_RECOVERY_CHECK)?;
         let phrase = RecoveryPhrase::generate();
         self.store.save(ENTRY_SECRET, &lock::encode_plain(&phrase.entropy()))?;
-        self.store.delete(ENTRY_CHECKED)?;
         Ok(phrase)
     }
 
@@ -122,7 +149,7 @@ impl<S: SecretStore> Vault<S> {
     pub fn restore(&self, phrase: &RecoveryPhrase) -> Result<(), VaultError> {
         self.ensure_empty()?;
         self.store.save(ENTRY_SECRET, &lock::encode_plain(&phrase.entropy()))?;
-        self.store.save(ENTRY_CHECKED, &[1])?;
+        self.store.save(ENTRY_RECOVERY_CHECK, &check_tag(&phrase.identity()))?;
         Ok(())
     }
 
@@ -145,9 +172,11 @@ impl<S: SecretStore> Vault<S> {
     }
 
     /// Turns the app lock on, or changes its passphrase. `current` is the
-    /// passphrase in use, `None` if there is no lock yet.
+    /// passphrase in use, `None` if there is no lock yet. Passphrases are
+    /// compared after Unicode NFC, so the same Hebrew text typed on another
+    /// OS still unlocks.
     pub fn set_app_lock(&self, current: Option<&str>, new: &str) -> Result<(), VaultError> {
-        if new.is_empty() {
+        if new.trim().is_empty() {
             return Err(VaultError::EmptyPassphrase);
         }
         let phrase = match current {
@@ -165,8 +194,11 @@ impl<S: SecretStore> Vault<S> {
         Ok(())
     }
 
-    pub fn recovery_check_done(&self) -> Result<bool, VaultError> {
-        Ok(self.store.load(ENTRY_CHECKED)?.is_some())
+    /// Whether the check was passed for this `identity`. A flag left by
+    /// another identity does not count.
+    pub fn recovery_check_done(&self, identity: &Identity) -> Result<bool, VaultError> {
+        let stored = self.store.load(ENTRY_RECOVERY_CHECK)?;
+        Ok(stored.is_some_and(|tag| tag.as_slice() == check_tag(identity)))
     }
 
     /// Records the check as passed if every answer matches. `answers` are
@@ -178,15 +210,15 @@ impl<S: SecretStore> Vault<S> {
     ) -> Result<bool, VaultError> {
         let ok = phrase.check_words(answers);
         if ok {
-            self.store.save(ENTRY_CHECKED, &[1])?;
+            self.store.save(ENTRY_RECOVERY_CHECK, &check_tag(&phrase.identity()))?;
         }
         Ok(ok)
     }
 
     /// Call before creating a server: the check can be postponed, but not
     /// past that.
-    pub fn require_recovery_check(&self) -> Result<(), VaultError> {
-        if self.recovery_check_done()? {
+    pub fn require_recovery_check(&self, identity: &Identity) -> Result<(), VaultError> {
+        if self.recovery_check_done(identity)? {
             Ok(())
         } else {
             Err(VaultError::RecoveryCheckRequired)
@@ -195,8 +227,8 @@ impl<S: SecretStore> Vault<S> {
 
     /// Deletes the identity from this device. Only the words bring it back.
     pub fn forget(&self) -> Result<(), VaultError> {
+        self.store.delete(ENTRY_RECOVERY_CHECK)?;
         self.store.delete(ENTRY_SECRET)?;
-        self.store.delete(ENTRY_CHECKED)?;
         Ok(())
     }
 

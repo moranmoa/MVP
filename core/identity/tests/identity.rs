@@ -1,6 +1,7 @@
 use identity::{
     check_positions, is_word, suggest, LockParams, MemoryStore, PhraseError, RecoveryPhrase,
-    SecretStore, Subkey, Vault, VaultError, VaultState, WORD_COUNT,
+    SecretStore, StoreError, Subkey, Vault, VaultError, VaultState, ENTRY_RECOVERY_CHECK,
+    ENTRY_SECRET, KEYCHAIN_SERVICE, WORD_COUNT,
 };
 
 const ABANDON: &str =
@@ -8,8 +9,8 @@ const ABANDON: &str =
 const LEGAL: &str = "legal winner thank year wave sausage worth useful legal winner thank yellow";
 const ZOO: &str = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong";
 
-/// Cheap Argon2id cost so the tests stay fast.
-const CHEAP: LockParams = LockParams { m_kib: 256, t: 1, p: 1 };
+/// The cheapest cost a lock may use, so the tests stay fast.
+const CHEAP: LockParams = LockParams::MIN;
 
 fn parse(words: &str) -> RecoveryPhrase {
     RecoveryPhrase::parse(words).expect("valid phrase")
@@ -53,21 +54,21 @@ fn derivation_vectors() {
     let vectors = [
         (
             ABANDON,
-            "ac20fde54abad8a65e772c0503b171075817b7aa33187cb5a028d7776e8897c3",
-            "27b8566b81e40bb9105c816c50deb3fc0ef7fd1d0be73a9ca76eee0e3c97b776",
-            "ed8ba6b74776e59c2a728c3a0b5839c99e22d36782a6a40b2a63b3eeccb3086f",
+            "286bcb2c389b909eaacb35cd3e70999f665fac768a97c56d0911a5b630a1899f",
+            "19c2f6189452071897d886a0760bbf3a25967660938491e6aec080369cb5ae7e",
+            "3da8d69912e964c5cc6851f48307caebb00dd78d875eddb7b8f1a9b708c6d73c",
         ),
         (
             LEGAL,
-            "26deff96806ea1c93e9764bd4cc26a90e3d790b3ca3d3a9263f65b09e289fd45",
-            "d71db4b555fe4535cf9b3af4073c3f98ddd758e878fe3af3af9e2ee40c6e73bb",
-            "5918170040e1803c78ab78d409650774d8b61686c787c747503361039228a609",
+            "10c9b2cd75b1c2cc6c4b9bca9421e85ee7350ba2641c4d0bfd123d44da2dc4fd",
+            "0d40f0b0543e252fe01b5a3c767f8ed34fec026e1bafbbd2a6566f893bd0fed4",
+            "309629642dd1b6429f0649aa151b5645b23adaa4262a24a02cb16fd01ab1e00b",
         ),
         (
             ZOO,
-            "f331d003edf20c15be53f87b16cd3de5b705b4ba746208fd9ef5039807b1b92c",
-            "634fe4e0769cc341cbc4cbb238fe23c3fb19f8a74de24b95250b88b024c1c03d",
-            "28493e23ce9b9c5e985e290259ce0e7f18971293583958042b34a96ba5feab57",
+            "0d72026f5e46534010058cb58fc4bfd04108965e773488446989154648ea4f43",
+            "b0fe92f9c2153f96ab749b47023447733b181ba292b4df91a3639086c9d2a4d7",
+            "fbebff33f4f3234ad508fc71083801087cf643e36c70f88d6e81d0936b7fd6ce",
         ),
     ];
     for (words, identity_pub, storage, device0_pub) in vectors {
@@ -135,7 +136,7 @@ fn restore_on_a_new_device() {
         first.open().unwrap().identity().public_key()
     );
     // Typing all 12 words is the recovery check.
-    assert!(second.recovery_check_done().unwrap());
+    assert!(second.recovery_check_done(&second.open().unwrap().identity()).unwrap());
 }
 
 #[test]
@@ -231,8 +232,9 @@ fn only_twelve_words_are_accepted() {
 fn recovery_check_can_wait_but_not_past_server_creation() {
     let vault = Vault::new(MemoryStore::new());
     let phrase = vault.create().unwrap();
-    assert!(!vault.recovery_check_done().unwrap());
-    assert_eq!(vault.require_recovery_check(), Err(VaultError::RecoveryCheckRequired));
+    let id = phrase.identity();
+    assert!(!vault.recovery_check_done(&id).unwrap());
+    assert_eq!(vault.require_recovery_check(&id), Err(VaultError::RecoveryCheckRequired));
 
     let positions = check_positions(3);
     assert_eq!(positions.len(), 3);
@@ -243,12 +245,12 @@ fn recovery_check_can_wait_but_not_past_server_creation() {
     assert!(!vault.confirm_recovery_check(&phrase, &wrong).unwrap());
     assert!(!vault.confirm_recovery_check(&phrase, &[]).unwrap());
     assert!(!vault.confirm_recovery_check(&phrase, &[(12, "abandon")]).unwrap());
-    assert!(vault.require_recovery_check().is_err());
+    assert!(vault.require_recovery_check(&id).is_err());
 
     let right: Vec<(usize, &str)> =
         positions.iter().map(|&p| (p, phrase.word(p).unwrap())).collect();
     assert!(vault.confirm_recovery_check(&phrase, &right).unwrap());
-    assert_eq!(vault.require_recovery_check(), Ok(()));
+    assert_eq!(vault.require_recovery_check(&id), Ok(()));
 }
 
 // --- Vault and app lock ----------------------------------------------------
@@ -281,7 +283,7 @@ fn app_lock() {
     assert_eq!(vault.unlock("סיסמה ארוכה").unwrap().identity().public_key(), expected);
 
     // The stored blob does not contain the entropy.
-    let blob = store.load("identity").unwrap().unwrap();
+    let blob = store.load(ENTRY_SECRET).unwrap().unwrap();
     assert!(!contains(&blob, &[0x7f; 16]));
 
     // Change the passphrase.
@@ -311,25 +313,25 @@ fn tampered_app_lock_is_rejected() {
     let vault = Vault::new(&store).with_lock_params(CHEAP);
     vault.restore(&parse(LEGAL)).unwrap();
     vault.set_app_lock(None, "pass").unwrap();
-    let blob = store.load("identity").unwrap().unwrap().to_vec();
+    let blob = store.load(ENTRY_SECRET).unwrap().unwrap().to_vec();
 
     // Flipping any byte after the format header fails: the cost and salt
     // are authenticated, the ciphertext and tag too.
     for i in 2..blob.len() {
         let mut bad = blob.clone();
         bad[i] ^= 1;
-        store.save("identity", &bad).unwrap();
+        store.save(ENTRY_SECRET, &bad).unwrap();
         assert!(vault.unlock("pass").is_err(), "byte {i}");
     }
     // A huge cost in a corrupted entry is refused before running Argon2.
     let mut huge = blob.clone();
     huge[2..6].copy_from_slice(&u32::MAX.to_le_bytes());
-    store.save("identity", &huge).unwrap();
+    store.save(ENTRY_SECRET, &huge).unwrap();
     assert_eq!(vault.unlock("pass").unwrap_err(), VaultError::Corrupt);
 
-    store.save("identity", &blob[..blob.len() - 1]).unwrap();
+    store.save(ENTRY_SECRET, &blob[..blob.len() - 1]).unwrap();
     assert_eq!(vault.state().unwrap_err(), VaultError::Corrupt);
-    store.save("identity", &blob).unwrap();
+    store.save(ENTRY_SECRET, &blob).unwrap();
     assert!(vault.unlock("pass").is_ok());
 }
 
@@ -352,7 +354,7 @@ fn debug_and_display_never_show_secrets() {
         id.storage_key().expose_secret().to_vec(),
         device.to_bytes().to_vec(),
     ];
-    secrets.push(store.load("identity").unwrap().unwrap().to_vec());
+    secrets.push(store.load(ENTRY_SECRET).unwrap().unwrap().to_vec());
 
     // A typo in every word, so the error carries suggestions.
     let typos: Vec<String> = phrase.words().iter().map(|w| format!("{w}x")).collect();
@@ -401,6 +403,119 @@ fn debug_and_display_never_show_secrets() {
     }
     // The public key may be shown, and is.
     assert!(format!("{id:?}").contains(&format!("{:?}", id.public_key())));
+}
+
+// --- Keychain names and the recovery-check flag -----------------------------
+
+/// Changing any of these makes existing identities invisible to the app.
+#[test]
+fn keychain_names_are_frozen() {
+    assert_eq!(KEYCHAIN_SERVICE, "io.github.moranmoa.mvs.identity.v1");
+    assert_eq!(ENTRY_SECRET, "identity-secret-v1");
+    assert_eq!(ENTRY_RECOVERY_CHECK, "identity-recovery-check-v1");
+
+    let store = MemoryStore::new();
+    let vault = Vault::new(&store);
+    vault.restore(&parse(LEGAL)).unwrap();
+    assert_eq!(
+        format!("{store:?}"),
+        r#"MemoryStore { names: ["identity-recovery-check-v1", "identity-secret-v1"] }"#
+    );
+}
+
+/// A store whose `delete` always fails, like a locked keychain.
+struct DeleteFails(MemoryStore);
+
+impl SecretStore for DeleteFails {
+    fn load(&self, name: &str) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, StoreError> {
+        self.0.load(name)
+    }
+    fn save(&self, name: &str, secret: &[u8]) -> Result<(), StoreError> {
+        self.0.save(name, secret)
+    }
+    fn delete(&self, _name: &str) -> Result<(), StoreError> {
+        Err(StoreError("delete refused".into()))
+    }
+}
+
+#[test]
+fn create_stores_nothing_if_the_old_flag_cannot_be_cleared() {
+    // A previous identity passed the check, then its secret went away but
+    // its flag stayed.
+    let store = DeleteFails(MemoryStore::new());
+    Vault::new(&store.0).restore(&parse(ZOO)).unwrap();
+    store.0.delete(ENTRY_SECRET).unwrap();
+
+    let vault = Vault::new(&store);
+    assert!(matches!(vault.create(), Err(VaultError::Store(_))));
+    assert_eq!(vault.state().unwrap(), VaultState::Empty);
+}
+
+#[test]
+fn a_leftover_flag_does_not_count_for_another_identity() {
+    let store = MemoryStore::new();
+    let vault = Vault::new(&store);
+    vault.restore(&parse(ZOO)).unwrap();
+    assert!(vault.recovery_check_done(&parse(ZOO).identity()).unwrap());
+    store.delete(ENTRY_SECRET).unwrap(); // the flag stays behind
+
+    let phrase = vault.create().unwrap();
+    let id = phrase.identity();
+    assert!(!vault.recovery_check_done(&id).unwrap());
+    assert_eq!(vault.require_recovery_check(&id), Err(VaultError::RecoveryCheckRequired));
+
+    // Even a flag that survives is bound to the identity it was passed for.
+    store.save(ENTRY_RECOVERY_CHECK, &[1]).unwrap();
+    assert!(!vault.recovery_check_done(&id).unwrap());
+    let answers: Vec<(usize, &str)> = (0..3).map(|p| (p, phrase.word(p).unwrap())).collect();
+    assert!(vault.confirm_recovery_check(&phrase, &answers).unwrap());
+    assert!(vault.recovery_check_done(&id).unwrap());
+    assert!(!vault.recovery_check_done(&parse(ZOO).identity()).unwrap());
+}
+
+// --- App lock cost and passphrase -------------------------------------------
+
+#[test]
+fn app_lock_cost_has_a_floor_and_a_ceiling() {
+    let weak = [
+        LockParams { m_kib: 8, t: 1, p: 1 },
+        LockParams { m_kib: CHEAP.m_kib - 1, ..CHEAP },
+        LockParams { t: 1, ..CHEAP },
+        LockParams { m_kib: 256 * 1024 + 1, ..CHEAP },
+        LockParams { t: 11, ..CHEAP },
+        LockParams { p: 9, ..CHEAP },
+    ];
+    for params in weak {
+        let vault = Vault::new(MemoryStore::new()).with_lock_params(params);
+        vault.restore(&parse(LEGAL)).unwrap();
+        assert_eq!(vault.set_app_lock(None, "pass"), Err(VaultError::WeakLockParams), "{params:?}");
+        assert_eq!(vault.state().unwrap(), VaultState::Ready);
+    }
+    assert!(LockParams::default().m_kib >= CHEAP.m_kib && LockParams::default().t >= CHEAP.t);
+}
+
+#[test]
+fn passphrase_is_compared_after_nfc() {
+    let vault = Vault::new(MemoryStore::new()).with_lock_params(CHEAP);
+    vault.restore(&parse(LEGAL)).unwrap();
+    // "é" precomposed vs. e + combining acute; Hebrew shin with its marks in
+    // either order (shin dot U+05C1, qamats U+05B8).
+    vault.set_app_lock(None, "caf\u{e9} \u{5e9}\u{5c1}\u{5b8}").unwrap();
+    assert!(vault.unlock("cafe\u{301} \u{5e9}\u{5b8}\u{5c1}").is_ok());
+    assert_eq!(vault.unlock("cafe \u{5e9}").unwrap_err(), VaultError::WrongPassphrase);
+}
+
+#[test]
+fn whitespace_passphrase_is_empty() {
+    let vault = Vault::new(MemoryStore::new()).with_lock_params(CHEAP);
+    vault.restore(&parse(LEGAL)).unwrap();
+    for passphrase in ["", " ", "\t\n", "\u{3000}"] {
+        assert_eq!(vault.set_app_lock(None, passphrase), Err(VaultError::EmptyPassphrase));
+    }
+    // Spaces inside or around a real passphrase are kept, not trimmed.
+    vault.set_app_lock(None, " a b ").unwrap();
+    assert_eq!(vault.unlock("a b").unwrap_err(), VaultError::WrongPassphrase);
+    assert!(vault.unlock(" a b ").is_ok());
 }
 
 // --- Helpers ---------------------------------------------------------------

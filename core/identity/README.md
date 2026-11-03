@@ -9,7 +9,7 @@ A user's identity, made from 12 recovery words ("מילות שחזור").
  └─ 12 words: BIP-39 English, 11 bits each, last 4 bits = SHA-256 checksum
      └─ seed = PBKDF2-HMAC-SHA512(words, "mnemonic", 2048 rounds) — 64 bytes
          (standard BIP-39 seed, empty BIP-39 passphrase)
-         └─ PRK = HKDF-SHA256-Extract(salt = "mvp/identity/v1", seed)
+         └─ PRK = HKDF-SHA256-Extract(salt = "mvs/identity/v1", seed)
              ├─ HKDF-Expand(PRK, "identity/ed25519", 32)  → Ed25519 identity key (the user's ID)
              ├─ HKDF-Expand(PRK, "local-storage/key", 32) → local storage encryption key
              └─ HKDF-Expand(PRK, "device/ed25519/" ‖ u32be(n), 32) → device key n (Subkey::Device)
@@ -21,9 +21,14 @@ A user's identity, made from 12 recovery words ("מילות שחזור").
 - Each key has its own HKDF label, so knowing one derived key tells nothing
   about another. New purposes get a new `Subkey` variant and a new label;
   existing labels never change.
-- The salt and labels are frozen. Changing them changes every user's
-  identity. If the project name should be in the salt, change it before the
-  alpha ships, not after.
+- **Frozen for the alpha** (product name MVS, "message voice stream"):
+  the HKDF salt `mvs/identity/v1` and the labels above, the keychain
+  service `io.github.moranmoa.mvs.identity.v1`, the entry names
+  `identity-secret-v1` and `identity-recovery-check-v1`, and the check-tag
+  domain `mvs/identity/recovery-check/v1`. Changing the salt or a label
+  changes every user's identity; changing a keychain name makes existing
+  identities invisible (the app would offer sign-up). Tests pin all of them
+  (`derivation_vectors`, `keychain_names_are_frozen`).
 - Device keys are for "link another device" (stage 3): the identity key
   signs a certificate for the device key, so a device can be revoked without
   touching the identity. A device may also use a random key instead; only
@@ -38,19 +43,25 @@ A user's identity, made from 12 recovery words ("מילות שחזור").
 
 | Store | Where |
 | --- | --- |
-| `OsKeychain` | Windows Credential Manager, macOS Keychain, Linux Secret Service (GNOME Keyring / KWallet). Feature `os-keychain`, on by default. |
+| `OsKeychain` | Windows Credential Manager, macOS Keychain, Linux Secret Service (GNOME Keyring / KWallet). Feature `os-keychain`, on by default. Always under service `KEYCHAIN_SERVICE`. On Windows: target name `<service>/<entry>` set explicitly (so no other app's `user.service` pair can collide with it) and persistence `Local`, so the credential never roams with an enterprise or roaming profile. |
 | `MemoryStore` | In memory, for tests. |
 
 Optional app lock: the entropy is sealed with XChaCha20-Poly1305 under a key
 from Argon2id(passphrase, random 16-byte salt). Default cost is RFC 9106's
 second recommendation (64 MiB, 3 passes, 4 lanes); the cost is stored with
-the entry and authenticated, so it can be raised later. Unlocking a
-corrupted entry with an absurd cost is refused before Argon2 runs.
+the entry and authenticated, so it can be raised later. A new lock needs at
+least OWASP's minimum (`LockParams::MIN`: 19 MiB, 2 passes); a stored cost
+above 256 MiB, 10 passes or 8 lanes is refused before Argon2 runs. The
+passphrase is NFC-normalised first, so the same Hebrew text with niqqud or
+a geresh unlocks on any OS. A passphrase of only whitespace is refused.
 
 The recovery-word check (`confirm_recovery_check`) can be postponed, but
-`require_recovery_check()` fails with `RecoveryCheckRequired` (the UI's
-`recovery-check-required`) until it passes. Call it before creating a
-server. Restoring from all 12 words counts as passing it.
+`require_recovery_check(&identity)` fails with `RecoveryCheckRequired` (the
+UI's `recovery-check-required`) until it passes. Call it before creating a
+server. Restoring from all 12 words counts as passing it. The flag stores
+the first 16 bytes of SHA-256(`mvs/identity/recovery-check/v1` ‖ public
+key), so a flag left over from another identity never counts, and `create`
+clears the old flag before it stores anything.
 
 ## Restore screen
 
@@ -64,6 +75,10 @@ checksum mismatch (all words valid but one is wrong or two are swapped).
 
 Words typed with the Hebrew keyboard layout on by mistake are mapped to the
 letter on the same key: "שנשמגםמ" is "abandon".
+
+The list is standard BIP-39, so someone could paste a crypto wallet's 12
+words into restore. That can't be detected; the restore screen should say
+"never use words from a crypto wallet".
 
 ## Why not a Hebrew word list
 
@@ -99,12 +114,19 @@ aid only.
   the typed word or the suggestions), `MemoryStore` (entry names only) and
   `VaultError` is redacted. The crate does not log. Test:
   `debug_and_display_never_show_secrets`.
+- `Identity` keeps the HKDF PRK (zeroized on drop) so subkeys can be derived
+  later. It is no more sensitive than the identity key held next to it.
 - Without the app lock, the entropy is as safe as the OS keychain: other
   software running as the same user may be able to read it. The app lock
   protects it at rest against that, at the cost of a passphrase that, if
   forgotten, needs the 12 words.
 - The OS keychain is only reached through `SecretStore`; tests never touch
   it.
+- **No secret store, no identity.** On Linux without a running Secret
+  Service (headless, minimal window managers), and on Android and iOS
+  (keyring has no store there), `OsKeychain` returns an error and nothing
+  is stored; there is deliberately no silent fallback. Open design item: a
+  fallback such as an encrypted file with the app lock made mandatory.
 
 ## Dependencies and licences
 
@@ -115,11 +137,18 @@ aid only.
 | hkdf, sha2, argon2, chacha20poly1305 | MIT OR Apache-2.0 | KDF, app lock |
 | zeroize, rand_core | MIT OR Apache-2.0 | |
 | strsim | MIT | Typo distance |
-| keyring 4 | MIT OR Apache-2.0 | OS keychain |
+| keyring 4, keyring-core 1 | MIT OR Apache-2.0 | OS keychain |
+| unicode-normalization | MIT OR Apache-2.0 | NFC for the app lock passphrase |
 
 keyring's default stores are used. On Linux it talks to the Secret Service
-over zbus (pure Rust), so no libdbus (AFL/GPL) is linked. `cargo-deny`
-passes with `core/deny.toml`.
+over zbus (pure Rust), so no libdbus (AFL/GPL) is linked. `cargo-deny check
+licenses sources bans` passes with `core/deny.toml`.
+
+Known advisories (non-blocking CI job): zbus 5.19 brings three RustSec
+"unmaintained" notices, RUSTSEC-2026-0370 (`zvariant`), -0371
+(`zbus_names`) and -0372 (`zvariant_derive`). Not vulnerabilities; revisit
+when keyring's zbus store moves on. Switching to the `dbus-secret-service`
+store to avoid them is not an option: it links libdbus.
 
 ## Tests
 

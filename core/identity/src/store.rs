@@ -81,24 +81,55 @@ impl<S: SecretStore + ?Sized> SecretStore for &S {
     }
 }
 
+/// The keychain service every entry of this app lives under. Frozen for the
+/// alpha: changing it makes existing identities invisible (the app would
+/// offer sign-up again).
+pub const KEYCHAIN_SERVICE: &str = "io.github.moranmoa.mvs.identity.v1";
+
 /// The OS keychain: Windows Credential Manager, macOS Keychain, or the
-/// Secret Service on Linux (GNOME Keyring, KWallet). Entries are
-/// (`service`, name) pairs.
+/// Secret Service on Linux (GNOME Keyring, KWallet). Every entry is under
+/// [`KEYCHAIN_SERVICE`]; there is no way to pick another service.
+///
+/// On Windows the credential's target name is `<service>/<name>` (set
+/// explicitly, so no other `user.service` pair can collide with it) and its
+/// persistence is `Local`: never copied into a roaming profile.
 #[cfg(feature = "os-keychain")]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct OsKeychain {
-    service: String,
+    _private: (),
 }
 
 #[cfg(feature = "os-keychain")]
 impl OsKeychain {
-    pub fn new(service: impl Into<String>) -> OsKeychain {
-        OsKeychain { service: service.into() }
+    pub fn new() -> OsKeychain {
+        OsKeychain::default()
     }
 
-    fn entry(&self, name: &str) -> Result<keyring::Entry, StoreError> {
-        keyring::Entry::new(&self.service, name).map_err(platform)
+    fn entry(&self, name: &str) -> Result<keyring_core::Entry, StoreError> {
+        // Sets up the platform's default store on first use.
+        if let Err(e) = keyring::Entry::store_status() {
+            return Err(StoreError(e.to_string()));
+        }
+        let owned = modifiers(name);
+        let mods: HashMap<&str, &str> = owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        keyring_core::Entry::new_with_modifiers(KEYCHAIN_SERVICE, name, &mods).map_err(platform)
     }
+}
+
+#[cfg(all(feature = "os-keychain", target_os = "windows"))]
+fn modifiers(name: &str) -> HashMap<&'static str, String> {
+    HashMap::from([("target", windows_target(name)), ("persistence", "Local".to_owned())])
+}
+
+#[cfg(all(feature = "os-keychain", not(target_os = "windows")))]
+fn modifiers(_name: &str) -> HashMap<&'static str, String> {
+    HashMap::new()
+}
+
+#[cfg(feature = "os-keychain")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_target(name: &str) -> String {
+    format!("{KEYCHAIN_SERVICE}/{name}")
 }
 
 #[cfg(feature = "os-keychain")]
@@ -106,7 +137,7 @@ impl SecretStore for OsKeychain {
     fn load(&self, name: &str) -> Result<Option<Zeroizing<Vec<u8>>>, StoreError> {
         match self.entry(name)?.get_secret() {
             Ok(secret) => Ok(Some(Zeroizing::new(secret))),
-            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(keyring_core::Error::NoEntry) => Ok(None),
             Err(e) => Err(platform(e)),
         }
     }
@@ -117,19 +148,32 @@ impl SecretStore for OsKeychain {
 
     fn delete(&self, name: &str) -> Result<(), StoreError> {
         match self.entry(name)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
             Err(e) => Err(platform(e)),
         }
     }
 }
 
 #[cfg(feature = "os-keychain")]
-fn platform(error: keyring::Error) -> StoreError {
+fn platform(error: keyring_core::Error) -> StoreError {
     match error {
         // These two carry the stored bytes; never put them in a message.
-        keyring::Error::BadEncoding(_) | keyring::Error::BadDataFormat(..) => {
+        keyring_core::Error::BadEncoding(_) | keyring_core::Error::BadDataFormat(..) => {
             StoreError("stored value has an unexpected format".into())
         }
         other => StoreError(other.to_string()),
+    }
+}
+
+#[cfg(all(test, feature = "os-keychain"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_target_is_frozen() {
+        assert_eq!(
+            windows_target("identity-secret-v1"),
+            "io.github.moranmoa.mvs.identity.v1/identity-secret-v1"
+        );
     }
 }
