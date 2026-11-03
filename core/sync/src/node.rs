@@ -260,6 +260,9 @@ enum Command {
     State { log: String, reply: oneshot::Sender<Result<LogState>> },
     Presence { server: ServerId, reply: oneshot::Sender<PresenceState> },
     Peers { reply: oneshot::Sender<Vec<PeerId>> },
+    ListenAddrs { reply: oneshot::Sender<Vec<Multiaddr>> },
+    #[cfg(test)]
+    Served { peer: PeerId, log: String, reply: oneshot::Sender<usize> },
     Prune { id: RecordId, reply: oneshot::Sender<Result<bool>> },
     Shutdown { reply: oneshot::Sender<()> },
 }
@@ -422,6 +425,8 @@ impl Node {
             own: HashSet::new(),
             acks: Acks::new(ACKS_PER_AUTHOR, MAX_ACK_AUTHORS, ACK_TTL),
             soon: HashSet::new(),
+            #[cfg(test)]
+            served: HashMap::new(),
             presence: Presence::default(),
             last_seen: HashMap::new(),
             reached: false,
@@ -500,6 +505,22 @@ impl Node {
         let (reply, rx) = oneshot::channel();
         self.send(Command::Prune { id, reply })?;
         rx.await?
+    }
+
+    /// The addresses the node listens on right now (empty until the listener
+    /// is up; a relay circuit shows once reserved).
+    /// Tests: how many entries our pull answers to `peer` for `log` carried.
+    #[cfg(test)]
+    async fn served(&self, peer: PeerId, log: &str) -> usize {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::Served { peer, log: log.into(), reply }).unwrap();
+        rx.await.unwrap()
+    }
+
+    pub async fn listen_addrs(&self) -> Result<Vec<Multiaddr>> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::ListenAddrs { reply })?;
+        Ok(rx.await?)
     }
 
     pub async fn peers(&self) -> Result<Vec<PeerId>> {
@@ -681,7 +702,7 @@ impl ReadCheck {
 
 /// A finished answer: who asked, where to reply, the page, and the bytes
 /// reserved for it when the request came in.
-type Answer = (PeerId, ResponseChannel<SyncResponse>, SyncResponse, usize, Vec<RecordId>);
+type Answer = (PeerId, ResponseChannel<SyncResponse>, SyncResponse, usize, Vec<RecordId>, String);
 /// A pulled page after decoding: (peer, log), the records that verified
 /// and belong to the log, and whether the peer said there is more.
 type Decoded = ((PeerId, String), Vec<Incoming>, bool, Vec<RecordId>);
@@ -749,6 +770,9 @@ struct Task {
     acks: Acks<(ServerId, PublicKey)>,
     /// Logs to pull again shortly (to pick up acks after writing).
     soon: HashSet<String>,
+    /// Tests: entries served per (peer, log).
+    #[cfg(test)]
+    served: HashMap<(PeerId, String), usize>,
     /// Who is online, per server (M2).
     presence: Presence,
     last_seen: HashMap<ServerId, SystemTime>,
@@ -875,6 +899,13 @@ impl Task {
             }
             Command::Prune { id, reply } => {
                 let _ = reply.send(self.store.prune(&id, &*self.stub_gate).map_err(Into::into));
+            }
+            #[cfg(test)]
+            Command::Served { peer, log, reply } => {
+                let _ = reply.send(self.served.get(&(peer, log)).copied().unwrap_or(0));
+            }
+            Command::ListenAddrs { reply } => {
+                let _ = reply.send(self.swarm.listeners().cloned().collect());
             }
             Command::Peers { reply } => {
                 let _ = reply.send(self.connected.iter().copied().collect());
@@ -1289,7 +1320,7 @@ impl Task {
         let answers = self.answers.clone();
         tokio::task::spawn_blocking(move || {
             let Ok(store) = store.lock() else {
-                let _ = answers.send((peer, channel, empty_response(), max_bytes, Vec::new()));
+                let _ = answers.send((peer, channel, empty_response(), max_bytes, Vec::new(), log));
                 return;
             };
             let (mut response, ids) = match gate {
@@ -1297,7 +1328,7 @@ impl Task {
                 _ => answer_with_ids(&store, &log, &request.have, max_bytes),
             };
             for_members_only(&mut response, ours, &acks, &store);
-            let _ = answers.send((peer, channel, response, max_bytes, ids));
+            let _ = answers.send((peer, channel, response, max_bytes, ids, log));
         });
     }
 
@@ -1327,7 +1358,11 @@ impl Task {
     /// Sends a finished answer, charges its size to the byte budgets, and
     /// reports our own records in it that leave this device for the first time.
     fn send_answer(&mut self, answer: Answer) {
-        let (peer, channel, response, reserved, ids) = answer;
+        let (peer, channel, response, reserved, ids, _log) = answer;
+        #[cfg(test)]
+        {
+            *self.served.entry((peer, _log)).or_default() += response.records.len();
+        }
         for id in ids {
             if self.unsent.remove(&id) {
                 self.emit(NodeEvent::Sent { id });
@@ -2163,8 +2198,21 @@ mod tests {
         }
     }
 
-    fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    /// The TCP port `node` actually listens on (it was started on port 0).
+    /// Tests used to pick a free port first and bind it later; on Windows a
+    /// parallel test could get the same port in between, and nodes of two
+    /// tests then met each other.
+    async fn port_of(node: &Node) -> u16 {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            for addr in node.listen_addrs().await.unwrap() {
+                if let Some(Protocol::Tcp(port)) = addr.iter().find(|p| matches!(p, Protocol::Tcp(_))) {
+                    return port;
+                }
+            }
+            assert!(Instant::now() < deadline, "node never listened");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     async fn test_node(name: &str, listen: Option<u16>, bootstrap: Option<u16>, access: Access) -> Node {
@@ -2208,13 +2256,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_message_is_sent_then_delivered_once_a_member_stored_it() {
         use crate::testutil::{message, test_key};
-        let secret = ServerSecret::from_bytes([9; 32]);
+        let secret = ServerSecret::from_bytes([10; 32]);
         let key = |n: u8| -> Option<Arc<dyn Binder>> { Some(Arc::new(test_key(n))) };
-        let port = free_port();
         // The author (test key 1, who signs `message`) counts only key 0 as a member.
         let members: Arc<dyn ReadGate> = Arc::new(OnlyReader(test_key(0).identity()));
         let (author, mut events) =
-            test_node_events("author", Some(port), None, Access { binder: key(1), read_gate: Some(members), stub_gate: None }).await;
+            test_node_events("author", None, None, Access { binder: key(1), read_gate: Some(members), stub_gate: None }).await;
+        let port = port_of(&author).await;
         author.open_server(server(), secret.clone()).unwrap();
         author.open_channel(server(), channel()).await.unwrap();
 
@@ -2271,10 +2319,10 @@ mod tests {
         use crate::testutil::{genesis, message, test_key};
         let secret = ServerSecret::from_bytes([9; 32]);
         let key = |n: u8| -> Option<Arc<dyn Binder>> { Some(Arc::new(test_key(n))) };
-        let port = free_port();
         // The owner's node serves channels to test key 1 only.
         let reader: Arc<dyn ReadGate> = Arc::new(OnlyReader(test_key(1).identity()));
-        let owner = test_node("owner", Some(port), None, Access { binder: key(0), read_gate: Some(reader), stub_gate: None }).await;
+        let owner = test_node("owner", None, None, Access { binder: key(0), read_gate: Some(reader), stub_gate: None }).await;
+        let port = port_of(&owner).await;
         owner.open_server(server(), secret.clone()).unwrap();
         owner.open_channel(server(), channel()).await.unwrap();
         owner.append(genesis()).await.unwrap();
@@ -2289,7 +2337,21 @@ mod tests {
             node
         };
         let member = peer("member", key(1), secret.clone()).await;
-        let stranger = peer("stranger", key(2), secret.clone()).await;
+        // The stranger's stored records, with how they came (pull or push).
+        let (stranger, mut events) =
+            test_node_events("stranger", None, Some(port), Access { binder: key(2), read_gate: None, stub_gate: None })
+                .await;
+        stranger.open_server(server(), secret.clone()).unwrap();
+        stranger.open_channel(server(), channel()).await.unwrap();
+        let stored = Arc::new(Mutex::new(Vec::<(String, RecordId, Via)>::new()));
+        let log_events = stored.clone();
+        tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                if let NodeEvent::Stored { log, record, via, .. } = event {
+                    log_events.lock().unwrap().push((log, record.id(), via));
+                }
+            }
+        });
         let unbound = peer("unbound", None, secret.clone()).await;
         let outsider = peer("outsider", key(1), ServerSecret::from_bytes([8; 32])).await;
         let by_name = test_node("by-name", None, Some(port), Access::default()).await;
@@ -2305,9 +2367,29 @@ mod tests {
         let first = message(0, &[], 0);
         owner.append(message(1, &[first.id()], 0)).await.unwrap();
         eventually(&member, (1, 2), 20).await;
-        // Past another anti-entropy round: the rest still have nothing more.
-        tokio::time::sleep(ANTI_ENTROPY + Duration::from_secs(1)).await;
-        assert_eq!(counts(&stranger).await, (1, 0), "a bound non-member pulled a channel");
+        // A control record written after all that: once the stranger has it,
+        // its later pulls (control and channel alike) have been answered. No
+        // fixed sleep; the stranger's own progress is the clock.
+        let later = crate::testutil::post(1, &[genesis().id()]);
+        owner.append(later.clone()).await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !stored.lock().unwrap().iter().any(|(_, id, _)| *id == later.id()) {
+            assert!(Instant::now() < deadline, "the stranger stopped syncing its control log");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        tokio::time::sleep(ANTI_ENTROPY).await; // one more full round of pulls
+        // The security property: no channel record ever reached the bound
+        // non-member *by pull*. (Sealed gossip to a secret holder is the
+        // documented GAP-4b residual; it only got m1, which waits for m0.)
+        let pulled: Vec<_> = stored.lock().unwrap().iter().filter(|(log, _, via)| *log == chan() && *via == Via::Pull).cloned().collect();
+        assert!(pulled.is_empty(), "a bound non-member pulled a channel: {pulled:?}");
+        // And at the source: the owner's answers to the stranger carried
+        // control records but not one channel entry. So this checks the
+        // ReadGate path itself, not gossip.
+        assert!(owner.served(stranger.peer_id(), &log_name(server(), Scope::Control)).await >= 1);
+        assert_eq!(owner.served(stranger.peer_id(), &chan()).await, 0, "the owner served the channel to a non-member");
+        assert!(owner.served(member.peer_id(), &chan()).await >= 1);
+        assert_eq!(counts(&stranger).await, (2, 0));
         assert_eq!(counts(&unbound).await, (0, 0), "a pull without a binding was answered");
         assert_eq!(counts(&outsider).await, (0, 0), "a wrong secret was answered");
         assert_eq!(counts(&by_name).await, (0, 0), "a sealed log was served by its plain name");
@@ -2330,7 +2412,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn two_nodes_sync_over_websocket() {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let node = |name: &str, listen: String, bootstrap: Vec<Multiaddr>| {
             let dir = std::env::temp_dir().join(format!("sync-ws-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
@@ -2345,7 +2426,8 @@ mod tests {
                 allow_lan: true,
             }
         };
-        let (a, _a_events) = Node::start(node("a", format!("/ip4/127.0.0.1/tcp/{port}/ws"), vec![])).await.unwrap();
+        let (a, _a_events) = Node::start(node("a", "/ip4/127.0.0.1/tcp/0/ws".into(), vec![])).await.unwrap();
+        let port = port_of(&a).await;
         let ws = format!("/ip4/127.0.0.1/tcp/{port}/ws").parse().unwrap();
         let (b, _b_events) = Node::start(node("b", "/ip4/127.0.0.1/tcp/0".into(), vec![ws])).await.unwrap();
         a.append(crate::testutil::message(0, &[], 0)).await.unwrap();
@@ -2365,8 +2447,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn members_are_online_within_5_s_and_offline_within_30_s_of_leaving() {
         use crate::testutil::test_key;
-        let secret = ServerSecret::from_bytes([9; 32]);
-        let port = free_port();
+        let secret = ServerSecret::from_bytes([11; 32]);
         let id = |n: u8| test_key(n).identity();
         let node = |name: &'static str, n: u8, listen, bootstrap, gate: Arc<dyn ReadGate>| {
             let secret = secret.clone();
@@ -2378,7 +2459,8 @@ mod tests {
             }
         };
         // The owner (key 0) counts key 1 as a member, not key 2.
-        let owner = node("p-owner", 0, Some(port), None, Arc::new(OnlyReader(id(1)))).await;
+        let owner = node("p-owner", 0, None, None, Arc::new(OnlyReader(id(1)))).await;
+        let port = port_of(&owner).await;
         let started = Instant::now();
         let member = node("p-member", 1, None, Some(port), Arc::new(AcceptAll)).await;
         let stranger = node("p-stranger", 2, None, Some(port), Arc::new(AcceptAll)).await;
@@ -2442,9 +2524,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_newcomer_gets_the_stub_of_a_message_everyone_pruned() {
         use crate::testutil::{delete, message, DeletedOnly};
-        let port = free_port();
         let access = || Access { stub_gate: Some(Arc::new(DeletedOnly)), ..Access::default() };
-        let old = test_node("pruner", Some(port), None, access()).await;
+        let old = test_node("pruner", None, None, access()).await;
+        let port = port_of(&old).await;
         old.open(&chan()).unwrap();
         let m = message(0, &[], 100);
         let d = delete(1, &m);
