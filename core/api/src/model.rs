@@ -171,20 +171,35 @@ pub(crate) struct Log {
     pending: HashMap<RecordId, (Record, usize)>,
     /// Missing dep -> pending records waiting on it.
     waiting: HashMap<RecordId, Vec<RecordId>>,
+    /// This server's channel records, in the order they arrived. TODO:
+    /// bound them (per-channel windows, as sync pages).
+    pub channel: Vec<Record>,
+    server: ServerId,
+    channel_ids: HashSet<RecordId>,
+    /// `KeyRotation` records already handed to the cipher.
+    pub rotations_applied: HashSet<RecordId>,
 }
 
 impl Log {
     pub fn new(server: ServerId, records: impl IntoIterator<Item = Record>) -> Log {
-        Log::with_resolver(Resolver::new(server), records)
+        Log::with_resolver(server, Resolver::new(server), records)
     }
 
-    fn with_resolver(resolver: Resolver, records: impl IntoIterator<Item = Record>) -> Log {
+    fn with_resolver(
+        server: ServerId,
+        resolver: Resolver,
+        records: impl IntoIterator<Item = Record>,
+    ) -> Log {
         let mut log = Log {
             records: Vec::new(),
             resolver,
             joined: HashSet::new(),
             pending: HashMap::new(),
             waiting: HashMap::new(),
+            channel: Vec::new(),
+            server,
+            channel_ids: HashSet::new(),
+            rotations_applied: HashSet::new(),
         };
         for record in records {
             log.add(record);
@@ -200,7 +215,19 @@ impl Log {
         // makes authority re-resolve in full (a CPU lever).
         let id = record.id();
         match self.resolver.insert(record.clone()) {
-            Inserted::Ignored => Vec::new(),
+            // Not a control record of ours: keep this server's channel
+            // records (authority judges them on read, see `chat`).
+            Inserted::Ignored => {
+                let ours = record.server() == self.server
+                    && matches!(record.scope(), Scope::Channel(_))
+                    && self.channel_ids.insert(id);
+                if ours {
+                    self.channel.push(record.clone());
+                    vec![record]
+                } else {
+                    Vec::new()
+                }
+            }
             Inserted::Pending { evicted } => {
                 if let Some(old) = evicted {
                     self.forget(&old.id());
@@ -444,7 +471,7 @@ mod tests {
             .unwrap()
         };
         let mut log =
-            Log::with_resolver(Resolver::with_pending_limit(server, 2), [genesis.clone()]);
+            Log::with_resolver(server, Resolver::with_pending_limit(server, 2), [genesis.clone()]);
 
         // Three orphans, room for two: the oldest is dropped.
         let orphans: Vec<Record> =
