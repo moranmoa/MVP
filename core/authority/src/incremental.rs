@@ -12,6 +12,12 @@
 //!   before records that are by or about that target, only those records are
 //!   judged again, and so on for any role they in turn change. Nothing else in
 //!   the log is touched.
+//! - A join changes only its author's membership, and is handled like a
+//!   grant. Invites and revoke-invites change no roles. Whether a join is
+//!   accepted also depends on its invite, the invite's revokes and its other
+//!   joins (the use limit); when one of those could judge differently, or a
+//!   later join or revoke of the same invite is already applied, the resolver
+//!   re-resolves.
 //! - A removal that voids records already applied falls back to a full
 //!   re-resolve, and so does a change in which removals were accepted.
 //!
@@ -25,7 +31,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use records::{Record, RecordId, Scope, ServerId};
 
-use crate::{apply, full_run, permitted, Action, Actor, Role, State, View, Write};
+use crate::{apply, full_run, permitted, Action, Actor, Invite, Role, State, View, Write};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -97,6 +103,10 @@ pub struct Resolver {
     by_author: HashMap<Actor, Vec<RecordId>>,
     /// Actor -> records by or about them, in linear order.
     touch: HashMap<Actor, Vec<RecordId>>,
+    /// Invite -> the joins and the revoke-invites naming it, in linear order,
+    /// accepted or not.
+    invite_joins: HashMap<RecordId, Vec<RecordId>>,
+    invite_revokes: HashMap<RecordId, Vec<RecordId>>,
 
     // What the reference run would hold for the joined records.
     state: State,
@@ -136,6 +146,8 @@ impl Resolver {
             actions: HashMap::new(),
             by_author: HashMap::new(),
             touch: HashMap::new(),
+            invite_joins: HashMap::new(),
+            invite_revokes: HashMap::new(),
             state: State::default(),
             writes: HashMap::new(),
             genesis: None,
@@ -247,6 +259,17 @@ impl Resolver {
             let i = list.partition_point(|other| pos[other] < at);
             list.insert(i, id);
         }
+        let named = match &action {
+            Some(Action::Join { invite }) => Some((&mut self.invite_joins, *invite)),
+            Some(Action::RevokeInvite { invite }) => Some((&mut self.invite_revokes, *invite)),
+            _ => None,
+        };
+        if let Some((lists, invite)) = named {
+            let list = lists.entry(invite).or_default();
+            let pos = &self.pos;
+            let i = list.partition_point(|other| pos[other] < at);
+            list.insert(i, id);
+        }
         self.actions.insert(id, action);
 
         self.stats.joined += 1;
@@ -309,13 +332,32 @@ impl Resolver {
                 }
                 return Ok(());
             }
+            Action::Invite { .. } | Action::RevokeInvite { .. } => {
+                return self.apply_invite_record(id, at, &action, voided, allowed);
+            }
+            Action::Join { invite } => {
+                // Its own acceptance may differ between passes. That only
+                // matters through the joiner's later records, so if there
+                // are none yet, mark the joiner unsettled and judge it by
+                // the final pass.
+                if self.join_is_shaky(id, at, invite)? || self.is_unsettled(author) {
+                    if self.owner_unsettled || self.touch[&author].last() != Some(&id) {
+                        return Err(Fallback::Other);
+                    }
+                    self.unsettled.insert(author);
+                }
+                author
+            }
             Action::Grant { target, .. } | Action::Revoke { target } | Action::Kick { target } => {
                 target
             }
         };
 
         // From here on the record is judged the same way in every pass.
-        if self.owner_unsettled || self.is_unsettled(author) || self.is_unsettled(target) {
+        let shaky_join = matches!(action, Action::Join { .. }) && self.is_unsettled(author);
+        if !shaky_join
+            && (self.owner_unsettled || self.is_unsettled(author) || self.is_unsettled(target))
+        {
             return Err(Fallback::Other);
         }
         let removal = action.is_removal();
@@ -346,7 +388,99 @@ impl Resolver {
             }
         }
         self.accept_write(id, &action);
+        if let Action::Join { invite } = action {
+            self.refresh_invite(invite);
+        }
         self.propagate(at, target)
+    }
+
+    /// A join is judged against its invite, the invite's revokes and the
+    /// invite's earlier joins. Returns whether any of those could have been
+    /// judged differently in an earlier pass of the reference. Falls back
+    /// when this join lands ahead of another join it competes with for a use.
+    fn join_is_shaky(&self, id: RecordId, at: usize, invite: RecordId) -> Result<bool, Fallback> {
+        let record = &self.known[&id];
+        // Without its invite in deps the join is refused in every pass.
+        if !record.deps().contains(&invite) {
+            return Ok(false);
+        }
+        let Some(Action::Invite { max_uses, .. }) = self.actions[&invite] else {
+            return Ok(false);
+        };
+        let shaky = |other: &RecordId| {
+            self.excluded.contains(other) || self.is_unsettled(self.known[other].author())
+        };
+        let others = || self.invite_joins.get(&invite).into_iter().flatten();
+        if max_uses != 0 && others().any(|other| *other != id && self.pos[other] > at) {
+            return Err(Fallback::Other);
+        }
+        Ok(shaky(&invite)
+            || self.invite_revokes.get(&invite).into_iter().flatten().any(shaky)
+            || (max_uses != 0 && others().any(|other| *other != id && shaky(other))))
+    }
+
+    /// Applies a new invite or revoke-invite. Neither changes a role; what
+    /// they change is which joins are accepted. An invite can't have joins
+    /// or revokes yet (they depend on it). A revoke-invite that lands ahead
+    /// of already-applied joins or revokes of the same invite falls back.
+    /// If either could be judged differently in an earlier pass, a later
+    /// join through the invite finds out from `excluded` and `unsettled`
+    /// (see [`Self::join_is_shaky`]).
+    fn apply_invite_record(
+        &mut self,
+        id: RecordId,
+        at: usize,
+        action: &Action,
+        voided: bool,
+        allowed: bool,
+    ) -> Result<(), Fallback> {
+        if self.owner_unsettled {
+            return Err(Fallback::Other);
+        }
+        let invite = match action {
+            Action::RevokeInvite { invite } => {
+                let invite = *invite;
+                let later = |list: Option<&Vec<RecordId>>| {
+                    list.into_iter().flatten().any(|other| *other != id && self.pos[other] > at)
+                };
+                if later(self.invite_joins.get(&invite)) || later(self.invite_revokes.get(&invite))
+                {
+                    return Err(Fallback::Other);
+                }
+                invite
+            }
+            _ => id,
+        };
+        if voided {
+            self.excluded.insert(id);
+        } else if allowed {
+            self.state.accepted.insert(id);
+            self.refresh_invite(invite);
+        }
+        Ok(())
+    }
+
+    /// Recomputes an invite's entry in the state from its accepted joins and
+    /// revokes.
+    fn refresh_invite(&mut self, invite: RecordId) {
+        let Some(Some(Action::Invite { expires_ms, max_uses })) = self.actions.get(&invite) else {
+            return;
+        };
+        if !self.state.accepted.contains(&invite) {
+            self.state.invites.remove(&invite);
+            return;
+        }
+        let accepted = |list: Option<&Vec<RecordId>>| {
+            list.into_iter().flatten().filter(|id| self.state.accepted.contains(*id)).count()
+        };
+        let entry = Invite {
+            author: self.known[&invite].author(),
+            expires_ms: *expires_ms,
+            max_uses: *max_uses,
+            uses: u32::try_from(accepted(self.invite_joins.get(&invite))).unwrap_or(u32::MAX),
+            revoked: accepted(self.invite_revokes.get(&invite)) > 0,
+        };
+        self.state.invites.insert(invite, entry);
     }
 
     /// Judges again the records after `at` that are by or about an actor
@@ -359,8 +493,12 @@ impl Resolver {
                 continue;
             };
             let author = self.known[&id].author();
+            // Whose role history the record is judged against.
             let target = action.target();
-            if !dirty.contains(&author) && !target.is_some_and(|t| dirty.contains(&t)) {
+            let inviter =
+                action.invite().and_then(|invite| self.known.get(&invite)).map(|r| r.author());
+            let involved = [Some(author), target, inviter];
+            if !involved.iter().flatten().any(|actor| dirty.contains(actor)) {
                 continue;
             }
             let action = action.clone();
@@ -371,8 +509,8 @@ impl Resolver {
                 _ if self.excluded.contains(&id) => return Err(Fallback::Other),
                 _ => {}
             }
-            if target.is_some()
-                && (self.is_unsettled(author) || target.is_some_and(|t| self.is_unsettled(t)))
+            if !matches!(action, Action::Post { .. })
+                && involved.iter().flatten().any(|actor| self.is_unsettled(*actor))
             {
                 return Err(Fallback::Other);
             }
@@ -404,6 +542,11 @@ impl Resolver {
                 }
                 // Removals accepted differently void different records.
                 Action::Revoke { .. } | Action::Kick { .. } => return Err(Fallback::Voids),
+                // These change which joins are accepted, and joins compete
+                // for an invite's uses.
+                Action::Invite { .. } | Action::RevokeInvite { .. } | Action::Join { .. } => {
+                    return Err(Fallback::Other)
+                }
                 Action::Genesis => unreachable!("skipped above"),
             }
         }
@@ -419,6 +562,11 @@ impl Resolver {
                 self.state.kicked.insert(actor);
             } else {
                 self.state.kicked.remove(&actor);
+            }
+            if last.is_some_and(|w| w.member) || self.state.owner == Some(actor) {
+                self.state.members.insert(actor);
+            } else {
+                self.state.members.remove(&actor);
             }
         }
         Ok(())
@@ -478,7 +626,12 @@ impl Resolver {
             self.order = run.order;
             self.pos = self.order.iter().enumerate().map(|(i, id)| (*id, i)).collect();
             let pos = &self.pos;
-            for list in self.touch.values_mut() {
+            for list in self
+                .touch
+                .values_mut()
+                .chain(self.invite_joins.values_mut())
+                .chain(self.invite_revokes.values_mut())
+            {
                 list.sort_by_key(|id| pos[id]);
             }
         }
@@ -523,5 +676,33 @@ impl View for AtPosition<'_> {
 
     fn is_kicked(&self, actor: Actor) -> bool {
         self.last_write(actor).is_some_and(|w| w.kicked)
+    }
+
+    fn has_joined(&self, actor: Actor) -> bool {
+        self.last_write(actor).is_some_and(|w| w.member)
+    }
+
+    /// The invite with the joins and revokes accepted before this position.
+    fn invite(&self, id: RecordId) -> Option<Invite> {
+        let r = self.resolver;
+        if !r.state.accepted.contains(&id) || r.pos.get(&id).is_none_or(|pos| *pos >= self.at) {
+            return None;
+        }
+        let Some(Some(Action::Invite { expires_ms, max_uses })) = r.actions.get(&id) else {
+            return None;
+        };
+        let before = |list: Option<&'_ Vec<RecordId>>| {
+            list.into_iter()
+                .flatten()
+                .filter(|other| r.pos[*other] < self.at && r.state.accepted.contains(*other))
+                .count()
+        };
+        Some(Invite {
+            author: r.known[&id].author(),
+            expires_ms: *expires_ms,
+            max_uses: *max_uses,
+            uses: u32::try_from(before(r.invite_joins.get(&id))).unwrap_or(u32::MAX),
+            revoked: before(r.invite_revokes.get(&id)) > 0,
+        })
     }
 }

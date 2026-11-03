@@ -30,3 +30,24 @@ pub fn genesis() -> Record {
 pub fn rec(author: u8, seq: u64, deps: Vec<RecordId>, action: Action) -> Record {
     sign_control(&key(author), server(), seq, deps, 0, &action).expect("valid test record")
 }
+
+/// Like [`rec`], with an author-claimed timestamp.
+pub fn rec_ts(author: u8, seq: u64, deps: Vec<RecordId>, ts: u64, action: Action) -> Record {
+    sign_control(&key(author), server(), seq, deps, ts, &action).expect("valid test record")
+}
+
+/// The genesis, an unlimited invite by the owner, and a join through it by
+/// each of `joiners`. Returns the records and the heads to build on.
+pub fn founded(joiners: &[u8]) -> (Vec<Record>, Vec<RecordId>) {
+    let g = genesis();
+    let invite = rec(0, 1, vec![g.id()], Action::Invite { expires_ms: 0, max_uses: 0 });
+    let joins: Vec<Record> = joiners
+        .iter()
+        .map(|&n| rec(n, 0, vec![invite.id()], Action::Join { invite: invite.id() }))
+        .collect();
+    let heads =
+        if joins.is_empty() { vec![invite.id()] } else { joins.iter().map(Record::id).collect() };
+    let mut records = vec![g, invite];
+    records.extend(joins);
+    (records, heads)
+}

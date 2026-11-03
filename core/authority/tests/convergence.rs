@@ -8,24 +8,39 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use authority::{resolve, Action, Inserted, Record, RecordId, Resolver, Role, State, Stats};
-use common::{actor, genesis, rec, server};
+use common::{actor, genesis, rec_ts, server};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
+use records::Kind;
 
 const ACTORS: u8 = 5;
 const SCENARIOS: u64 = 10_000;
 const DELIVERIES_PER_SCENARIO: usize = 3;
 
-fn random_action(rng: &mut StdRng, author: u8) -> Action {
+/// A random action; joins and revoke-invites name one of `invites`, the
+/// invites the author has seen.
+fn random_action(rng: &mut StdRng, author: u8, invites: &[RecordId]) -> Action {
     let target = actor(rng.gen_range(0..ACTORS));
-    match rng.gen_range(0..4) {
+    match rng.gen_range(0..8) {
         0 => {
             let role = *[Role::Member, Role::Moderator, Role::Admin].choose(rng).unwrap();
             Action::Grant { target, role }
         }
         1 => Action::Revoke { target },
         2 => Action::Kick { target },
+        5 => Action::Invite {
+            expires_ms: *[0, 30, 60].choose(rng).unwrap(),
+            max_uses: rng.gen_range(0..3),
+        },
+        6 | 7 if !invites.is_empty() => {
+            let invite = *invites.choose(rng).unwrap();
+            if rng.gen_bool(0.75) {
+                Action::Join { invite }
+            } else {
+                Action::RevokeInvite { invite }
+            }
+        }
         _ => Action::Post { text: format!("from {author}") },
     }
 }
@@ -56,9 +71,15 @@ fn random_scenario(rng: &mut StdRng, steps: usize) -> Vec<Record> {
             let theirs = known[other].clone();
             known[a].extend(theirs);
         } else {
-            let deps = heads(&known[a], &all);
-            let action = random_action(rng, actor);
-            let record = rec(actor, seq[a], deps, action);
+            let mut deps = heads(&known[a], &all);
+            let invites: Vec<RecordId> =
+                known[a].iter().copied().filter(|id| all[id].kind() == Kind::Invite).collect();
+            let action = random_action(rng, actor, &invites);
+            if let Action::Join { invite } | Action::RevokeInvite { invite } = &action {
+                deps.push(*invite);
+            }
+            // Timestamps around the invite expiries above.
+            let record = rec_ts(actor, seq[a], deps, rng.gen_range(0..100), action);
             seq[a] += 1;
             known[a].insert(record.id());
             all.insert(record.id(), record.clone());
@@ -91,6 +112,8 @@ fn deliver_in_random_order(records: &[Record], rng: &mut StdRng, seed: u64) -> (
 #[test]
 fn all_delivery_orders_converge() {
     let mut accepted_removals = 0usize;
+    let mut joined_members = 0usize;
+    let mut used_up_or_revoked = 0usize;
     let mut totals = Stats::default();
     for seed in 0..SCENARIOS {
         let mut rng = StdRng::seed_from_u64(seed);
@@ -98,6 +121,12 @@ fn all_delivery_orders_converge() {
         let records = random_scenario(&mut rng, steps);
         let expected = resolve(server(), &records);
         accepted_removals += expected.kicked.len();
+        joined_members += expected.members.len().saturating_sub(1);
+        used_up_or_revoked += expected
+            .invites
+            .values()
+            .filter(|i| i.revoked || (i.max_uses != 0 && i.uses == i.max_uses))
+            .count();
 
         for _ in 0..DELIVERIES_PER_SCENARIO {
             let (state, stats) = deliver_in_random_order(&records, &mut rng, seed);
@@ -110,10 +139,13 @@ fn all_delivery_orders_converge() {
     }
     // Guard against a generator that never exercises the hard cases.
     assert!(accepted_removals > 0, "no scenario accepted a kick");
+    assert!(joined_members > 0, "no scenario accepted a join");
+    assert!(used_up_or_revoked > 0, "no invite was used up or revoked");
     println!(
         "{SCENARIOS} scenarios x {DELIVERIES_PER_SCENARIO} delivery orders converged, \
-         incremental == resolve(held) after every arrival; {accepted_removals} kicks accepted \
-         overall; {} records joined, {} applied incrementally, {} full re-resolves ({} of them for voids)",
+         incremental == resolve(held) after every arrival; {accepted_removals} kicks, \
+         {joined_members} members joined, {used_up_or_revoked} invites used up or revoked \
+         overall; {} records joined the log, {} applied incrementally, {} full re-resolves ({} of them for voids)",
         totals.joined, totals.incremental, totals.rebuilds, totals.rebuilds_for_voids
     );
 }
