@@ -60,10 +60,25 @@ describe('mvs:// links from the OS', () => {
     expect(join).not.toHaveBeenCalled();
   });
 
-  it('cleanInviteLink accepts only the canonical format', () => {
-    expect(cleanInviteLink(` ${LINK}/ `)).toBe(LINK);
-    expect(cleanInviteLink(`${LINK}x`)).toBe('');
-    expect(cleanInviteLink(42)).toBe('');
-    expect(cleanInviteLink(LINK + ' '.repeat(300))).toBe('');
+  it('cleanInviteLink accepts only server/invite/secret, three lower-case 64-hex parts (GAP-4)', () => {
+    const [S, I, K] = ['a', 'b', 'e'].map((c) => c.repeat(64));
+    expect(LINK).toHaveLength(205);
+    expect(cleanInviteLink(LINK)).toBe(LINK);
+    expect(cleanInviteLink(` ${LINK}/ `)).toBe(LINK); // trimmed, trailing slash dropped
+    expect(cleanInviteLink(LINK.toUpperCase())).toBe(LINK); // canonical lower case
+    for (const bad of [
+      `mvs://join/${S}/${I}`, // the old 2-part form: no secret
+      `mvs://join/${S}/${I}/${K}/${K}`, // a 4th part
+      `mvs://join/${S}/${I}/${K.slice(1)}`, // 63 hex
+      `mvs://join/${S}/${I}/${'g'.repeat(64)}`, // not hex
+      `mvs://join/${S}//${K}`, // empty part
+      `${LINK}x`,
+      `${LINK}?x=1`,
+      LINK + ' '.repeat(300), // over 256 characters
+      42,
+      null,
+    ]) {
+      expect(cleanInviteLink(bad), String(bad)).toBe('');
+    }
   });
 });
