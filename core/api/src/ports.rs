@@ -82,6 +82,11 @@ impl Clock for FixedClock {
 /// an event is a hint, never the data. Treat a gap (a sequence number that
 /// skips, or a `Lagged` event) as "re-read the store", and `Record::decode`
 /// every record at ingest (GAP-1) before it reaches the core.
+///
+/// For sync's `Authorizer` (#55): `ControlLog` decodes the whole control log
+/// for every channel record, so cache the monotone verdict ("owner, or has
+/// a stored Join") per author per server, and drop the cache when a new
+/// control record arrives.
 pub trait Network: Send + Sync {
     /// Offers a record we made or accepted to peers of its server.
     fn publish(&self, record: &Record);
