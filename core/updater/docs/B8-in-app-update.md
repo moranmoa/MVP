@@ -1,8 +1,68 @@
 # B8: in-app update, design note
 
-Status: **proposal**. File split pending agreement with dev-voice-shell
-(`desktop/`) and devops (`release.yml`). core/api changes go through the
-tech lead (owner: dev-identity). Security review: sec-lead.
+Status: **approved** by the tech lead and the security lead, with the
+amendments in §0 (PR #101). B8-1 is #108. core/api changes go through the
+tech lead (owner: dev-identity); `desktop/` through dev-voice-shell;
+`release.yml` and `manifest-body.mjs` through devops.
+
+## 0. Decisions and amendments (review of #101)
+
+These override anything below that disagrees.
+
+**Tech lead:**
+- **Data on rollback.** Before any schema migration, `mvs-core` copies
+  `core.db` to `core.db.pre-<schema>`, fsynced, with the same owner-only
+  ACL/0600 as `core.db`. Only the last snapshot is kept, and it is deleted
+  once the new version commits (`markHealthy`). On rollback, the **launcher**
+  restores it before the old version starts. Sync re-fetches whatever
+  arrived after the update. The keychain and `node.key` are never touched.
+- **core/api.** The surface in §8 is approved. Exact JSON shapes go into
+  `CONFORMANCE.md` in B8-2, and dev-identity builds it after M1.
+- **The launcher** is the only binary an update never replaces; only the
+  installer updates it. It is tiny, has no network access, and verifies
+  nothing itself: it picks a version and counts boots.
+
+**Security lead:**
+- **A1. Paths.** The launcher never takes a path from `state.json`. It
+  parses a `Version` and builds `versions/<v>/MVS[.exe]` itself; anything
+  else counts as a failed start. It spawns with no shell and forwards argv
+  **verbatim**, including the `--` before an `mvs://` link (#78). The only
+  thing it adds is `--mvs-update-root=<root>`.
+- **A2. Allow-list.** `checkForUpdate`, `downloadUpdate`, `applyUpdate`
+  and `markHealthy` are main/core-only and are **not** in
+  `desktop/src/commands.js`. The renderer keeps only `restartToUpdate`. A
+  broken UI must never be able to declare itself healthy.
+- **A3. Unpacking** (adds to §5):
+  - no `:` in names (NTFS streams), no trailing dot or space;
+  - no entries that collide case-insensitively, on every platform;
+  - files are created with `create_new` and `O_NOFOLLOW`; symlinks (Linux
+    only) are created **last**, after every regular file;
+  - path length is capped (each component ≤ 255 bytes, the whole path
+    ≤ 1024).
+- **A4. Redirects.** Only exact GitHub asset hosts are allowed
+  (`objects.githubusercontent.com`, `release-assets.githubusercontent.com`),
+  never `*.githubusercontent.com`.
+- **A5. Snapshot.** As the tech lead decided above: owner-only, deleted on
+  commit, restored by the launcher's rollback path.
+- **A6. State files.** `state.json`, `policy.json` and `root.json` are
+  validated on load and can never lower the baseline. If the launcher
+  cannot read `state.json`, it starts the version recorded as `previous` in
+  `state.json.bak`, the last good copy, written before each change. If that
+  also fails, it starts the **installer's version**, which is baked into the
+  launcher at build time. It never starts "whatever is there".
+
+**Devops (#103):**
+- **Discovery.** Each channel has a fixed-tag release, `update-<channel>`
+  (`update-alpha` now). It holds `manifest.json` and `root-*.json`, which
+  the owner re-uploads after signing. Base URL:
+  `https://github.com/moranmoa/MVP/releases/download/update-<channel>/`,
+  baked in at build time.
+- **Payload.** devops archives the `*-unpacked` folder itself: contents at
+  the archive root, `mvs-launcher` explicitly excluded, same file name. The
+  desktop job builds `mvs-launcher` into `desktop/.core/` next to
+  `mvs-core`, and dev-voice-shell's packaging places it.
+- **Channels.** UI `stable` maps to `alpha` during the closed alpha.
+- **Notes.** `manifest-body.mjs --notes-dir` is #111 (after #108).
 
 Spec: `docs/spec.md` "עדכונים", which requires:
 - signed updates with automatic rollback;
@@ -106,9 +166,9 @@ pub trait UpdateSource {
 ```
 
 - `HttpsSource`: GitHub release assets on a fixed per-channel URL, with the
-  base URL baked in at build time (asked of devops). Client: `ureq` with
-  rustls, no cookies, `https://` only, redirects only to
-  `*.githubusercontent.com`, timeouts, and a byte cap on every body.
+  base URL baked in at build time (`update-<channel>`, §0). Client: `ureq`
+  with rustls, no cookies, `https://` only, redirects only to the exact
+  hosts in A4, timeouts, and a byte cap on every body.
   - TLS is for privacy, not integrity: integrity is the signature and the hash.
 - `P2pSource` plus the project seeder come after the relay is live (T4),
   behind the same trait. It verifies the hash before forwarding, which is
@@ -123,7 +183,9 @@ is verified by hash first, then unpacked by a new `unpack` module into
 `versions/<v>.partial`.
 
 - Entries must be relative paths with no `..`, no absolute paths, no drive
-  letters, no NUL, and no Windows-reserved names.
+  letters, no NUL, and no Windows-reserved names. Plus the A3 rules: no
+  `:`, no trailing dot or space, no case collisions, length caps, and
+  symlinks created last.
 - No symlinks, hardlinks or device files. Exception: on Linux, symlinks that
   stay inside the folder (Electron needs `.so` symlinks); they are resolved
   and checked.
@@ -174,10 +236,13 @@ is verified by hash first, then unpacked by a new `unpack` module into
    - The `--update-root` argument and the 6-hour timer.
    - I'll provide an `updater::client::Updater` facade so the core/api part
      is thin glue.
-   - **Data compatibility:** a rollback runs the previous version on data
-     the new one may have migrated. Rule: schema changes must be readable by
-     the previous version, or the core snapshots the DB before the first
-     migration and restores it on rollback. Needs dev-identity's decision.
+   - **Data compatibility (decided, §0):** the core snapshots the DB before
+     migrating, and the launcher restores it on rollback. The core records
+     the snapshot in `update/db-snapshot.json`, as a version and a file
+     name; the launcher only accepts a plain file name inside the core data
+     folder. The launcher derives that folder the way Electron's
+     `userData` does (`%APPDATA%\MVS\core`, `$XDG_CONFIG_HOME/MVS/core`),
+     and the shell passes the same folder to the core.
 3. **devops (`release.yml`):** the fixed manifest URL per channel;
    `mvs-launcher` in `CORE_BINS`; the payload is the unpacked app folder;
    `--notes-dir`.
