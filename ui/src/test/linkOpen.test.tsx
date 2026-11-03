@@ -1,7 +1,7 @@
 // B1-3 (#78): an mvs:// link from the OS opens the join dialog pre-filled and
 // never joins on its own; only the Join button does.
 
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from '../app/App';
 import type { Settings } from '../app/settings';
@@ -17,6 +17,10 @@ async function setup() {
   const join = vi.spyOn(core, 'joinServer');
   render(<App core={core} initialSettings={settings} />);
   await screen.findByRole('textbox', { name: /^Message / });
+  // React subscribes in a passive effect, which may run after the composer is
+  // on screen: wait for Shell's link.open subscription before sending links.
+  const listeners = (core as unknown as { listeners: Map<string, Set<unknown>> }).listeners;
+  await waitFor(() => expect(listeners.get('link.open')?.size ?? 0).toBeGreaterThan(0));
   const openLink = (link: string) =>
     act(() => (core as unknown as { emit: (e: 'link.open', p: CoreEvents['link.open']) => void }).emit('link.open', { link }));
   return { join, openLink };
