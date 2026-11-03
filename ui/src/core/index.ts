@@ -10,8 +10,9 @@ export * from './types';
  * Picks the core implementation. In the desktop app (B1, Electron) the preload
  * script exposes `window.mvs` and the real core is reached over IPC; the URL
  * flags are ignored there. Anywhere else (browser, tests, screenshots) it is
- * the mock. Either way App wraps the result in guardCore() once, so what the
- * core returns is cleaned before the UI sees it.
+ * the mock. Either way App (src/app/App.tsx) wraps the result in guardCore()
+ * once, so what the core returns is cleaned before the UI sees it. Don't wrap
+ * it again here, and don't hand App a core any other way.
  *
  * URL flags for the mock (handy for demos and screenshots):
  *   ?demo=1          start signed in with sample servers
