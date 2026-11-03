@@ -1,73 +1,43 @@
-import { useMemo, useRef, useState, type FormEvent } from 'react';
+// The recovery-words screen and the 3-word check (B19, spec
+// docs/ux/specs/B19-recovery-words.md). The words are never in the page until
+// someone chooses to show them, and the check uses the challenge the core
+// picked, so nothing here can be used to guess the words one by one.
+
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
-import { useCore } from '../../core';
-import { AlertIcon } from '../../components/icons';
+import { isCoreError, useCore } from '../../core';
+import { AlertIcon, CheckIcon } from '../../components/icons';
 
 /**
  * Numbered grid of the 12 words, read down the columns (1–4, 5–8, 9–12) and
- * always LTR. Until `revealed`, the words are not in the page at all (only
- * dots), so a stream, a screenshot or a screen reader can't pick them up.
+ * always LTR. Without `words` it shows only dots: the real words are not in
+ * the DOM, so a stream, a screenshot or a screen reader can't pick them up.
  */
-export function WordGrid({ words, revealed = true, onReveal }: { words: string[]; revealed?: boolean; onReveal?: () => void }) {
+export function WordGrid({ words }: { words: string[] | null }) {
   const intl = useIntl();
   return (
-    <div className="word-grid-wrap">
     <ol
-      className={`word-grid words-shown ${revealed ? '' : 'words-hidden'}`}
+      id="word-grid"
+      className={`word-grid words-shown ${words ? '' : 'words-hidden'}`}
       dir="ltr"
-      aria-label={intl.formatMessage({ id: 'onb.words.gridLabel' })}
+      aria-label={intl.formatMessage({ id: words ? 'onb.words.gridLabel' : 'onb.words.gridHidden' })}
       // The words are meant for paper. Copying would leave them in the clipboard,
       // where other apps and clipboard history can read them.
       onCopy={(e) => e.preventDefault()}
       onCut={(e) => e.preventDefault()}
       onDragStart={(e) => e.preventDefault()}
     >
-      {words.map((w, i) => (
-        <li key={i}>
-          <span className="word-num" aria-hidden="true">
-            {i + 1}
-          </span>
-          {revealed ? (
-            <span className="word">{w}</span>
+      {Array.from({ length: 12 }, (_, i) => (
+        <li key={i} aria-hidden={words ? undefined : true}>
+          <span className="word-num">{i + 1}.</span>
+          {words ? (
+            <span className="word">{words[i]}</span>
           ) : (
-            <span className="word word-mask" aria-hidden="true">
-              •••••
-            </span>
+            <span className="word word-mask">•••••</span>
           )}
         </li>
       ))}
     </ol>
-    {!revealed && (
-      <div className="word-reveal">
-        <p className="muted small">
-          <FormattedMessage id="onb.words.hiddenHint" />
-        </p>
-        <button type="button" className="primary" onClick={onReveal}>
-          <FormattedMessage id="onb.words.reveal" />
-        </button>
-      </div>
-    )}
-    </div>
-  );
-}
-
-/**
- * The words screen: warning, hidden grid, and "I wrote them down", which only
- * works once the words were shown. Used in onboarding and to show them again
- * from the reminder (QA-01).
- */
-export function RecoveryWordsPanel({ words, onDone }: { words: string[]; onDone: () => void }) {
-  const [revealed, setRevealed] = useState(false);
-  return (
-    <>
-      <WordsWarning />
-      <WordGrid words={words} revealed={revealed} onReveal={() => setRevealed(true)} />
-      <div className="actions">
-        <button type="button" className="primary" onClick={onDone} disabled={!revealed}>
-          <FormattedMessage id="onb.words.written" />
-        </button>
-      </div>
-    </>
   );
 }
 
@@ -89,16 +59,105 @@ export function WordsWarning() {
   );
 }
 
-function pickPositions(): number[] {
-  const all = Array.from({ length: 12 }, (_, i) => i + 1);
-  for (let i = all.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [all[i], all[j]] = [all[j], all[i]];
-  }
-  return all.slice(0, 3).sort((a, b) => a - b);
+type Load = { state: 'hidden' } | { state: 'loading' } | { state: 'shown'; words: string[] } | { state: 'error'; cancelled: boolean };
+
+/**
+ * The words screen: warning, hidden grid, one show/hide button, and "I wrote
+ * them down", which only works after the words were shown once. `load` gets
+ * the words (from memory in onboarding, `getRecoveryWords()` after a reload or
+ * from the reminder, where the real core asks for OS authentication).
+ */
+export function RecoveryWordsPanel({ load, onDone }: { load: () => Promise<string[]>; onDone: () => void }) {
+  const intl = useIntl();
+  const [view, setView] = useState<Load>({ state: 'hidden' });
+  const [seen, setSeen] = useState(false);
+
+  const toggle = async () => {
+    if (view.state === 'shown') {
+      setView({ state: 'hidden' });
+      return;
+    }
+    setView({ state: 'loading' });
+    try {
+      const words = await load();
+      setView({ state: 'shown', words });
+      setSeen(true);
+    } catch (e) {
+      setView({ state: 'error', cancelled: isCoreError(e) && e.code === 'auth-cancelled' });
+    }
+  };
+
+  const shown = view.state === 'shown';
+  return (
+    <>
+      <WordsWarning />
+      {intl.locale === 'he' && (
+        <p className="muted small">
+          <FormattedMessage id="onb.words.english" />
+        </p>
+      )}
+      <div className="word-grid-wrap">
+        <WordGrid words={shown ? view.words : null} />
+        {!shown && (
+          <div className="word-reveal">
+            {view.state === 'error' ? (
+              <p className="error" role="alert">
+                <FormattedMessage id={view.cancelled ? 'onb.words.authCancelled' : 'onb.words.loadError'} />
+              </p>
+            ) : (
+              <p className="muted small">
+                <FormattedMessage id="onb.words.revealHint" />
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+      <div className="actions">
+        <button
+          type="button"
+          className="secondary"
+          aria-expanded={shown}
+          aria-controls="word-grid"
+          disabled={view.state === 'loading'}
+          onClick={() => void toggle()}
+        >
+          <FormattedMessage
+            id={
+              view.state === 'loading'
+                ? 'common.loading'
+                : shown
+                  ? 'onb.words.hide'
+                  : view.state === 'error'
+                    ? 'common.retry'
+                    : 'onb.words.reveal'
+            }
+          />
+        </button>
+        <button
+          type="button"
+          className="primary"
+          // aria-disabled keeps it in the Tab order so the hint is read out.
+          aria-disabled={!seen || undefined}
+          aria-describedby={seen ? undefined : 'words-written-hint'}
+          onClick={() => seen && onDone()}
+        >
+          <FormattedMessage id="onb.words.written" />
+        </button>
+      </div>
+      {!seen && (
+        <p id="words-written-hint" className="muted small">
+          <FormattedMessage id="onb.words.writtenHint" />
+        </p>
+      )}
+    </>
+  );
 }
 
-/** Asks for 3 of the 12 words. Used in onboarding and from the reminder banner. */
+/**
+ * Asks for the 3 words of the core's current challenge. Used in onboarding
+ * and from the reminder banner. Only the wrong fields are marked; after 5
+ * failed checks the core burns the challenge and the words must be shown again.
+ */
 export function RecoveryCheck({
   onChecked,
   onLater,
@@ -110,69 +169,107 @@ export function RecoveryCheck({
 }) {
   const core = useCore();
   const intl = useIntl();
-  const positions = useMemo(pickPositions, []);
+  const [positions, setPositions] = useState<number[] | null>(null);
   const [answers, setAnswers] = useState<Record<number, string>>({});
   const [wrong, setWrong] = useState<number[]>([]);
-  const inputs = useRef<(HTMLInputElement | null)[]>([]);
+  const [tooMany, setTooMany] = useState(false);
+  const [ok, setOk] = useState(false);
   const [busy, setBusy] = useState(false);
-  const complete = positions.every((p) => (answers[p] ?? '').trim());
+  const inputs = useRef<(HTMLInputElement | null)[]>([]);
+  const complete = !!positions && positions.every((p) => (answers[p] ?? '').trim());
+
+  useEffect(() => {
+    core.getRecoveryChallenge().then(
+      (c) => setPositions(c.positions),
+      (e) => {
+        if (isCoreError(e) && e.code === 'too-many-attempts') setTooMany(true);
+      },
+    );
+  }, [core]);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!complete) return;
+    if (!complete || busy || tooMany) return;
     setBusy(true);
-    // One position per call, so only the wrong fields get marked (B19).
-    const results = await Promise.all(positions.map((p) => core.checkRecoveryWords({ [p]: answers[p] })));
-    setBusy(false);
-    const bad = positions.filter((_, i) => !results[i]);
-    if (!bad.length && (await core.checkRecoveryWords(answers))) {
-      onChecked();
-      return;
+    try {
+      const result = await core.checkRecoveryWords(answers);
+      if (result.ok) {
+        setOk(true);
+        setTimeout(onChecked, 600);
+        return;
+      }
+      setWrong(result.wrong);
+      inputs.current[positions!.indexOf(result.wrong[0])]?.focus();
+    } catch (err) {
+      if (isCoreError(err) && err.code === 'too-many-attempts') setTooMany(true);
+    } finally {
+      setBusy(false);
     }
-    setWrong(bad);
-    inputs.current[positions.indexOf(bad[0] ?? positions[0])]?.focus();
   };
 
+  const errorId = 'check-error';
   return (
     <form onSubmit={submit} className="stack">
       <p className="muted">
         <FormattedMessage id="onb.check.hint" />
       </p>
-      <div className="check-fields">
-        {positions.map((p, i) => (
-          <label key={p} className="field">
-            <span>{intl.formatMessage({ id: 'onb.check.word' }, { n: p })}</span>
-            <input
-              dir="ltr"
-              autoComplete="off"
-              autoCapitalize="none"
-              spellCheck={false}
-              autoFocus={i === 0}
-              value={answers[p] ?? ''}
-              ref={(el) => {
-                inputs.current[i] = el;
-              }}
-              aria-invalid={wrong.includes(p) || undefined}
-              onChange={(e) => {
-                setWrong((w) => w.filter((x) => x !== p));
-                setAnswers({ ...answers, [p]: e.target.value });
-              }}
-            />
-          </label>
-        ))}
+      <div className="check-fields" aria-busy={!positions && !tooMany}>
+        {(positions ?? [0, 0, 0]).map((p, i) =>
+          p ? (
+            <label key={p} className="field">
+              <span>{intl.formatMessage({ id: 'onb.check.word' }, { n: p })}</span>
+              <input
+                ref={(el) => {
+                  inputs.current[i] = el;
+                }}
+                dir="ltr"
+                autoComplete="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                autoFocus={i === 0}
+                disabled={tooMany || ok}
+                value={answers[p] ?? ''}
+                aria-invalid={wrong.includes(p) || undefined}
+                aria-describedby={wrong.length || tooMany ? errorId : undefined}
+                onChange={(e) => {
+                  setWrong((w) => w.filter((x) => x !== p));
+                  setAnswers({ ...answers, [p]: e.target.value });
+                }}
+              />
+            </label>
+          ) : (
+            <span key={i} className="field skeleton-field" aria-hidden="true" />
+          ),
+        )}
       </div>
-      {wrong.length > 0 && (
-        <p className="error" role="alert">
-          <FormattedMessage id="onb.check.wrong" />
+      {tooMany ? (
+        <p id={errorId} className="error" role="alert">
+          <FormattedMessage id="onb.check.tooMany" />
+        </p>
+      ) : (
+        wrong.length > 0 && (
+          <p id={errorId} className="error" role="alert">
+            <FormattedMessage
+              id="onb.check.wrong"
+              values={{ count: wrong.length, positions: intl.formatList(wrong.map(String), { type: 'conjunction' }) }}
+            />
+          </p>
+        )
+      )}
+      {ok && (
+        <p className="success" role="status">
+          <CheckIcon /> <FormattedMessage id="onb.check.ok" />
         </p>
       )}
       <div className="actions">
-        <button type="submit" className="primary" disabled={!complete || busy}>
-          <FormattedMessage id="onb.check.verify" />
-        </button>
+        {!tooMany && (
+          <button type="submit" className="primary" disabled={!complete || busy || ok}>
+            <FormattedMessage id="onb.check.verify" />
+          </button>
+        )}
         {onShowAgain && (
-          <button type="button" className="link" onClick={onShowAgain}>
-            <FormattedMessage id="onb.check.showAgain" />
+          <button type="button" className={tooMany ? 'primary' : 'link'} onClick={onShowAgain}>
+            <FormattedMessage id={tooMany ? 'onb.words.reveal' : 'onb.check.showAgain'} />
           </button>
         )}
       </div>

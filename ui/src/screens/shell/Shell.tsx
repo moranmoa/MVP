@@ -34,10 +34,10 @@ export function Shell() {
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [dialog, setDialog] = useState<ShellDialog>(null);
-  // Words shown again from the reminder; dropped as soon as the dialog closes.
-  const [shownWords, setShownWords] = useState<string[] | null>(null);
+  // The reminder can show the words again (the panel loads them on demand).
+  const [showWords, setShowWords] = useState(false);
   const closeCheck = () => {
-    setShownWords(null);
+    setShowWords(false);
     setDialog(null);
   };
   // On a phone the channel list and the chat are two pages; this is the one shown.
@@ -216,14 +216,14 @@ export function Shell() {
       <Dialog
         open={dialog === 'check'}
         onClose={closeCheck}
-        title={intl.formatMessage({ id: shownWords ? 'onb.words.title' : 'onb.check.title' })}
+        title={intl.formatMessage({ id: showWords ? 'onb.words.title' : 'onb.check.title' })}
       >
-        {shownWords ? (
-          <RecoveryWordsPanel words={shownWords} onDone={() => setShownWords(null)} />
+        {showWords ? (
+          <RecoveryWordsPanel load={() => core.getRecoveryWords()} onDone={() => setShowWords(false)} />
         ) : (
           // The words can be shown again here, so a reload during onboarding never
           // leaves an account that can't pass the check (QA-01).
-          <RecoveryCheck onChecked={closeCheck} onShowAgain={() => void core.getRecoveryWords().then(setShownWords)} />
+          <RecoveryCheck onChecked={closeCheck} onShowAgain={() => setShowWords(true)} />
         )}
       </Dialog>
       <SettingsScreen open={settingsOpen} onClose={() => setSettingsOpen(false)} onCheckWords={() => setDialog('check')} />

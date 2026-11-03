@@ -257,14 +257,16 @@ describe('recovery words', () => {
     };
     const core = new MockCore({ speed: 0, storage });
     const { words } = await core.createIdentity({ locale: 'en', country: 'IL', birthDate: '2000-01-01' });
-    await core.checkRecoveryWords({ 1: words[0] });
+    const first = await core.getRecoveryChallenge();
+    await core.checkRecoveryWords(Object.fromEntries(first.positions.map((p) => [p, 'nope'])));
     const saved = [...store.values()].join('\n');
     expect(saved.length).toBeGreaterThan(0);
     for (const w of words) expect(saved).not.toMatch(new RegExp(`\\b${w}\\b`));
 
     // After a restart the check still works, without the words on disk.
     const again = new MockCore({ speed: 0, storage });
-    expect(await again.checkRecoveryWords({ 2: words[1], 7: words[6] })).toBe(true);
+    const { positions } = await again.getRecoveryChallenge();
+    expect(await again.checkRecoveryWords(Object.fromEntries(positions.map((p) => [p, words[p - 1]])))).toEqual({ ok: true });
   });
 
   it('drops words that an older build stored', () => {

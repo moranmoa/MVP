@@ -2011,3 +2011,16 @@ meter {
     transition: none !important;
   }
 }
+
+.skeleton-field {
+  display: block;
+  height: 4.25rem;
+  border-radius: var(--radius-s);
+  background: var(--bg-hover);
+}
+
+/* aria-disabled buttons stay focusable (so their hint is read) but look disabled. */
+button[aria-disabled='true'] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

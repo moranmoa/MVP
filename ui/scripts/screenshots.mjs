@@ -66,12 +66,12 @@ const shot = async (p, name) => {
   await p.waitForTimeout(700);
   await shot(p, '05-onboarding-preparing');
   await p.getByRole('heading', { name: 'מילות השחזור שלך' }).waitFor();
-  await shot(p, '06-onboarding-recovery-words-hidden');
+  await shot(p, '80-words-hidden-he');
   // Hidden words must not be in the page at all, and "I wrote them" waits for the reveal.
   if ((await p.locator('.word-grid .word:not(.word-mask)').count()) > 0) problems.push('recovery words in the page before reveal');
-  if (!(await p.getByRole('button', { name: 'כתבתי אותן' }).isDisabled())) problems.push('"I wrote them" enabled before reveal');
+  if ((await p.getByRole('button', { name: 'כתבתי אותן' }).getAttribute('aria-disabled')) !== 'true') problems.push('"I wrote them" enabled before reveal');
   await p.getByRole('button', { name: 'הצגת המילים' }).click();
-  await shot(p, '06b-onboarding-recovery-words-shown');
+  await shot(p, '81-words-shown-he');
   const shownWords = await p.locator('.word-grid .word').allTextContents();
   await p.getByRole('button', { name: 'כתבתי אותן' }).click();
   await shot(p, '07-onboarding-check-words');
@@ -83,7 +83,7 @@ const shot = async (p, name) => {
   await fields.nth(2).fill('wrong');
   await p.getByRole('button', { name: 'בדיקה', exact: true }).click();
   await p.getByRole('alert').waitFor();
-  await shot(p, '07b-onboarding-check-words-wrong');
+  await shot(p, '83-check-one-wrong-he');
   const invalid = await fields.evaluateAll((els) => els.map((e) => e.getAttribute('aria-invalid') === 'true'));
   if (invalid.join() !== 'false,true,true') problems.push(`check marks the wrong fields: ${invalid.join()}`);
   await p.getByRole('button', { name: 'אעשה את זה אחר כך' }).click();

@@ -19,6 +19,7 @@ import type {
   MessageRange,
   NewIdentityInput,
   ProfileInput,
+  RecoveryCheckResult,
   ServerSummary,
   StorageUsage,
   UpdateChannel,
@@ -51,6 +52,8 @@ export interface MockOptions {
 }
 
 const STORAGE_KEY = 'mvp.mock.v1';
+/** Failed word checks before the challenge is burned (B19 spec §6). */
+const MAX_CHECK_FAILURES = 5;
 const MESSAGE_GAP_MS = 47_000;
 
 interface ChannelState {
@@ -124,6 +127,7 @@ export class MockCore implements CoreApi {
   private channelIndex = new Map<Id, ChannelState>();
   private identity: Identity | null = null;
   private words: string[] = [];
+  private challenge: { positions: number[]; failures: number; burned: boolean } | null = null;
   private persisted: Persisted | null = null;
   private storageLimit = 5 * 1024 ** 3;
   private updateChannel: UpdateChannel = 'stable';
@@ -501,20 +505,42 @@ export class MockCore implements CoreApi {
     return { identity: this.identity, words: [...this.words] };
   }
 
-  async checkRecoveryWords(answers: Record<number, string>): Promise<boolean> {
+  async getRecoveryChallenge(): Promise<{ positions: number[] }> {
+    if (this.challenge?.burned) throw err({ code: 'too-many-attempts' });
+    if (!this.challenge) {
+      const all = Array.from({ length: 12 }, (_, i) => i + 1);
+      for (let i = all.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [all[i], all[j]] = [all[j], all[i]];
+      }
+      this.challenge = { positions: all.slice(0, 3).sort((a, b) => a - b), failures: 0, burned: false };
+    }
+    return { positions: [...this.challenge.positions] };
+  }
+
+  async checkRecoveryWords(answers: Record<number, string>): Promise<RecoveryCheckResult> {
     await this.wait(150);
-    const ok = Object.entries(answers).every(
-      ([pos, w]) => this.words[Number(pos) - 1] === w.trim().toLowerCase(),
-    );
-    if (ok && this.identity && Object.keys(answers).length >= 3) {
+    const c = this.challenge;
+    if (c?.burned) throw err({ code: 'too-many-attempts' });
+    const given = Object.keys(answers).map(Number).sort((a, b) => a - b);
+    if (!c || given.join() !== c.positions.join()) throw err({ code: 'not-allowed' });
+    const wrong = c.positions.filter((p) => this.words[p - 1] !== (answers[p] ?? '').trim().toLowerCase());
+    if (wrong.length) {
+      if (++c.failures >= MAX_CHECK_FAILURES) c.burned = true;
+      return { ok: false, wrong };
+    }
+    this.challenge = null;
+    if (this.identity) {
       this.identity = { ...this.identity, recoveryChecked: true };
       this.save();
       this.emit('identity.changed', this.identity);
     }
-    return ok;
+    return { ok: true };
   }
 
   async getRecoveryWords(): Promise<string[]> {
+    // The real core asks for OS authentication here; success lifts a burned challenge.
+    if (this.challenge?.burned) this.challenge = null;
     return [...this.words];
   }
 

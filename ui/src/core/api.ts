@@ -17,6 +17,7 @@ import type {
   MessageRange,
   NewIdentityInput,
   ProfileInput,
+  RecoveryCheckResult,
   AgeRestriction,
   ServerSummary,
   StorageUsage,
@@ -30,13 +31,24 @@ export interface CoreCommands {
   /** Emits `identity.progress` while the account is prepared. */
   createIdentity(input: NewIdentityInput): Promise<{ identity: Identity; words: string[] }>;
   /**
-   * Positions are 1-based. Resolves true when all answers match. The account
-   * is marked checked only when at least 3 positions are given and all match;
-   * fewer positions just answer the question (the UI asks one word at a time
-   * to mark only the wrong fields).
+   * The current word check: 3 positions (1-based) the core picked. Calling it
+   * again returns the same challenge until it is passed or burned. After 5
+   * failed checks it rejects with `too-many-attempts` until
+   * `getRecoveryWords()` succeeds again (B19 spec §6).
    */
-  checkRecoveryWords(answers: Record<number, string>): Promise<boolean>;
-  /** Returns the words again, for the "show my words" path in settings. */
+  getRecoveryChallenge(): Promise<{ positions: number[] }>;
+  /**
+   * Answers for exactly the current challenge's positions (otherwise rejects
+   * with `not-allowed`). Returns the wrong positions; on success the account
+   * is marked checked. The 5th failed check burns the challenge; after that it
+   * rejects with `too-many-attempts`.
+   */
+  checkRecoveryWords(answers: Record<number, string>): Promise<RecoveryCheckResult>;
+  /**
+   * The words again (onboarding resume, "show the words again"). The real core
+   * asks for OS authentication first and may reject with `auth-cancelled`.
+   * Success also lifts a burned challenge.
+   */
   getRecoveryWords(): Promise<string[]>;
   restoreIdentity(words: string[]): Promise<Identity>;
   updateProfile(input: ProfileInput): Promise<Identity>;
