@@ -140,8 +140,10 @@ function lockDownSession(ses) {
 
 /**
  * An mvs:// invite from the OS. Only a link of the exact invite format gets
- * through (deeplink.js), and only as the argument of joinServer; the UI sees
- * the result as the usual join.status / server.added events.
+ * through (deeplink.js). Main never joins by itself: a link from outside
+ * must not reveal who we are to someone's server without a click. It sends
+ * the UI a `link.open` event; the UI shows the join screen, pre-filled, and
+ * calls joinServer only when the user presses Join.
  */
 let pendingInvite = null;
 let uiReady = false;
@@ -154,14 +156,11 @@ function openInvite(raw) {
     if (win.isMinimized()) win.restore();
     win.focus();
   }
-  if (!uiReady || !core) {
+  if (!uiReady || !win || !sec.isInternalUrl(win.webContents.getURL())) {
     pendingInvite = link;
     return;
   }
-  core.request('joinServer', { link }).then((res) => {
-    // Only the error code is logged, never the link (it names a server).
-    if (res.error) console.warn(`joinServer from a link: ${res.error.code}`);
-  });
+  win.webContents.send('core:event', 'link.open', { link });
 }
 
 function flushInvite() {
@@ -206,7 +205,8 @@ app.whenReady().then(() => {
   serveUi();
   serveCoreIpc();
   // The OS sends mvs:// links to the installed app only; a checkout never registers.
-  if (app.isPackaged) app.setAsDefaultProtocolClient(deeplink.SCHEME);
+  // `--` before the link: whatever the link holds can never become a switch.
+  if (app.isPackaged) app.setAsDefaultProtocolClient(deeplink.SCHEME, process.execPath, ['--']);
   startCore();
   createWindow();
   const first = deeplink.inviteFromArgv(process.argv);

@@ -1,6 +1,8 @@
-// mvs:// links end to end: on the first launch's command line and from a
-// second instance, a valid invite becomes exactly one joinServer call; a
-// hostile one reaches nothing. The fake core logs what main sends it.
+// mvs:// links end to end. A valid invite, on the first launch's command line
+// or from a second instance, reaches the page as a `link.open` event, and
+// NOTHING is sent to the core: joinServer happens only when the UI calls it
+// (the user pressed Join). Hostile links reach nothing. The fake core logs
+// every command main sends it.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -18,21 +20,35 @@ const B = `mvs://join/${'c'.repeat(64)}/${'d'.repeat(64)}`;
 const env = { ...process.env, MVS_CORE_PATH: FAKE_CORE };
 
 let app;
+let page;
 let log;
 const commands = () => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
 const joins = () => commands().filter((c) => c.cmd === 'joinServer').map((c) => c.args.link);
+const seen = () => page.evaluate(() => window.__links.slice());
 const until = async (cond, ms = 15_000) => {
   const end = Date.now() + ms;
-  while (!cond()) {
+  while (!(await cond())) {
     if (Date.now() > end) return false;
     await new Promise((r) => setTimeout(r, 100));
   }
   return true;
 };
+const launchSecond = async (arg) => {
+  const p = spawn(ELECTRON, ['.', '--', arg], { env, stdio: 'ignore' });
+  return new Promise((r) => p.on('exit', r));
+};
 
 before(async () => {
-  app = await electron.launch({ args: ['.', '--some-flag', A.toUpperCase() + '/'], env });
-  await app.firstWindow();
+  // Upper case and a trailing slash: the shell must canonicalise.
+  app = await electron.launch({ args: ['.', '--', `${A.toUpperCase()}/`], env });
+  page = await app.firstWindow();
+  await page.waitForFunction(() => typeof window.mvs?.onEvent === 'function');
+  // Subscribe late, like the UI after React mounts: the first link must wait.
+  await page.waitForTimeout(1500);
+  await page.evaluate(() => {
+    window.__links = [];
+    window.mvs.onEvent((name, payload) => name === 'link.open' && window.__links.push(payload));
+  });
   log = join(await app.evaluate(({ app: a }) => a.getPath('userData')), 'core', 'commands.log');
 });
 
@@ -40,25 +56,29 @@ after(async () => {
   await app?.close();
 });
 
-test('an invite on the first command line becomes one joinServer, canonical', async () => {
-  assert.ok(await until(() => joins().length > 0), 'joinServer was not called');
-  assert.deepEqual(joins(), [A]);
+test('a link on the first command line reaches the page, canonical, even if it subscribes late', async () => {
+  assert.ok(await until(async () => (await seen()).length > 0), 'link.open not delivered');
+  assert.deepEqual(await seen(), [{ link: A }]);
 });
 
 test('a second launch hands its link to the running app and exits', async () => {
-  const second = spawn(ELECTRON, ['.', B], { env, stdio: 'ignore' });
-  const code = await new Promise((r) => second.on('exit', r));
-  assert.equal(code, 0, 'the second instance quits');
-  assert.ok(await until(() => joins().length > 1), 'second link not delivered');
-  assert.deepEqual(joins(), [A, B]);
+  assert.equal(await launchSecond(B), 0);
+  assert.ok(await until(async () => (await seen()).length > 1), 'second link not delivered');
+  assert.deepEqual(await seen(), [{ link: A }, { link: B }]);
 });
 
 test('hostile links reach nothing', async () => {
-  for (const bad of ['mvs://join/xyz', `mvs://join/${'a'.repeat(64)}/${'b'.repeat(64)}?--inspect`, 'mvs://evil/../../etc']) {
-    const p = spawn(ELECTRON, ['.', bad], { env, stdio: 'ignore' });
-    await new Promise((r) => p.on('exit', r));
-  }
+  for (const bad of ['mvs://join/xyz', `${A}?--inspect`, 'mvs://evil/../../etc', `--inspect ${A}`]) await launchSecond(bad);
   await new Promise((r) => setTimeout(r, 1500));
-  assert.deepEqual(joins(), [A, B]);
+  assert.deepEqual(await seen(), [{ link: A }, { link: B }]);
   assert.equal(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 1);
+});
+
+test('no link ever causes a joinServer by itself', () => {
+  assert.deepEqual(joins(), []);
+});
+
+test('joinServer happens only when the UI calls it (the user pressed Join)', async () => {
+  await page.evaluate((link) => window.mvs.invoke('joinServer', [link]), A);
+  assert.deepEqual(joins(), [A]);
 });

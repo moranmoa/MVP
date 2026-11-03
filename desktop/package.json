@@ -57,6 +57,9 @@
           "from": ".core/mvs-core",
           "to": "mvs-core"
         }
+      ],
+      "executableArgs": [
+        "--"
       ]
     },
     "deb": {
