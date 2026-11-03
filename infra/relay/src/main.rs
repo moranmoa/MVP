@@ -35,6 +35,10 @@ const PROTOCOL_VERSION: &str = "/mvs/0.1.0";
 /// (`/ipfs/kad/1.0.0`). Clients (core/sync) must use the same name.
 const KAD_PROTOCOL: StreamProtocol = StreamProtocol::new("/mvs/kad/1.0.0");
 
+/// TODO(R2): drop once core/sync speaks KAD_PROTOCOL. Until then the relay
+/// also answers on the IPFS name so today's clients can still use its DHT.
+const LEGACY_KAD_PROTOCOL: StreamProtocol = StreamProtocol::new("/ipfs/kad/1.0.0");
+
 #[derive(NetworkBehaviour)]
 struct Behaviour {
     // Limits first: they deny a connection before any other behaviour
@@ -197,6 +201,12 @@ async fn run() -> Result<()> {
     // Absolute bytes, not a percentage: the percentage is of the host's RAM,
     // which ignores the container's memory limit (256 MB in compose).
     let max_memory = env_num("MAX_MEMORY_MB", 200usize)? * 1024 * 1024;
+    // Test harnesses and LAN setups have only private addresses; never set
+    // this on the public relay (it would hand out clients' LAN addresses).
+    let allow_private_addrs = env::var("ALLOW_PRIVATE_ADDRS").is_ok_and(|v| v == "1");
+    if allow_private_addrs {
+        warn!("ALLOW_PRIVATE_ADDRS=1: private addresses go into the DHT; for test/LAN use only");
+    }
 
     let mut swarm = SwarmBuilder::with_existing_identity(key)
         .with_tokio()
@@ -207,11 +217,13 @@ async fn run() -> Result<()> {
         .await?
         .with_behaviour(|key| {
             let peer_id = key.public().to_peer_id();
-            let mut kademlia = kad::Behaviour::with_config(
-                peer_id,
-                kad::store::MemoryStore::new(peer_id),
-                kad::Config::new(KAD_PROTOCOL),
-            );
+            let mut kad_config = kad::Config::new(KAD_PROTOCOL);
+            // Ours first: it is preferred whenever both sides support it.
+            // Deprecated in favour of Config::new, which takes one name only.
+            #[allow(deprecated)]
+            kad_config.set_protocol_names(vec![KAD_PROTOCOL, LEGACY_KAD_PROTOCOL]);
+            let mut kademlia =
+                kad::Behaviour::with_config(peer_id, kad::store::MemoryStore::new(peer_id), kad_config);
             kademlia.set_mode(Some(kad::Mode::Server));
             Behaviour {
                 limits: connection_limits::Behaviour::new(limits),
@@ -278,7 +290,7 @@ async fn run() -> Result<()> {
                 info,
                 ..
             })) => {
-                for addr in info.listen_addrs.into_iter().filter(is_global) {
+                for addr in info.listen_addrs.into_iter().filter(|a| allow_private_addrs || is_global(a)) {
                     swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
                 }
             }
@@ -318,7 +330,7 @@ mod tests {
         assert!(global("/ip4/8.8.8.8/tcp/4001"));
         assert!(global("/ip4/100.128.0.1/udp/4001/quic-v1"));
         assert!(global("/ip6/2a00:1450::1/tcp/4001"));
-        assert!(global("/dns4/relay.example.com/tcp/443/wss"));
+        assert!(global("/dns4/relay.example.org/tcp/443/wss"));
         assert!(global("/ip4/8.8.8.8/tcp/4001/p2p/12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc/p2p-circuit"));
     }
 

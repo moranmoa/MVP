@@ -24,6 +24,8 @@ services:
       STATS_INTERVAL_SECS: ${STATS_INTERVAL_SECS:-300}
       MAX_CONNECTIONS: ${MAX_CONNECTIONS:-512}
       MAX_MEMORY_MB: ${MAX_MEMORY_MB:-200}
+      # 1 only for test harnesses / LAN: private addresses into the DHT.
+      ALLOW_PRIVATE_ADDRS: ${ALLOW_PRIVATE_ADDRS:-0}
     ports:
       - "4001:4001/tcp"
       - "4001:4001/udp"
@@ -62,7 +64,7 @@ services:
       relay:
         condition: service_healthy
     environment:
-      RELAY_DOMAIN: ${RELAY_DOMAIN:-relay.example.com}
+      RELAY_DOMAIN: ${RELAY_DOMAIN:-relay.example.org}
     ports:
       - "80:80/tcp"
       - "443:443/tcp"
