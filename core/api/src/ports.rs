@@ -87,6 +87,10 @@ impl Clock for FixedClock {
 /// for every channel record, so cache the monotone verdict ("owner, or has
 /// a stored Join") per author per server, and drop the cache when a new
 /// control record arrives.
+///
+/// Startup (#64): sync refuses to start when it can't lock down `node.key`
+/// (the Windows ACL). Surface that as a clear error the UI shows, an error
+/// code or a `notice`, never a silently dead sync.
 pub trait Network: Send + Sync {
     /// Offers a record we made or accepted to peers of its server.
     fn publish(&self, record: &Record);
@@ -138,7 +142,11 @@ pub enum CipherOutcome {
 /// `Decrypted.accepted` is false is shown as untrusted, never as a normal
 /// message (issue #21). Rotations are deny-by-default: feed
 /// `ChannelKeys::set_accepted` / `accept` with `authority::State::accepted` ∩
-/// the channel's rotation IDs (GAP-5).
+/// the channel's rotation IDs (GAP-5). As of #70 those are part record IDs:
+/// every `KeyRotation` record is a part, so pass that intersection straight
+/// through. Parts that `ChannelKeys` evicted under a flood (their IDs come
+/// back from `apply`) are fetched again. A part we re-send is the same
+/// stored record, never re-signed.
 /// Messages with `Verdict::Pending` (auth_deps not here yet) are neither
 /// shown nor forwarded until they resolve (B4).
 /// API as of #51: build one `Arc<MemberSecret>` (`MemberSecret::new(
