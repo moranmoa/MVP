@@ -142,7 +142,7 @@ fn ok<T: serde::Serialize>(value: CoreResult<T>) -> CoreResult<Value> {
 
 /// Every command in `CoreCommands`, plus the Rust additions. Commands from
 /// the contract this core doesn't do yet answer `not-implemented`.
-pub const NOT_YET: &[&str] = &["editMessage", "deleteMessage", "retryMessage"];
+pub const NOT_YET: &[&str] = &[];
 
 impl Core {
     /// Takes a request JSON text, returns the response JSON text.
