@@ -22,6 +22,7 @@
 //!   node, pulls what it is missing (heads + markers → missing records, paged)
 //!   and pushes new records live over gossipsub.
 
+pub mod access;
 pub mod node;
 pub mod store;
 
@@ -30,6 +31,7 @@ mod limits;
 #[cfg(test)]
 pub(crate) mod testutil;
 
+pub use access::{binding_message, Binder, Handle, ReadGate, ServerSecret};
 pub use node::{Node, NodeConfig, NodeEvent, Via};
 pub use records::{ChannelId, Record, RecordId, Scope, ServerId};
 pub use store::{Append, ControlLog, IngestError, Store};

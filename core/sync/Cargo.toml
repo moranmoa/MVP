@@ -15,6 +15,7 @@ path = "harness/coordinator.rs"
 [dependencies]
 anyhow = "1"
 blake3 = "1"
+chacha20poly1305 = "0.10"
 # Test and harness keys only (the app gets keys from core/identity).
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures = "0.3"
@@ -42,6 +43,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net", "io-util", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zeroize = { version = "1", features = ["derive"] }
 
 # Owner-only ACL for the node key (same as core/updater).
 [target.'cfg(windows)'.dependencies]
