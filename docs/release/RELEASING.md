@@ -27,11 +27,15 @@ owner, offline: updater sign-manifest ──> manifest.json ──> upload ─�
    platform archive `mvs-X.Y.Z-<platform>` holds `bin/` (core binaries),
    `ui/` and a README. Everything is **unsigned** (no code-signing certs yet;
    Windows SmartScreen and macOS Gatekeeper will warn testers).
-4. **publish**: `SHA256SUMS` over every file, then
+4. **publish**: checks that the run produced exactly the artifacts `ui` and
+   `core-<platform>` (one per entry in `PLATFORMS`, which must match the core
+   matrix), each holding exactly its one expected file, and stops on anything
+   missing or extra. Then `SHA256SUMS` over those five files, and
    [`manifest-body.mjs`](../../.github/scripts/manifest-body.mjs) writes
    `manifest-body.json`: channel `alpha`, the version, one
-   `{sha256, size}` entry per platform, valid for 14 days from the build.
-   Then it creates the draft pre-release and uploads everything. If a
+   `{sha256, size}` entry per platform in `PLATFORMS` (any other platform is
+   an error), valid for 14 days from the build. Then it creates the draft
+   pre-release and uploads that explicit list of seven files. If a
    release for the tag is already published, it stops, so a published
    release's assets are never replaced.
 
