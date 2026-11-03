@@ -17,12 +17,20 @@
 //! ts         u64          author-claimed ms since the Unix epoch, informational
 //! kind       u16
 //! body       u32 length, then the bytes (opaque here; encryption comes later)
-//! sig        [u8; 64]     Ed25519 over SIGNING_CONTEXT || every byte above
+//! sig        [u8; 64]     Ed25519 over the signed message (below)
 //! ```
 //!
-//! The record ID is the BLAKE3 hash of exactly the bytes the signature covers
-//! (the context plus the unsigned envelope). Leaving the signature out of the
-//! ID means the ID can't be changed by re-encoding the signature.
+//! The signature covers SIGNING_CONTEXT, every envelope byte up to `kind`,
+//! the body length, and BODY_HASH_CONTEXT's BLAKE3 `derive_key` of the body
+//! instead of the body itself. The record ID is the BLAKE3 hash of exactly
+//! that message. Leaving the signature out of the ID means the ID can't be
+//! changed by re-encoding the signature; signing the body's hash means the
+//! body can be dropped later (a [`Stub`]) and the rest still verifies, with
+//! the same ID.
+//!
+//! A [`Stub`] is a pruned record (B6-p): the same layout with `body`
+//! replaced by `u32 length, [u8; 32] body hash`. Only `Message` and
+//! `MessageEdit` records can be pruned, after a delete or edit replaced them.
 //!
 //! A [`Record`] value always holds a valid signature: the only ways to get one
 //! are [`Draft::sign`] and [`Record::decode`], and its fields are read-only.
@@ -34,11 +42,19 @@ use ed25519_dalek::{Signature, Signer, VerifyingKey};
 pub use ed25519_dalek::SigningKey;
 
 /// Envelope format version this crate reads and writes.
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 
 /// Prefixed to the envelope before signing and hashing, so a record
 /// signature can never be replayed as a signature over some other message.
-const SIGNING_CONTEXT: &[u8] = b"mvs/record/v1\0";
+const SIGNING_CONTEXT: &[u8] = b"mvs/record/v2\0";
+
+/// BLAKE3 `derive_key` context for the body hash the signature covers.
+const BODY_HASH_CONTEXT: &str = "mvs/record-body/v1";
+
+/// The hash a record's signature and ID cover in place of its body.
+pub fn body_hash(body: &[u8]) -> [u8; 32] {
+    blake3::derive_key(BODY_HASH_CONTEXT, body)
+}
 
 /// Most heads a record may point at. A writer that sees more merges them.
 pub const MAX_DEPS: usize = 64;
@@ -268,6 +284,12 @@ impl Kind {
         }
     }
 
+    /// Whether a record of this kind may be pruned to a [`Stub`] once a delete
+    /// or edit replaced it.
+    pub fn prunable(self) -> bool {
+        matches!(self, Kind::Message | Kind::MessageEdit)
+    }
+
     fn allowed_in(self, scope: Scope) -> bool {
         match self {
             Kind::Message | Kind::MessageEdit | Kind::MessageDelete | Kind::KeyRotation => {
@@ -304,6 +326,8 @@ pub enum RecordError {
     GenesisWithDeps,
     /// The genesis author and nonce don't hash to the record's server ID.
     GenesisServerMismatch,
+    /// Only `Message` and `MessageEdit` records can be pruned to a stub.
+    NotPrunable(Kind),
     /// A key rotation body without a valid part header (see
     /// [`ROTATION_HEADER_LEN`]).
     BadRotationHeader,
@@ -342,6 +366,7 @@ impl fmt::Display for RecordError {
                 write!(f, "genesis author and nonce don't match the server ID")
             }
             RecordError::BadRotationHeader => write!(f, "key rotation part header is invalid"),
+            RecordError::NotPrunable(kind) => write!(f, "{kind:?} records can't be pruned"),
             RecordError::BadSignature => write!(f, "signature does not verify"),
         }
     }
@@ -406,33 +431,12 @@ struct Fields {
 impl Fields {
     /// Format rules that don't depend on how the bytes were laid out.
     fn validate(&self) -> Result<(), RecordError> {
-        if !self.kind.allowed_in(self.scope) {
-            return Err(RecordError::KindNotAllowedInScope(self.kind));
-        }
-        if self.scope == Scope::Control && !self.auth_deps.is_empty() {
-            return Err(RecordError::AuthDepsInControlScope);
-        }
+        self.validate_header(self.body.len())?;
         if self.kind == Kind::Genesis {
-            if !self.deps.is_empty() {
-                return Err(RecordError::GenesisWithDeps);
-            }
             let nonce = self.body.first_chunk::<GENESIS_NONCE_LEN>();
             if nonce.is_none_or(|nonce| ServerId::derive(&self.author, nonce) != self.server) {
                 return Err(RecordError::GenesisServerMismatch);
             }
-        }
-        if self.deps.len() > MAX_DEPS {
-            return Err(RecordError::TooManyDeps(self.deps.len()));
-        }
-        if self.auth_deps.len() > MAX_AUTH_DEPS {
-            return Err(RecordError::TooManyAuthDeps(self.auth_deps.len()));
-        }
-        if !strictly_ascending(&self.deps) || !strictly_ascending(&self.auth_deps) {
-            return Err(RecordError::NotCanonical);
-        }
-        let max = self.kind.max_body();
-        if self.body.len() > max {
-            return Err(RecordError::BodyTooLarge { kind: self.kind, len: self.body.len(), max });
         }
         if self.kind == Kind::KeyRotation {
             let header = self.body.get(ID_LEN..ROTATION_HEADER_LEN);
@@ -445,16 +449,51 @@ impl Fields {
         Ok(())
     }
 
-    /// SIGNING_CONTEXT followed by the unsigned envelope.
+    /// The rules that don't need the body, only its length: all a stub can
+    /// be checked against.
+    fn validate_header(&self, body_len: usize) -> Result<(), RecordError> {
+        if !self.kind.allowed_in(self.scope) {
+            return Err(RecordError::KindNotAllowedInScope(self.kind));
+        }
+        if self.scope == Scope::Control && !self.auth_deps.is_empty() {
+            return Err(RecordError::AuthDepsInControlScope);
+        }
+        if self.kind == Kind::Genesis && !self.deps.is_empty() {
+            return Err(RecordError::GenesisWithDeps);
+        }
+        if self.deps.len() > MAX_DEPS {
+            return Err(RecordError::TooManyDeps(self.deps.len()));
+        }
+        if self.auth_deps.len() > MAX_AUTH_DEPS {
+            return Err(RecordError::TooManyAuthDeps(self.auth_deps.len()));
+        }
+        if !strictly_ascending(&self.deps) || !strictly_ascending(&self.auth_deps) {
+            return Err(RecordError::NotCanonical);
+        }
+        let max = self.kind.max_body();
+        if body_len > max {
+            return Err(RecordError::BodyTooLarge { kind: self.kind, len: body_len, max });
+        }
+        Ok(())
+    }
+
+    /// What the signature and the ID cover: SIGNING_CONTEXT, the envelope up
+    /// to `kind`, then the body's length and hash.
     fn signing_message(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(
-            SIGNING_CONTEXT.len()
-                + 128
-                + (self.deps.len() + self.auth_deps.len()) * ID_LEN
-                + self.body.len()
-                + SIG_LEN,
-        );
-        out.extend_from_slice(SIGNING_CONTEXT);
+        self.signing_message_for(self.body.len(), &body_hash(&self.body))
+    }
+
+    fn signing_message_for(&self, body_len: usize, hash: &[u8; 32]) -> Vec<u8> {
+        let mut out = SIGNING_CONTEXT.to_vec();
+        self.encode_header(&mut out);
+        out.extend_from_slice(&(body_len as u32).to_le_bytes());
+        out.extend_from_slice(hash);
+        out
+    }
+
+    /// The wire envelope from `ver` up to `kind`.
+    fn encode_header(&self, out: &mut Vec<u8>) {
+        out.reserve(128 + (self.deps.len() + self.auth_deps.len()) * ID_LEN);
         out.push(VERSION);
         out.extend_from_slice(&self.server.0);
         match self.scope {
@@ -474,9 +513,6 @@ impl Fields {
         }
         out.extend_from_slice(&self.ts.to_le_bytes());
         out.extend_from_slice(&self.kind.code().to_le_bytes());
-        out.extend_from_slice(&(self.body.len() as u32).to_le_bytes());
-        out.extend_from_slice(&self.body);
-        out
     }
 }
 
@@ -544,8 +580,10 @@ impl Record {
 
     /// The canonical wire form.
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = self.fields.signing_message();
-        out.drain(..SIGNING_CONTEXT.len());
+        let mut out = Vec::new();
+        self.fields.encode_header(&mut out);
+        out.extend_from_slice(&(self.fields.body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.fields.body);
         out.extend_from_slice(&self.sig);
         out
     }
@@ -553,47 +591,191 @@ impl Record {
     /// Parses and verifies a record. Anything that isn't the canonical
     /// encoding of a validly signed record within the limits is rejected.
     pub fn decode(bytes: &[u8]) -> Result<Record, RecordError> {
-        if bytes.len() > MAX_RECORD_BYTES {
-            return Err(RecordError::TooLarge { len: bytes.len() });
-        }
-        let mut reader = Reader { bytes };
-        let ver = reader.u8()?;
-        if ver != VERSION {
-            return Err(RecordError::UnsupportedVersion(ver));
-        }
-        let server = ServerId(reader.id()?);
-        let scope = match reader.u8()? {
-            0 => Scope::Control,
-            1 => Scope::Channel(ChannelId(reader.id()?)),
-            tag => return Err(RecordError::UnknownScope(tag)),
-        };
-        let author = PublicKey(reader.id()?);
-        let seq = reader.u64()?;
-        let deps = reader.ids(MAX_DEPS, RecordError::TooManyDeps)?;
-        let auth_deps = reader.ids(MAX_AUTH_DEPS, RecordError::TooManyAuthDeps)?;
-        let ts = reader.u64()?;
-        let code = reader.u16()?;
-        let kind = Kind::from_code(code).ok_or(RecordError::UnknownKind(code))?;
-        let body_len = reader.u32()? as usize;
-        let max = kind.max_body();
-        if body_len > max {
-            return Err(RecordError::BodyTooLarge { kind, len: body_len, max });
-        }
-        let body = reader.take(body_len)?.to_vec();
-        let sig: [u8; SIG_LEN] = reader.take(SIG_LEN)?.try_into().expect("length checked");
-        if !reader.bytes.is_empty() {
-            return Err(RecordError::TrailingBytes);
-        }
-
-        let fields = Fields { server, scope, author, seq, deps, auth_deps, ts, kind, body };
+        let (mut fields, mut reader) = read_header(bytes)?;
+        let body_len = read_body_len(&mut reader, fields.kind)?;
+        fields.body = reader.take(body_len)?.to_vec();
+        let sig = read_sig(&mut reader)?;
         fields.validate()?;
         let message = fields.signing_message();
-        let key = VerifyingKey::from_bytes(&author.0).map_err(|_| RecordError::BadAuthorKey)?;
-        key.verify_strict(&message, &Signature::from_bytes(&sig))
-            .map_err(|_| RecordError::BadSignature)?;
+        verify(&fields.author, &message, &sig)?;
         let id = RecordId(*blake3::hash(&message).as_bytes());
         Ok(Record { fields, sig, id })
     }
+
+    /// The hash the signature and the ID cover in place of the body.
+    pub fn body_hash(&self) -> [u8; 32] {
+        body_hash(&self.fields.body)
+    }
+
+    /// This record without its body, once a delete or edit replaced it.
+    /// It keeps the ID and still verifies. `None` for kinds that can't be
+    /// pruned (only `Message` and `MessageEdit` can).
+    pub fn prune(&self) -> Option<Stub> {
+        if !self.fields.kind.prunable() {
+            return None;
+        }
+        let fields = Fields { body: Vec::new(), ..self.fields.clone() };
+        Some(Stub {
+            fields,
+            body_len: self.fields.body.len() as u32,
+            body_hash: self.body_hash(),
+            sig: self.sig,
+            id: self.id,
+        })
+    }
+}
+
+/// A pruned record (B6-p): every field but the body, which is replaced by
+/// its length and hash. The signature covers exactly those, so a stub
+/// verifies and keeps the record's ID. Holding one means its signature has
+/// been verified. Only `Message` and `MessageEdit` records are pruned.
+///
+/// Wire layout: the record's, with `body` replaced by `u32 length, [u8; 32]
+/// body hash`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stub {
+    /// With an empty body.
+    fields: Fields,
+    body_len: u32,
+    body_hash: [u8; 32],
+    sig: [u8; SIG_LEN],
+    id: RecordId,
+}
+
+impl Stub {
+    pub fn id(&self) -> RecordId {
+        self.id
+    }
+
+    pub fn server(&self) -> ServerId {
+        self.fields.server
+    }
+
+    pub fn scope(&self) -> Scope {
+        self.fields.scope
+    }
+
+    pub fn author(&self) -> PublicKey {
+        self.fields.author
+    }
+
+    pub fn seq(&self) -> u64 {
+        self.fields.seq
+    }
+
+    pub fn deps(&self) -> &[RecordId] {
+        &self.fields.deps
+    }
+
+    pub fn auth_deps(&self) -> &[RecordId] {
+        &self.fields.auth_deps
+    }
+
+    /// Author-claimed time. Informational: never used for ordering.
+    pub fn ts(&self) -> u64 {
+        self.fields.ts
+    }
+
+    pub fn kind(&self) -> Kind {
+        self.fields.kind
+    }
+
+    /// The pruned body's length in bytes.
+    pub fn body_len(&self) -> u32 {
+        self.body_len
+    }
+
+    pub fn body_hash(&self) -> [u8; 32] {
+        self.body_hash
+    }
+
+    pub fn signature(&self) -> &[u8; SIG_LEN] {
+        &self.sig
+    }
+
+    /// Whether `record` is the full record this stub was pruned from.
+    pub fn is_pruned_from(&self, record: &Record) -> bool {
+        record.id() == self.id
+    }
+
+    /// The canonical wire form.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.fields.encode_header(&mut out);
+        out.extend_from_slice(&self.body_len.to_le_bytes());
+        out.extend_from_slice(&self.body_hash);
+        out.extend_from_slice(&self.sig);
+        out
+    }
+
+    /// Parses and verifies a stub, with the same rules as a record apart
+    /// from the body: a kind that can't be pruned is rejected too.
+    pub fn decode(bytes: &[u8]) -> Result<Stub, RecordError> {
+        let (fields, mut reader) = read_header(bytes)?;
+        let body_len = read_body_len(&mut reader, fields.kind)?;
+        let body_hash = reader.array::<32>()?;
+        let sig = read_sig(&mut reader)?;
+        fields.validate_header(body_len)?;
+        if !fields.kind.prunable() {
+            return Err(RecordError::NotPrunable(fields.kind));
+        }
+        let message = fields.signing_message_for(body_len, &body_hash);
+        verify(&fields.author, &message, &sig)?;
+        let id = RecordId(*blake3::hash(&message).as_bytes());
+        Ok(Stub { fields, body_len: body_len as u32, body_hash, sig, id })
+    }
+}
+
+/// Reads the envelope from `ver` up to `kind`, after the size check. The
+/// returned fields have an empty body.
+fn read_header(bytes: &[u8]) -> Result<(Fields, Reader<'_>), RecordError> {
+    if bytes.len() > MAX_RECORD_BYTES {
+        return Err(RecordError::TooLarge { len: bytes.len() });
+    }
+    let mut reader = Reader { bytes };
+    let ver = reader.u8()?;
+    if ver != VERSION {
+        return Err(RecordError::UnsupportedVersion(ver));
+    }
+    let server = ServerId(reader.id()?);
+    let scope = match reader.u8()? {
+        0 => Scope::Control,
+        1 => Scope::Channel(ChannelId(reader.id()?)),
+        tag => return Err(RecordError::UnknownScope(tag)),
+    };
+    let author = PublicKey(reader.id()?);
+    let seq = reader.u64()?;
+    let deps = reader.ids(MAX_DEPS, RecordError::TooManyDeps)?;
+    let auth_deps = reader.ids(MAX_AUTH_DEPS, RecordError::TooManyAuthDeps)?;
+    let ts = reader.u64()?;
+    let code = reader.u16()?;
+    let kind = Kind::from_code(code).ok_or(RecordError::UnknownKind(code))?;
+    let fields = Fields { server, scope, author, seq, deps, auth_deps, ts, kind, body: Vec::new() };
+    Ok((fields, reader))
+}
+
+/// The body length, bounded by the kind's limit before anything is read.
+fn read_body_len(reader: &mut Reader<'_>, kind: Kind) -> Result<usize, RecordError> {
+    let len = reader.u32()? as usize;
+    let max = kind.max_body();
+    if len > max {
+        return Err(RecordError::BodyTooLarge { kind, len, max });
+    }
+    Ok(len)
+}
+
+/// The signature, which must end the input.
+fn read_sig(reader: &mut Reader<'_>) -> Result<[u8; SIG_LEN], RecordError> {
+    let sig = reader.array::<SIG_LEN>()?;
+    if !reader.bytes.is_empty() {
+        return Err(RecordError::TrailingBytes);
+    }
+    Ok(sig)
+}
+
+fn verify(author: &PublicKey, message: &[u8], sig: &[u8; SIG_LEN]) -> Result<(), RecordError> {
+    let key = VerifyingKey::from_bytes(&author.0).map_err(|_| RecordError::BadAuthorKey)?;
+    key.verify_strict(message, &Signature::from_bytes(sig)).map_err(|_| RecordError::BadSignature)
 }
 
 struct Reader<'a> {
@@ -720,7 +902,8 @@ mod tests {
         assert_ne!(other_author.id(), a.id());
     }
 
-    const GOLDEN_ID: &str = "645946b1558de504af00d486f14bdfb4c0e47674f00964bd5a56bccb97a3d7aa";
+    // Version 2 (B6-p): the signature covers the body's hash.
+    const GOLDEN_ID: &str = "5badd58f88cb53d92763c16c91abb0c60e29a2094ac40102bf070453477288aa";
 
     #[test]
     fn tampered_body_is_rejected() {
@@ -803,9 +986,12 @@ mod tests {
         first.swap_with_slice(second);
         assert_eq!(Record::decode(&unsorted), Err(RecordError::NotCanonical));
 
-        let mut version = bytes.clone();
-        version[0] = 2;
-        assert_eq!(Record::decode(&version), Err(RecordError::UnsupportedVersion(2)));
+        // Version 1 signed the body itself; its records are no longer read.
+        for ver in [1, VERSION + 1] {
+            let mut version = bytes.clone();
+            version[0] = ver;
+            assert_eq!(Record::decode(&version), Err(RecordError::UnsupportedVersion(ver)));
+        }
     }
 
     #[test]
@@ -894,6 +1080,97 @@ mod tests {
         let at = body_offset(&record) + ID_LEN;
         bytes[at] = 1;
         assert_eq!(Record::decode(&bytes), Err(RecordError::BadRotationHeader));
+    }
+
+    fn message() -> Record {
+        Draft {
+            scope: Scope::Channel(ChannelId::from_bytes([4; 32])),
+            auth_deps: vec![RecordId::from_bytes([5; 32])],
+            kind: Kind::Message,
+            body: vec![7; 1000],
+            ..draft()
+        }
+        .sign(&key(1))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_pruned_stub_verifies_and_keeps_the_id() {
+        let record = message();
+        let stub = record.prune().expect("messages prune");
+        assert_eq!(stub.id(), record.id());
+        assert!(stub.is_pruned_from(&record));
+        assert_eq!(
+            (stub.kind(), stub.author(), stub.deps()),
+            (record.kind(), record.author(), record.deps())
+        );
+        assert_eq!(stub.body_len() as usize, record.body().len());
+        assert_eq!(stub.body_hash(), body_hash(record.body()));
+        // What a new member syncs: the stub alone, verified on decode.
+        let synced = Stub::decode(&stub.encode()).unwrap();
+        assert_eq!(synced, stub);
+        assert!(stub.encode().len() < record.encode().len());
+        // An edit prunes too; a delete, a rotation or a control record don't.
+        let edit = Draft { kind: Kind::MessageEdit, ..draft_in_channel() }.sign(&key(1)).unwrap();
+        assert!(edit.prune().is_some());
+        let delete =
+            Draft { kind: Kind::MessageDelete, ..draft_in_channel() }.sign(&key(1)).unwrap();
+        assert!(delete.prune().is_none());
+        assert!(draft().sign(&key(1)).unwrap().prune().is_none());
+    }
+
+    fn draft_in_channel() -> Draft {
+        Draft {
+            scope: Scope::Channel(ChannelId::from_bytes([4; 32])),
+            auth_deps: vec![RecordId::from_bytes([5; 32])],
+            ..draft()
+        }
+    }
+
+    /// Stub bytes for any record, prunable or not.
+    fn stub_bytes(record: &Record) -> Vec<u8> {
+        let mut out = Vec::new();
+        record.fields.encode_header(&mut out);
+        out.extend_from_slice(&(record.body().len() as u32).to_le_bytes());
+        out.extend_from_slice(&record.body_hash());
+        out.extend_from_slice(record.signature());
+        out
+    }
+
+    #[test]
+    fn hostile_stubs_are_rejected() {
+        let record = message();
+        let good = stub_bytes(&record);
+        assert!(Stub::decode(&good).is_ok());
+        // A stub of a kind that can't be pruned, validly signed.
+        let post = draft().sign(&key(1)).unwrap();
+        assert_eq!(Stub::decode(&stub_bytes(&post)), Err(RecordError::NotPrunable(Kind::Post)));
+        // Another body's hash or length: the signature doesn't cover it.
+        let hash_at = good.len() - SIG_LEN - 32;
+        let mut hash = good.clone();
+        hash[hash_at] ^= 1;
+        assert_eq!(Stub::decode(&hash), Err(RecordError::BadSignature));
+        let mut len = good.clone();
+        len[hash_at - 4] ^= 1;
+        assert_eq!(Stub::decode(&len), Err(RecordError::BadSignature));
+        // Truncated, trailing bytes, an oversized claimed body.
+        assert_eq!(Stub::decode(&good[..good.len() - 1]), Err(RecordError::Truncated));
+        assert_eq!(
+            Stub::decode(&[good.clone(), vec![0]].concat()),
+            Err(RecordError::TrailingBytes)
+        );
+        let mut huge = good.clone();
+        huge[hash_at - 4..hash_at].copy_from_slice(&(16 * 1024 + 1u32).to_le_bytes());
+        assert!(matches!(Stub::decode(&huge), Err(RecordError::BodyTooLarge { .. })));
+        // A record and a stub never pass for each other.
+        assert!(Record::decode(&good).is_err());
+        assert!(Stub::decode(&record.encode()).is_err());
+    }
+
+    #[test]
+    fn the_body_hash_has_its_own_domain() {
+        assert_ne!(body_hash(b"x"), *blake3::hash(b"x").as_bytes());
+        assert_eq!(body_hash(b"x"), blake3::derive_key("mvs/record-body/v1", b"x"));
     }
 
     #[test]
