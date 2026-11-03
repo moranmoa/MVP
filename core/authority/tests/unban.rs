@@ -165,3 +165,34 @@ fn hostile_unban_bodies_are_never_accepted() {
     let state = all_orders(&records);
     assert!(state.kicked.contains(&actor(1)));
 }
+
+/// D28: a demotion is a revoke, then a new grant of the lower role. The
+/// demoted admin keeps the moderator's powers it was granted after the
+/// revoke, and loses the admin's.
+#[test]
+fn demoting_an_admin_to_moderator_is_a_revoke_then_a_grant() {
+    let (mut records, heads) = founded(&[1, 2, 3]);
+    let admin = rec(0, 2, heads, Action::Grant { target: actor(1), role: Role::Admin });
+    let moderator =
+        rec(0, 3, vec![admin.id()], Action::Grant { target: actor(2), role: Role::Moderator });
+    let revoke = rec(0, 4, vec![moderator.id()], Action::revoke(actor(1)));
+    let demoted =
+        rec(0, 5, vec![revoke.id()], Action::Grant { target: actor(1), role: Role::Moderator });
+    // As a moderator now: kicking a member works, kicking a moderator doesn't.
+    let kick_member = rec(1, 1, vec![demoted.id()], Action::kick(actor(3)));
+    let kick_moderator = rec(1, 2, vec![kick_member.id()], Action::kick(actor(2)));
+    records.extend([
+        admin,
+        moderator,
+        revoke,
+        demoted,
+        kick_member.clone(),
+        kick_moderator.clone(),
+    ]);
+
+    let state = all_orders(&records);
+    assert_eq!(state.role(actor(1)), Role::Moderator);
+    assert!(state.accepted.contains(&kick_member.id()));
+    assert!(!state.accepted.contains(&kick_moderator.id()));
+    assert!(state.kicked.contains(&actor(3)) && !state.kicked.contains(&actor(2)));
+}
