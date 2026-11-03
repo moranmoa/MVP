@@ -40,6 +40,7 @@ use serde_bytes::ByteBuf;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use rand_core::{OsRng, RngCore};
 use zeroize::Zeroizing;
 
 use crate::access::{self, Binder, Binding, Handle, ReadGate, ServerSecret};
@@ -520,6 +521,12 @@ impl Sealing {
     }
 }
 
+/// `base` ± 20 %, from a random `r`: after a relay restart its clients
+/// don't all redial in the same instant.
+fn jittered(base: Duration, r: u32) -> Duration {
+    base.mul_f64(0.8 + 0.4 * f64::from(r) / f64::from(u32::MAX))
+}
+
 fn unix_now() -> u64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
@@ -763,7 +770,7 @@ impl Task {
         } else if Instant::now() >= self.relay_next_dial {
             debug!(backoff = ?self.relay_backoff, "dialling the relay");
             let _ = self.swarm.dial(self.relay_addr.clone());
-            self.relay_next_dial = Instant::now() + self.relay_backoff;
+            self.relay_next_dial = Instant::now() + jittered(self.relay_backoff, OsRng.next_u32());
             self.relay_backoff = (self.relay_backoff * 2).min(RELAY_BACKOFF_MAX);
         }
         for (addr, peer) in self.bootstrap.clone() {
@@ -901,7 +908,7 @@ impl Task {
                     if let Some(id) = self.circuit.take() {
                         self.swarm.remove_listener(id);
                     }
-                    self.relay_next_dial = Instant::now() + self.relay_backoff;
+                    self.relay_next_dial = Instant::now() + jittered(self.relay_backoff, OsRng.next_u32());
                 }
                 if self.connected.remove(&peer_id) {
                     info!(%peer_id, "peer disconnected");
@@ -1640,6 +1647,19 @@ mod tests {
         assert!(follow_up(true, true));
         assert!(!follow_up(true, false));
         assert!(!follow_up(false, true));
+    }
+
+    #[test]
+    fn relay_backoff_is_jittered_by_at_most_20_percent() {
+        let base = Duration::from_secs(10);
+        assert_eq!(jittered(base, 0), Duration::from_secs(8));
+        assert_eq!(jittered(base, u32::MAX), Duration::from_secs(12));
+        for _ in 0..1000 {
+            let d = jittered(base, OsRng.next_u32());
+            assert!(d >= Duration::from_secs(8) && d <= Duration::from_secs(12), "{d:?}");
+        }
+        // The cap with jitter still reconnects within a minute.
+        assert!(jittered(RELAY_BACKOFF_MAX, u32::MAX) <= Duration::from_secs(36));
     }
 
     #[test]
