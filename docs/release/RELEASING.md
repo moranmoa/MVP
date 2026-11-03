@@ -18,10 +18,8 @@ owner, offline: updater sign-manifest ──> manifest.json ──> upload ─�
 [`.github/workflows/release.yml`](../../.github/workflows/release.yml), on a
 `v*` tag:
 
-1. **prepare**: checks the tag is `vMAJOR.MINOR.PATCH` (core/updater accepts
-   no `-alpha.1` style suffixes; the channel says "alpha" instead) and creates
-   a draft pre-release. If the release is already published it stops, so a
-   published release's assets are never replaced.
+1. **check**: the tag must be `vMAJOR.MINOR.PATCH`. core/updater accepts
+   no `-alpha.1` style suffixes; the channel says "alpha" instead.
 2. **ui**: licence check, `npm ci --ignore-scripts`, `npm run build` →
    `mvs-ui-X.Y.Z.tar.gz`.
 3. **core** (matrix): `cargo build --release --locked` for
@@ -29,10 +27,27 @@ owner, offline: updater sign-manifest ──> manifest.json ──> upload ─�
    platform archive `mvs-X.Y.Z-<platform>` holds `bin/` (core binaries),
    `ui/` and a README. Everything is **unsigned** (no code-signing certs yet;
    Windows SmartScreen and macOS Gatekeeper will warn testers).
-4. **manifest**: `SHA256SUMS` over every asset, and
+4. **publish**: checks that the run produced exactly the artifacts `ui` and
+   `core-<platform>` (one per entry in `PLATFORMS`, which must match the core
+   matrix), each holding exactly its one expected file, and stops on anything
+   missing or extra. Then `SHA256SUMS` over those five files, and
    [`manifest-body.mjs`](../../.github/scripts/manifest-body.mjs) writes
    `manifest-body.json`: channel `alpha`, the version, one
-   `{sha256, size}` entry per platform, valid for 14 days from the build.
+   `{sha256, size}` entry per platform in `PLATFORMS` (any other platform is
+   an error), valid for 14 days from the build. Then it creates the draft
+   pre-release and uploads that explicit list of seven files. If a
+   release for the tag is already published, it stops, so a published
+   release's assets are never replaced.
+
+**Who can write (GAP-20).** The build jobs (ui, core) run third-party code:
+crates, npm packages and the toolchain action. So they get a read-only token
+and **no caches** (no rust-cache, no npm cache), which means a cache poisoned
+by a PR build can't end up in a release binary. They hand their files to
+`publish` as workflow artifacts (kept 7 days). `publish` is the only job with
+`contents: write`. It runs only GitHub's own actions, the runner's
+preinstalled `gh` and `node`, and our own dependency-free script. Release
+builds are slower without the caches (cold `cargo build` on every platform);
+that's the price.
 
 The desktop shell is not chosen yet. The **SHELL PACKAGING PLUG-IN POINT** in
 the core job has sketched Tauri and Electron steps behind the repository

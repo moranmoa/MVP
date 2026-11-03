@@ -2,12 +2,14 @@
 // release artifacts. The owner signs it offline with `updater sign-manifest`
 // (docs/release/RELEASING.md). No dependencies: runs on any Node >= 18.
 //
-//   node manifest-body.mjs --version 0.1.0 --dir dist [--channel alpha] [--days 14] --out manifest-body.json
+//   node manifest-body.mjs --version 0.1.0 --platforms "linux-x86_64 ..." --dir dist [--channel alpha] [--days 14] --out manifest-body.json
 //   node manifest-body.mjs --restamp manifest-body.json [--days 14]
 //
-// Updater artifacts are named mvs-<version>-<platform>.zip|.tar.gz; every
-// other file in --dir is ignored. --restamp only renews issued_at/expires_at
-// (for signing days after the build); the hashes are left untouched.
+// Updater artifacts are named mvs-<version>-<platform>.zip|.tar.gz. Every
+// platform in --platforms (space- or comma-separated) must have exactly one,
+// and an artifact for any other platform is an error. Other files in --dir
+// are ignored. --restamp only renews issued_at/expires_at (for signing days
+// after the build); the hashes are left untouched.
 
 import { createHash } from "node:crypto";
 import { createReadStream, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -64,9 +66,11 @@ if (a.restamp) {
 } else {
   const { version, dir, out } = a;
   const channel = a.channel ?? "alpha";
-  if (!version || !dir || !out) fail("need --version, --dir and --out");
+  if (!version || !dir || !out || !a.platforms) fail("need --version, --platforms, --dir and --out");
   if (!VERSION.test(version)) fail(`version ${version} is not MAJOR.MINOR.PATCH`);
   if (!NAME.test(channel)) fail(`bad channel ${channel}`);
+  const platforms = new Set(a.platforms.split(/[\s,]+/).filter(Boolean));
+  for (const p of platforms) if (!NAME.test(p)) fail(`bad platform name ${p}`);
 
   const prefix = `mvs-${version}-`;
   const artifacts = {};
@@ -74,12 +78,12 @@ if (a.restamp) {
     const m = file.startsWith(prefix) && file.slice(prefix.length).match(/^(.+?)\.(zip|tar\.gz)$/);
     if (!m) continue;
     const platform = m[1];
-    if (!NAME.test(platform)) fail(`bad platform name in ${file}`);
+    if (!platforms.has(platform)) fail(`${file}: platform ${platform} is not in --platforms`);
     if (artifacts[platform]) fail(`two artifacts for ${platform}`);
     const path = join(dir, file);
     artifacts[platform] = { sha256: await sha256(path), size: statSync(path).size };
   }
-  if (Object.keys(artifacts).length === 0) fail(`no ${prefix}<platform> artifacts in ${dir}`);
+  for (const p of platforms) if (!artifacts[p]) fail(`no ${prefix}${p} artifact in ${dir}`);
 
   const body = { format: 1, channel, version, issued_at: 0, expires_at: 0, artifacts, revoked: [] };
   stamp(body, days);
