@@ -7,3 +7,8 @@ publish = false
 [dependencies]
 records = { path = "../records" }
 
+[dev-dependencies]
+# OsRng for sealing; the same rand_core as groupkeys and api.
+rand_core = { version = "0.6", features = ["getrandom"] }
+# The sealed-message size test seals a real message.
+groupkeys = { path = "../groupkeys" }

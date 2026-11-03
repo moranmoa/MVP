@@ -104,9 +104,13 @@ fn is_valid_lang(s: &str) -> bool {
         && region.is_none_or(|r| r.len() == 2 && r.bytes().all(|b| b.is_ascii_uppercase()))
 }
 
-/// No control characters except newlines: notes are shown as plain text.
+/// No control characters except newlines, and no bidi overrides or isolates
+/// (U+202A..U+202E, U+2066..U+2069), which can reorder what the user reads:
+/// notes are shown as plain text. LRM/RLM marks are fine.
 fn is_plain_text(s: &str) -> bool {
-    !s.chars().any(|c| c.is_control() && c != '\n')
+    !s.chars().any(|c| {
+        (c.is_control() && c != '\n') || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    })
 }
 
 impl ManifestBody {
@@ -643,6 +647,9 @@ pub(crate) mod tests {
             with_notes(&[("he", "a\u{1b}[31mred")]),
             with_notes(&[("he", "a\rb")]),
             with_notes(&[("en", "a\u{85}b")]),
+            with_notes(&[("he", "abc \u{202E}evil")]),
+            with_notes(&[("he", "a\u{2066}b\u{2069}")]),
+            with_notes(&[("en", "\u{202A}x")]),
             with_notes(&[("HE", "x")]),
             with_notes(&[("he_IL", "x")]),
             with_notes(&[("he-il", "x")]),
@@ -653,5 +660,6 @@ pub(crate) mod tests {
             assert!(matches!(b.validate(), Err(Error::Malformed(_))), "{:?}", b.notes.keys());
         }
         assert!(with_notes(&[("he", &"א".repeat(MAX_NOTES_BYTES / 2))]).validate().is_ok());
+        assert!(with_notes(&[("he", "שלום \u{200F}MVS\u{200E} 2.0")]).validate().is_ok());
     }
 }

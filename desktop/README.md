@@ -148,3 +148,24 @@ spikes/RESULTS.md) after cross-compiling `mvs-core.exe` into `.core/`
 (`cargo build --release --locked --bin mvs-core --target x86_64-pc-windows-gnu`).
 
 Still to come: the release.yml plug-in point with devops.
+
+## Relay address (release builds)
+
+The core needs a relay to reach anyone (`mvs-core --relay <multiaddr>`).
+The address is never in git:
+
+- **Release build:** the release workflow writes `build/mvs-config.json`
+  (git-ignored), `{ "relay": "<multiaddr>" }`, or `{}` when the repository
+  variable is not set. Packaging copies it to `resources/mvs-config.json`. If
+  the file is missing, electron-builder only notes it and the app runs offline.
+- **Checkout:** `MVS_RELAY=<multiaddr>`. The packaged app ignores this variable.
+- **Checks** (`src/config.js`): a string starting with `/` and ending in
+  `/p2p/<peer id>` (the relay is pinned, #114), at most 512
+  characters, no whitespace. Anything else (bad JSON, other types) is
+  ignored with a warning that never includes the address, and the core
+  runs without a relay. The address is passed through as-is (e.g. the wss
+  form `/dns4/<domain>/tcp/443/wss/p2p/<id>`).
+
+`--relay` is passed to mvs-core only when there is one (`src/sidecar.js`,
+which also takes `extraArgs` for other parts of the shell). Tests:
+`test/config.test.js`.

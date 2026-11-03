@@ -29,9 +29,36 @@ pub fn members(ns: &[u8]) -> BTreeSet<PublicKey> {
     ns.iter().map(|n| pk(*n)).collect()
 }
 
-pub fn rng(seed: u64) -> ChaCha20Rng {
-    ChaCha20Rng::seed_from_u64(seed)
+/// A fixed-seed ChaCha20 RNG for reproducible tests and the golden vectors.
+pub fn rng(seed: u64) -> TestRng {
+    TestRng(ChaCha20Rng::seed_from_u64(seed))
 }
+
+/// `rand_chacha` 0.9 implements the `rand_core` 0.9 traits; `groupkeys`
+/// takes `rand_core` 0.6 ones (as `chacha20poly1305` and `ed25519-dalek` 2
+/// do). This passes the same ChaCha20 stream through.
+pub struct TestRng(ChaCha20Rng);
+
+impl rand_core::RngCore for TestRng {
+    fn next_u32(&mut self) -> u32 {
+        rand_chacha::rand_core::RngCore::next_u32(&mut self.0)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        rand_chacha::rand_core::RngCore::next_u64(&mut self.0)
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        rand_chacha::rand_core::RngCore::fill_bytes(&mut self.0, dest)
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+}
+
+impl rand_core::CryptoRng for TestRng {}
 
 pub fn peer(n: u8) -> ChannelKeys {
     ChannelKeys::new(SERVER, CHANNEL, secret(n))

@@ -15,14 +15,25 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Dry run: builds everything as version 0.0.0 and runs the publish checks,
+  # but publishes nothing (no job with write access runs).
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .github/scripts/collect-release.sh
+      - .github/scripts/manifest-body.mjs
+      - desktop/package.json
+      - desktop/package-lock.json
+      - desktop/build/**
 
 permissions:
   contents: read
 
-# Never cancel a half-uploaded release; a second push of the same tag waits.
+# Never cancel a half-uploaded release: a second push of the same tag waits.
+# A newer push to a pull request replaces its dry run.
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -30,12 +41,10 @@ env:
   TAG: ${{ github.ref_name }}
   # Channel written into the manifest body. Closed alpha only, for now.
   CHANNEL: alpha
-  # Binaries from core/ shipped in each platform archive.
-  CORE_BINS: "updater spike-peer sync-peer"
-  # Must list exactly the core matrix's platforms. publish accepts these and
-  # nothing else, so a build job can't slip an extra platform into the
-  # manifest body the owner signs.
-  PLATFORMS: "windows-x86_64 macos-x86_64 macos-aarch64 linux-x86_64"
+  # Must list exactly the desktop matrix's platforms. publish accepts these
+  # and nothing else, so a build job can't slip an extra platform into the
+  # manifest body the owner signs. macOS returns when it has a package.
+  PLATFORMS: "windows-x86_64 linux-x86_64"
 
 # Actions are pinned to full commit SHAs, same as ci.yml.
 
@@ -48,6 +57,9 @@ jobs:
     steps:
       - id: version
         run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            echo "version=0.0.0" >> "$GITHUB_OUTPUT"; exit 0
+          fi
           if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
             echo "::error::tag $TAG is not vMAJOR.MINOR.PATCH (no suffixes: core/updater rejects them)"
             exit 1
@@ -94,8 +106,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  core:
-    name: core ${{ matrix.platform }}
+  desktop:
+    name: desktop ${{ matrix.platform }}
     needs: [check, ui]
     runs-on: ${{ matrix.os }}
     strategy:
@@ -103,12 +115,11 @@ jobs:
       matrix:
         include:
           # Platform names are the keys of the manifest's `artifacts` map.
-          - { platform: windows-x86_64, os: windows-latest, target: x86_64-pc-windows-msvc, exe: ".exe" }
-          # Intel macOS is cross-compiled on the Apple Silicon runner.
-          - { platform: macos-x86_64, os: macos-latest, target: x86_64-apple-darwin, exe: "" }
-          - { platform: macos-aarch64, os: macos-latest, target: aarch64-apple-darwin, exe: "" }
+          # Windows is built natively: electron-builder's NSIS step needs
+          # wine anywhere else.
+          - { platform: windows-x86_64, os: windows-latest, target: x86_64-pc-windows-msvc, core: mvs-core.exe }
           # Oldest still-supported runner = oldest glibc we link against.
-          - { platform: linux-x86_64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, exe: "" }
+          - { platform: linux-x86_64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, core: mvs-core }
     env:
       VERSION: ${{ needs.check.outputs.version }}
     defaults:
@@ -122,91 +133,94 @@ jobs:
         with:
           toolchain: "1.90"
           targets: ${{ matrix.target }}
-      # No rust-cache here on purpose (GAP-20): a cache written by any PR
-      # build could otherwise end up inside a release binary.
+      # No rust-cache and no npm cache on purpose (GAP-20): a cache written
+      # by any PR build could otherwise end up inside a release binary.
 
-      - name: Build core
+      - name: Build the core sidecar (mvs-core)
         working-directory: core
-        run: cargo build --release --locked --target "${{ matrix.target }}" --bins
+        run: |
+          cargo build --release --locked --target "${{ matrix.target }}" -p api --bin mvs-core
+          mkdir -p ../desktop/.core
+          cp "target/${{ matrix.target }}/release/${{ matrix.core }}" ../desktop/.core/
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ui
-          path: stage
-
-      - name: Stage files
+          path: ui-artifact
+      - name: Unpack ui/dist
         run: |
-          stage="stage/mvs-${VERSION}-${{ matrix.platform }}"
-          mkdir -p "$stage/bin" "$stage/ui"
-          for bin in $CORE_BINS; do
-            cp "core/target/${{ matrix.target }}/release/${bin}${{ matrix.exe }}" "$stage/bin/"
-          done
-          tar -xzf "stage/mvs-ui-${VERSION}.tar.gz" -C "$stage/ui"
-          printf 'MVS %s (%s), closed alpha, UNSIGNED.\nBuilt from %s.\n' \
-            "$VERSION" "${{ matrix.platform }}" "$GITHUB_SHA" > "$stage/README.txt"
+          mkdir -p ui/dist
+          tar -xzf "ui-artifact/mvs-ui-${VERSION}.tar.gz" -C ui/dist
 
-      # ------------------------------------------------------------------
-      # SHELL PACKAGING PLUG-IN POINT
-      #
-      # Until the desktop shell is chosen, the updater artifact is the plain
-      # archive built by "Package (no shell yet)". Once it is, set the repo
-      # variable MVS_SHELL to `tauri` or `electron`, flesh out the matching
-      # step below and delete the other one. Whatever it produces MUST be
-      # renamed to dist/mvs-<version>-<platform>.zip|.tar.gz: that file name
-      # is how manifest-body.mjs finds the updater artifact for a platform.
-      # Installers (.msi/.dmg/.AppImage) can go into dist/ alongside it under
-      # any other name. This job has a read-only token: packaging tools must
-      # not need to write to the repo. All of it stays unsigned until
-      # code-signing certs exist (no CSC_* / APPLE_* / TAURI_SIGNING_* secrets).
-      # ------------------------------------------------------------------
-      - name: "[shell] Tauri bundle (sketch)"
-        if: vars.MVS_SHELL == 'tauri'
-        run: |
-          # Linux needs: sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
-          # shell/tauri/src-tauri/tauri.conf.json: frontendDist -> ../../ui/dist (reuse stage/.../ui),
-          # bundle.externalBin -> the core sidecar binaries from stage/.../bin.
-          cd shell/tauri
-          npm ci --ignore-scripts
-          npx tauri build --target "${{ matrix.target }}" --ci
-          # The updater payload is the app bundle archive, not the installer:
-          #   windows: bundle/nsis/*.exe   macOS: bundle/macos/*.app (tar it)   linux: bundle/appimage/*.AppImage
-          # mkdir -p ../../dist && tar/zip it to ../../dist/mvs-${VERSION}-${{ matrix.platform }}.<ext>
-          echo "::error::Tauri packaging is a sketch; finish it before setting MVS_SHELL=tauri"; exit 1
-
-      - name: "[shell] Electron bundle (sketch)"
-        if: vars.MVS_SHELL == 'electron'
+      # Relay address baked into the app. It lives in the repository
+      # variable MVS_RELAY_ADDR (Settings -> Variables), never in git: it
+      # contains the owner's domain. Without it the app runs offline.
+      # Only a tag build reads it: pull-request dry runs (public artifacts on
+      # a public repo) always get {}, and the dry-run job asserts that.
+      - name: Build-time config (relay)
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: "false" # unsigned on purpose
+          RELAY: ${{ github.event_name == 'push' && vars.MVS_RELAY_ADDR || '' }}
         run: |
-          # shell/electron/electron-builder.yml: files -> ui dist, extraResources -> stage/.../bin
-          cd shell/electron
-          npm ci --ignore-scripts
-          case "${{ matrix.platform }}" in
-            windows-*) npx electron-builder --win nsis zip --x64 --publish never ;;
-            macos-x86_64) npx electron-builder --mac dmg zip --x64 --publish never ;;
-            macos-aarch64) npx electron-builder --mac dmg zip --arm64 --publish never ;;
-            linux-*) npx electron-builder --linux AppImage tar.gz --x64 --publish never ;;
-          esac
-          # The zip/tar.gz from dist/ is the updater payload:
-          # mv it to ../../dist/mvs-${VERSION}-${{ matrix.platform }}.<ext>
-          echo "::error::Electron packaging is a sketch; finish it before setting MVS_SHELL=electron"; exit 1
-
-      - name: Package (no shell yet)
-        if: vars.MVS_SHELL == ''
-        run: |
-          name="mvs-${VERSION}-${{ matrix.platform }}"
-          mkdir -p dist
-          if [ "${{ matrix.exe }}" = ".exe" ]; then
-            (cd stage && 7z a -tzip "../dist/${name}.zip" "$name" > /dev/null)
-          else
-            tar -czf "dist/${name}.tar.gz" -C stage "$name"
+          node -e '
+            const relay = process.env.RELAY || "";
+            if (relay && (!relay.startsWith("/") || /\s/.test(relay) || relay.length > 512)) {
+              console.error("::error::MVS_RELAY_ADDR is not a multiaddr"); process.exit(1);
+            }
+            // The relay must be pinned by its peer ID: without /p2p/<id>, Noise
+            // would accept whoever answers at that address (behind Cloudflare).
+            if (relay && !/\/p2p\/[1-9A-HJ-NP-Za-km-z]{46,60}$/.test(relay)) {
+              console.error("::error::MVS_RELAY_ADDR must end in /p2p/<relay peer id>"); process.exit(1);
+            }
+            require("fs").writeFileSync("desktop/build/mvs-config.json", JSON.stringify(relay ? { relay } : {}));
+            console.log(relay ? "relay configured" : "::warning::no relay address in this build: the app will run offline");
+          '
+          if [ "$GITHUB_EVENT_NAME" != push ] && [ "$(cat desktop/build/mvs-config.json)" != "{}" ]; then
+            echo "::error::a non-tag build must not carry a relay address"; exit 1
           fi
-      # ------------------------------------------------------------------
 
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+      - name: Package (electron-builder, unsigned)
+        working-directory: desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false" # unsigned on purpose (closed alpha)
+        run: |
+          npm ci --no-audit --no-fund
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          case "${{ matrix.platform }}" in
+            windows-*) npx electron-builder --win nsis --x64 --publish never ;;
+            linux-*) npx electron-builder --linux AppImage deb --x64 --publish never ;;
+          esac
+
+      # Release names. The updater payload is the unpacked app folder
+      # (win-unpacked / linux-unpacked, contents at the archive root) with no
+      # installer and no mvs-launcher, which the updater keeps outside the app.
+      # Its name mvs-<version>-<platform>.zip|.tar.gz is how manifest-body.mjs
+      # finds it.
+      - name: Collect
+        run: |
+          one() { # the expanded glob -> its single match, or fail
+            [ $# -eq 1 ] && [ -f "$1" ] || { echo "::error::expected one file, got: $*"; ls -l desktop/dist; exit 1; }
+            echo "$1"
+          }
+          base="mvs-${VERSION}-${{ matrix.platform }}"
+          mkdir -p out
+          shopt -s nullglob
+          case "${{ matrix.platform }}" in
+            windows-*)
+              cp "$(one desktop/dist/*Setup*.exe)" "out/${base}-setup.exe"
+              (cd desktop/dist/win-unpacked && 7z a -tzip "../../../out/${base}.zip" . -xr'!mvs-launcher*' > /dev/null) ;;
+            linux-*)
+              cp "$(one desktop/dist/*.AppImage)" "out/${base}.AppImage"
+              cp "$(one desktop/dist/*.deb)" "out/${base}.deb"
+              tar -czf "out/${base}.tar.gz" -C desktop/dist/linux-unpacked --exclude='mvs-launcher*' . ;;
+          esac
+          ls -l out
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: core-${{ matrix.platform }}
-          path: dist/
+          name: desktop-${{ matrix.platform }}
+          path: out/
           if-no-files-found: error
           retention-days: 7
 
@@ -215,7 +229,8 @@ jobs:
     # own checkout/download-artifact actions, the runner's preinstalled gh
     # and node, and .github/scripts/manifest-body.mjs (Node built-ins only).
     name: draft pre-release
-    needs: [check, ui, core]
+    if: github.event_name == 'push'
+    needs: [check, ui, desktop]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -233,43 +248,8 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
-      - name: Check artifacts, collect release files
-        run: |
-          # Exactly one expected file per expected artifact, nothing else.
-          expect="ui=mvs-ui-${VERSION}.tar.gz"
-          for p in $PLATFORMS; do
-            case "$p" in windows-*) ext=zip ;; *) ext=tar.gz ;; esac
-            expect="$expect core-$p=mvs-${VERSION}-$p.$ext"
-          done
-          want_dirs=$(for e in $expect; do echo "${e%%=*}"; done | sort)
-          have_dirs=$(find artifacts -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
-          if [ "$have_dirs" != "$want_dirs" ]; then
-            echo "::error::unexpected artifact set:"; echo "$have_dirs"; exit 1
-          fi
-          mkdir dist
-          : > files
-          for e in $expect; do
-            name="${e%%=*}" file="${e#*=}"
-            if [ "$(find "artifacts/$name" -mindepth 1 -printf '%P\n')" != "$file" ] || [ ! -f "artifacts/$name/$file" ] || [ -L "artifacts/$name/$file" ]; then
-              echo "::error::artifact $name must hold exactly $file, has:"; ls -lA "artifacts/$name"; exit 1
-            fi
-            cp "artifacts/$name/$file" dist/
-            echo "$file" >> files
-          done
-          ls -l dist
-      - name: SHA256SUMS
-        working-directory: dist
-        run: |
-          mapfile -t files < ../files
-          sha256sum "${files[@]}" > SHA256SUMS
-          cat SHA256SUMS
-      - name: manifest-body.json (unsigned)
-        run: |
-          node .github/scripts/manifest-body.mjs --version "$VERSION" --channel "$CHANNEL" \
-            --platforms "$PLATFORMS" --dir dist --days 14 --out dist/manifest-body.json
-          cat dist/manifest-body.json
-          echo SHA256SUMS >> files
-          echo manifest-body.json >> files
+      - name: Check artifacts, SHA256SUMS, manifest-body.json (unsigned)
+        run: bash .github/scripts/collect-release.sh "$VERSION" "$CHANNEL" "$PLATFORMS"
       - name: Create or update the draft
         run: |
           if gh release view "$TAG" --json isDraft --jq .isDraft > is_draft 2>/dev/null; then
@@ -282,13 +262,25 @@ jobs:
             cat > notes.md <<EOF
           **Closed alpha - unsigned build. Only install it if you were invited.**
 
-          Built by GitHub Actions from \`${GITHUB_SHA}\`. Check downloads against \`SHA256SUMS\`.
-          \`manifest.json\` (signed offline by the owner) is attached before this is published.
+          | System | Download |
+          | --- | --- |
+          | Windows 10/11 (per user, no admin) | \`mvs-${VERSION}-windows-x86_64-setup.exe\` |
+          | Linux, any distro (no install) | \`mvs-${VERSION}-linux-x86_64.AppImage\` |
+          | Debian/Ubuntu | \`mvs-${VERSION}-linux-x86_64.deb\` |
+
+          How to install and get started (Hebrew):
+          [docs/release/ALPHA-QUICKSTART.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/docs/release/ALPHA-QUICKSTART.md)
+
+          - The installers are **not code-signed**. Windows SmartScreen will warn: choose "More info" and then "Run anyway".
+          - The \`.zip\`/\`.tar.gz\` files are the in-app updater payloads; you don't need them.
+          - \`manifest-body.json\` is the **unsigned** updater manifest. The owner signs it offline and attaches \`manifest.json\`; until then, in-app updates are not offered.
+          - Built by GitHub Actions from \`${GITHUB_SHA}\`. Check downloads against \`SHA256SUMS\`.
           EOF
             gh release create "$TAG" --draft --prerelease --verify-tag \
               --title "MVS ${TAG} (closed alpha)" --notes-file notes.md
           fi
-          # The explicit list: 5 archives, SHA256SUMS, manifest-body.json.
+          # The explicit list: the ui archive, the installers and updater
+          # payloads checked above, SHA256SUMS, manifest-body.json.
           mapfile -t files < files
           (cd dist && gh release upload "$TAG" "${files[@]}" --clobber)
       - name: Summary
@@ -302,3 +294,39 @@ jobs:
             cat dist/SHA256SUMS
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  dry-run:
+    # Pull requests only: the same checks as publish, read-only, uploads nothing.
+    name: release dry run
+    if: github.event_name == 'pull_request'
+    needs: [check, ui, desktop]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: artifacts
+      - name: Check artifacts, SHA256SUMS, manifest-body.json (unsigned)
+        run: bash .github/scripts/collect-release.sh "$VERSION" "$CHANNEL" "$PLATFORMS"
+      - name: No relay address in dry-run builds
+        run: |
+          # The packaged app's resources/mvs-config.json must be {} (or absent,
+          # while desktop/ doesn't package it yet).
+          mkdir -p probe/win probe/linux
+          unzip -q -o "dist/mvs-${VERSION}-windows-x86_64.zip" 'resources/mvs-config.json' -d probe/win 2>/dev/null || true
+          tar -xzf "dist/mvs-${VERSION}-linux-x86_64.tar.gz" -C probe/linux ./resources/mvs-config.json 2>/dev/null || true
+          for c in probe/win/resources/mvs-config.json probe/linux/resources/mvs-config.json; do
+            if [ -f "$c" ]; then
+              [ "$(cat "$c")" = "{}" ] || { echo "::error::$c is not {}"; exit 1; }
+              echo "ok: $c is {}"
+            else
+              echo "not packaged yet: $c"
+            fi
+          done
+      - name: Files that a tag would publish
+        run: cat files
