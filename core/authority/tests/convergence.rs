@@ -215,10 +215,11 @@ fn incremental_vs_full_on_a_large_control_log() {
     let (resolver, total, _) = apply_all(&written);
     assert_eq!(resolver.state(), &expected);
     // A live peer re-resolves only for the rare removal that voids
-    // applied records. Measured: 8 on this log (tests/rng, seed 42); the
-    // bound is that + 2. Re-measure if the generator or the scenario change.
+    // applied records. Measured: 16 on this log (tests/rng, seed 42, record
+    // format v2); the bound is that + 2. Record IDs fix the linear order, so
+    // re-measure if the generator, the scenario or the record format change.
     assert!(
-        resolver.stats().rebuilds <= 10,
+        resolver.stats().rebuilds <= 18,
         "too many re-resolves: {}",
         describe(resolver.stats())
     );
