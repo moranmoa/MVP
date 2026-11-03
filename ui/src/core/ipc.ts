@@ -50,7 +50,7 @@ export function createIpcCore(bridge: DesktopBridge = window.mvs as DesktopBridg
     let set = handlers.get(event);
     if (!set) handlers.set(event, (set = new Set()));
     set.add(handler as (payload: never) => void);
-    if (event === 'link.open' && pendingLink !== null) {
+    if ((event as string) === 'link.open' && pendingLink !== null) {
       const p = pendingLink;
       pendingLink = null;
       setTimeout(() => (handler as (payload: unknown) => void)(p), 0);
