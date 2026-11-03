@@ -40,11 +40,19 @@ use serde_bytes::ByteBuf;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use zeroize::Zeroizing;
+
+use crate::access::{self, Binder, Binding, Handle, ReadGate, ServerSecret};
 use crate::limits::{Pending, PerIp, RateLimiter, Refused};
 use crate::store::MAX_HAVE;
-use crate::{log_name, log_of, valid_log_name, Append, Authorizer, Record, RecordId, Scope, Store};
+use crate::{
+    log_name, log_of, valid_log_name, Append, Authorizer, ChannelId, Record, RecordId, Scope, ServerId, Store,
+};
+use records::PublicKey;
 
-const SYNC_PROTOCOL: StreamProtocol = StreamProtocol::new("/mvs/sync/0.2.0");
+/// 0.3: logs of servers opened with a secret are named by handle, and pulls
+/// for them carry a peer binding (GAP-4).
+const SYNC_PROTOCOL: StreamProtocol = StreamProtocol::new("/mvs/sync/0.3.0");
 const IDENTIFY_VERSION: &str = "/mvs/0.1.0";
 const KAD_PROTOCOL: StreamProtocol = StreamProtocol::new("/mvs/kad/1.0.0");
 /// Records per sync response page.
@@ -104,6 +112,10 @@ const ALL_SERVED_BYTES_RATE: u32 = 8 * 1024 * 1024;
 /// Below this much budget a pull is dropped rather than answered with a
 /// sliver (a page always carries at least one record, up to ~19 KiB).
 const MIN_PAGE_BUDGET: usize = 64 * 1024;
+/// Our own bindings are signed for this long, and re-signed once less than
+/// [`BINDING_RENEW`] is left. Under [`access::MAX_BINDING_TTL`].
+const BINDING_TTL: Duration = Duration::from_secs(23 * 3600);
+const BINDING_RENEW: Duration = Duration::from_secs(3600);
 
 pub struct NodeConfig {
     /// Bootstrap/relay node, ending in /p2p/<peer id>.
@@ -125,6 +137,17 @@ pub struct NodeConfig {
     /// relayed connection into a direct one. Off for real users; on for a
     /// LAN test setup like the Docker harness.
     pub allow_lan: bool,
+}
+
+/// Who may read servers opened with [`Node::open_server`] (GAP-4). Without
+/// a binder our pulls for those servers carry no binding (peers won't
+/// answer them); without a read gate we answer nobody's channel pulls.
+#[derive(Clone, Default)]
+pub struct Access {
+    /// Signs our peer bindings with the identity key.
+    pub binder: Option<Arc<dyn Binder>>,
+    /// Decides who may pull a server's channel logs.
+    pub read_gate: Option<Arc<dyn ReadGate>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -156,6 +179,8 @@ enum Command {
     Append { record: Box<Record>, reply: oneshot::Sender<Result<()>> },
     Heads { log: String, reply: oneshot::Sender<Result<Vec<RecordId>>> },
     Open { log: String },
+    OpenServer { server: ServerId, secret: Box<ServerSecret> },
+    OpenChannel { server: ServerId, channel: ChannelId, reply: oneshot::Sender<Result<()>> },
     State { log: String, reply: oneshot::Sender<Result<LogState>> },
     Peers { reply: oneshot::Sender<Vec<PeerId>> },
     Shutdown { reply: oneshot::Sender<()> },
@@ -163,8 +188,13 @@ enum Command {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SyncRequest {
+    /// The log's handle (`h/<hex>`) for a server opened with its secret;
+    /// otherwise its plain name.
     log: String,
     have: Vec<ByteBuf>,
+    /// Required for handles: who is asking.
+    #[serde(default)]
+    binding: Option<Binding>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -185,12 +215,13 @@ struct Behaviour {
     limits: connection_limits::Behaviour,
 }
 
-/// Remote peers' subscriptions are only tracked for well-formed log topics.
+/// Remote peers' subscriptions are only tracked for well-formed log topics
+/// (`log/<name>` or a handle).
 struct LogTopics;
 
 impl TopicSubscriptionFilter for LogTopics {
     fn can_subscribe(&mut self, topic: &TopicHash) -> bool {
-        log_of_topic(topic).is_some()
+        log_of_topic(topic).is_some() || Handle::parse(topic.as_str()).is_some()
     }
 }
 
@@ -209,6 +240,11 @@ impl Node {
     /// Opens the store, starts networking and returns the handle plus a
     /// stream of events (records stored, peers connected).
     pub async fn start(config: NodeConfig) -> Result<(Node, mpsc::Receiver<NodeEvent>)> {
+        Node::start_with(config, Access::default()).await
+    }
+
+    /// Like [`Node::start`], with who may read servers opened with a secret.
+    pub async fn start_with(config: NodeConfig, access: Access) -> Result<(Node, mpsc::Receiver<NodeEvent>)> {
         for log in &config.logs {
             ensure!(valid_log_name(log), "invalid log name {log:?}");
         }
@@ -263,9 +299,14 @@ impl Node {
             allow_lan: config.allow_lan,
             relayed: HashMap::new(),
             direct: HashMap::new(),
+            secrets: HashMap::new(),
+            sealing: Sealing::default(),
+            access,
+            own_bindings: HashMap::new(),
+            bound: HashMap::new(),
         };
         for log in config.logs {
-            task.open(log);
+            task.open(log, None);
         }
         tokio::spawn(task.run(command_rx, answer_rx, decoded_rx));
         Ok((Node { peer_id, commands }, event_rx))
@@ -291,10 +332,28 @@ impl Node {
         rx.await?
     }
 
-    /// Starts syncing a log (channel logs are only synced once opened).
+    /// Starts syncing a log by its plain name (channel logs are only synced
+    /// once opened). Anyone who knows the name can pull a log opened this
+    /// way: use [`Node::open_server`] for real servers. Ignored for the logs
+    /// of a server opened with its secret.
     pub fn open(&self, log: &str) -> Result<()> {
         ensure!(valid_log_name(log), "invalid log name {log:?}");
         self.send(Command::Open { log: log.into() })
+    }
+
+    /// Starts syncing a server's control log, members-only (GAP-4): its logs
+    /// are named on the wire by handles derived from `secret`, its gossip is
+    /// sealed, and its logs are served only to bound peers (channels: only
+    /// those the read gate accepts).
+    pub fn open_server(&self, server: ServerId, secret: ServerSecret) -> Result<()> {
+        self.send(Command::OpenServer { server, secret: Box::new(secret) })
+    }
+
+    /// Starts syncing a channel of a server opened with [`Node::open_server`].
+    pub async fn open_channel(&self, server: ServerId, channel: ChannelId) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::OpenChannel { server, channel, reply })?;
+        rx.await?
     }
 
     pub async fn state(&self, log: &str) -> Result<LogState> {
@@ -403,8 +462,70 @@ fn build_swarm(key: identity::Keypair) -> Result<Swarm<Behaviour>> {
         .build())
 }
 
-fn topic(log: &str) -> gossipsub::IdentTopic {
-    gossipsub::IdentTopic::new(format!("log/{log}"))
+/// The gossip topic for a log's wire name: the handle itself, or
+/// `log/<name>` for a log opened by its plain name.
+fn topic(wire: &str) -> gossipsub::IdentTopic {
+    if Handle::parse(wire).is_some() {
+        gossipsub::IdentTopic::new(wire)
+    } else {
+        gossipsub::IdentTopic::new(format!("log/{wire}"))
+    }
+}
+
+/// A log of a server opened with its secret.
+struct Sealed {
+    server: ServerId,
+    scope: Scope,
+    handle: Handle,
+    /// Seals the log's gossip.
+    key: Zeroizing<[u8; 32]>,
+}
+
+/// How open logs are named on the wire: by handle for servers opened with
+/// a secret, by plain name otherwise.
+#[derive(Default)]
+struct Sealing {
+    by_log: HashMap<String, Sealed>,
+    /// Handle (`h/<hex>`) → log name.
+    by_wire: HashMap<String, String>,
+}
+
+impl Sealing {
+    fn insert(&mut self, log: String, sealed: Sealed) {
+        self.by_wire.insert(sealed.handle.wire(), log.clone());
+        self.by_log.insert(log, sealed);
+    }
+
+    fn get(&self, log: &str) -> Option<&Sealed> {
+        self.by_log.get(log)
+    }
+
+    /// The name a log goes by on the wire (pull requests, gossip topic).
+    fn wire(&self, log: &str) -> String {
+        self.by_log.get(log).map_or_else(|| log.to_string(), |s| s.handle.wire())
+    }
+
+    /// The log a handle names, if we hold it.
+    fn log_of_wire(&self, wire: &str) -> Option<&str> {
+        self.by_wire.get(wire).map(String::as_str)
+    }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// The read gate's check for one channel pull, run on the answering thread.
+struct ReadCheck {
+    gate: Arc<dyn ReadGate>,
+    identity: PublicKey,
+    server: ServerId,
+}
+
+impl ReadCheck {
+    fn allows(&self, store: &Store) -> bool {
+        self.gate.may_read(&self.identity, &store.control_log(self.server))
+    }
 }
 
 /// A finished answer: who asked, where to reply, the page, and the bytes
@@ -456,6 +577,15 @@ struct Task {
     /// 2 minutes), so a relayed connection is closed once a direct one exists.
     relayed: HashMap<PeerId, HashSet<ConnectionId>>,
     direct: HashMap<PeerId, HashSet<ConnectionId>>,
+    /// Servers opened with their secret.
+    secrets: HashMap<ServerId, ServerSecret>,
+    sealing: Sealing,
+    access: Access,
+    /// Our signed bindings, per server.
+    own_bindings: HashMap<ServerId, Binding>,
+    /// Peers' verified bindings, per server; dropped when the peer
+    /// disconnects.
+    bound: HashMap<(PeerId, ServerId), (Binding, PublicKey)>,
 }
 
 /// What happened to one incoming record.
@@ -515,7 +645,26 @@ impl Task {
             Command::Heads { log, reply } => {
                 let _ = reply.send(self.store.heads(&log).map_err(Into::into));
             }
-            Command::Open { log } => self.open(log),
+            Command::Open { log } => {
+                if self.secrets.keys().any(|server| log.starts_with(&format!("{server}/"))) {
+                    warn!("a log of a server opened with its secret can't be opened by name");
+                } else {
+                    self.open(log, None);
+                }
+            }
+            Command::OpenServer { server, secret } => {
+                self.secrets.entry(server).or_insert(*secret);
+                self.open_sealed(server, Scope::Control);
+            }
+            Command::OpenChannel { server, channel, reply } => {
+                let result = if self.secrets.contains_key(&server) {
+                    self.open_sealed(server, Scope::Channel(channel));
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("open the server with its secret first"))
+                };
+                let _ = reply.send(result);
+            }
             Command::State { log, reply } => {
                 let state = (|| {
                     Ok(LogState {
@@ -533,11 +682,20 @@ impl Task {
         }
     }
 
-    fn open(&mut self, log: String) {
+    fn open_sealed(&mut self, server: ServerId, scope: Scope) {
+        let secret = &self.secrets[&server];
+        let sealed = Sealed { server, scope, handle: secret.handle(scope), key: secret.gossip_key(scope) };
+        self.open(log_name(server, scope), Some(sealed));
+    }
+
+    fn open(&mut self, log: String, sealed: Option<Sealed>) {
         if !self.logs.insert(log.clone()) {
             return;
         }
-        if let Err(err) = self.swarm.behaviour_mut().gossipsub.subscribe(&topic(&log)) {
+        if let Some(sealed) = sealed {
+            self.sealing.insert(log.clone(), sealed);
+        }
+        if let Err(err) = self.swarm.behaviour_mut().gossipsub.subscribe(&topic(&self.sealing.wire(&log))) {
             warn!(%err, "subscribe failed");
         }
         for peer in self.connected.clone() {
@@ -555,7 +713,11 @@ impl Task {
             other => bail!("storing own record failed: {other:?}"),
         }
         // No subscribed peers yet is fine: they'll pull it.
-        let _ = self.swarm.behaviour_mut().gossipsub.publish(topic(&log), record.encode());
+        let data = match self.sealing.get(&log) {
+            Some(s) => access::seal(&s.key, &s.handle, &record.encode()),
+            None => record.encode(),
+        };
+        let _ = self.swarm.behaviour_mut().gossipsub.publish(topic(&self.sealing.wire(&log)), data);
         let id = record.id();
         self.stored(log, record, Via::Local, SystemTime::now());
         self.release_pending(id);
@@ -627,8 +789,43 @@ impl Task {
             Err(err) => return warn!(%err, "reading markers failed"),
         }
         let have = have.into_iter().map(|id| ByteBuf::from(id.as_bytes().to_vec())).collect();
-        let request = self.swarm.behaviour_mut().sync.send_request(&peer, SyncRequest { log: log.into(), have });
+        let binding = self.sealing.get(log).map(|s| s.server).and_then(|server| self.own_binding(server));
+        let request = SyncRequest { log: self.sealing.wire(log), have, binding };
+        let request = self.swarm.behaviour_mut().sync.send_request(&peer, request);
         self.inflight.insert(request, key);
+    }
+
+    /// Our binding for a server's pulls, re-signed when it nears expiry.
+    /// None without a binder.
+    fn own_binding(&mut self, server: ServerId) -> Option<Binding> {
+        let binder = self.access.binder.clone()?;
+        let now = unix_now();
+        if let Some(binding) = self.own_bindings.get(&server) {
+            if binding.expiry() > now + BINDING_RENEW.as_secs() {
+                return Some(binding.clone());
+            }
+        }
+        let control = self.secrets.get(&server)?.handle(Scope::Control);
+        let me = *self.swarm.local_peer_id();
+        let binding = Binding::sign(&*binder, &me, &control, now + BINDING_TTL.as_secs());
+        self.own_bindings.insert(server, binding.clone());
+        Some(binding)
+    }
+
+    /// The identity `peer` proved for `server` with `binding`. A verified
+    /// binding is kept for the connection, so a repeat isn't re-verified.
+    fn bound_identity(&mut self, peer: PeerId, server: ServerId, binding: Option<Binding>) -> Option<PublicKey> {
+        let binding = binding?;
+        let now = unix_now();
+        if let Some((known, identity)) = self.bound.get(&(peer, server)) {
+            if *known == binding && binding.expiry().saturating_add(access::CLOCK_SKEW.as_secs()) >= now {
+                return Some(*identity);
+            }
+        }
+        let control = self.secrets.get(&server)?.handle(Scope::Control);
+        let identity = binding.verify(&peer, &control, now)?;
+        self.bound.insert((peer, server), (binding, identity));
+        Some(identity)
     }
 
     fn on_swarm_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
@@ -672,6 +869,7 @@ impl Task {
                     info!(%peer_id, "peer disconnected");
                     self.emit(NodeEvent::PeerDisconnected(peer_id));
                 }
+                self.bound.retain(|(p, _), _| *p != peer_id);
                 self.inflight.retain(|_, (p, _)| *p != peer_id);
                 self.decoding.retain(|(p, _)| *p != peer_id);
                 self.again.retain(|(p, _)| *p != peer_id);
@@ -766,10 +964,10 @@ impl Task {
             debug!(%peer, "pull rate limit exceeded");
             return;
         }
-        if !self.logs.contains(&request.log) {
+        let Some((log, gate)) = self.who_may_read(peer, request.log, request.binding) else {
             let _ = self.swarm.behaviour_mut().sync.send_response(channel, empty_response());
             return;
-        }
+        };
         if self.answering >= MAX_ANSWERING {
             debug!(%peer, "too many pulls being answered");
             return;
@@ -791,11 +989,38 @@ impl Task {
         let answers = self.answers.clone();
         tokio::task::spawn_blocking(move || {
             let response = match reader.lock() {
-                Ok(store) => answer(&store, &request, max_bytes),
+                Ok(store) => match gate {
+                    Some(gate) if !gate.allows(&store) => empty_response(),
+                    _ => answer(&store, &log, &request.have, max_bytes),
+                },
                 Err(_) => empty_response(),
             };
             let _ = answers.send((peer, channel, response, max_bytes));
         });
+    }
+
+    /// Which open log a pull names, and the read check still to run on it;
+    /// None if `peer` may not have it. A handle needs a valid binding from
+    /// `peer`; for a channel, the read gate must also accept the identity.
+    /// The control log goes to any bound peer (they know the secret): a
+    /// joiner needs it before its own `Join` exists. A plain name serves only
+    /// a log opened by name.
+    fn who_may_read(&mut self, peer: PeerId, wire: String, binding: Option<Binding>) -> Option<(String, Option<ReadCheck>)> {
+        let Some(log) = self.sealing.log_of_wire(&wire).map(str::to_string) else {
+            return (self.logs.contains(&wire) && self.sealing.get(&wire).is_none()).then_some((wire, None));
+        };
+        let (server, scope) = self.sealing.get(&log).map(|s| (s.server, s.scope))?;
+        let Some(identity) = self.bound_identity(peer, server, binding) else {
+            debug!(%peer, "pull without a valid binding");
+            return None;
+        };
+        match scope {
+            Scope::Control => Some((log, None)),
+            Scope::Channel(_) => {
+                let gate = self.access.read_gate.clone()?;
+                Some((log, Some(ReadCheck { gate, identity, server })))
+            }
+        }
     }
 
     /// Sends a finished answer and charges its size to the byte budgets.
@@ -819,7 +1044,7 @@ impl Task {
     /// stops it here (and counts against the sender once peer scoring is on);
     /// Ignore neither forwards nor blames (a duplicate, or not judgeable yet).
     fn on_gossip(&mut self, from: PeerId, message: &gossipsub::Message) -> MessageAcceptance {
-        let record = match check_pushed(&self.logs, message) {
+        let record = match check_pushed(&self.logs, &self.sealing, message) {
             Ok(record) => record,
             Err(Refuse::Ignore) => return MessageAcceptance::Ignore,
             Err(Refuse::Reject) => {
@@ -1113,14 +1338,29 @@ enum Refuse {
 }
 
 /// The record in a pushed message, if it may be ingested: the topic is a
-/// log we have open (else Ignore), the bytes decode and verify, and the
-/// record signed the topic's log (else Reject).
-fn check_pushed(open: &HashSet<String>, message: &gossipsub::Message) -> Result<Record, Refuse> {
-    let topic_log = log_of_topic(&message.topic).ok_or(Refuse::Reject)?;
+/// log we have open (else Ignore); on a handle topic the message opens with
+/// that log's key (else Reject); the bytes decode and verify, and the record
+/// signed the topic's log (else Reject). Opening never replaces those checks.
+fn check_pushed(open: &HashSet<String>, sealing: &Sealing, message: &gossipsub::Message) -> Result<Record, Refuse> {
+    let (topic_log, data) = if let Some(log) = sealing.log_of_wire(message.topic.as_str()) {
+        let s = sealing.get(log).ok_or(Refuse::Ignore)?;
+        let data = access::open(&s.key, &s.handle, &message.data).ok_or(Refuse::Reject)?;
+        (log, std::borrow::Cow::Owned(data))
+    } else if Handle::parse(message.topic.as_str()).is_some() {
+        // A handle we don't hold.
+        return Err(Refuse::Ignore);
+    } else {
+        let log = log_of_topic(&message.topic).ok_or(Refuse::Reject)?;
+        // A sealed log is never taken by its plain name.
+        if sealing.get(log).is_some() {
+            return Err(Refuse::Ignore);
+        }
+        (log, std::borrow::Cow::Borrowed(&message.data[..]))
+    };
     if !open.contains(topic_log) {
         return Err(Refuse::Ignore);
     }
-    let record = Record::decode(&message.data).map_err(|_| Refuse::Reject)?;
+    let record = Record::decode(&data).map_err(|_| Refuse::Reject)?;
     // Filed under the log it signed, never the topic it came on.
     if log_of(&record) != topic_log {
         return Err(Refuse::Reject);
@@ -1146,15 +1386,15 @@ fn empty_response() -> SyncResponse {
 /// Answers a pull: what the requester is missing from `request.log`, one
 /// page, straight from the stored bytes (they passed the ingest checks when
 /// they were stored). At most [`MAX_HAVE`] `have` ids are looked at, and
-/// malformed ones are skipped. The caller checks the log is open.
-fn answer(store: &Store, request: &SyncRequest, max_bytes: usize) -> SyncResponse {
-    let have: Vec<RecordId> = request
-        .have
+/// malformed ones are skipped. The caller checks the log is open and the
+/// requester may read it.
+fn answer(store: &Store, log: &str, have: &[ByteBuf], max_bytes: usize) -> SyncResponse {
+    let have: Vec<RecordId> = have
         .iter()
         .take(MAX_HAVE)
         .filter_map(|b| <[u8; 32]>::try_from(b.as_slice()).ok().map(RecordId::from_bytes))
         .collect();
-    match store.missing_since(&request.log, &have, PAGE, max_bytes) {
+    match store.missing_since(log, &have, PAGE, max_bytes) {
         Ok((page, more)) => SyncResponse { records: page.into_iter().map(|s| ByteBuf::from(s.bytes)).collect(), more },
         Err(err) => {
             warn!(%err, "missing_since failed");
@@ -1180,10 +1420,6 @@ mod tests {
         log_name(server(), Scope::Channel(channel()))
     }
 
-    fn request(log: &str, have: Vec<ByteBuf>) -> SyncRequest {
-        SyncRequest { log: log.into(), have }
-    }
-
     fn store_with(n: usize, size: usize) -> (Store, Vec<Record>) {
         let mut store = Store::in_memory().unwrap();
         let chain = message_chain(n, size);
@@ -1195,12 +1431,12 @@ mod tests {
     fn malformed_and_excess_have_ids_are_ignored() {
         let (store, chain) = store_with(5, 0);
         let have = vec![ByteBuf::from(vec![1, 2, 3]), ByteBuf::from(chain[4].id().as_bytes().to_vec())];
-        assert!(answer(&store, &request(&chan(), have), PAGE_BYTES).records.is_empty());
+        assert!(answer(&store, &chan(), &have, PAGE_BYTES).records.is_empty());
         // 100,000 have ids cost the same as MAX_HAVE.
         let flood = vec![ByteBuf::from(vec![0xee; 32]); 100_000];
-        assert_eq!(answer(&store, &request(&chan(), flood), PAGE_BYTES).records.len(), 5);
+        assert_eq!(answer(&store, &chan(), &flood, PAGE_BYTES).records.len(), 5);
         // An unknown log name is just empty (SQL parameter, never SQL text).
-        assert!(answer(&store, &request("x'; DROP TABLE records; --", vec![]), PAGE_BYTES).records.is_empty());
+        assert!(answer(&store, "x'; DROP TABLE records; --", &[], PAGE_BYTES).records.is_empty());
         assert_eq!(store.count(&chan()).unwrap(), 5);
     }
 
@@ -1208,7 +1444,7 @@ mod tests {
     fn response_pages_fit_the_codec_limit() {
         // 400 records of ~16 KiB is ~6.5 MB; a page stops at PAGE_BYTES.
         let (store, _) = store_with(400, 16 * 1024 - 8);
-        let response = answer(&store, &request(&chan(), vec![]), PAGE_BYTES);
+        let response = answer(&store, &chan(), &[], PAGE_BYTES);
         assert!(response.more);
         let size: usize = response.records.iter().map(|b| b.len()).sum();
         assert!(size <= PAGE_BYTES + records::MAX_RECORD_BYTES, "page is {size} bytes");
@@ -1232,23 +1468,23 @@ mod tests {
         let control = log_name(server(), Scope::Control);
         let open: HashSet<String> = [chan(), control.clone()].into();
         let m = crate::testutil::message(0, &[], 0);
-        assert_eq!(check_pushed(&open, &pushed(&chan(), m.encode())), Ok(m.clone()));
+        assert_eq!(check_pushed(&open, &Sealing::default(), &pushed(&chan(), m.encode())), Ok(m.clone()));
 
         // A real record on another open log's topic: refused, not refiled.
-        assert_eq!(check_pushed(&open, &pushed(&control, m.encode())), Err(Refuse::Reject));
+        assert_eq!(check_pushed(&open, &Sealing::default(), &pushed(&control, m.encode())), Err(Refuse::Reject));
         // Garbage, truncated, or a bad signature.
-        assert_eq!(check_pushed(&open, &pushed(&chan(), vec![1, 2, 3])), Err(Refuse::Reject));
+        assert_eq!(check_pushed(&open, &Sealing::default(), &pushed(&chan(), vec![1, 2, 3])), Err(Refuse::Reject));
         let mut bytes = m.encode();
         let last = bytes.len() - 1;
         bytes[last] ^= 1;
-        assert_eq!(check_pushed(&open, &pushed(&chan(), bytes.clone())), Err(Refuse::Reject));
-        assert_eq!(check_pushed(&open, &pushed(&chan(), bytes[..last].to_vec())), Err(Refuse::Reject));
+        assert_eq!(check_pushed(&open, &Sealing::default(), &pushed(&chan(), bytes.clone())), Err(Refuse::Reject));
+        assert_eq!(check_pushed(&open, &Sealing::default(), &pushed(&chan(), bytes[..last].to_vec())), Err(Refuse::Reject));
         // A log we don't have open: not ours to judge.
-        assert_eq!(check_pushed(&HashSet::new(), &pushed(&chan(), m.encode())), Err(Refuse::Ignore));
+        assert_eq!(check_pushed(&HashSet::new(), &Sealing::default(), &pushed(&chan(), m.encode())), Err(Refuse::Ignore));
         // Not a log topic at all.
         let mut odd = pushed(&chan(), m.encode());
         odd.topic = TopicHash::from_raw("other");
-        assert_eq!(check_pushed(&open, &odd), Err(Refuse::Reject));
+        assert_eq!(check_pushed(&open, &Sealing::default(), &odd), Err(Refuse::Reject));
     }
 
     #[tokio::test]
@@ -1343,8 +1579,8 @@ mod tests {
     #[test]
     fn a_small_byte_budget_gives_a_small_page() {
         let (store, _) = store_with(50, 10_000);
-        let full = answer(&store, &request(&chan(), vec![]), PAGE_BYTES);
-        let cut = answer(&store, &request(&chan(), vec![]), 64 * 1024);
+        let full = answer(&store, &chan(), &[], PAGE_BYTES);
+        let cut = answer(&store, &chan(), &[], 64 * 1024);
         assert_eq!(full.records.len(), 50);
         assert!(cut.more && cut.records.len() < 10, "{} records", cut.records.len());
         assert!(cut.records.iter().map(|r| r.len()).sum::<usize>() <= 64 * 1024);
