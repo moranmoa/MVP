@@ -42,7 +42,10 @@ fn run_scenario(scenario: &Value) {
         let at = format!("{name} / step {i} ({})", step["cmd"]);
         let peer = &peers[step["peer"].as_str().expect("peer")];
         peer.events.take();
-        let args = substitute(step.get("args").unwrap_or(&json!({})), &saved, &at);
+        let args = match step.get("answer") {
+            Some(answer) => answers_for(&substitute(answer, &saved, &at), &at),
+            None => substitute(step.get("args").unwrap_or(&json!({})), &saved, &at),
+        };
         let request = json!({ "cmd": step["cmd"], "args": args }).to_string();
         let response: Value =
             serde_json::from_str(&peer.core.handle(&request)).expect("JSON reply");
@@ -74,6 +77,31 @@ fn run_scenario(scenario: &Value) {
 
 fn event_name(event: &Event) -> String {
     serde_json::to_value(event).expect("event JSON")["event"].as_str().expect("tag").to_owned()
+}
+
+/// `"answer": { "positions", "words", "wrong"? }` → `checkRecoveryWords`
+/// args: the word at each (1-based) position, except `"zzzz"` at the
+/// indexes (into `positions`) listed in `wrong`. Challenge positions are
+/// random, so the fixture can't spell them out.
+fn answers_for(answer: &Value, at: &str) -> Value {
+    let positions = answer["positions"].as_array().unwrap_or_else(|| panic!("{at}: positions"));
+    let words = answer["words"].as_array().unwrap_or_else(|| panic!("{at}: words"));
+    let wrong: Vec<u64> =
+        answer["wrong"].as_array().map_or(vec![], |w| w.iter().filter_map(Value::as_u64).collect());
+    let answers: serde_json::Map<String, Value> = positions
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let p = p.as_u64().unwrap_or_else(|| panic!("{at}: position"));
+            let word = if wrong.contains(&(i as u64)) {
+                json!("zzzz")
+            } else {
+                words[p as usize - 1].clone()
+            };
+            (p.to_string(), word)
+        })
+        .collect();
+    json!({ "answers": answers })
 }
 
 /// `"${var}"` and `"${var.N}"` become the saved value.

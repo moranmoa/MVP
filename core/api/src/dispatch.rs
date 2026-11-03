@@ -146,6 +146,7 @@ impl Core {
                 }
                 ok(self.check_recovery_words(answers))
             }
+            "getRecoveryChallenge" => ok(self.get_recovery_challenge()),
             "getRecoveryWords" => ok(self.get_recovery_words()),
             "restoreIdentity" => ok(self.restore_identity(args::<WordsArg>(raw)?.words)),
             "updateProfile" => ok(self.update_profile(args::<InputArg<ProfileInput>>(raw)?.input)),

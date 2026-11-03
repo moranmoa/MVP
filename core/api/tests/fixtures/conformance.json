@@ -31,16 +31,30 @@
         },
         {
           "peer": "alice",
-          "cmd": "checkRecoveryWords",
-          "args": { "answers": { "2": "zzzz", "7": "${words.6}" } },
-          "expect": { "ok": false }
+          "cmd": "getRecoveryChallenge",
+          "expect": { "ok": { "positions": "<len:3>" } },
+          "save": { "challenge": "ok.positions" }
         },
-        { "peer": "alice", "cmd": "getIdentity", "expect": { "ok": { "recoveryChecked": false } } },
+        { "peer": "alice", "cmd": "getRecoveryChallenge", "expect": { "ok": { "positions": "${challenge}" } } },
         {
           "peer": "alice",
           "cmd": "checkRecoveryWords",
-          "args": { "answers": { "1": "${words.0}", "7": "${words.6}", "12": "${words.11}" } },
-          "expect": { "ok": true },
+          "args": { "answers": { "2": "zzzz", "7": "${words.6}" } },
+          "expect": { "error": { "code": "not-allowed" } }
+        },
+        {
+          "peer": "alice",
+          "cmd": "checkRecoveryWords",
+          "answer": { "positions": "${challenge}", "words": "${words}", "wrong": [1] },
+          "expect": { "ok": { "ok": false, "wrong": ["${challenge.1}"] } }
+        },
+        { "peer": "alice", "cmd": "getIdentity", "expect": { "ok": { "recoveryChecked": false } } },
+        { "peer": "alice", "cmd": "getRecoveryChallenge", "expect": { "ok": { "positions": "${challenge}" } } },
+        {
+          "peer": "alice",
+          "cmd": "checkRecoveryWords",
+          "answer": { "positions": "${challenge}", "words": "${words}" },
+          "expect": { "ok": { "ok": true } },
           "events": ["identity.changed"]
         },
         { "peer": "alice", "cmd": "getIdentity", "expect": { "ok": { "recoveryChecked": true } } },
