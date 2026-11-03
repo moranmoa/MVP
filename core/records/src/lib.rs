@@ -190,14 +190,14 @@ pub enum Kind {
     Unban = 20,
 }
 
-/// Most channels a cut names.
+/// Most (channel, head) pairs a cut names, over all its channels.
 pub const MAX_CUT_ENTRIES: usize = 64;
 
 /// Largest cut: the channel heads a kick, revoke or leave was signed on,
 /// which later decide which of the target's channel records are voided. A
 /// cut is `count u8`, then `count` pairs of (channel ID, head record ID),
-/// strictly ascending by channel ID. Records checks only the size; the
-/// authority parses it.
+/// strictly ascending by (channel, head), so a channel may have several
+/// heads. Records checks only the size; the authority parses it.
 pub const CUT_BYTES: usize = 1 + MAX_CUT_ENTRIES * 2 * ID_LEN;
 
 /// Most parts one key rotation is split into (R7): about 200 members fit in

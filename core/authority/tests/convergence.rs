@@ -1,4 +1,4 @@
-//! Spike experiment 3: peers that receive the same records in any order must
+﻿//! Spike experiment 3: peers that receive the same records in any order must
 //! end up with the same server state, whether they recompute from scratch
 //! ([`resolve`]) or apply records incrementally ([`Resolver`]).
 
@@ -22,15 +22,16 @@ const DELIVERIES_PER_SCENARIO: usize = 3;
 
 /// A random action; joins and revoke-invites name one of `invites`, the
 /// invites the author has seen.
-fn random_action(rng: &mut StdRng, author: u8, invites: &[RecordId]) -> Action {
+fn random_action(rng: &mut StdRng, author: u8, invites: &[RecordId], cuts: bool) -> Action {
+    let cut = |rng: &mut StdRng| if cuts { random_cut(rng) } else { Cut::default() };
     let target = actor(rng.gen_range(0..ACTORS));
     match rng.gen_range(0..8) {
         0 => {
             let role = *[Role::Member, Role::Moderator, Role::Admin].choose(rng).unwrap();
             Action::Grant { target, role }
         }
-        1 => Action::Revoke { target, cut: random_cut(rng) },
-        2 => Action::Kick { target, cut: random_cut(rng) },
+        1 => Action::Revoke { target, cut: cut(rng) },
+        2 => Action::Kick { target, cut: cut(rng) },
         5 => Action::Invite {
             expires_ms: *[0, 30, 60].choose(rng).unwrap(),
             max_uses: rng.gen_range(0..3),
@@ -47,12 +48,12 @@ fn random_action(rng: &mut StdRng, author: u8, invites: &[RecordId]) -> Action {
     }
 }
 
-/// Up to 3 channel heads, so cuts go through the wire format.
+/// Up to 3 channel heads, two of them sometimes in one channel, so cuts go through the wire format.
 fn random_cut(rng: &mut StdRng) -> Cut {
     let heads = (0..rng.gen_range(0..4u8))
-        .map(|n| (ChannelId::from_bytes([n; 32]), RecordId::from_bytes([rng.gen(); 32])))
+        .map(|n| (ChannelId::from_bytes([n / 2; 32]), RecordId::from_bytes([rng.gen(); 32])))
         .collect();
-    Cut::new(heads).expect("distinct channels")
+    Cut::new(heads).expect("at most 3 heads")
 }
 
 /// Records in `known` that no other known record depends on.
@@ -64,8 +65,9 @@ fn heads(known: &BTreeSet<RecordId>, all: &BTreeMap<RecordId, Record>) -> Vec<Re
 
 /// Actors write records against their own partial view of the log and
 /// occasionally sync with each other, so plenty of records are concurrent.
-/// Returns the records in the order they were written.
-fn random_scenario(rng: &mut StdRng, steps: usize) -> Vec<Record> {
+/// Kicks and revokes carry random cuts if `cuts`. Returns the records in
+/// the order they were written.
+fn random_scenario(rng: &mut StdRng, steps: usize, cuts: bool) -> Vec<Record> {
     let genesis = genesis();
     let mut written = vec![genesis.clone()];
     let mut all = BTreeMap::from([(genesis.id(), genesis.clone())]);
@@ -84,7 +86,7 @@ fn random_scenario(rng: &mut StdRng, steps: usize) -> Vec<Record> {
             let mut deps = heads(&known[a], &all);
             let invites: Vec<RecordId> =
                 known[a].iter().copied().filter(|id| all[id].kind() == Kind::Invite).collect();
-            let action = random_action(rng, actor, &invites);
+            let action = random_action(rng, actor, &invites, cuts);
             if let Action::Join { invite } | Action::RevokeInvite { invite } = &action {
                 deps.push(*invite);
             }
@@ -128,7 +130,7 @@ fn all_delivery_orders_converge() {
     for seed in 0..SCENARIOS {
         let mut rng = StdRng::seed_from_u64(seed);
         let steps = rng.gen_range(5..40);
-        let records = random_scenario(&mut rng, steps);
+        let records = random_scenario(&mut rng, steps, true);
         let expected = resolve(server(), &records);
         accepted_removals += expected.kicked.len();
         joined_members += expected.members.len().saturating_sub(1);
@@ -184,7 +186,9 @@ fn apply_all(records: &[Record]) -> (Resolver, Duration, usize) {
 #[test]
 fn incremental_vs_full_on_a_large_control_log() {
     let mut rng = StdRng::seed_from_u64(42);
-    let written = random_scenario(&mut rng, 7_150);
+    // No cuts: they don't change resolution, but they change record IDs,
+    // so this log stays the one the main branch is measured on.
+    let written = random_scenario(&mut rng, 7_150, false);
     let n = written.len();
 
     let start = Instant::now();

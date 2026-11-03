@@ -154,8 +154,20 @@ fn removal_cuts_have_exactly_one_encoding() {
         |n: u8| (ChannelId::from_bytes([n; 32]), RecordId::from_bytes([n.wrapping_add(100); 32]));
     let full: Vec<_> = (0..MAX_CUT_ENTRIES as u8).map(head).collect();
     assert!(Cut::new(full.clone()).is_some());
-    assert!(Cut::new([full.clone(), vec![head(200)]].concat()).is_none(), "65 channels");
-    assert!(Cut::new(vec![head(1), (head(1).0, head(2).1)]).is_none(), "a channel twice");
+    assert!(Cut::new([full.clone(), vec![head(200)]].concat()).is_none(), "65 pairs");
+    assert_eq!(Cut::new(vec![head(1), head(1)]), Cut::new(vec![head(1)]), "deduplicated");
+
+    // A channel with two concurrent heads: both are kept, and the limit
+    // counts pairs, not channels.
+    let (a, b) = (RecordId::from_bytes([7; 32]), RecordId::from_bytes([3; 32]));
+    let two = Cut::new(vec![(head(1).0, a), head(2), (head(1).0, b)]).unwrap();
+    assert_eq!(two.heads(), [(head(1).0, b), (head(1).0, a), head(2)]);
+    assert_eq!(two.heads_of(head(1).0).collect::<Vec<_>>(), [b, a]);
+    assert_eq!(two.heads_of(head(2).0).collect::<Vec<_>>(), [head(2).1]);
+    assert!(two.names(head(1).0) && !two.names(head(9).0), "an unnamed channel has no heads");
+    let one_channel: Vec<_> =
+        (0..MAX_CUT_ENTRIES as u8).map(|n| (head(1).0, RecordId::from_bytes([n; 32]))).collect();
+    assert!(Cut::new(one_channel).is_some(), "64 heads in one channel");
     assert_eq!(Cut::new(vec![head(2), head(1)]), Cut::new(vec![head(1), head(2)]), "sorted");
 
     let (mut records, heads) = founded(&[1, 2]);
@@ -163,9 +175,11 @@ fn removal_cuts_have_exactly_one_encoding() {
     let kick = rec(0, 2, heads.clone(), full_kick.clone());
     assert_eq!(kick.body().len(), Kind::Kick.max_body());
     assert_eq!(Action::from_record(&kick), Some(full_kick));
+    let two_kick = Action::Kick { target: actor(1), cut: two };
+    assert_eq!(Action::from_record(&rec(0, 3, heads.clone(), two_kick.clone())), Some(two_kick));
 
     // Bodies `encode` never produces: no count, a count that doesn't match,
-    // channels out of order or repeated.
+    // pairs out of order or repeated, heads of one channel out of order.
     let pair = |n: u8| [[n; 32], [n.wrapping_add(100); 32]].concat();
     let target = actor(2).as_bytes().to_vec();
     let bad_cuts: Vec<Vec<u8>> = vec![
@@ -176,6 +190,7 @@ fn removal_cuts_have_exactly_one_encoding() {
         [vec![2], pair(2), pair(1)].concat(),
         [vec![2], pair(1), pair(1)].concat(),
         [vec![1], pair(1), vec![0]].concat(),
+        [vec![2], [[1; 32], [9; 32]].concat(), [[1; 32], [8; 32]].concat()].concat(),
     ];
     let mut refused = Vec::new();
     for (seq, cut) in bad_cuts.into_iter().enumerate() {

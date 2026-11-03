@@ -256,28 +256,44 @@ impl Action {
     }
 }
 
-/// The channel heads a revoke, kick or leave was signed on, one per
-/// channel. Once the removal is accepted, the target's channel records that
-/// aren't ancestors of these heads are voided (GAP-2, B4-4).
+/// The channel heads a revoke, kick or leave was signed on. A channel
+/// usually has several concurrent heads, and the remover has seen them all,
+/// so a cut may name several heads per channel. Once the removal is
+/// accepted, a channel record of the target survives if it is an ancestor
+/// of any head of its channel in the cut; the rest of the target's records
+/// in that channel are voided (GAP-2, B4-4). A channel the cut doesn't name
+/// is not voided at all.
 ///
 /// Encoding (see `records::CUT_BYTES`): `count u8`, then `count` pairs of
-/// (channel ID, head record ID), strictly ascending by channel ID, at most
-/// `records::MAX_CUT_ENTRIES`. Anything else doesn't parse, so each cut has
-/// one encoding.
+/// (channel ID, head record ID), strictly ascending by (channel, head), at
+/// most `records::MAX_CUT_ENTRIES` pairs in total. Anything else doesn't
+/// parse, so each cut has one encoding.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Cut(Vec<(ChannelId, RecordId)>);
 
 impl Cut {
-    /// A cut naming `heads`; `None` if a channel appears twice or there are
-    /// more than `records::MAX_CUT_ENTRIES`.
+    /// A cut naming `heads`, sorted and deduplicated; `None` if more than
+    /// `records::MAX_CUT_ENTRIES` distinct pairs remain.
     pub fn new(mut heads: Vec<(ChannelId, RecordId)>) -> Option<Cut> {
         heads.sort();
-        let distinct = heads.windows(2).all(|pair| pair[0].0 != pair[1].0);
-        (distinct && heads.len() <= MAX_CUT_ENTRIES).then_some(Cut(heads))
+        heads.dedup();
+        (heads.len() <= MAX_CUT_ENTRIES).then_some(Cut(heads))
     }
 
+    /// Every (channel, head) pair, in ascending order.
     pub fn heads(&self) -> &[(ChannelId, RecordId)] {
         &self.0
+    }
+
+    /// The heads the cut names for `channel`; empty if it names none.
+    pub fn heads_of(&self, channel: ChannelId) -> impl Iterator<Item = RecordId> + '_ {
+        let start = self.0.partition_point(|(c, _)| *c < channel);
+        self.0[start..].iter().take_while(move |(c, _)| *c == channel).map(|(_, head)| *head)
+    }
+
+    /// Whether the cut names `channel` at all.
+    pub fn names(&self, channel: ChannelId) -> bool {
+        self.heads_of(channel).next().is_some()
     }
 
     fn encode(&self, out: &mut Vec<u8>) {
@@ -302,7 +318,7 @@ impl Cut {
                 (channel, RecordId::from_bytes(head.try_into().expect("32 bytes")))
             })
             .collect();
-        heads.windows(2).all(|pair| pair[0].0 < pair[1].0).then_some(Cut(heads))
+        heads.windows(2).all(|pair| pair[0] < pair[1]).then_some(Cut(heads))
     }
 }
 
