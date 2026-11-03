@@ -88,5 +88,6 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
   `revokeRole(serverId, userId)`.
 - `Member.role: 'owner' | 'admin' | 'moderator' | 'member'`.
 - `CoreError.code`: `'bad-request' | 'not-implemented' | 'internal'`.
+- `NoticeKind`: `'rekey-waiting'`, sent when removed members still hold a channel key and only a moderator can renew it. Until a moderator does, sending there answers `not-allowed`.
 - `syncNow()`: test-only until `sync` drives updates. It shouldn't ship in
   the UI.
