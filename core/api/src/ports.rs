@@ -168,13 +168,10 @@ pub enum CipherOutcome {
 /// - whenever authority's accepted set changes: `set_accepted(server, ids)`
 ///   with that server's accepted `KeyRotation` record IDs.
 ///
-/// The caller MUST:
-/// - call `encrypt`, `decrypt`, `apply_rotation` and `rotate` only for
-///   channels authority knows. As a backstop the cipher holds keys for at
-///   most `MAX_CHANNELS_PER_SERVER` (256) channels per server and refuses
-///   new ones past that;
-/// - after every `unlock`, call `set_accepted` and then replay every stored
-///   `KeyRotation` record through `apply_rotation`. `lock` drops all keys.
+/// The caller MUST, after every `unlock`: call `set_channels` and
+/// `set_accepted` for each server, then replay every stored `KeyRotation`
+/// record through `apply_rotation`. `lock` drops all keys, and nothing is
+/// kept across it.
 pub trait GroupCipher: Send + Sync {
     fn membership_changed(&self, server: ServerId, members: &BTreeSet<PublicKey>) -> CipherOutcome;
 
@@ -214,8 +211,17 @@ pub trait GroupCipher: Send + Sync {
         let _ = (server, accepted);
     }
 
+    /// The channels of `server` that authority knows now (until B4-3: the
+    /// default channel). Call it before anything else for the server, and
+    /// whenever the set changes. Keys exist only for these; every other
+    /// channel is refused without creating state, and a channel left out
+    /// drops its keys.
+    fn set_channels(&self, server: ServerId, channels: &BTreeSet<records::ChannelId>) {
+        let _ = (server, channels);
+    }
+
     /// At identity unlock: `MemberSecret::new(signing_key)`. Until then
-    /// everything but bookkeeping is `Unavailable`.
+    /// everything but bookkeeping is `Unavailable`. See the MUST above.
     fn unlock(&self, secret: Arc<groupkeys::MemberSecret>) {
         let _ = secret;
     }
