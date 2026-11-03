@@ -95,8 +95,12 @@ pub(crate) fn check_profile(input: &ProfileInput) -> Result<(), ErrorCode> {
         bio.chars().count() <= BIO_MAX_CHARS && bio.lines().count() <= BIO_MAX_LINES
     });
     let avatar_ok = input.avatar_data_url.as_deref().is_none_or(is_safe_avatar);
-    let ok =
-        !name.is_empty() && name.chars().count() <= PROFILE_NAME_MAX_CHARS && bio_ok && avatar_ok;
+    // B23: no bidi, control or zero-width characters in a name others see.
+    let ok = !name.is_empty()
+        && name.chars().count() <= PROFILE_NAME_MAX_CHARS
+        && authority::display_text_ok(name)
+        && bio_ok
+        && avatar_ok;
     ok.then_some(()).ok_or(ErrorCode::BadRequest)
 }
 
@@ -369,16 +373,23 @@ impl<'a> ServerView<'a> {
 
     /// `authority`'s member set, with names from profile posts. Ordered by
     /// role, then key.
-    pub fn members(&self) -> Vec<MemberInfo> {
+    /// Each author's latest display name from their profile posts. A name
+    /// with bidi, control or zero-width characters (B23) isn't shown.
+    pub fn display_names(&self) -> BTreeMap<PublicKey, String> {
         let by_id: HashMap<RecordId, &Record> = self.records.iter().map(|r| (r.id(), r)).collect();
         let mut names: BTreeMap<PublicKey, String> = BTreeMap::new();
         for id in &self.state.posts {
             let Some(record) = by_id.get(id) else { continue };
-            if let Some(name) = parse_profile(record) {
+            if let Some(name) = parse_profile(record).filter(|n| authority::display_text_ok(n)) {
                 // Later profile posts (a new display name) win.
                 names.insert(record.author(), name);
             }
         }
+        names
+    }
+
+    pub fn members(&self) -> Vec<MemberInfo> {
+        let names = self.display_names();
         let mut members: Vec<MemberInfo> = self
             .state
             .members

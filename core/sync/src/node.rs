@@ -53,6 +53,7 @@ use zeroize::Zeroizing;
 
 use crate::access::{self, Binder, Binding, Handle, ReadGate, ServerSecret};
 use crate::limits::{Acks, DialBackoff, Pending, PerIp, RateLimiter, Refused};
+use crate::presence::Presence;
 use crate::store::MAX_HAVE;
 use crate::{
     log_name, log_of, valid_log_name, Append, Authorizer, ChannelId, NoStubs, Record, RecordId, Scope, ServerId, Store,
@@ -141,6 +142,8 @@ const ACK_TTL: Duration = Duration::from_secs(600);
 const MAX_OWN: usize = 10_000;
 /// After writing, the log is pulled again this soon, to pick up acks.
 const ACK_PULL: Duration = Duration::from_secs(1);
+/// Reachability is `Connecting` at most this long after starting.
+const CONNECTING: Duration = Duration::from_secs(10);
 /// Peers' stubs waiting for the delete or edit that replaced them.
 const MAX_PENDING_STUBS: usize = 10_000;
 /// Waits between relay dials while it is down: reconnects within a minute
@@ -218,6 +221,31 @@ pub enum NodeEvent {
     /// ordering or deletion. A false ack can only mislead the author's own
     /// UI. Sent once per record.
     Delivered { id: RecordId },
+    /// A bound identity came online on, or went offline from, a server
+    /// opened with its secret (M2). Anyone holding the secret can be bound:
+    /// the app shows only members. Sent on changes only.
+    Presence { server: ServerId, identity: PublicKey, online: bool },
+}
+
+/// Presence on one server (M2). `online` holds bound identities (anyone
+/// with the secret): the app shows only members.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresenceState {
+    pub online: Vec<PublicKey>,
+    /// The last time anyone of the server was seen online here.
+    pub last_seen: Option<SystemTime>,
+    pub reachability: Reachability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Reachability {
+    /// Just started: not on the network yet (no relay reservation, no peer).
+    Connecting,
+    /// Someone of the server is online.
+    Online,
+    /// Nobody of the server is reachable *from here*: others may be online
+    /// but out of reach (NAT, relay down).
+    NobodyOnline,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -234,7 +262,11 @@ enum Command {
     OpenServer { server: ServerId, secret: Box<ServerSecret> },
     OpenChannel { server: ServerId, channel: ChannelId, reply: oneshot::Sender<Result<()>> },
     State { log: String, reply: oneshot::Sender<Result<LogState>> },
+    Presence { server: ServerId, reply: oneshot::Sender<PresenceState> },
     Peers { reply: oneshot::Sender<Vec<PeerId>> },
+    ListenAddrs { reply: oneshot::Sender<Vec<Multiaddr>> },
+    #[cfg(test)]
+    Served { peer: PeerId, log: String, reply: oneshot::Sender<usize> },
     Prune { id: RecordId, reply: oneshot::Sender<Result<bool>> },
     Shutdown { reply: oneshot::Sender<()> },
 }
@@ -398,6 +430,12 @@ impl Node {
             acks: Acks::new(ACKS_PER_AUTHOR, MAX_ACK_AUTHORS, ACK_TTL),
             soon: HashSet::new(),
             dial_backoff: DialBackoff::new(DIAL_BACKOFF_MIN, DIAL_BACKOFF_MAX, MAX_TRACKED_PEERS),
+            #[cfg(test)]
+            served: HashMap::new(),
+            presence: Presence::default(),
+            last_seen: HashMap::new(),
+            reached: false,
+            started: Instant::now(),
             pending_stubs: HashMap::new(),
         };
         for log in config.logs {
@@ -457,6 +495,14 @@ impl Node {
         rx.await?
     }
 
+    /// Who is online on a server opened with its secret, and whether anyone
+    /// is reachable (M2).
+    pub async fn presence(&self, server: ServerId) -> Result<PresenceState> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::Presence { server, reply })?;
+        Ok(rx.await?)
+    }
+
     /// Replaces a stored message or edit by its stub (B6-p), if the stub gate
     /// accepts it: a held, accepted delete or newer edit replaced it. True if
     /// pruned; from then on peers get the stub.
@@ -464,6 +510,22 @@ impl Node {
         let (reply, rx) = oneshot::channel();
         self.send(Command::Prune { id, reply })?;
         rx.await?
+    }
+
+    /// The addresses the node listens on right now (empty until the listener
+    /// is up; a relay circuit shows once reserved).
+    /// Tests: how many entries our pull answers to `peer` for `log` carried.
+    #[cfg(test)]
+    async fn served(&self, peer: PeerId, log: &str) -> usize {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::Served { peer, log: log.into(), reply }).unwrap();
+        rx.await.unwrap()
+    }
+
+    pub async fn listen_addrs(&self) -> Result<Vec<Multiaddr>> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::ListenAddrs { reply })?;
+        Ok(rx.await?)
     }
 
     pub async fn peers(&self) -> Result<Vec<PeerId>> {
@@ -645,7 +707,7 @@ impl ReadCheck {
 
 /// A finished answer: who asked, where to reply, the page, and the bytes
 /// reserved for it when the request came in.
-type Answer = (PeerId, ResponseChannel<SyncResponse>, SyncResponse, usize, Vec<RecordId>);
+type Answer = (PeerId, ResponseChannel<SyncResponse>, SyncResponse, usize, Vec<RecordId>, String);
 /// A pulled page after decoding: (peer, log), the records that verified
 /// and belong to the log, and whether the peer said there is more.
 type Decoded = ((PeerId, String), Vec<Incoming>, bool, Vec<RecordId>);
@@ -715,6 +777,15 @@ struct Task {
     soon: HashSet<String>,
     /// Peers from the DHT whose dials failed, and when to try them again.
     dial_backoff: DialBackoff<PeerId>,
+    /// Tests: entries served per (peer, log).
+    #[cfg(test)]
+    served: HashMap<(PeerId, String), usize>,
+    /// Who is online, per server (M2).
+    presence: Presence,
+    last_seen: HashMap<ServerId, SystemTime>,
+    /// Whether we ever reached the network (a relay reservation or a peer).
+    reached: bool,
+    started: Instant,
     /// Peers' stubs the stub gate couldn't accept yet, by id: stored with
     /// the delete or edit that replaced them when it arrives.
     pending_stubs: HashMap<RecordId, Stub>,
@@ -770,7 +841,11 @@ impl Task {
                 event = self.swarm.select_next_some() => self.on_swarm_event(event),
                 Some(answer) = answers.recv() => self.send_answer(answer),
                 Some((key, records, more, acked)) = decoded.recv() => self.on_decoded(key, records, more, acked),
-                _ = soon.tick() => self.pull_soon(),
+                _ = soon.tick() => {
+                    self.pull_soon();
+                    let gone = self.presence.expire(Instant::now());
+                    self.went_offline(gone);
+                }
                 _ = anti_entropy.tick() => {
                     self.pending.expire(Instant::now(), PENDING_TTL);
                     self.pull_all();
@@ -818,8 +893,26 @@ impl Task {
                 })();
                 let _ = reply.send(state);
             }
+            Command::Presence { server, reply } => {
+                let online = self.presence.online(&server);
+                let reachability = if !online.is_empty() {
+                    Reachability::Online
+                } else if self.reached || self.started.elapsed() >= CONNECTING {
+                    Reachability::NobodyOnline
+                } else {
+                    Reachability::Connecting
+                };
+                let _ = reply.send(PresenceState { online, last_seen: self.last_seen.get(&server).copied(), reachability });
+            }
             Command::Prune { id, reply } => {
                 let _ = reply.send(self.store.prune(&id, &*self.stub_gate).map_err(Into::into));
+            }
+            #[cfg(test)]
+            Command::Served { peer, log, reply } => {
+                let _ = reply.send(self.served.get(&(peer, log)).copied().unwrap_or(0));
+            }
+            Command::ListenAddrs { reply } => {
+                let _ = reply.send(self.swarm.listeners().cloned().collect());
             }
             Command::Peers { reply } => {
                 let _ = reply.send(self.connected.iter().copied().collect());
@@ -1001,7 +1094,12 @@ impl Task {
     /// The identity `peer` proved for `server` with `binding`. A verified
     /// binding is kept for the connection, so a repeat isn't re-verified.
     fn bound_identity(&mut self, peer: PeerId, server: ServerId, binding: Option<Binding>) -> Option<PublicKey> {
-        let binding = binding?;
+        let identity = self.verify_binding(peer, server, binding?)?;
+        self.mark_seen(server, identity, peer);
+        Some(identity)
+    }
+
+    fn verify_binding(&mut self, peer: PeerId, server: ServerId, binding: Binding) -> Option<PublicKey> {
         let now = unix_now();
         if let Some((known, identity)) = self.bound.get(&(peer, server)) {
             if *known == binding && binding.expiry().saturating_add(access::CLOCK_SKEW.as_secs()) >= now {
@@ -1012,6 +1110,24 @@ impl Task {
         let identity = binding.verify(&peer, &control, now)?;
         self.bound.insert((peer, server), (binding, identity));
         Some(identity)
+    }
+
+    /// Presence (M2): `identity` proved itself on `peer` just now.
+    fn mark_seen(&mut self, server: ServerId, identity: PublicKey, peer: PeerId) {
+        if self.access.binder.as_ref().is_some_and(|b| b.identity() == identity) {
+            return;
+        }
+        self.last_seen.insert(server, SystemTime::now());
+        if self.presence.seen(server, identity, peer, Instant::now()) {
+            self.emit(NodeEvent::Presence { server, identity, online: true });
+        }
+    }
+
+    fn went_offline(&mut self, gone: Vec<(ServerId, PublicKey)>) {
+        for (server, identity) in gone {
+            self.last_seen.insert(server, SystemTime::now());
+            self.emit(NodeEvent::Presence { server, identity, online: false });
+        }
     }
 
     fn on_swarm_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
@@ -1034,6 +1150,7 @@ impl Task {
                     // Peer ID with its address only at debug level (PR checklist).
                     debug!(%peer_id, address = %endpoint.get_remote_address(), "peer connected");
                     info!(%peer_id, "peer connected");
+                    self.reached = true;
                     self.emit(NodeEvent::PeerConnected(peer_id));
                     for log in self.logs.clone() {
                         self.pull(peer_id, &log);
@@ -1067,6 +1184,8 @@ impl Task {
                     self.emit(NodeEvent::PeerDisconnected(peer_id));
                 }
                 self.bound.retain(|(p, _), _| *p != peer_id);
+                let gone = self.presence.disconnected(&peer_id);
+                self.went_offline(gone);
                 self.inflight.retain(|_, (p, _)| *p != peer_id);
                 self.decoding.retain(|(p, _)| *p != peer_id);
                 self.again.retain(|(p, _)| *p != peer_id);
@@ -1094,6 +1213,7 @@ impl Task {
                     // Reachable through the relay now: look for peers and catch
                     // up at once rather than at the next timer tick.
                     info!("relay reservation accepted");
+                    self.reached = true;
                     self.emit(NodeEvent::RelayReserved);
                     let me = *self.swarm.local_peer_id();
                     self.swarm.behaviour_mut().kad.get_closest_peers(me);
@@ -1210,28 +1330,30 @@ impl Task {
         self.served_bytes.charge(peer, now, max_bytes);
         self.all_served_bytes.charge((), now, max_bytes);
         self.answering += 1;
-        // Receipt acks for the requester's own records (B6), with our binding
-        // so the author can tell a member stored them.
+        // Our binding (presence, M2) and receipt acks for the requester's own
+        // records (B6) go only to a requester our read gate accepts as a
+        // member: a leaked-link holder learns neither who we are nor what
+        // we stored.
         let acks = reader.map(|r| self.acks.take(&r, MAX_ACKS, now)).unwrap_or_default();
-        let binding = match reader {
-            Some((server, _)) if !acks.is_empty() => self.own_binding(server),
+        let ours = match (reader, self.access.read_gate.clone()) {
+            (Some((server, identity)), Some(gate)) => {
+                self.own_binding(server).map(|binding| (ReadCheck { gate, identity, server }, binding))
+            }
             _ => None,
         };
         let store = self.reader.clone();
         let answers = self.answers.clone();
         tokio::task::spawn_blocking(move || {
-            let (mut response, ids) = match store.lock() {
-                Ok(store) => match gate {
-                    Some(gate) if !gate.allows(&store) => (empty_response(), Vec::new()),
-                    _ => answer_with_ids(&store, &log, &request.have, max_bytes),
-                },
-                Err(_) => (empty_response(), Vec::new()),
+            let Ok(store) = store.lock() else {
+                let _ = answers.send((peer, channel, empty_response(), max_bytes, Vec::new(), log));
+                return;
             };
-            if binding.is_some() {
-                response.acks = acks.iter().map(|id| ByteBuf::from(id.as_bytes().to_vec())).collect();
-                response.binding = binding;
-            }
-            let _ = answers.send((peer, channel, response, max_bytes, ids));
+            let (mut response, ids) = match gate {
+                Some(gate) if !gate.allows(&store) => (empty_response(), Vec::new()),
+                _ => answer_with_ids(&store, &log, &request.have, max_bytes),
+            };
+            for_members_only(&mut response, ours, &acks, &store);
+            let _ = answers.send((peer, channel, response, max_bytes, ids, log));
         });
     }
 
@@ -1261,7 +1383,11 @@ impl Task {
     /// Sends a finished answer, charges its size to the byte budgets, and
     /// reports our own records in it that leave this device for the first time.
     fn send_answer(&mut self, answer: Answer) {
-        let (peer, channel, response, reserved, ids) = answer;
+        let (peer, channel, response, reserved, ids, _log) = answer;
+        #[cfg(test)]
+        {
+            *self.served.entry((peer, _log)).or_default() += response.records.len();
+        }
         for id in ids {
             if self.unsent.remove(&id) {
                 self.emit(NodeEvent::Sent { id });
@@ -1365,6 +1491,13 @@ impl Task {
     /// thread, so the network task keeps serving gossip meanwhile.
     fn on_response(&mut self, key: (PeerId, String), response: SyncResponse) {
         self.decoding.insert(key.clone());
+        // Presence: the answerer's binding says who it is (sent to members only).
+        if let (Some(binding), Some(s)) = (response.binding.clone(), self.sealing.get(&key.1)) {
+            let server = s.server;
+            if let Some(identity) = self.verify_binding(key.0, server, binding) {
+                self.mark_seen(server, identity, key.0);
+            }
+        }
         let acks = self.ack_check(&key, &response);
         let decoded = self.decoded.clone();
         let store = self.reader.clone();
@@ -1755,6 +1888,18 @@ fn empty_response() -> SyncResponse {
     SyncResponse { records: Vec::new(), more: false, acks: Vec::new(), binding: None }
 }
 
+/// Adds our binding (presence) and the requester's receipt acks to an
+/// answer, only if our read gate accepts the requester as a member: a
+/// leaked-link holder learns neither who we are nor what we stored.
+fn for_members_only(response: &mut SyncResponse, ours: Option<(ReadCheck, Binding)>, acks: &[RecordId], store: &Store) {
+    if let Some((member, binding)) = ours {
+        if member.allows(store) {
+            response.acks = acks.iter().map(|id| ByteBuf::from(id.as_bytes().to_vec())).collect();
+            response.binding = Some(binding);
+        }
+    }
+}
+
 /// Answers a pull: what the requester is missing from `request.log`, one
 /// page, straight from the stored bytes (they passed the ingest checks when
 /// they were stored). At most [`MAX_HAVE`] `have` ids are looked at, and
@@ -2078,8 +2223,21 @@ mod tests {
         }
     }
 
-    fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    /// The TCP port `node` actually listens on (it was started on port 0).
+    /// Tests used to pick a free port first and bind it later; on Windows a
+    /// parallel test could get the same port in between, and nodes of two
+    /// tests then met each other.
+    async fn port_of(node: &Node) -> u16 {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            for addr in node.listen_addrs().await.unwrap() {
+                if let Some(Protocol::Tcp(port)) = addr.iter().find(|p| matches!(p, Protocol::Tcp(_))) {
+                    return port;
+                }
+            }
+            assert!(Instant::now() < deadline, "node never listened");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     async fn test_node(name: &str, listen: Option<u16>, bootstrap: Option<u16>, access: Access) -> Node {
@@ -2123,13 +2281,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_message_is_sent_then_delivered_once_a_member_stored_it() {
         use crate::testutil::{message, test_key};
-        let secret = ServerSecret::from_bytes([9; 32]);
+        let secret = ServerSecret::from_bytes([10; 32]);
         let key = |n: u8| -> Option<Arc<dyn Binder>> { Some(Arc::new(test_key(n))) };
-        let port = free_port();
         // The author (test key 1, who signs `message`) counts only key 0 as a member.
         let members: Arc<dyn ReadGate> = Arc::new(OnlyReader(test_key(0).identity()));
         let (author, mut events) =
-            test_node_events("author", Some(port), None, Access { binder: key(1), read_gate: Some(members), stub_gate: None }).await;
+            test_node_events("author", None, None, Access { binder: key(1), read_gate: Some(members), stub_gate: None }).await;
+        let port = port_of(&author).await;
         author.open_server(server(), secret.clone()).unwrap();
         author.open_channel(server(), channel()).await.unwrap();
 
@@ -2186,10 +2344,10 @@ mod tests {
         use crate::testutil::{genesis, message, test_key};
         let secret = ServerSecret::from_bytes([9; 32]);
         let key = |n: u8| -> Option<Arc<dyn Binder>> { Some(Arc::new(test_key(n))) };
-        let port = free_port();
         // The owner's node serves channels to test key 1 only.
         let reader: Arc<dyn ReadGate> = Arc::new(OnlyReader(test_key(1).identity()));
-        let owner = test_node("owner", Some(port), None, Access { binder: key(0), read_gate: Some(reader), stub_gate: None }).await;
+        let owner = test_node("owner", None, None, Access { binder: key(0), read_gate: Some(reader), stub_gate: None }).await;
+        let port = port_of(&owner).await;
         owner.open_server(server(), secret.clone()).unwrap();
         owner.open_channel(server(), channel()).await.unwrap();
         owner.append(genesis()).await.unwrap();
@@ -2204,7 +2362,21 @@ mod tests {
             node
         };
         let member = peer("member", key(1), secret.clone()).await;
-        let stranger = peer("stranger", key(2), secret.clone()).await;
+        // The stranger's stored records, with how they came (pull or push).
+        let (stranger, mut events) =
+            test_node_events("stranger", None, Some(port), Access { binder: key(2), read_gate: None, stub_gate: None })
+                .await;
+        stranger.open_server(server(), secret.clone()).unwrap();
+        stranger.open_channel(server(), channel()).await.unwrap();
+        let stored = Arc::new(Mutex::new(Vec::<(String, RecordId, Via)>::new()));
+        let log_events = stored.clone();
+        tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                if let NodeEvent::Stored { log, record, via, .. } = event {
+                    log_events.lock().unwrap().push((log, record.id(), via));
+                }
+            }
+        });
         let unbound = peer("unbound", None, secret.clone()).await;
         let outsider = peer("outsider", key(1), ServerSecret::from_bytes([8; 32])).await;
         let by_name = test_node("by-name", None, Some(port), Access::default()).await;
@@ -2220,9 +2392,29 @@ mod tests {
         let first = message(0, &[], 0);
         owner.append(message(1, &[first.id()], 0)).await.unwrap();
         eventually(&member, (1, 2), 20).await;
-        // Past another anti-entropy round: the rest still have nothing more.
-        tokio::time::sleep(ANTI_ENTROPY + Duration::from_secs(1)).await;
-        assert_eq!(counts(&stranger).await, (1, 0), "a bound non-member pulled a channel");
+        // A control record written after all that: once the stranger has it,
+        // its later pulls (control and channel alike) have been answered. No
+        // fixed sleep; the stranger's own progress is the clock.
+        let later = crate::testutil::post(1, &[genesis().id()]);
+        owner.append(later.clone()).await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !stored.lock().unwrap().iter().any(|(_, id, _)| *id == later.id()) {
+            assert!(Instant::now() < deadline, "the stranger stopped syncing its control log");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        tokio::time::sleep(ANTI_ENTROPY).await; // one more full round of pulls
+        // The security property: no channel record ever reached the bound
+        // non-member *by pull*. (Sealed gossip to a secret holder is the
+        // documented GAP-4b residual; it only got m1, which waits for m0.)
+        let pulled: Vec<_> = stored.lock().unwrap().iter().filter(|(log, _, via)| *log == chan() && *via == Via::Pull).cloned().collect();
+        assert!(pulled.is_empty(), "a bound non-member pulled a channel: {pulled:?}");
+        // And at the source: the owner's answers to the stranger carried
+        // control records but not one channel entry. So this checks the
+        // ReadGate path itself, not gossip.
+        assert!(owner.served(stranger.peer_id(), &log_name(server(), Scope::Control)).await >= 1);
+        assert_eq!(owner.served(stranger.peer_id(), &chan()).await, 0, "the owner served the channel to a non-member");
+        assert!(owner.served(member.peer_id(), &chan()).await >= 1);
+        assert_eq!(counts(&stranger).await, (2, 0));
         assert_eq!(counts(&unbound).await, (0, 0), "a pull without a binding was answered");
         assert_eq!(counts(&outsider).await, (0, 0), "a wrong secret was answered");
         assert_eq!(counts(&by_name).await, (0, 0), "a sealed log was served by its plain name");
@@ -2245,7 +2437,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn two_nodes_sync_over_websocket() {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let node = |name: &str, listen: String, bootstrap: Vec<Multiaddr>| {
             let dir = std::env::temp_dir().join(format!("sync-ws-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
@@ -2260,7 +2451,8 @@ mod tests {
                 allow_lan: true,
             }
         };
-        let (a, _a_events) = Node::start(node("a", format!("/ip4/127.0.0.1/tcp/{port}/ws"), vec![])).await.unwrap();
+        let (a, _a_events) = Node::start(node("a", "/ip4/127.0.0.1/tcp/0/ws".into(), vec![])).await.unwrap();
+        let port = port_of(&a).await;
         let ws = format!("/ip4/127.0.0.1/tcp/{port}/ws").parse().unwrap();
         let (b, _b_events) = Node::start(node("b", "/ip4/127.0.0.1/tcp/0".into(), vec![ws])).await.unwrap();
         a.append(crate::testutil::message(0, &[], 0)).await.unwrap();
@@ -2274,15 +2466,92 @@ mod tests {
         b.shutdown().await.unwrap();
     }
 
+    /// Presence (M2) end to end: a member is online on both sides within
+    /// 5 s; a bound non-member learns only who pulls from it (GAP-4b); a member that
+    /// leaves is offline within 30 s.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn members_are_online_within_5_s_and_offline_within_30_s_of_leaving() {
+        use crate::testutil::test_key;
+        let secret = ServerSecret::from_bytes([11; 32]);
+        let id = |n: u8| test_key(n).identity();
+        let node = |name: &'static str, n: u8, listen, bootstrap, gate: Arc<dyn ReadGate>| {
+            let secret = secret.clone();
+            async move {
+                let access = Access { binder: Some(Arc::new(test_key(n))), read_gate: Some(gate), stub_gate: None };
+                let node = test_node(name, listen, bootstrap, access).await;
+                node.open_server(server(), secret).unwrap();
+                node
+            }
+        };
+        // The owner (key 0) counts key 1 as a member, not key 2.
+        let owner = node("p-owner", 0, None, None, Arc::new(OnlyReader(id(1)))).await;
+        let port = port_of(&owner).await;
+        let started = Instant::now();
+        let member = node("p-member", 1, None, Some(port), Arc::new(AcceptAll)).await;
+        let stranger = node("p-stranger", 2, None, Some(port), Arc::new(AcceptAll)).await;
+        async fn online(n: &Node) -> PresenceState {
+            n.presence(server()).await.unwrap()
+        }
+        while !(online(&owner).await.online.contains(&id(1)) && online(&member).await.online.contains(&id(0))) {
+            assert!(started.elapsed() < Duration::from_secs(5), "member not online on both sides within 5 s");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(online(&member).await.reachability, Reachability::Online);
+        tokio::time::sleep(ANTI_ENTROPY + Duration::from_secs(1)).await;
+        // The stranger is bound (reported to the owner; the app filters), but
+        // never gets the owner's binding, so it sees nobody.
+        assert!(online(&owner).await.online.contains(&id(2)));
+        // Residual GAP-4b (PRESENCE.md): members pull from the stranger too,
+        // and a pull carries the requester's binding, so the stranger learns
+        // who pulls from it. Its answers never told it anything (below).
+        assert_eq!(online(&stranger).await.online.len(), 2);
+        // Our own identity is never listed.
+        assert!(!online(&owner).await.online.contains(&id(0)));
+
+        member.shutdown().await.unwrap();
+        let left = Instant::now();
+        while online(&owner).await.online.contains(&id(1)) {
+            assert!(left.elapsed() < Duration::from_secs(30), "member still online 30 s after leaving");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(online(&owner).await.last_seen.is_some());
+        owner.shutdown().await.unwrap();
+        stranger.shutdown().await.unwrap();
+    }
+
+    /// The answer side of presence: our binding and acks go only to a
+    /// requester our read gate accepts as a member.
+    #[test]
+    fn our_binding_and_acks_go_to_members_only() {
+        use crate::testutil::test_key;
+        let store = Store::in_memory().unwrap();
+        let control = ServerSecret::from_bytes([9; 32]).handle(Scope::Control);
+        let binding = Binding::sign(&test_key(0), &PeerId::random(), &control, unix_now() + 3600);
+        let acks = [RecordId::from_bytes([1; 32])];
+        let gate: Arc<dyn ReadGate> = Arc::new(OnlyReader(test_key(1).identity()));
+        let answer_to = |n: u8| {
+            let mut response = empty_response();
+            let check = ReadCheck { gate: gate.clone(), identity: test_key(n).identity(), server: server() };
+            for_members_only(&mut response, Some((check, binding.clone())), &acks, &store);
+            response
+        };
+        let member = answer_to(1);
+        assert_eq!(member.binding, Some(binding.clone()));
+        assert_eq!(member.acks.len(), 1);
+        let stranger = answer_to(2);
+        assert_eq!(stranger.binding, None);
+        assert!(stranger.acks.is_empty());
+    }
+
     /// B6-p end to end: the only peer pruned a deleted message, so a newcomer
     /// can only get the stub. It arrives before the delete (page order) and
     /// ends up stored with it.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_newcomer_gets_the_stub_of_a_message_everyone_pruned() {
         use crate::testutil::{delete, message, DeletedOnly};
-        let port = free_port();
         let access = || Access { stub_gate: Some(Arc::new(DeletedOnly)), ..Access::default() };
-        let old = test_node("pruner", Some(port), None, access()).await;
+        let old = test_node("pruner", None, None, access()).await;
+        let port = port_of(&old).await;
         old.open(&chan()).unwrap();
         let m = message(0, &[], 100);
         let d = delete(1, &m);

@@ -343,7 +343,8 @@ impl Core {
     pub fn list_channels(&self, server_id: &str) -> CoreResult<Vec<Channel>> {
         let mut inner = self.lock();
         let server = inner.load_mine(parse_server(server_id)?)?;
-        inner.view(server).map(|view| view.channels())
+        let me = inner.me.as_ref().map(Me::key);
+        inner.view(server).map(|view| view.channels(me))
     }
 
     pub fn list_members(&self, server_id: &str) -> CoreResult<Vec<Member>> {
@@ -361,7 +362,10 @@ impl Core {
             let me = inner.me.as_ref().ok_or(ErrorCode::NotFound)?;
             inner.vault.require_recovery_check(&me.identity).map_err(vault_error)?;
             let name = name.trim();
-            if name.is_empty() || name.chars().count() > model::MAX_NAME_CHARS {
+            if name.is_empty()
+                || name.chars().count() > model::MAX_NAME_CHARS
+                || !authority::display_text_ok(name)
+            {
                 return Err(ErrorCode::BadRequest.into());
             }
             let mut nonce = [0u8; records::GENESIS_NONCE_LEN];
@@ -408,6 +412,9 @@ impl Core {
                 ports.network.publish(&record);
                 inner.store(server, record)?;
             }
+            let claim = inner.sign_age_claim(ports, server)?;
+            ports.network.publish(&claim);
+            inner.store(server, claim)?;
             inner.db.add_server(server, ports.clock.now_ms())?;
             let summary = inner.summary(server)?;
             events.push(Event::ServerAdded(summary.clone()));
@@ -458,6 +465,40 @@ impl Core {
     /// (`authority`'s rule; the mock only lets the owner kick).
     pub fn kick_member(&self, server_id: &str, user_id: &str) -> CoreResult<()> {
         self.control_action(server_id, Action::kick(parse_user(user_id)?))
+    }
+
+    /// Rust addition (`undoKick`, B4 kick-undo): the owner lets a kicked
+    /// account back. It isn't made a member: it may join again through an
+    /// invite. `not-allowed` for anyone but the owner, or someone not kicked.
+    pub fn undo_kick(&self, server_id: &str, user_id: &str) -> CoreResult<()> {
+        self.control_action(server_id, Action::Unban { target: parse_user(user_id)? })
+    }
+
+    /// Rust addition (`listRemovedMembers`): the owner's list of removed
+    /// accounts, with when each was kicked. `not-allowed` for anyone else.
+    pub fn list_removed_members(&self, server_id: &str) -> CoreResult<Vec<RemovedMember>> {
+        let mut inner = self.lock();
+        let server = inner.load_mine(parse_server(server_id)?)?;
+        let me = inner.me.as_ref().map(Me::key);
+        let view = inner.view(server)?;
+        if me != Some(view.owner) {
+            return Err(ErrorCode::NotAllowed.into());
+        }
+        let names = view.display_names();
+        let kicked_at: HashMap<RecordId, u64> =
+            view.records.iter().map(|r| (r.id(), r.ts())).collect();
+        Ok(view
+            .state
+            .removed
+            .iter()
+            .filter(|(key, _)| view.state.kicked.contains(key))
+            .map(|(key, kick)| RemovedMember {
+                id: model::hex_id(key.as_bytes()),
+                short_code: model::short_code(key),
+                display_name: names.get(key).cloned().unwrap_or_default(),
+                removed_at: kicked_at.get(kick).copied().unwrap_or_default(),
+            })
+            .collect())
     }
 
     // TODO(records B4):
@@ -785,6 +826,36 @@ impl Core {
 }
 
 impl Inner {
+    /// The known channels this identity may read and write: 18+ channels
+    /// only with an accepted 18+ claim (B7).
+    fn visible(&self, server: ServerId) -> CoreResult<BTreeSet<ChannelId>> {
+        let me = self.me.as_ref().map(Me::key);
+        let state = self.logs.get(&server).ok_or(ErrorCode::Internal)?.resolver.state();
+        let adult = me.is_some_and(|me| state.adults.contains(&me));
+        let mut visible = self.known(server)?;
+        visible.retain(|c| adult || !state.channels.get(c).is_some_and(|c| c.adult));
+        Ok(visible)
+    }
+
+    /// Our age claim for `server` (B7): 18+ or not, from the sealed birth
+    /// date, which never leaves this device. A restored identity has no
+    /// birth date yet and claims "not 18+".
+    fn sign_age_claim(&self, ports: &Ports, server: ServerId) -> CoreResult<Record> {
+        let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?;
+        let now = ports.clock.now_ms();
+        let adult = model::age_on(&me.profile.birth_date, now).is_some_and(|age| age >= 18);
+        let view = self.view(server)?;
+        authority::sign_control(
+            me.identity.signing_key(),
+            server,
+            view.next_seq(&me.key()),
+            view.deps(None),
+            now,
+            &Action::AgeClaim { adult },
+        )
+        .map_err(|_| ErrorCode::BadRequest.into())
+    }
+
     /// B6-p: every full record an accepted delete or edit replaced is pruned
     /// to its stub, in memory, in the store and in sync's store. Nothing of
     /// its body (the ciphertext) is kept; nothing of its text was ever
@@ -1094,7 +1165,7 @@ impl Inner {
             model::parse_hex32(channel_id).map(ChannelId::from_bytes).ok_or(ErrorCode::NotFound)?;
         for server in self.db.servers()? {
             self.load(server)?;
-            if self.known(server)?.contains(&channel) {
+            if self.visible(server)?.contains(&channel) {
                 return Ok((server, channel));
             }
         }
@@ -1325,6 +1396,9 @@ impl Inner {
         self.logs.insert(server, log);
         mine.push(profile.clone());
         self.store(server, profile)?;
+        let claim = self.sign_age_claim(ports, server)?;
+        mine.push(claim.clone());
+        self.store(server, claim)?;
         for record in &mine {
             ports.network.publish(record);
         }
@@ -1361,7 +1435,7 @@ impl ServerView<'_> {
     /// The channels authority knows, with their names as created; a server
     /// from before #113 shows its derived #general.
     /// TODO(#116): hide 18+ channels from members without an 18+ claim.
-    fn channels(&self) -> Vec<Channel> {
+    fn channels(&self, me: Option<PublicKey>) -> Vec<Channel> {
         let server_id = model::hex_id(self.id.as_bytes());
         let channel = |id: ChannelId, name: &str, adult: bool| Channel {
             id: model::hex_id(id.as_bytes()),
@@ -1374,7 +1448,14 @@ impl ServerView<'_> {
         if self.state.channels.is_empty() {
             return vec![channel(model::default_channel(self.id), model::GENERAL, false)];
         }
-        self.state.channels.iter().map(|(id, c)| channel(*id, &c.name, c.adult)).collect()
+        // B7: 18+ channels only for members with an accepted 18+ claim.
+        let adult = me.is_some_and(|me| self.state.adults.contains(&me));
+        self.state
+            .channels
+            .iter()
+            .filter(|(_, c)| adult || !c.adult)
+            .map(|(id, c)| channel(*id, &c.name, c.adult))
+            .collect()
     }
 }
 
