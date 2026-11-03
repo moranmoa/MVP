@@ -27,5 +27,8 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
+    // Above the 5 s findBy/waitFor limit in setup.ts, so a slow wait fails as
+    // a wait (with its message), not as a test timeout.
+    testTimeout: 15_000,
   },
 });
