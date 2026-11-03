@@ -22,11 +22,6 @@ services:
       EXTERNAL_ADDRS: ${EXTERNAL_ADDRS:-}
       RUST_LOG: ${RUST_LOG:-info}
       STATS_INTERVAL_SECS: ${STATS_INTERVAL_SECS:-300}
-      # Circuit limits; empty keeps libp2p's defaults. See .env.example.
-      MAX_CIRCUITS: ${MAX_CIRCUITS:-}
-      MAX_CIRCUITS_PER_PEER: ${MAX_CIRCUITS_PER_PEER:-}
-      MAX_CIRCUIT_SECS: ${MAX_CIRCUIT_SECS:-}
-      MAX_CIRCUIT_BYTES: ${MAX_CIRCUIT_BYTES:-}
     ports:
       - "4001:4001/tcp"
       - "4001:4001/udp"

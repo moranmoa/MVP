@@ -8,6 +8,7 @@ Results and conclusions: [RESULTS.md](RESULTS.md).
 | `browser/` | the browser peer: rust-libp2p 0.54 compiled to wasm32 (WebSocket, relay circuit, webrtc-direct; gossipsub push + CBOR pull) |
 | `native/` | `web-native`: a native peer with core/sync's SQLite store and protocols plus a webrtc-direct listener |
 | `www/` | the page that loads the wasm bundle |
+| `relay/` | copy of `infra/relay` with the relay changes specified in RESULTS.md (`relay.patch` is the diff); the harness builds it |
 | `harness/` | Docker build, docker-compose (relay, core/sync node, web-native, Playwright) and the test script |
 
 ## Reproduce
@@ -40,7 +41,7 @@ bash spikes/web/harness/summarize.sh dist/results.json
 `build.sh` compiles `web-native`, core/sync's unmodified `sync-peer` and the
 wasm bundle in a `rust:1.90-bookworm`-based image, runs the wire-format tests,
 and writes `harness/dist/` (bundle sizes in `dist/www/pkg/sizes.json`).
-`run.sh` starts its own relay (built from `infra/relay`, fresh key, own
+`run.sh` starts its own relay (built from `relay/`, a patched copy of `infra/relay`; fresh key, own
 Docker network; the `infra/` relay is not touched), the two native peers and
 the Playwright container, which runs Chromium and Firefox headless. Results:
 `harness/dist/results.json`; peer logs: `harness/dist/peers.log`. It exits

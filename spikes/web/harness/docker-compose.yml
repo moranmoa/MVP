@@ -1,4 +1,4 @@
-# Spike 5 harness: relay (infra/relay, unchanged), an unmodified core/sync
+# Spike 5 harness: relay (relay/, patched copy of infra/relay), an unmodified core/sync
 # node, the WebRTC native peer and headless browsers. Own network, own relay
 # key: it does not touch the infra/ relay. Run it with run.sh.
 name: web-spike
@@ -14,7 +14,7 @@ x-peer: &peer
 
 services:
   relay:
-    build: ../../../infra/relay
+    build: ../relay # patched copy of infra/relay (see relay/relay.patch)
     image: web-spike-relay
     environment:
       KEY_PATH: /tmp/node.key # fresh key per run

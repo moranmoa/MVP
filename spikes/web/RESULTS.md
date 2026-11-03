@@ -15,12 +15,13 @@ WebKit run).
 
 Two things must change before production. Both are covered below:
 
-1. **The relay needs settings, and this PR fixes one.** Without
+1. **The relay needs settings and three code changes** (specified below for
+   devops; the harness uses a patched copy in `relay/`). Without
    `EXTERNAL_ADDRS`, circuits fail silently. libp2p's default circuit limits
    (128 KiB / 2 min per circuit, 16 circuits in total) cut off relayed browser
    sessions. With Nagle's algorithm on, every relayed message waited about
-   40 ms per hop (fixed in this PR: relayed sync round trip went from 90 ms to
-   3 ms).
+   40 ms per hop (turning it off took the relayed sync round trip from 90 ms
+   to 3 ms).
 2. **WebRTC in libp2p 0.54 is alpha and has a real bug.** A browser cannot
    send a blob of ~8 KB or more to a native peer over WebRTC (the native side
    fails to decode it). The first request a native peer opens on a fresh
@@ -43,7 +44,7 @@ Reproduce: [README.md](README.md). Per-run tables: [results/runs.md](results/run
 | Browser peer | `browser/` | rust-libp2p 0.54 → wasm32 via wasm-bindgen. Transports: WebSocket (`websocket-websys`), relay circuit client, webrtc-direct (`libp2p-webrtc-websys`). Behaviours: identify, ping, gossipsub, request-response (CBOR), same as core/sync. Blobs live in memory. |
 | Wire crate | `wire/` | core/sync's current wire format (`/mvs/sync/0.1.0`: blob = dep count, sorted deps, data; id recomputed from log, deps and data; same size limits; content-based gossipsub message ids), `SyncRequest`/`SyncResponse`, and an in-memory log with the same pull rules (have-markers, missing-since with byte-capped pages, state hash). A test checks it against `sync::Blob` and `sync::Store`: same ids, same bytes, same markers, same pages. |
 | Native WebRTC peer | `native/` | `web-native`: core/sync's SQLite `Store` and protocols plus a webrtc-direct listener (`libp2p-webrtc` 0.8.0-alpha). core/sync's `Node` has no WebRTC, and core/ was off-limits for this spike. |
-| Harness | `harness/` | Docker build, a docker-compose network (relay built from `infra/relay`, core/sync's own `sync-peer`, `web-native`, Playwright 1.56.1) and the test script. |
+| Harness | `harness/` | Docker build, a docker-compose network (relay built from `relay/`, a patched copy of `infra/relay`, core/sync's own `sync-peer`, `web-native`, Playwright 1.56.1) and the test script. |
 
 The browser joins as follows. It dials the relay over WebSocket, then dials
 `<relay>/p2p-circuit/p2p/<native>`. For the direct path it learns the native
@@ -104,7 +105,7 @@ Notes on reading the table:
 | Problem | Effect | Fix | Before → after (Chromium p50) |
 |---|---|---|---|
 | `libp2p-websocket-websys` 0.4 completes a flush only when a 100 ms interval timer sees the send buffer empty | every handshake step waits for a tick: **~400 ms** per WebSocket connect, in every browser | `EagerFlush` wrapper in `browser/src/lib.rs` (flush returns at once; writes still respect the buffer limit) | 401 → 137 ms |
-| Relay TCP and WebSocket sockets had Nagle's algorithm on (libp2p-tcp's default) | small relayed messages wait for delayed ACKs, about 40 ms per hop | `nodelay(true)` in `infra/relay` for TCP and WebSocket (this PR) | WebSocket connect 137–146 → 8–16 ms; circuit connect 151–208 → 13–22 ms; relayed sync round trip 88–97 → 2.7–3.9 ms |
+| Relay TCP and WebSocket sockets had Nagle's algorithm on (libp2p-tcp's default) | small relayed messages wait for delayed ACKs, about 40 ms per hop | `nodelay(true)` for TCP and WebSocket in the relay (spec R2, R3 below) | WebSocket connect 137–146 → 8–16 ms; circuit connect 151–208 → 13–22 ms; relayed sync round trip 88–97 → 2.7–3.9 ms |
 
 The first fix belongs upstream (or comes with a libp2p upgrade). The second
 also speeds up native peers that are relayed through the relay today.
@@ -137,10 +138,7 @@ also speeds up native peers that are relayed through the relay today.
    Measured with defaults: a 320 KB push over a circuit was cut after 9 of
    40 blobs. A joining Firefox peer's history pull was cut mid-transfer. An
    early harness version, which left test connections open, hit the
-   16-circuit cap after 16 connections. This PR makes the limits
-   configurable (`MAX_CIRCUITS`, `MAX_CIRCUITS_PER_PEER`, `MAX_CIRCUIT_SECS`,
-   `MAX_CIRCUIT_BYTES`). Unset keeps the defaults, so behaviour is unchanged
-   until `.env` sets them.
+   16-circuit cap after 16 connections. Spec R1 below makes the limits configurable.
 3. **WebRTC, browser → native, ≥ ~8 KB fails** (libp2p-webrtc 0.8.0-alpha on
    the native side, libp2p-webrtc-websys 0.4.0-alpha in the browser). The
    native peer pulls from a browser that is connected only over WebRTC.
@@ -212,13 +210,50 @@ also speeds up native peers that are relayed through the relay today.
   16–64, `MAX_CIRCUIT_SECS` of an hour or more, and `MAX_CIRCUIT_BYTES` in
   the hundreds of MB. Watch bandwidth: the relay now carries the web
   clients' traffic.
-- **Nagle off** (in this PR).
+- **Nagle off** (spec R2, R3).
 - **Optional, cert-free alternative:** the relay could also listen on
   webrtc-direct. Browsers then reach it with only the certificate hash in
   the address, with no domain or TLS certificate. Its certificate must
   persist across restarts, or the advertised address changes. Not done here
   (relay changes were kept minimal), and bugs 3–4 argue for waiting for a
   libp2p upgrade.
+
+## Relay changes for devops (spec)
+
+`infra/relay` is not changed by this spike. The harness builds `relay/`, a
+copy of `infra/relay` (as on main, 2026-11-03) with the three changes below;
+`relay/relay.patch` is the exact diff. All measurements above used it.
+
+- **R1. Circuit limits from the environment.** Read four optional variables
+  and apply them to `relay::Config`; unset or empty keeps libp2p's default,
+  so behaviour doesn't change until `.env` sets them:
+
+  | Variable | `relay::Config` field | libp2p default |
+  |---|---|---|
+  | `MAX_CIRCUITS` | `max_circuits` | 16 |
+  | `MAX_CIRCUITS_PER_PEER` | `max_circuits_per_peer` | 4 |
+  | `MAX_CIRCUIT_SECS` | `max_circuit_duration` (seconds) | 120 |
+  | `MAX_CIRCUIT_BYTES` | `max_circuit_bytes` | 131072 |
+
+  Pass them through `infra/docker-compose.yml` (`${VAR:-}`) and list them,
+  empty, in `.env.example`. A non-numeric value should fail startup with the
+  variable's name. Starting values for production are under "What the relay
+  needs in production". Acceptance: `bash spikes/web/harness/run.sh` with
+  the variables unset shows "bulk 320 KB over circuit: cut after N blobs";
+  with `MAX_CIRCUIT_BYTES=1073741824` (and the others raised) it shows "ok".
+- **R2. Nagle off on the TCP transport:** `tcp::Config::default().nodelay(true)`
+  in `.with_tcp(...)`.
+- **R3. Nagle off on the WebSocket transport.** `SwarmBuilder::with_websocket`
+  has no TCP config, so build the same thing with `with_other_transport`
+  before `with_dns`: `websocket::WsConfig::new(tcp::tokio::Transport::new(
+  tcp::Config::default().nodelay(true)))`, upgraded with `Version::V1Lazy`,
+  Noise and yamux. Listening addresses and the `/ws` port are unchanged.
+  Acceptance for R2 + R3: in the harness, Chromium's `relay_ws` connect p50
+  drops from ~140 ms to under 20 ms and the relayed sync round trip from
+  ~90 ms to under 5 ms.
+
+Ops item, no code: keep `EXTERNAL_ADDRS` non-empty (bug 1); an empty value
+should probably log a warning at startup.
 
 ## Why rust-libp2p → WASM (and not js-libp2p)
 
@@ -242,4 +277,4 @@ rust-libp2p lacks. That is the main reason to reconsider later.
 - **The browser peer has no anti-entropy timer** (core/sync pulls every
   5 s). It pulls on connect and when a pushed blob's deps are missing.
 - **Licences:** cargo-deny with `core/deny.toml` passes for `spikes/web` and
-  `infra/relay` (licenses, sources, bans).
+  `relay/` (the patched relay; licenses, sources, bans).
