@@ -1,0 +1,52 @@
+{
+  "name": "voice-spike-electron",
+  "private": true,
+  "version": "0.1.0",
+  "license": "UNLICENSED",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist:win": "electron-builder --win portable",
+    "dist:linux": "electron-builder --linux AppImage",
+    "dist:mac": "electron-builder --mac zip"
+  },
+  "devDependencies": {
+    "electron": "44.7.0",
+    "electron-builder": "26.17.0"
+  },
+  "build": {
+    "appId": "dev.mvp.voicespike",
+    "productName": "VoiceSpike",
+    "files": [
+      "main.js",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../web",
+        "to": "web"
+      }
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "mac": {
+      "target": "zip",
+      "identity": null
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Network",
+      "maintainer": "MVP spike <spike@example.invalid>"
+    },
+    "win": {
+      "target": "portable"
+    }
+  },
+  "description": "Voice spike, Electron variant",
+  "homepage": "https://github.com/moranmoa/MVP",
+  "author": {
+    "name": "MVP spike",
+    "email": "spike@example.invalid"
+  }
+}

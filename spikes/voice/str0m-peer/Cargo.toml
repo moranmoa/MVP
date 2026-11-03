@@ -1,0 +1,32 @@
+[package]
+name = "str0m-peer"
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+description = "Voice spike (experiment 4), Tauri variant: group call over str0m with native audio"
+
+# Standalone on purpose: not a member of core/ so the spike cannot disturb
+# the core workspace or its lock file.
+[workspace]
+
+[features]
+default = []
+# WebRTC's audio processing module (echo cancellation, noise suppression,
+# gain control). Builds the C++ library from source, so it is opt-in.
+apm = ["dep:webrtc-audio-processing", "dep:webrtc-audio-processing-config"]
+
+[dependencies]
+# Pure-Rust DTLS/SRTP crypto: no OpenSSL or AWS-LC C build, same on every OS.
+str0m = { version = "0.24.1", default-features = false, features = ["rust-crypto"] }
+tungstenite = { version = "0.27", default-features = false, features = ["handshake"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+opus = "0.3"
+cpal = "0.16"
+webrtc-audio-processing = { version = "~2.1", features = ["bundled"], optional = true }
+webrtc-audio-processing-config = { version = "~2.1", optional = true }
+
+[profile.release]
+debug = false
+strip = true

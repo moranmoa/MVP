@@ -1,0 +1,166 @@
+{
+  "id": "c-89a670",
+  "variant": "chromium",
+  "room": "c6-lossy",
+  "src": "pulses",
+  "processing": {
+    "aec": true,
+    "ns": true,
+    "agc": true
+  },
+  "seconds": 79.995,
+  "capabilities": {
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/141.0.7390.37 Safari/537.36",
+    "RTCPeerConnection": true,
+    "getUserMedia": true,
+    "enumerateDevices": true,
+    "selectAudioOutput": false,
+    "setSinkId": true,
+    "audioWorklet": true,
+    "echoCancellation": true,
+    "noiseSuppression": true,
+    "autoGainControl": true,
+    "insertableStreams": true,
+    "opus": true
+  },
+  "peers": {
+    "c-97e3c8": {
+      "kind": "chromium",
+      "latencyMs": {
+        "n": 76,
+        "median": 122.5,
+        "p95": 131.7,
+        "min": 109.8,
+        "max": 137
+      },
+      "jitterMs": {
+        "n": 78,
+        "median": 1,
+        "p95": 14,
+        "min": 0,
+        "max": 17
+      },
+      "rttMs": {
+        "n": 77,
+        "median": 101,
+        "p95": 101,
+        "min": 101,
+        "max": 102
+      },
+      "lossPct": 1.9868827160493827,
+      "jitterBufferMs": 39.973502914679386,
+      "concealedPct": 1.8428300865800866
+    },
+    "c-44fe97": {
+      "kind": "chromium",
+      "latencyMs": {
+        "n": 77,
+        "median": 119.5,
+        "p95": 129.5,
+        "min": 108.1,
+        "max": 131
+      },
+      "jitterMs": {
+        "n": 79,
+        "median": 1,
+        "p95": 15,
+        "min": 0,
+        "max": 17
+      },
+      "rttMs": {
+        "n": 74,
+        "median": 101,
+        "p95": 101,
+        "min": 101,
+        "max": 101
+      },
+      "lossPct": 2.1668099742046434,
+      "jitterBufferMs": 29.145702306079663,
+      "concealedPct": 2.2009615384615384
+    },
+    "c-ed5c99": {
+      "kind": "chromium",
+      "latencyMs": {
+        "n": 77,
+        "median": 117.3,
+        "p95": 140.4,
+        "min": 102.4,
+        "max": 143.2
+      },
+      "jitterMs": {
+        "n": 78,
+        "median": 1,
+        "p95": 16,
+        "min": 0,
+        "max": 17
+      },
+      "rttMs": {
+        "n": 73,
+        "median": 101,
+        "p95": 101,
+        "min": 101,
+        "max": 101
+      },
+      "lossPct": 2.2027220630372493,
+      "jitterBufferMs": 28.92487390496416,
+      "concealedPct": 2.135119047619048
+    },
+    "c-af96f3": {
+      "kind": "chromium",
+      "latencyMs": {
+        "n": 75,
+        "median": 126.5,
+        "p95": 137.5,
+        "min": 112.7,
+        "max": 144.8
+      },
+      "jitterMs": {
+        "n": 78,
+        "median": 1,
+        "p95": 16,
+        "min": 0,
+        "max": 16
+      },
+      "rttMs": {
+        "n": 69,
+        "median": 101,
+        "p95": 101,
+        "min": 101,
+        "max": 101
+      },
+      "lossPct": 2.08649468892261,
+      "jitterBufferMs": 40.61754571958654,
+      "concealedPct": 1.8886363636363637
+    },
+    "c-9f80c2": {
+      "kind": "chromium",
+      "latencyMs": {
+        "n": 73,
+        "median": 119.5,
+        "p95": 129.7,
+        "min": 103.7,
+        "max": 143.5
+      },
+      "jitterMs": {
+        "n": 76,
+        "median": 1,
+        "p95": 16,
+        "min": 0,
+        "max": 16
+      },
+      "rttMs": {
+        "n": 73,
+        "median": 101,
+        "p95": 101,
+        "min": 101,
+        "max": 101
+      },
+      "lossPct": 2.2965641952983726,
+      "jitterBufferMs": 29.92631004366812,
+      "concealedPct": 2.2950555555555554
+    }
+  },
+  "netem": "delay 50ms loss 2%",
+  "cpuPctOfOneCore": 41.8,
+  "memMiB": 151
+}
