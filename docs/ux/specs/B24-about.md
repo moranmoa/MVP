@@ -1,7 +1,7 @@
 # B24 – מסך "אודות"
 
 - **משימה:** B24 · **מקורות:** `docs/business/plan-1.md` §3.1 (תנאי שימוש), §3.2 (הודעת פרטיות), §3.3 (דיווח על פגיעה), B9 (קובץ third-party notices), U5 (שורת הרישיונות)
-- **קבצים צפויים:** `SettingsScreen.tsx` (אודות), `legal/he.json` ו-`legal/en.json` (חדשים), `app/config.ts` (כתובות), `Onboarding.tsx` (ההסכם קורא מאותו מקור), `core/api.ts`, `i18n/*.json`
+- **קבצים צפויים:** `SettingsScreen.tsx` (אודות), `legal/he.json` ו-`legal/en.json` (חדשים), `Onboarding.tsx` (ההסכם קורא מאותו מקור), `core/api.ts`, `i18n/*.json`
 
 ## 1. מבנה העמוד ("הגדרות ← אודות")
 
@@ -15,9 +15,9 @@
    - "הודעת הפרטיות" (`about.privacy`)
 5. **"דיווח על פגיעה או תוכן לא חוקי"** (`about.report`):
    - הסבר: `about.report.body`
-   - הכתובת: `ABUSE_CONTACT` מ-`app/config.ts`, ב-`Code`, עם "העתקה" ו"שליחת מייל" (פותח `mailto:` דרך `openExternal`, §4)
-   - **placeholder:** עד שהכתובת נקבעת, `ABUSE_CONTACT` ריק, ובמקום הכתובת מופיע `about.report.pending`. אין כפתורים
-6. **"פרטיות – פניות"**: אותו דפוס, עם `PRIVACY_CONTACT` ו-`about.privacyContact.body`. ריק – `about.report.pending`.
+   - הכתובת: `abuseContact` מ-`getAppInfo()` (§4), ב-`Code`, עם "העתקה" ו"שליחת מייל" (פותח `mailto:` דרך `openExternal`)
+   - **בגרסת dev או דמה בלבד:** כשהשדה ריק, במקום הכתובת מופיע `about.report.pending`, בלי כפתורים. בגרסה שמופצת לבודקים הכתובת תמיד קיימת, כי הבנייה נכשלת בלעדיה (§4)
+6. **"פרטיות – פניות"**: אותו דפוס, עם `privacyContact` (מ-`getAppInfo()`) ו-`about.privacyContact.body`. ריק – `about.report.pending`.
 7. **"רישיונות קוד פתוח"** (`about.licenses`): שורת-קישור שפותחת את רשימת הרכיבים (§3). מחליפה את `settings.about.licenses`, וכך גם נפתר U5.
 
 ## 2. תצוגת מסמך (תנאים, פרטיות)
@@ -26,7 +26,7 @@
 - **המקור:** `legal/{he,en}.json`, מבנה `{ terms: { updated, sections: [{ title, body }] }, privacy: { … } }`. מרנדרים ל-`<h3>` ו-`<p>`, **בלי markdown ובלי HTML** (CSP, ‏PR #10).
 - **אותו מקור לשלב ההסכם בהרשמה:** שם מוצגות רק כותרות הסעיפים (7 + סעיף 8 על העדכונים, לפי plan-1 §3.1), כמו היום. "אודות" מציג את הגוף המלא.
 - בראש המסמך: `about.doc.updated` ("עודכן ב-{date}").
-- **placeholders בטיוטה** (`[כתובת דיווח]`, `[קישור]`): מוחלפים בזמן הבנייה ב-`ABUSE_CONTACT` ובקישור הפנימי לתצוגת הפרטיות. ערך ריק מוצג כ-`about.report.pending`. בתצוגה לא מופיעים סוגריים מרובעים.
+- **placeholders בטיוטה** (`[כתובת דיווח]`, `[קישור]`): מוחלפים בזמן ההצגה ב-`abuseContact` ובקישור הפנימי לתצוגת הפרטיות. ערך ריק מוצג כ-`about.report.pending`. בתצוגה לא מופיעים סוגריים מרובעים.
 - טקסט שמסומן "[לבדיקת עו"ד: …]" ב-plan-1 **לא** נכנס לאפליקציה.
 
 ## 3. רישיונות קוד פתוח
@@ -41,13 +41,13 @@
 | פקודה | שינוי | הערה |
 | --- | --- | --- |
 | `openExternal(url): Promise<void>` | **חדש** | פותח `mailto:` או `https:` מחוץ לאפליקציה, דרך המעטפת (Tauri opener או Electron `shell`). הליבה מקבלת רק את שתי הסכמות האלה. במעטפת חסומים ניווט וחלונות חדשים (PR #10), ולכן אין `window.open` |
-| `getAppInfo()` | **שינוי חוזה:** מוסיפים `os: string` (למשל "Windows 11") | לכפתור "העתקה" |
+| `getAppInfo()` | **שינוי חוזה:** מוסיפים `os: string` (למשל "Windows 11"), `abuseContact?: string` ו-`privacyContact?: string` | `os` לכפתור "העתקה". שתי הכתובות מגיעות מקונפיגורציית השחרור בזמן הבנייה (`ABUSE_CONTACT`, `PRIVACY_CONTACT`), **ולא נכנסות ל-git**. בניית release נכשלת אם `ABUSE_CONTACT` ריק – כתובת הדיווח היא חלק מהמינימום של האלפא הסגורה (plan-1 §3.3) |
 
 ## 5. מצבים
 
 | מצב | מה רואים |
 | --- | --- |
-| כתובת דיווח לא נקבעה | `about.report.pending`, בלי כפתורים |
+| כתובת דיווח ריקה (dev או דמה בלבד) | `about.report.pending`, בלי כפתורים |
 | `openExternal` נכשל | toast `about.openFailed`. הכתובת נשארת להעתקה |
 | מסמך ארוך | גלילה רגילה בתוך הפאנל. כפתור "חזרה" sticky למעלה |
 | 200% / גופן 24px | שורות-הקישור בגובה 44px לפחות. שמות רכיבים ארוכים נשברים (`overflow-wrap: anywhere`) |
@@ -73,7 +73,7 @@
 | `about.report` | `דיווח על פגיעה או תוכן לא חוקי` | `Report abuse or illegal content` |
 | `about.report.body` | `אין שרת מרכזי, ולכן אנחנו לא יכולים למחוק תוכן מהמחשבים של אחרים. על הודעה בשרת כדאי לדווח קודם לבעלי השרת. על תוכן לא חוקי, ובפרט פגיעה בקטינים, אפשר לדווח גם לנו:` | `There's no central server, so we can't delete content from other people's computers. Report a message to the server's owner first. Illegal content, especially anything harming minors, can also be reported to us:` |
 | `about.report.email` | `שליחת מייל` | `Send email` |
-| `about.report.pending` | `הכתובת תתפרסם לפני האלפא הפתוחה.` | `The address will be published before the open alpha.` |
+| `about.report.pending` | `הכתובת תופיע בגרסה שמופצת לבודקים.` | `The address appears in builds shipped to testers.` |
 | `about.privacyContact` | `פניות בנושא פרטיות` | `Privacy requests` |
 | `about.privacyContact.body` | `לשאלות, ולבקשות לעיון במידע או למחיקה:` | `For questions, and requests to see or delete data:` |
 | `about.licenses` | `רישיונות קוד פתוח` | `Open-source licenses` |
@@ -85,7 +85,8 @@
 
 ## 8. בדיקות קבלה
 
-1. **בלי `ABUSE_CONTACT`:** `about.report.pending` מוצג, ואין כפתור "שליחת מייל" ב-DOM.
+1. **dev בלי כתובת:** `about.report.pending` מוצג, ואין כפתור "שליחת מייל" ב-DOM.
+1a. **release:** בנייה עם `ABUSE_CONTACT` ריק נכשלת (בדיקה ב-CI של B9). אין כתובת דיווח או פרטיות בקבצים שב-git (בדיקת מקור).
 2. **עם כתובת (דמה: `?demo=1&abuse=1`):** "שליחת מייל" קורא ל-`openExternal('mailto:…')`.
 3. **"תנאי השימוש"** נפתח עם הכותרת בפוקוס. אין `[` או `]` בטקסט שמוצג.
 4. **אותו מקור:** שלב ההסכם בהרשמה ו"תנאי השימוש" באודות מציגים את אותן כותרות סעיפים, באותו סדר.
