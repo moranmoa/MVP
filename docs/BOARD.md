@@ -3,7 +3,7 @@
 The single source of truth for who does what, in which order, and what blocks the closed alpha.
 Owner: pm (see [`docs/TEAM.md`](TEAM.md)). Updated whenever a PR lands; if this board disagrees with a PR, a review or a chat, **the board wins until it is corrected here**.
 
-Last updated: 2026-11-03, refresh 3. `main` has PRs #1–#17, #22, #23, #25–#27; refresh 2 (#25) and the QA re-test commit land on `main` with this PR. Open: #18 (draft), #24, #28–#30.
+Last updated: 2026-11-03, refresh 4. `main` has PRs #1–#17, #22–#27, #33, #35. Open: #18 (draft), #28–#30, #32, #34, #46 (draft), plus Dependabot #36–#45, #47. Paused WIP branches: `claude/sync-records` (B4-sync), `claude/voice-shell-spike-7d5285` (S4/6).
 
 **Contents:** [Rules](#rules) · [Milestones](#milestones) · [Open PRs](#open-prs) · [Board](#board) · [Dependency map and critical path](#dependency-map-and-critical-path) · [Next assignments](#next-assignments) · [File ownership](#file-ownership) · [Risks and blockers](#risks-and-blockers) · [Owner decisions](#owner-decisions)
 
@@ -35,14 +35,16 @@ Last updated: 2026-11-03, refresh 3. `main` has PRs #1–#17, #22, #23, #25–#2
 | PR | What | Author | Required verdicts | Status | Next step |
 | --- | --- | --- | --- | --- | --- |
 | [#18](https://github.com/moranmoa/MVP/pull/18) | **T1** `core/api`: core API, first flows end to end | dev-identity | tech-lead, sec-lead | in progress | draft; #11 is merged, so rebase on `main` and take out of draft |
-| [#24](https://github.com/moranmoa/MVP/pull/24) | UI: B17 mixed text direction (UX-01, UX-03, UX-18, U4) | dev-ui | tech-lead (+ ux visual check) | in progress | tech-lead APPROVE (`ec6aef7`); ux visual check CHANGES REQUESTED |
-| [#28](https://github.com/moranmoa/MVP/pull/28) | UI: B19 recovery-words screen safety (QA-01, U1) | dev-ui | tech-lead, sec-lead (recovery words), ux visual | in review | tech-lead APPROVE (`2ca0e0e`); sec-lead + ux pending |
+| [#28](https://github.com/moranmoa/MVP/pull/28) | UI: B19 recovery-words screen safety (QA-01, U1) | dev-ui | tech-lead, sec-lead (recovery words), ux visual | in review | reworked to the approved spec (`760ce38`, `afada5d`); tech-lead re-check, sec-lead + ux pending |
 | [#29](https://github.com/moranmoa/MVP/pull/29) | Spike 5: browser peer (rust-libp2p → WASM) | dev-web | tech-lead, sec-lead (network) | in review | no verdict yet |
-| [#30](https://github.com/moranmoa/MVP/pull/30) | relay: T4a hardening (R1 R2 R3 R6 R7 R10) + tag protection | devops | tech-lead, sec-lead (relay) | in progress | tech-lead CHANGES REQUESTED (`578696a`) |
+| [#30](https://github.com/moranmoa/MVP/pull/30) | relay: T4a hardening (R1 R2 R3 R6 R7 R10) + tag protection | devops | tech-lead, sec-lead (relay) | in review | tech-lead APPROVE (`1d48204`); sec-lead pending |
+| [#32](https://github.com/moranmoa/MVP/pull/32) | **GAP-20** release trust split: read-only cache-free build jobs, one `publish` job with write | devops | tech-lead, sec-lead (release) | in review | no verdict yet; P0 before the first `v*` tag |
+| [#34](https://github.com/moranmoa/MVP/pull/34) | UI: **QA-10** composer limit, keep text on failed send (B6 UI part) | dev-ui | tech-lead (+ product-lead on the limit) | in review | tech-lead APPROVE (`4cb586f`). Base is still `claude/ui-b17-text-direction`: retarget to `main` now that #24 is in. **Counter appears from 3,500; B6 says 3,800** (product-lead decision): align before merge |
+| [#46](https://github.com/moranmoa/MVP/pull/46) | **B4 stage 1**: `Invite`/`RevokeInvite`/`Join` kinds + member set (GAP-3) | core-5 | tech-lead, sec-lead (permissions) | in progress | draft: tests pass; open perf item (526 full re-resolves on a ~5,000-record live log). Two decisions to confirm: invites signed by moderator+ (Q2); join expiry reads the claimed `ts`, so B4-sync/T1 must drop joins whose `ts` is far from the local clock (Q3) |
 
-Merged since the first board: #5, #6, #7, #8 (updater audit), #9 (groupkeys), #10, #11, #12, #13, #14, #15, #16, #17, #22 + #26 (UX specs), #23, #25, #27 (QA re-test).
+Merged since the first board: #5, #6, #7, #8 (updater audit), #9 (groupkeys), #10, #11, #12, #13, #14, #15, #16, #17, #22 + #26 + #35 (UX specs), #23, #24 (B17), #25, #27 (QA re-test), #33 (board refresh 3).
 
-**Merge order for core**: #18 (T1, rebased on `main` with #8/#9 in) next. Every later core PR rebases and keeps every crate in `members`. UI PRs #24 and #28 merge any time.
+**Merge order for core**: #18 (T1) next, then #46 (B4 stage 1) rebased on it. Every later core PR rebases and keeps every crate in `members`. UI PRs #28 and #34 merge any time (#34 after its retarget). **Dependabot #36–#45, #47:** hold until #18 and #46 are in (K7). Crypto/identity majors (#37 argon2, #39 bip39, #42 curve25519-dalek, #36 rand, #44 rand_chacha) need sec-lead and can change derived keys or golden vectors, so take them one at a time; UI tool majors (#38 vite, #40 typescript, #43, #45, #47) go to dev-ui; #41 actions to dev-updater/devops.
 
 ---
 
@@ -63,8 +65,8 @@ Merged since the first board: #5, #6, #7, #8 (updater audit), #9 (groupkeys), #1
 | R4 | Updater audit: root-rotation chain DoS, QA-14, QA-15 | dev-updater | done | #8 | S1 | S | M3 |
 | QA-16 | `spike-peer` hangs when relay is unreachable | dev-sync | done | #5 | – | S | M2 |
 | T2 | All crypto domain strings `mvs/…`, pinned by tests | each crate owner | done | #5 #7 #8 #9 #11 | – | S | M1 |
-| B4 | MVP record kinds: server edit/close, channels, invite + revoke, **Join + member set (GAP-3; #18 borrows a control `Post` tagged `mvs/join/v1` until `Kind::Join` exists)**, edit/delete tombstones, leave, age claim, kick blocks rejoin (ש-4), **kick-undo (owner only) + the removed-members list behind `listRemovedMembers`**; revoke-only demotion (D28); `Kind::KeyRotation` ~48 KiB (R7); **`auth_deps` format for channel messages (GAP-2)**; `#general` auto-named (UX-04) | core-5 (records-authority-dev-b4) | in progress | – | R1 ✔; D30 for history flag; GAP-2 format decision by tech-lead + sec-lead | L | M1 |
-| B4-sync | Verify records at ingest and before gossip forward (GAP-1, with T1); roles only from the signed log; **F1** answer pulls off the swarm task (`spawn_blocking` + read-only connection); **F3** dropped `Stored` events must surface (`Lagged` event or sequence number) so T1 re-reads the store | dev-sync | todo | – | R2, B4 kinds | M | M1 |
+| B4 | MVP record kinds: server edit/close, channels, invite + revoke, **Join + member set (GAP-3; #18 borrows a control `Post` tagged `mvs/join/v1` until `Kind::Join` exists)**, edit/delete tombstones, leave, age claim, kick blocks rejoin (ש-4), **kick-undo (owner only) + the removed-members list behind `listRemovedMembers`**; revoke-only demotion (D28); `Kind::KeyRotation` ~48 KiB (R7); **`auth_deps` format for channel messages (GAP-2)**; `#general` auto-named (UX-04) | core-5 (records-authority-dev-b4) | in progress (stage 1: invites, joins, member set in draft #46) | #46 | R1 ✔; D30 for history flag; GAP-2 format decision by tech-lead + sec-lead | L | M1 |
+| B4-sync | Verify records at ingest and before gossip forward (GAP-1, with T1); roles only from the signed log; **F1** answer pulls off the swarm task (`spawn_blocking` + read-only connection); **F3** dropped `Stored` events must surface (`Lagged` event or sequence number) so T1 re-reads the store | dev-sync | in progress (paused WIP on `claude/sync-records`: ingest verify, F1, F3 `Lagged`; harness passes but restart catch-up is intermittently slow, up to 107 s, and most burst deliveries arrive by pull) | – | R2, B4 kinds | M | M1 |
 | F2 | Sync: filter dialled addresses, with a "LAN allowed" switch for the harness | dev-sync | todo | – | #5 | S | M2 |
 | F4 | Sync: `make_room` scans all 4,096 buckets per new peer when full; switch to LRU if the limit grows | dev-sync | todo | – | #5 | S | – |
 | GAP-4 | Answer sync only for members: peer-ID ↔ identity binding, secret-derived topic names | dev-sync | todo | – | B4 (member set), B4-sync | M | M2 |
@@ -77,7 +79,7 @@ Merged since the first board: #5, #6, #7, #8 (updater audit), #9 (groupkeys), #1
 
 | ID | Title | Owner | Status | PR | Depends on | Size | MS |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| S4/6 | Spike 4+6: voice + footprint, **Tauri vs Electron** | dev-voice-shell | in progress | – | – | M | M1 |
+| S4/6 | Spike 4+6: voice + footprint, **Tauri vs Electron** | dev-voice-shell | in progress (paused WIP on `claude/voice-shell-spike-7d5285`: voice matrix done in `spikes/voice/bench`; left: footprint numbers, Windows runs, `RESULTS.md` recommendation) | – | – | M | M1 |
 | S5 | Spike 5: browser peer (rust-libp2p → WASM) joins the network | dev-web | in review | #29 | S2 | M | – |
 | B1 | Desktop shell (per S4/6) + real `CoreApi` over IPC; core in its own process; mock stays at `?demo`; minimal IPC surface (GAP-17) | dev-voice-shell | blocked (S4/6) | – | S4/6, T1 | L | M1 |
 | B10 | CI: ui job (#8), `qa/` smoke on every PR, advisories blocking, `ring` exception permanent (D29) | dev-updater | in progress (ui job merged in #8) | #8 | #13 for smoke; T3 for blocking | S | M2 |
@@ -94,8 +96,8 @@ Merged since the first board: #5, #6, #7, #8 (updater audit), #9 (groupkeys), #1
 
 | ID | Title | Owner | Status | PR | Depends on | Size | MS |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| B6 | Real send states: pending/sent/delivered (receipt ack ש-11), failed + retry; composer cap and no text loss (QA-10); **QA-17** (product-lead decision): one limit of **4,000 code points** in composer, display, sanitizer and core; counter shown from 3,800; fits under the 16 KiB record limit | dev-sync (ack) + dev-ui (composer) | todo | – | B4-sync, T1; QA-10 part can start now | S | M2 |
-| B7 | Age end-to-end: < 16 blocked, 120-year check (QA-04), signed age claims, 18+ channels hidden (ש-12), DOB correction rules, UX-15, UX-23 | core-5 (claims) + dev-ui | todo | – | B4 | M | M2 |
+| B6 | Real send states: pending/sent/delivered (receipt ack ש-11), failed + retry; composer cap and no text loss (QA-10); **QA-17** (product-lead decision): one limit of **4,000 code points** in composer, display, sanitizer and core; counter shown from 3,800; fits under the 16 KiB record limit | dev-sync (ack) + dev-ui (composer) | in progress (QA-10 UI part in #34) | #34 | B4-sync, T1; QA-10 part can start now | S | M2 |
+| B7 | Age end-to-end: < 16 blocked, 120-year check (QA-04), signed age claims, 18+ channels hidden (ש-12), DOB correction rules, UX-15, UX-23 | core-5 (claims) + dev-ui | todo (spec in #35) | – | B4 | M | M2 |
 | B11a | Leave server (owner blocked, ש-19) | dev-ui | todo (spec approved) | spec #26 | B4 for core | S | M3 |
 | B11b | Edit / close server (ש-22, ש-23) | dev-ui | todo (spec approved) | spec #26 | B4 | M | M3 |
 | B11c | Channels: create, rename, delete (ש-20), 18+ flag | dev-ui | todo (spec approved) | spec #26 | B4 | M | M3 |
@@ -103,14 +105,14 @@ Merged since the first board: #5, #6, #7, #8 (updater audit), #9 (groupkeys), #1
 | B11e | Edit profile: name, avatar, banner, bio (UX-02, UX-16, QA-02; QA-03 fixed by #10) | dev-ui | todo (spec approved) | spec #26 | – (mock first) | S | M2 |
 | B12 | Display bugs + 200 % / 24 px check (U1, U2, U4–U6, UX-05, UX-17, QA-12); **QA-18 (High)**: at 375 px the recovery-word check step is 516 px wide and "בדיקה" is off-screen (same root as UX-05; do it with B19); **QA-19** (Low): reply reference tap target ~19 px, goal ≥ 44 px | dev-ui | todo | – | – | M | M3 |
 | B13 | Wording, product name MVS (`mvs://`, `app.name`, `document.title`), spec updates (ש-1, ש-2, ש-5, ש-8, ש-9), UX-39, UX-40 | product-lead (spec + string table), dev-ui (i18n files) | todo | – | – | S | M2 |
-| B17 | Mixed-direction text in messages and strings (UX-01 blocker, UX-03, UX-18), built from `docs/ux/specs/B17-mixed-direction.md` (spec approved). Includes **UX-19** on the same message-head line: identity code next to the name, 0.75rem, `--text-muted`, `aria-hidden` on the code, `aria-labelledby` on the article | dev-ui | in progress (ux visual changes requested) | #24 (spec #22) | – | S–M | M1 |
+| B17 | Mixed-direction text in messages and strings (UX-01 blocker, UX-03, UX-18), built from `docs/ux/specs/B17-mixed-direction.md` (spec approved). Includes **UX-19** on the same message-head line: identity code next to the name, 0.75rem, `--text-muted`, `aria-hidden` on the code, `aria-labelledby` on the article | dev-ui | done (product-lead acceptance pending) | #24 (spec #22) | – | S–M | M1 |
 | B18 | P2P states in UI: own new server, offline server, background join (UX-07..09, QA-08) | dev-ui + dev-sync (API contract) | todo (spec approved) | spec #26 | T1 contract for background join | M | M2 |
 | B19 | Recovery-words screen safety: resume after reload (QA-01), reading order, hidden by default (UX-05, UX-06, U1), recovery challenge | dev-ui | in review | #28 (spec #22) | B2-f for the core side | S | M1 |
 | B20 | Contrast AA (UX-13) | dev-ui | todo | – | – | S | M3 |
 | B16 | Settings export/import, message density, date separators (UX-12) | dev-ui | todo | – | – | M | – |
 | B21 | Accessibility + keyboard (UX-11, UX-20, UX-21, UX-34, UX-37, UX-38) | dev-ui | todo | – | – | M | – |
 | B22 | Flow polish (UX-22..32 part, UX-41..48, QA-05, QA-07, QA-09, QA-11) | dev-ui | todo | – | – | M | – |
-| B24 | About screen: abuse-report address, links to the agreement and privacy notice (business plan §3.3, approved by product-lead in #16) | dev-ui | todo (5.1 decided) | – | 5.1 | S | M3 |
+| B24 | About screen: abuse-report address, links to the agreement and privacy notice (business plan §3.3, approved by product-lead in #16) | dev-ui | todo (5.1 decided; spec in #35) | – | 5.1 | S | M3 |
 | UX-10 | `mvs://` links not clickable in WhatsApp/Telegram/Discord → https landing page on `<relay-domain>` | devops + dev-ui | todo (5.1 decided) | – | T4 | S | M3 |
 
 ### Reviews, QA, security, business
@@ -122,7 +124,7 @@ Merged since the first board: #5, #6, #7, #8 (updater audit), #9 (groupkeys), #1
 | UI-SEC | UI security audit + phone layout | dev-ui | done | #10 | – | M | M1 |
 | QA-P1 | QA plan + Playwright smoke + bug list | qa | done | #13 | – | M | M1 |
 | QA-R1 | QA re-test 1: QA-17..19 new, QA-03/13 closed | qa | done | #27 | – | S | M1 |
-| T11 | UX specs before build: B17, B19, B11e, B18, B11a–d in `docs/ux/specs/` | ux | done | #22, #26 | – | M | M1–M3 |
+| T11 | UX specs before build: B17, B19, B11e, B18, B11a–d, B7, B24 in `docs/ux/specs/` | ux | done | #22, #26, #35 | – | M | M1–M3 |
 | T5 | Threat model, relay review, PR checklist | sec-lead | done | #15 | – | M | M2 |
 | T6 | Business plan 1: alpha recruitment, costs, legal drafts, owner decisions §5 | biz | done | #16 | – | M | M3 |
 | T10 | Team structure + review flows (`docs/TEAM.md`) | pm | done | #14 | – | S | M1 |
@@ -174,8 +176,8 @@ graph LR
   D30 --> B4
   D31{{D31 large-channel rotation}}:::decision -. not alpha-blocking .-> B3
   GAP2{{GAP-2 auth_deps format}}:::decision --> B4
-  R1 --> B4[B4 MVP record kinds + member set]:::prog
-  R2 --> B4S[B4-sync verify at ingest]:::todo
+  R1 --> B4[B4 MVP record kinds + member set #46]:::prog
+  R2 --> B4S[B4-sync verify at ingest]:::prog
   B4 --> B4S
   B2 --> T1[T1 core/api #18]:::prog
   B3 --> T1
@@ -186,7 +188,7 @@ graph LR
   T1 --> B1
   G5 --> M1((M1 talks to itself))
   B1 --> M1
-  B17[B17 mixed direction #24]:::prog --> M1
+  B17[B17 mixed direction #24]:::done --> M1
   B19[B19 recovery words #28]:::review --> M1
 
   QA16[QA-16 #5]:::done --> B5
@@ -241,19 +243,19 @@ What each agent picks up **after its current PR merges**, the lead who assigns i
 | Agent | Assigned by | Now | Next (in order) | Writes | Must not touch |
 | --- | --- | --- | --- | --- | --- |
 | **core-5** (records-authority-dev-b4) | tech-lead → core sub-lead | B4 | 1. **B4** incl. member set (GAP-3), `auth_deps` (GAP-2), `KeyRotation` (R7), revoke-only demotion (D28), kick-undo + removed-members list. 2. B7 age-claim records. 3. B23 core name sanitising. | `core/records/**`, `core/authority/**` | `core/sync`, `core/groupkeys`, `core/api` |
-| **tech-lead** | manager | reviews #18, #24 (re-check), #29, #30; B4 | 1. GAP-2 format with sec-lead (feeds B4). 2. Review B4 as it lands. | – (`core/records` + `core/authority` handed to core-5) | – |
-| **dev-sync** | tech-lead → dev-identity | – (#5 merged) | 1. **B4-sync** (GAP-1 + F1 + F3). 2. GAP-6 clients (ship with T4a relay side, #30) + F2. 3. GAP-4 members-only sync (after B4 member set). 4. Receipt ack for B6 (ש-11). 5. T3 libp2p upgrade (alone, see conflicts). 6. B5 run with qa. F4 when the peer limit grows. | `core/sync/**`, `core/spike-peer/**` | `core/records`, `infra/` |
+| **tech-lead** | manager | reviews #18, #28 (re-check), #29, #32, #46 (B4) | 1. GAP-2 format with sec-lead (feeds B4). 2. Review B4 as it lands. | – (`core/records` + `core/authority` handed to core-5) | – |
+| **dev-sync** | tech-lead → dev-identity | B4-sync (paused WIP, `claude/sync-records`) | 1. **B4-sync** (GAP-1 + F1 + F3): fix slow restart catch-up and push-vs-pull delivery, then open the PR; drop joins with a far-off `ts` (B4 Q3). 2. GAP-6 clients (ship with T4a relay side, #30) + F2. 3. GAP-4 members-only sync (after B4 member set). 4. Receipt ack for B6 (ש-11). 5. T3 libp2p upgrade (alone, see conflicts). 6. B5 run with qa. F4 when the peer limit grows. | `core/sync/**`, `core/spike-peer/**` | `core/records`, `infra/` |
 | **dev-identity** (core sub-lead) | tech-lead | #18 (T1 draft) | 1. **T1**: rebase #18 on `main`, out of draft; swap the `Network` adapter for `sync`; F3 handling; spec additions for parity. 2. **B2-f** recovery challenge + 5-failure cap. 3. GAP-17 IPC surface with dev-voice-shell (B1). 4. B15 diagnostics. | `core/api/**`, `core/identity/**` | `ui/**` (contract changes go to dev-ui) |
 | **dev-crypto** | tech-lead → dev-identity | – (#9 merged) | 1. **D30 + D31 recommendation** to the owner. 2. GAP-5 crypto module in T1 after the skeleton merges. 3. B3 acceptance: relay sees only ciphertext; 500-member rotation size. | `core/groupkeys/**`; T1 `src/crypto/**` after skeleton | rest of T1 crate, `core/records` |
 | **dev-updater** | tech-lead → dev-identity | – (#8 merged) | 1. B10: `qa/` smoke job in `ci.yml` (after #13); advisories blocking after T3. 2. **B8** in-app update after B1 + B9. | `core/updater/**`, `.github/workflows/ci.yml`, `.github/scripts/npm-licenses.mjs`, `.github/scripts/install-cargo-deny.sh`, `.github/dependabot.yml`, `core/deny.toml` | `release.yml`, `.github/scripts/manifest-body.mjs` |
-| **dev-voice-shell** | tech-lead → dev-ui | S4/6 spike | 1. Spike results + recommendation (decision log lines 1 and 7). 2. **B1** desktop shell + IPC `CoreApi`; fill the shell plug-in point in `release.yml` with devops. | `desktop/**` (new; or `ui/src-tauri/**`), `ui/src/core/ipc.ts` (new) | other `ui/src/**`, `release.yml` (send devops a patch) |
+| **dev-voice-shell** | tech-lead → dev-ui | S4/6 spike (paused WIP, `claude/voice-shell-spike-7d5285`) | 1. Finish footprint numbers and Windows runs, then spike results + recommendation (decision log lines 1 and 7). 2. **B1** desktop shell + IPC `CoreApi`; fill the shell plug-in point in `release.yml` with devops. | `desktop/**` (new; or `ui/src-tauri/**`), `ui/src/core/ipc.ts` (new) | other `ui/src/**`, `release.yml` (send devops a patch) |
 | **dev-web** | tech-lead → dev-ui | #29 (S5) | 1. Land #29. 2. **B14** UI perf harness in the real shell (after B1). | spike dir, later `perf/**` (new) | `ui/**`, `qa/**` |
-| **dev-ui** (client sub-lead) | tech-lead | #24 (B17), #28 (B19) | 1. Fix ux visual findings on #24. 2. QA-17 / QA-10: 4,000-code-point limit (B6 UI part). 3. QA-18 with B19 if not in #28. 4. B11e, B18, B11a–d from the approved specs (#26), mock first. 5. B13 strings. 6. B12, B20, B24 (unblocked), UX-10 link handling. | `ui/**` (sole writer, incl. `ui/src/i18n/*.json`) | `ui/src/core/ipc.ts`, `desktop/**` |
-| **devops** | tech-lead | #30 (T4a) | 1. Fix tech-lead findings on #30. 2. **B9** installer skeleton under `packaging/**`. 3. macOS runner for R8. 4. **T4** go-live on `<relay-domain>` (never commit the real name). 5. UX-10 landing page with dev-ui. | `infra/**`, `.github/workflows/release.yml`, `.github/scripts/manifest-body.mjs`, `docs/release/**`, `packaging/**` (new) | `ci.yml` (dev-updater) |
-| **sec-lead** | manager | – (#15 merged) | 1. Verdicts on #28 (B19), #29, #30. 2. GAP-2 format with tech-lead. 3. Review B2-f, B4, B4-sync, T1 (#18) (`PR-CHECKLIST.md`). 4. Key custody for D-sign / D23. | `docs/security/**` | crate code (findings go to owners) |
+| **dev-ui** (client sub-lead) | tech-lead | #28 (B19), #34 (QA-10) | 1. Retarget #34 to `main` and set the counter to 3,800 (B6). 2. B7 and B24 from the #35 specs once B4 age claims land (B24 can start now). 3. QA-18 with B19 if not in #28. 4. B11e, B18, B11a–d from the approved specs (#26), mock first. 5. B13 strings. 6. B12, B20, B24 (unblocked), UX-10 link handling. | `ui/**` (sole writer, incl. `ui/src/i18n/*.json`) | `ui/src/core/ipc.ts`, `desktop/**` |
+| **devops** | tech-lead | #30 (T4a), #32 (GAP-20) | 1. sec-lead verdicts on #30 and #32. 2. **B9** installer skeleton under `packaging/**`. 3. macOS runner for R8. 4. **T4** go-live on `<relay-domain>` (never commit the real name). 5. UX-10 landing page with dev-ui. | `infra/**`, `.github/workflows/release.yml`, `.github/scripts/manifest-body.mjs`, `docs/release/**`, `packaging/**` (new) | `ci.yml` (dev-updater) |
+| **sec-lead** | manager | – (#15 merged) | 1. Verdicts on #28 (B19), #29, #30, #32 (GAP-20), #46 (B4 stage 1, Q2/Q3). 2. GAP-2 format with tech-lead. 3. Review B2-f, B4, B4-sync, T1 (#18) (`PR-CHECKLIST.md`). 4. Key custody for D-sign / D23. | `docs/security/**` | crate code (findings go to owners) |
 | **qa** | manager | – (#27 merged) | 1. Re-test B17/B19 once #24/#28 merge. 2. B5 run with dev-sync. 3. T7 rerun on the real shell. | `qa/**` | `ui/**`, `ci.yml` (ask dev-updater) |
 | **product-lead** | manager | – | 1. **B13**: spec updates + string table. 2. Acceptance of B17/B19 against their specs. 3. Review of product/UX/business/QA/board PRs. | `docs/spec.md`, `docs/reviews/po-*` | `ui/src/i18n/*` |
-| **ux** | product-lead | – (#22, #26 merged) | 1. Visual check of dev-ui PRs against the specs (#24 re-check, #28). 2. T8 after B1. | `docs/ux/**`, `docs/reviews/ux-*` | `ui/**` |
+| **ux** | product-lead | – (#22, #26, #35 merged) | 1. Visual check of dev-ui PRs against the specs (#28, #34). 2. T8 after B1. | `docs/ux/**`, `docs/reviews/ux-*` | `ui/**` |
 | **biz** | product-lead | – (#16 merged) | 1. Answer the owner's questions on §5 (5.1–5.13). 2. Tester recruitment wave 1 with product-lead. | `docs/business/**` | – |
 | **pm** | manager | this PR | Batched board refreshes; flag conflicts. | `docs/BOARD.md`, `docs/TEAM.md` | everything else |
 
@@ -279,7 +281,7 @@ What each agent picks up **after its current PR merges**, the lead who assigns i
 
 | # | Risk / blocker | Impact | Mitigation | Owner |
 | --- | --- | --- | --- | --- |
-| K1 | **S4/6 Tauri vs Electron** undecided | B1, B9 packaging, B8, B14, T7, T8 wait | Timebox the spike; #17's shell plug-in point already lets the pipeline ship plain archives | dev-voice-shell, tech-lead |
+| K1 | **S4/6 Tauri vs Electron** undecided | B1, B9 packaging, B8, B14, T7, T8 wait | Voice matrix done; spike paused before footprint numbers. Timebox the rest; #17's shell plug-in point already lets the pipeline ship plain archives | dev-voice-shell, tech-lead |
 | K2 | **D30 history for new members** pending | B4 history flag, B3 final behaviour, join copy | dev-crypto recommendation; B4 reserves the field | owner, dev-crypto |
 | K3 | **D31 large-channel rotation** pending | > ~200 members per kick > 16 KiB; not alpha-blocking | Alpha caps servers below; `KeyRotation` ~48 KiB covers ~500 (R7) | owner, dev-crypto |
 | K4 | Domain decided (5.1, private: written `<relay-domain>` everywhere in git) | T4 go-live, B5, B8, UX-10 now unblocked on the domain | Never commit the real name; `infra/.env.example` stays templated | devops |
@@ -292,7 +294,7 @@ What each agent picks up **after its current PR merges**, the lead who assigns i
 | K11 | QA-01 recovery words lost on reload | Account can never create a server | B19 + B2 persistence | dev-ui, dev-identity |
 | K12 | macOS untested for identity/keychain (R8) | Silent failure on 1 of 3 alpha OSes | macOS runner | devops |
 | K13 | B4 heads the critical path | B4 slips → T1, B1 and everything after slip | Staffed: records-authority-dev-b4 (core-5) is on B4; tech-lead reviews | tech-lead |
-| K14 | Review load on tech-lead + sec-lead (5 engineering PRs open now) | Merge queue stalls | Sub-leads pre-review; follow the merge order; docs PRs go to product-lead | tech-lead, sec-lead |
+| K14 | Review load on tech-lead + sec-lead (7 engineering PRs + 11 Dependabot open now) | Merge queue stalls | Sub-leads pre-review; follow the merge order; docs PRs go to product-lead | tech-lead, sec-lead |
 
 ## Owner decisions
 
