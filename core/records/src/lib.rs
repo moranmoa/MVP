@@ -777,9 +777,11 @@ mod tests {
 
     #[test]
     fn genesis_needs_a_nonce_and_no_deps() {
-        let short = Draft { body: vec![0; GENESIS_NONCE_LEN - 1], ..genesis_draft(&key(1), [0; 16]) };
+        let short =
+            Draft { body: vec![0; GENESIS_NONCE_LEN - 1], ..genesis_draft(&key(1), [0; 16]) };
         assert_eq!(short.sign(&key(1)), Err(RecordError::GenesisServerMismatch));
-        let with_deps = Draft { deps: vec![RecordId::from_bytes([1; 32])], ..genesis_draft(&key(1), [0; 16]) };
+        let with_deps =
+            Draft { deps: vec![RecordId::from_bytes([1; 32])], ..genesis_draft(&key(1), [0; 16]) };
         assert_eq!(with_deps.sign(&key(1)), Err(RecordError::GenesisWithDeps));
     }
 }

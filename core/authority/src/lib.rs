@@ -8,8 +8,12 @@
 //!
 //! Rules:
 //! - The genesis author is the owner and can't be demoted or kicked.
+//! - Only the genesis of the record's own server counts: the server ID is
+//!   derived from the owner's key (see `records::ServerId::derive`), and
+//!   records of any other server are ignored.
 //! - Rank: owner > admin > moderator > member. An actor can only grant a role
-//!   below its own, and only revoke or kick someone ranked below it.
+//!   below its own, and only revoke or kick someone ranked below it. Grants
+//!   only promote; demoting is a revoke. A kicked actor can't be kicked again.
 //! - A revoke voids the target's privileged actions that are concurrent with
 //!   it (not causal ancestors of it). A kick voids all of the target's
 //!   concurrent records. This blocks "backdating": signing new records whose
@@ -21,15 +25,15 @@
 //! is a record whose body doesn't parse for its kind (it stays in the graph,
 //! but is never accepted). Timestamps are informational and never consulted.
 
+use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
 
 use records::{Draft, Kind, RecordError, Scope, SigningKey, GENESIS_NONCE_LEN};
-pub use records::ServerId;
-pub use records::{PublicKey, Record, RecordId};
+pub use records::{PublicKey, Record, RecordId, ServerId};
 
 mod incremental;
-pub use incremental::{Resolver, Stats};
+pub use incremental::{Inserted, Resolver, Stats, MAX_PENDING};
 
 /// An actor is identified by their Ed25519 public key.
 pub type Actor = PublicKey;
@@ -229,18 +233,20 @@ fn permitted(view: &impl View, record: &Record, action: &Action) -> bool {
     let author_role = view.role_of(author);
     match action {
         Action::Genesis => unreachable!("handled above"),
+        // Grants only promote. A demotion has to be a revoke (then a new
+        // grant if wanted), so it voids the target's concurrent privileged
+        // records like any revoke: a demoted moderator can't backdate a kick.
         Action::Grant { target, role } => {
-            *role < Role::Owner
-                && author_role > *role
-                && author_role > view.role_of(*target)
-                && !view.is_kicked(*target)
+            author_role > *role && *role > view.role_of(*target) && !view.is_kicked(*target)
         }
         Action::Revoke { target } => {
             let target_role = view.role_of(*target);
             author_role > target_role && target_role > Role::Member
         }
         Action::Kick { target } => {
-            author_role >= Role::Moderator && author_role > view.role_of(*target)
+            author_role >= Role::Moderator
+                && author_role > view.role_of(*target)
+                && !view.is_kicked(*target)
         }
         Action::Post { .. } => true,
     }
@@ -264,11 +270,8 @@ fn apply(state: &mut State, record: &Record, action: &Action) -> Option<(Actor, 
             None
         }
         Action::Grant { target, role } => {
-            if *role == Role::Member {
-                state.roles.remove(target);
-            } else {
-                state.roles.insert(*target, *role);
-            }
+            // Never Member: grants only promote.
+            state.roles.insert(*target, *role);
             Some((*target, write(*role, false)))
         }
         Action::Revoke { target } => {
@@ -313,7 +316,11 @@ struct Run {
 }
 
 fn full_run<'a>(server: ServerId, records: impl IntoIterator<Item = &'a Record>) -> Run {
-    let by_id = complete_records(server, records);
+    let by_id: HashMap<RecordId, &Record> = records
+        .into_iter()
+        .filter(|r| r.server() == server && r.scope() == Scope::Control)
+        .map(|r| (r.id(), r))
+        .collect();
     let order = linear_order(&by_id);
     let graph = Graph::new(&by_id, &order);
 
@@ -362,33 +369,9 @@ fn full_run<'a>(server: ServerId, records: impl IntoIterator<Item = &'a Record>)
     }
 }
 
-/// Keeps only `server`'s control records whose whole dependency chain is
-/// present.
-fn complete_records<'a>(
-    server: ServerId,
-    records: impl IntoIterator<Item = &'a Record>,
-) -> HashMap<RecordId, &'a Record> {
-    let mut by_id: HashMap<RecordId, &Record> = records
-        .into_iter()
-        .filter(|r| r.server() == server && r.scope() == Scope::Control)
-        .map(|r| (r.id(), r))
-        .collect();
-    loop {
-        let broken: Vec<RecordId> = by_id
-            .values()
-            .filter(|r| r.deps().iter().any(|dep| !by_id.contains_key(dep)))
-            .map(|r| r.id())
-            .collect();
-        if broken.is_empty() {
-            return by_id;
-        }
-        for id in broken {
-            by_id.remove(&id);
-        }
-    }
-}
-
 /// Topological order of the record graph; concurrent records go in ID order.
+/// A record whose dependency chain isn't all in `by_id` never becomes ready,
+/// so it is left out, in one linear pass however long the broken chain is.
 fn linear_order(by_id: &HashMap<RecordId, &Record>) -> Vec<RecordId> {
     let mut pending_deps: HashMap<RecordId, usize> =
         by_id.values().map(|r| (r.id(), r.deps().len())).collect();
@@ -415,35 +398,17 @@ fn linear_order(by_id: &HashMap<RecordId, &Record>) -> Vec<RecordId> {
     order
 }
 
-/// Fixed-size bit set over positions in the linear order.
-struct BitSet(Vec<u64>);
-
-impl BitSet {
-    fn new(len: usize) -> Self {
-        BitSet(vec![0; len.div_ceil(64)])
-    }
-
-    fn insert(&mut self, i: usize) {
-        self.0[i / 64] |= 1 << (i % 64);
-    }
-
-    fn contains(&self, i: usize) -> bool {
-        self.0[i / 64] & (1 << (i % 64)) != 0
-    }
-
-    fn union_with(&mut self, other: &BitSet) {
-        for (word, theirs) in self.0.iter_mut().zip(&other.0) {
-            *word |= theirs;
-        }
-    }
-}
-
 /// The complete records laid out in linear order, indexed by position.
 struct Graph<'a> {
     records: Vec<&'a Record>,
     actions: Vec<Option<Action>>,
-    ancestors: Vec<BitSet>,
+    /// Positions of each record's deps.
+    deps: Vec<Vec<usize>>,
     by_author: HashMap<Actor, Vec<usize>>,
+    /// What each accepted removal voids, worked out the first time a pass
+    /// accepts it. Only removals need to know their ancestors, so a log full
+    /// of posts costs no ancestry memory.
+    voids: RefCell<HashMap<usize, Vec<usize>>>,
 }
 
 struct Pass {
@@ -462,20 +427,14 @@ impl<'a> Graph<'a> {
         let position: HashMap<RecordId, usize> =
             order.iter().enumerate().map(|(i, id)| (*id, i)).collect();
         let records: Vec<&Record> = order.iter().map(|id| by_id[id]).collect();
-        let mut ancestors: Vec<BitSet> = Vec::with_capacity(records.len());
+        let deps =
+            records.iter().map(|r| r.deps().iter().map(|dep| position[dep]).collect()).collect();
         let mut by_author: HashMap<Actor, Vec<usize>> = HashMap::new();
         for (i, record) in records.iter().enumerate() {
-            let mut set = BitSet::new(records.len());
-            for dep in record.deps() {
-                let dep = position[dep];
-                set.insert(dep);
-                set.union_with(&ancestors[dep]);
-            }
-            ancestors.push(set);
             by_author.entry(record.author()).or_default().push(i);
         }
         let actions = records.iter().map(|r| Action::from_record(r)).collect();
-        Graph { records, actions, ancestors, by_author }
+        Graph { records, actions, deps, by_author, voids: RefCell::default() }
     }
 
     fn fold(&self, excluded: &[bool]) -> Pass {
@@ -524,16 +483,27 @@ impl<'a> Graph<'a> {
     }
 
     /// Records by `target` that the removal at `removal` hadn't seen.
-    fn concurrent_by(
-        &self,
-        removal: usize,
-        target: Actor,
-        privileged_only: bool,
-    ) -> impl Iterator<Item = usize> + '_ {
-        self.by_author.get(&target).into_iter().flatten().copied().filter(move |&i| {
-            i != removal
-                && !self.ancestors[removal].contains(i)
-                && (!privileged_only || self.actions[i].as_ref().is_some_and(Action::is_privileged))
-        })
+    fn concurrent_by(&self, removal: usize, target: Actor, privileged_only: bool) -> Vec<usize> {
+        let mut voids = self.voids.borrow_mut();
+        let voided = voids.entry(removal).or_insert_with(|| {
+            // Ancestors come earlier in the linear order.
+            let mut seen = vec![false; removal];
+            let mut stack = self.deps[removal].clone();
+            while let Some(i) = stack.pop() {
+                if !std::mem::replace(&mut seen[i], true) {
+                    stack.extend_from_slice(&self.deps[i]);
+                }
+            }
+            let by_target = self.by_author.get(&target).into_iter().flatten().copied();
+            by_target
+                .filter(|&i| {
+                    i != removal
+                        && !seen.get(i).copied().unwrap_or(false)
+                        && (!privileged_only
+                            || self.actions[i].as_ref().is_some_and(Action::is_privileged))
+                })
+                .collect()
+        });
+        voided.clone()
     }
 }

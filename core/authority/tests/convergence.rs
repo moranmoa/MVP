@@ -7,8 +7,8 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use authority::{resolve, Action, Record, RecordId, Resolver, Role, State, Stats};
-use common::{actor, rec};
+use authority::{resolve, Action, Inserted, Record, RecordId, Resolver, Role, State, Stats};
+use common::{actor, genesis, rec, server};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
@@ -41,7 +41,7 @@ fn heads(known: &BTreeSet<RecordId>, all: &BTreeMap<RecordId, Record>) -> Vec<Re
 /// occasionally sync with each other, so plenty of records are concurrent.
 /// Returns the records in the order they were written.
 fn random_scenario(rng: &mut StdRng, steps: usize) -> Vec<Record> {
-    let genesis = rec(0, 0, vec![], Action::Genesis);
+    let genesis = genesis();
     let mut written = vec![genesis.clone()];
     let mut all = BTreeMap::from([(genesis.id(), genesis.clone())]);
     let mut known: Vec<BTreeSet<RecordId>> =
@@ -75,11 +75,15 @@ fn deliver_in_random_order(records: &[Record], rng: &mut StdRng, seed: u64) -> (
     let mut arriving = records.to_vec();
     arriving.shuffle(rng);
     let mut held = Vec::with_capacity(arriving.len());
-    let mut resolver = Resolver::new();
+    let mut resolver = Resolver::new(server());
     for record in arriving {
         held.push(record.clone());
         resolver.insert(record);
-        assert_eq!(resolver.state(), &resolve(&held), "incremental diverged on seed {seed}");
+        assert_eq!(
+            resolver.state(),
+            &resolve(server(), &held),
+            "incremental diverged on seed {seed}"
+        );
     }
     (resolver.state().clone(), resolver.stats())
 }
@@ -92,7 +96,7 @@ fn all_delivery_orders_converge() {
         let mut rng = StdRng::seed_from_u64(seed);
         let steps = rng.gen_range(5..40);
         let records = random_scenario(&mut rng, steps);
-        let expected = resolve(&records);
+        let expected = resolve(server(), &records);
         accepted_removals += expected.kicked.len();
 
         for _ in 0..DELIVERIES_PER_SCENARIO {
@@ -114,13 +118,23 @@ fn all_delivery_orders_converge() {
     );
 }
 
-fn apply_all(records: &[Record]) -> (Resolver, Duration) {
-    let mut resolver = Resolver::new();
+/// Delivers `records` in order. Records dropped because the pending queue
+/// was full are delivered again afterwards, the way a peer re-requests what
+/// it couldn't keep. Returns how many redeliveries that took.
+fn apply_all(records: &[Record]) -> (Resolver, Duration, usize) {
+    let mut resolver = Resolver::new(server());
     let start = Instant::now();
-    for record in records {
-        resolver.insert(record.clone());
+    let mut redelivered = 0;
+    let mut round: Vec<&Record> = records.iter().collect();
+    while !round.is_empty() {
+        let dropped: Vec<&Record> = round
+            .into_iter()
+            .filter(|record| resolver.insert((*record).clone()) == Inserted::Dropped)
+            .collect();
+        redelivered += dropped.len();
+        round = dropped;
     }
-    (resolver, start.elapsed())
+    (resolver, start.elapsed(), redelivered)
 }
 
 #[test]
@@ -130,7 +144,7 @@ fn incremental_vs_full_on_a_large_control_log() {
     let n = written.len();
 
     let start = Instant::now();
-    let expected = resolve(&written);
+    let expected = resolve(server(), &written);
     let full = start.elapsed();
     println!(
         "full resolve of {n} control records ({} accepted): {full:?}",
@@ -138,14 +152,14 @@ fn incremental_vs_full_on_a_large_control_log() {
     );
 
     // A live peer: records arrive in the order they were written.
-    let (mut resolver, _) = apply_all(&written[..n - 1]);
+    let (mut resolver, _, _) = apply_all(&written[..n - 1]);
     let start = Instant::now();
     resolver.insert(written[n - 1].clone());
     let last = start.elapsed();
     assert_eq!(resolver.state(), &expected);
     println!("incremental: applying record #{n} to the other {} took {last:?}", n - 1);
 
-    let (resolver, total) = apply_all(&written);
+    let (resolver, total, _) = apply_all(&written);
     assert_eq!(resolver.state(), &expected);
     println!(
         "incremental, written order: all {n} records in {total:?} ({:?} per record; {})",
@@ -156,10 +170,10 @@ fn incremental_vs_full_on_a_large_control_log() {
     // Catching up after being offline: everything arrives shuffled.
     let mut shuffled = written.clone();
     shuffled.shuffle(&mut rng);
-    let (resolver, total) = apply_all(&shuffled);
+    let (resolver, total, redelivered) = apply_all(&shuffled);
     assert_eq!(resolver.state(), &expected);
     println!(
-        "incremental, random order: all {n} records in {total:?} ({})",
+        "incremental, random order: all {n} records in {total:?} ({}; {redelivered} redelivered after the pending queue filled)",
         describe(resolver.stats())
     );
 }

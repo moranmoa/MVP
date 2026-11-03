@@ -45,12 +45,32 @@ enum Fallback {
     Other,
 }
 
+/// What [`Resolver::insert`] did with a record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Inserted {
+    /// It joined the log, along with any waiting records it unblocked.
+    Joined,
+    /// Some of its deps haven't arrived; it waits for them.
+    Pending,
+    /// A duplicate, another server's record, or not a control-log record.
+    Ignored,
+    /// Its deps are missing and the pending queue is full, so it wasn't
+    /// kept. Deliver it again once its deps have joined.
+    Dropped,
+}
+
+/// Default for how many records may wait on missing deps at once. Anyone can
+/// sign records that point at deps which will never arrive, so the queue is
+/// bounded: at most about 26 MB of control records.
+pub const MAX_PENDING: usize = 4096;
+
 /// Holds one server's control log and its resolved state, updated as records
 /// arrive in any order.
-#[derive(Default)]
 pub struct Resolver {
     /// The one server whose records this resolver accepts.
     server: ServerId,
+    /// Most records that may wait on missing deps.
+    pending_limit: usize,
     /// Every control record received, whether or not its deps have arrived.
     known: HashMap<RecordId, Record>,
     /// Records still waiting on deps: how many are missing.
@@ -83,8 +103,40 @@ pub struct Resolver {
 }
 
 impl Resolver {
+    /// A resolver for `server` (see [`ServerId::derive`]).
     pub fn new(server: ServerId) -> Self {
-        Self { server, ..Self::default() }
+        Self::with_pending_limit(server, MAX_PENDING)
+    }
+
+    /// Like [`Self::new`], with room for `limit` records waiting on deps.
+    pub fn with_pending_limit(server: ServerId, limit: usize) -> Self {
+        Resolver {
+            server,
+            pending_limit: limit,
+            known: HashMap::new(),
+            missing: HashMap::new(),
+            waiting: HashMap::new(),
+            order: Vec::new(),
+            pos: HashMap::new(),
+            actions: HashMap::new(),
+            by_author: HashMap::new(),
+            touch: HashMap::new(),
+            state: State::default(),
+            writes: HashMap::new(),
+            genesis: None,
+            excluded: HashSet::new(),
+            kick_targets: HashSet::new(),
+            revoke_targets: HashSet::new(),
+            unsettled: HashSet::new(),
+            owner_unsettled: false,
+            stale: None,
+            stats: Stats::default(),
+        }
+    }
+
+    /// How many records are waiting on missing deps.
+    pub fn pending(&self) -> usize {
+        self.missing.len()
     }
 
     pub fn state(&self) -> &State {
@@ -97,27 +149,29 @@ impl Resolver {
 
     /// Adds an arriving record. Duplicates, other servers' records and
     /// records outside the control log are ignored; records with missing
-    /// deps wait for them.
-    pub fn insert(&mut self, record: Record) {
+    /// deps wait for them, up to the pending limit.
+    pub fn insert(&mut self, record: Record) -> Inserted {
         let id = record.id();
         if record.server() != self.server
             || record.scope() != Scope::Control
             || self.known.contains_key(&id)
         {
-            return;
+            return Inserted::Ignored;
         }
-        let mut missing = 0;
-        for dep in record.deps() {
-            if !self.pos.contains_key(dep) {
-                missing += 1;
+        let missing: Vec<RecordId> =
+            record.deps().iter().filter(|dep| !self.pos.contains_key(*dep)).copied().collect();
+        if !missing.is_empty() {
+            if self.missing.len() >= self.pending_limit {
+                return Inserted::Dropped;
+            }
+            for dep in &missing {
                 self.waiting.entry(*dep).or_default().push(id);
             }
+            self.missing.insert(id, missing.len());
+            self.known.insert(id, record);
+            return Inserted::Pending;
         }
         self.known.insert(id, record);
-        if missing > 0 {
-            self.missing.insert(id, missing);
-            return;
-        }
 
         let mut ready = vec![id];
         while let Some(id) = ready.pop() {
@@ -134,6 +188,7 @@ impl Resolver {
         if let Some(reason) = self.stale.take() {
             self.rebuild(reason);
         }
+        Inserted::Joined
     }
 
     /// Puts a record whose deps have all joined into the log.
@@ -164,7 +219,6 @@ impl Resolver {
                 Err(reason) => self.stale = Some(reason),
             }
         }
-        true
     }
 
     /// Where the reference's min-ID topological sort puts a new record:
@@ -379,8 +433,18 @@ impl Resolver {
     }
 
     fn rebuild(&mut self, reason: Fallback) {
-        let run = full_run(self.order.iter().map(|id| &self.known[id]));
-        assert_eq!(run.order, self.order, "incremental order diverged from the reference");
+        let run = full_run(self.server, self.order.iter().map(|id| &self.known[id]));
+        if run.order != self.order {
+            // Can't happen unless `insertion_point` has a bug. Take the
+            // reference's order rather than panic on records a peer sent.
+            debug_assert!(false, "incremental order diverged from the reference");
+            self.order = run.order;
+            self.pos = self.order.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+            let pos = &self.pos;
+            for list in self.touch.values_mut() {
+                list.sort_by_key(|id| pos[id]);
+            }
+        }
         self.state = run.state;
         self.writes = run.writes;
         self.genesis = run.genesis;
