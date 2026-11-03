@@ -202,6 +202,7 @@ impl Store {
     fn init(conn: Connection) -> rusqlite::Result<Self> {
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
+             PRAGMA secure_delete = ON;
              PRAGMA synchronous = NORMAL;
              CREATE TABLE IF NOT EXISTS records (
                  seq  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -369,6 +370,11 @@ impl Store {
         tx.prepare_cached("UPDATE records SET data = ?1, stub = 1 WHERE id = ?2")?
             .execute(params![stub.encode(), &id.as_bytes()[..]])?;
         tx.commit()?;
+        // B6-p: the old page images (with the body) leave the WAL now, not
+        // at some later checkpoint; secure_delete zeroed them in the db.
+        // A reader holding the WAL can keep it from truncating: best effort,
+        // and the next prune tries again.
+        let _ = self.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
         Ok(true)
     }
 

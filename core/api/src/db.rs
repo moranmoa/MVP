@@ -6,12 +6,14 @@ use std::path::Path;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rand_core::{OsRng, RngCore};
-use records::{PublicKey, Record, ServerId};
+use records::{PublicKey, Record, ServerId, Stub};
 use rusqlite::{params, Connection, OptionalExtension};
+use zeroize::Zeroizing;
 
 use crate::types::{CoreError, ErrorCode};
 
 const SCHEMA: &str = "
+PRAGMA secure_delete = ON;
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS records (
     id BLOB PRIMARY KEY,
@@ -19,12 +21,23 @@ CREATE TABLE IF NOT EXISTS records (
     bytes BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS records_server ON records (server);
+CREATE TABLE IF NOT EXISTS stubs (
+    id BLOB PRIMARY KEY,
+    server BLOB NOT NULL,
+    bytes BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS stubs_server ON stubs (server);
 CREATE TABLE IF NOT EXISTS servers (id BLOB PRIMARY KEY, joined_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS blocked (user BLOB PRIMARY KEY);
 ";
 
 const PROFILE_KEY: &str = "profile";
 const PROFILE_AD: &[u8] = b"mvs/api/profile/v1";
+const SECRET_AD: &[u8] = b"mvs/api/server-secret/v1";
+
+fn secret_key(server: ServerId) -> String {
+    format!("server-secret/{}", hex::encode(server.as_bytes()))
+}
 const NONCE_LEN: usize = 24;
 
 pub(crate) struct Db {
@@ -88,6 +101,44 @@ impl Db {
             .map_err(internal)
     }
 
+    /// A server's sync secret (GAP-4), sealed like the profile under the
+    /// storage key, bound to the server by the AD. A bearer credential: it
+    /// never leaves this table except into an invite link the user copies.
+    pub fn save_server_secret(
+        &self,
+        key: &[u8; 32],
+        server: ServerId,
+        secret: &[u8; 32],
+    ) -> Result<(), CoreError> {
+        let mut nonce = [0u8; NONCE_LEN];
+        OsRng.fill_bytes(&mut nonce);
+        let aad = [SECRET_AD, server.as_bytes().as_slice()].concat();
+        let sealed = XChaCha20Poly1305::new(key.into())
+            .encrypt(XNonce::from_slice(&nonce), Payload { msg: secret, aad: &aad })
+            .map_err(internal)?;
+        self.set(&secret_key(server), &[nonce.as_slice(), &sealed].concat())
+    }
+
+    pub fn load_server_secret(
+        &self,
+        key: &[u8; 32],
+        server: ServerId,
+    ) -> Result<Option<Zeroizing<[u8; 32]>>, CoreError> {
+        let Some(blob) = self.get(&secret_key(server))? else { return Ok(None) };
+        if blob.len() < NONCE_LEN {
+            return Err(internal("short secret"));
+        }
+        let (nonce, sealed) = blob.split_at(NONCE_LEN);
+        let aad = [SECRET_AD, server.as_bytes().as_slice()].concat();
+        let plain = Zeroizing::new(
+            XChaCha20Poly1305::new(key.into())
+                .decrypt(XNonce::from_slice(nonce), Payload { msg: sealed, aad: &aad })
+                .map_err(internal)?,
+        );
+        let secret: [u8; 32] = plain.as_slice().try_into().map_err(|_| internal("secret size"))?;
+        Ok(Some(Zeroizing::new(secret)))
+    }
+
     pub fn put_record(&self, record: &Record) -> Result<(), CoreError> {
         self.conn
             .execute(
@@ -123,6 +174,42 @@ impl Db {
         for bytes in rows {
             // Stored records were verified on the way in; re-verify anyway.
             out.push(Record::decode(&bytes.map_err(internal)?).map_err(internal)?);
+        }
+        Ok(out)
+    }
+
+    /// Replaces a stored record by its stub (B6-p), in one transaction. With
+    /// `secure_delete` on, the record's bytes are overwritten, not left in
+    /// free pages.
+    pub fn prune_record(&self, stub: &Stub) -> Result<(), CoreError> {
+        let tx = self.conn.unchecked_transaction().map_err(internal)?;
+        self.conn
+            .execute("DELETE FROM records WHERE id = ?1", [stub.id().as_bytes().as_slice()])
+            .map_err(internal)?;
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO stubs (id, server, bytes) VALUES (?1, ?2, ?3)",
+                params![
+                    stub.id().as_bytes().as_slice(),
+                    stub.server().as_bytes().as_slice(),
+                    stub.encode()
+                ],
+            )
+            .map_err(internal)?;
+        tx.commit().map_err(internal)
+    }
+
+    pub fn stubs(&self, server: ServerId) -> Result<Vec<Stub>, CoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT bytes FROM stubs WHERE server = ?1 ORDER BY rowid")
+            .map_err(internal)?;
+        let rows = stmt
+            .query_map([server.as_bytes().as_slice()], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(internal)?;
+        let mut out = Vec::new();
+        for bytes in rows {
+            out.push(Stub::decode(&bytes.map_err(internal)?).map_err(internal)?);
         }
         Ok(out)
     }
