@@ -220,12 +220,14 @@ fn decode_is_strict() {
 fn v1_format_is_pinned() {
     let rotation = body();
     let mut view = peer(1);
-    let signed = sign(1, rotation.clone());
-    apply(&mut view, &signed);
+    // A fixed rotation ID, not a signed record: the pin covers this crate's
+    // format only, not the record envelope.
+    let id = RecordId::from_bytes([0x42; 32]);
+    assert_eq!(view.apply(id, pk(1), &rotation), Ok(Applied::Key));
     let ciphertext = view.encrypt(&members(&[1, 2]), b"shalom", &mut rng(8)).unwrap();
     assert_eq!(blake3::hash(&rotation).to_hex().as_str(), GOLDEN_ROTATION);
     assert_eq!(blake3::hash(&ciphertext).to_hex().as_str(), GOLDEN_MESSAGE);
 }
 
 const GOLDEN_ROTATION: &str = "412a9501496e7354dd86be6b1391a6e6381bacb04e99def9a672a414a0687eea";
-const GOLDEN_MESSAGE: &str = "daf236d32949a10926659431ce2003726b695727fc1ca6b736807f2a6107f5ca";
+const GOLDEN_MESSAGE: &str = "83176bb213b73b24e1111b2564b31b4aed18638495935c6d871f8e71900d5b8f";
