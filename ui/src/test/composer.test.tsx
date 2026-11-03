@@ -61,7 +61,7 @@ describe('composer length limit (QA-10)', () => {
   it('gives the text back when the core refuses the message', async () => {
     const core = new MockCore({ demo: true, speed: 0, simulateActivity: false });
     core.sendMessage = async () => {
-      throw { code: 'not-allowed' };
+      throw { code: 'internal' };
     };
     const { box } = await setup(core);
     fireEvent.change(box, { target: { value: 'keep me' } });
@@ -70,5 +70,19 @@ describe('composer length limit (QA-10)', () => {
     });
     expect(box.value).toBe('keep me');
     expect(screen.getByRole('alert').textContent).toContain("The message wasn't sent");
+  });
+
+  it('says when the channel has no key yet (not-allowed from the core)', async () => {
+    const core = new MockCore({ demo: true, speed: 0, simulateActivity: false });
+    core.sendMessage = async () => {
+      throw { code: 'not-allowed' };
+    };
+    const { box } = await setup(core);
+    fireEvent.change(box, { target: { value: 'hello' } });
+    await act(async () => {
+      fireEvent.keyDown(box, { key: 'Enter' });
+    });
+    expect(box.value).toBe('hello');
+    expect(screen.getByRole('alert').textContent).toContain('waiting for a moderator to renew');
   });
 });
