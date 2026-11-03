@@ -631,9 +631,15 @@ fn members_chat_through_the_group_cipher() {
 
     // No key yet, and a plain member can't make one.
     guest.core.sync_now().unwrap();
-    assert_eq!(guest.core.send_message(&channel, "first?", None).unwrap_err().code, ErrorCode::NotAllowed);
+    assert_eq!(
+        guest.core.send_message(&channel, "first?", None).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
     // Bad input, and replies (not yet).
-    assert_eq!(owner.core.send_message(&channel, "  ", None).unwrap_err().code, ErrorCode::BadRequest);
+    assert_eq!(
+        owner.core.send_message(&channel, "  ", None).unwrap_err().code,
+        ErrorCode::BadRequest
+    );
     assert_eq!(
         owner.core.send_message(&channel, "x", Some("ab")).unwrap_err().code,
         ErrorCode::NotImplemented
@@ -652,8 +658,14 @@ fn members_chat_through_the_group_cipher() {
     guest.core.send_message(&channel, "hi", None).unwrap();
 
     owner.core.sync_now().unwrap();
-    let bodies: Vec<String> =
-        owner.core.get_messages(&channel, 0, 10).unwrap().messages.into_iter().map(|m| m.body).collect();
+    let bodies: Vec<String> = owner
+        .core
+        .get_messages(&channel, 0, 10)
+        .unwrap()
+        .messages
+        .into_iter()
+        .map(|m| m.body)
+        .collect();
     assert_eq!(bodies, ["שלום", "hi"]);
     let page = owner.core.get_messages(&channel, 1, 99).unwrap();
     assert_eq!((page.start, page.messages.len(), page.messages[0].index), (1, 1, 1));
