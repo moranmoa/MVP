@@ -47,9 +47,14 @@ function startCore() {
     console.warn('mvs-core not found; core commands answer core-unavailable');
     return;
   }
+  // The core's folder is the user's only (0700); on Windows the per-user
+  // profile ACL already does this.
+  const dataDir = path.join(app.getPath('userData'), 'core');
+  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') fs.chmodSync(dataDir, 0o700);
   core = new Sidecar({
     exe: CORE_EXE,
-    dataDir: path.join(app.getPath('userData'), 'core'),
+    dataDir,
     onEvent: (name, payload) => {
       for (const win of BrowserWindow.getAllWindows()) {
         if (sec.isInternalUrl(win.webContents.getURL())) win.webContents.send('core:event', name, payload);

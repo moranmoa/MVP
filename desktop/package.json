@@ -8,10 +8,80 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test test/security.test.js test/commands.test.js test/sidecar.test.js",
-    "e2e": "node --test --test-concurrency=1 test/e2e.test.mjs"
+    "e2e": "node --test --test-concurrency=1 test/e2e.test.mjs",
+    "dist:linux": "electron-builder --linux AppImage deb",
+    "dist:win": "electron-builder --win nsis",
+    "test:fuses": "node --test test/fuses.test.mjs"
   },
   "devDependencies": {
     "electron": "44.7.0",
-    "playwright-core": "1.56.1"
+    "playwright-core": "1.56.1",
+    "electron-builder": "26.17.0",
+    "@electron/fuses": "2.1.3"
+  },
+  "productName": "MVS",
+  "author": {
+    "name": "MVS",
+    "email": "spike@example.invalid"
+  },
+  "homepage": "https://github.com/moranmoa/MVP",
+  "build": {
+    "appId": "dev.mvs.app",
+    "productName": "MVS",
+    "executableName": "mvs",
+    "publish": null,
+    "asar": true,
+    "files": [
+      "src/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../ui/dist",
+        "to": "ui"
+      },
+      {
+        "from": ".core",
+        "to": ".",
+        "filter": [
+          "mvs-core",
+          "mvs-core.exe"
+        ]
+      }
+    ],
+    "afterPack": "build/fuses.js",
+    "directories": {
+      "output": "dist"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Network",
+      "maintainer": "MVS <spike@example.invalid>"
+    },
+    "deb": {
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0",
+        "libasound2t64 | libasound2"
+      ]
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false
+    }
   }
 }
