@@ -2,7 +2,7 @@
 // exist in the DOM, so a channel with 100,000 messages scrolls like one with 50.
 
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { memo, useCallback, useMemo, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
 import type { MessageWindow } from '../../app/store';
 import type { Member, Message } from '../../core';
@@ -17,7 +17,7 @@ import {
   ReplyIcon,
   TrashIcon,
 } from '../../components/icons';
-import { displayName } from './MemberList';
+import { displayName, lookalikeIds, LookalikeTag } from './MemberList';
 
 const GROUP_GAP_MS = 5 * 60_000;
 const BOTTOM_SLACK_PX = 48;
@@ -55,6 +55,7 @@ export function MessageList({
   const [flash, setFlash] = useState<number | null>(null);
   const focusPending = useRef(false);
   const count = win.count;
+  const flagged = useMemo(() => lookalikeIds([...memberMap.values()]), [memberMap]);
 
   const virtualizer = useVirtualizer({
     count,
@@ -211,6 +212,7 @@ export function MessageList({
                     author={memberMap.get(m.authorId)}
                     replyAuthor={m.replyTo ? memberMap.get(m.replyTo.authorId) : undefined}
                     grouped={grouped}
+                    lookalike={flagged.has(m.authorId)}
                     mine={m.authorId === myId}
                     canDelete={m.authorId === myId || isOwner}
                     actionsTabbable={item.index === tabRow}
@@ -248,6 +250,7 @@ const MessageRow = memo(function MessageRow({
   author,
   replyAuthor,
   grouped,
+  lookalike,
   mine,
   canDelete,
   actionsTabbable,
@@ -263,6 +266,7 @@ const MessageRow = memo(function MessageRow({
   author?: Member;
   replyAuthor?: Member;
   grouped: boolean;
+  lookalike: boolean;
   mine: boolean;
   canDelete: boolean;
   actionsTabbable: boolean;
@@ -335,6 +339,7 @@ const MessageRow = memo(function MessageRow({
           {!grouped && (
             <div className="msg-head">
               <Name className="author">{name}</Name>
+              {lookalike && <LookalikeTag />}
               {author && (
                 <Code value={author.shortCode} label={intl.formatMessage({ id: 'chat.code' }, { code: author.shortCode })} />
               )}
@@ -354,6 +359,11 @@ const MessageRow = memo(function MessageRow({
               </>
             )}
           </p>
+          {m.clipped && (
+            <p className="muted small clipped-note">
+              <FormattedMessage id="chat.clipped" />
+            </p>
+          )}
           {mine && m.sendState && <SendStateView message={m} onRetry={onRetry} tab={tab} />}
         </div>
       </div>

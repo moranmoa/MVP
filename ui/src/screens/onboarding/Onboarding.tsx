@@ -5,6 +5,7 @@ import { useAppStore } from '../../app/App';
 import { useSettings } from '../../app/settings';
 import { useCore, useCoreEvent, type Identity, type Locale } from '../../core';
 import type { CoreEvents } from '../../core/api';
+import { safeImageSrc } from '../../core/sanitize';
 import { Avatar, Code } from '../../components/common';
 import { CheckIcon } from '../../components/icons';
 import { LOCALES } from '../../i18n';
@@ -39,6 +40,12 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
     setWords(words);
     store.setIdentity(identity);
     setStep('words');
+  };
+
+  // The words are not needed after the check, so they do not stay in memory.
+  const leaveWords = () => {
+    setWords([]);
+    setStep('profile');
   };
 
   const stepNo = NUMBERED.indexOf(step);
@@ -92,8 +99,8 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
                 <FormattedMessage id="onb.check.title" />
               </h1>
               <RecoveryCheck
-                onChecked={() => setStep('profile')}
-                onLater={() => setStep('profile')}
+                onChecked={leaveWords}
+                onLater={leaveWords}
                 onShowAgain={() => setStep('words')}
               />
             </>
@@ -135,6 +142,9 @@ function LanguageStep({ onNext, onRestore }: { onNext: () => void; onRestore: ()
   const intl = useIntl();
   return (
     <>
+      <p className="brand">
+        <FormattedMessage id="app.name" />
+      </p>
       <h1>
         <FormattedMessage id="onb.language.title" />
       </h1>
@@ -387,6 +397,9 @@ function WordsStep({ words, onNext }: { words: string[]; onNext: () => void }) {
   );
 }
 
+const AVATAR_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+const AVATAR_MAX_BYTES = 512 * 1024;
+
 function ProfileStep({ onDone }: { onDone: () => void }) {
   const core = useCore();
   const store = useAppStore();
@@ -394,6 +407,7 @@ function ProfileStep({ onDone }: { onDone: () => void }) {
   const [name, setName] = useState(identity.displayName);
   const [bio, setBio] = useState(identity.bio ?? '');
   const [avatar, setAvatar] = useState<string | undefined>(identity.avatarDataUrl);
+  const [avatarError, setAvatarError] = useState(false);
   const intl = useIntl();
 
   const save = async (e: FormEvent) => {
@@ -416,19 +430,33 @@ function ProfileStep({ onDone }: { onDone: () => void }) {
           <FormattedMessage id="onb.profile.avatarPick" />
           <input
             type="file"
-            accept="image/png,image/jpeg,image/webp,image/gif"
+            accept={AVATAR_TYPES.join(',')}
             className="visually-hidden"
             aria-label={intl.formatMessage({ id: 'onb.profile.avatar' })}
             onChange={(e) => {
               const f = e.target.files?.[0];
               if (!f) return;
+              setAvatarError(false);
+              if (!AVATAR_TYPES.includes(f.type) || f.size > AVATAR_MAX_BYTES) {
+                setAvatarError(true);
+                return;
+              }
               const r = new FileReader();
-              r.onload = () => setAvatar(String(r.result));
+              r.onload = () => {
+                const src = safeImageSrc(r.result);
+                setAvatar(src);
+                setAvatarError(!src);
+              };
               r.readAsDataURL(f);
             }}
           />
         </label>
       </div>
+      {avatarError && (
+        <p className="error" role="alert">
+          <FormattedMessage id="onb.profile.avatarTooBig" />
+        </p>
+      )}
       <label className="field">
         <span>
           <FormattedMessage id="onb.profile.name" />

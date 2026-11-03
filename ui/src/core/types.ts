@@ -110,6 +110,8 @@ export interface Message {
   /** Only set on messages written on this device. */
   sendState?: SendState;
   mentionsMe?: boolean;
+  /** Set by the UI when the text was too long or had too many lines to show in full. */
+  clipped?: boolean;
 }
 
 export interface MessageRange {

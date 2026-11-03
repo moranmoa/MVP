@@ -6,16 +6,23 @@
 //!   open log; the peer answers with what we're missing, in pages.
 //! - Push: every new blob is published on the log's gossipsub topic. A pushed
 //!   blob whose deps we lack waits in memory and triggers a pull.
+//!
+//! Every input from a peer is bounded: blob size and dep count
+//! ([`Blob::decode`]), ids recomputed from content, `have` list length,
+//! response pages (count and bytes), inbound pull rate per peer, gossip
+//! message size and topics, connections, and the pending-blob buffer.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use futures::StreamExt;
 use libp2p::{
+    connection_limits,
     core::multiaddr::Protocol,
-    gossipsub, identify, identity, kad, noise, ping, relay,
+    gossipsub::{self, MessageAcceptance, MaxCountSubscriptionFilter, TopicHash, TopicSubscriptionFilter},
+    identify, identity, kad, noise, ping, relay,
     request_response::{self, ProtocolSupport},
     swarm::{
         dial_opts::{DialOpts, PeerCondition},
@@ -28,16 +35,49 @@ use serde_bytes::ByteBuf;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::{Append, Blob, Id, Store};
+use crate::limits::{Pending, RateLimiter};
+use crate::store::MAX_HAVE;
+use crate::{valid_log_name, Append, Blob, Id, Store, MAX_DATA_BYTES, MAX_DEPS, MAX_ENCODED_BYTES};
 
-const SYNC_PROTOCOL: StreamProtocol = StreamProtocol::new("/descord-replacement/sync/0.1.0");
-const IDENTIFY_VERSION: &str = "/descord-replacement/0.1.0";
+const SYNC_PROTOCOL: StreamProtocol = StreamProtocol::new("/mvs/sync/0.1.0");
+const IDENTIFY_VERSION: &str = "/mvs/0.1.0";
 /// Blobs per sync response page.
 const PAGE: usize = 2000;
+/// Blob bytes (data + deps) per page. The CBOR codec drops responses over
+/// 10 MiB, so a page must stay well below that.
+const PAGE_BYTES: usize = 4 * 1024 * 1024;
 const ANTI_ENTROPY: Duration = Duration::from_secs(5);
 const DISCOVERY: Duration = Duration::from_secs(3);
-/// Cap on pushed blobs waiting for their deps (the pull fetches them anyway).
-const MAX_PENDING: usize = 50_000;
+/// Pushed blobs waiting for their deps (the pull fetches them anyway).
+const MAX_PENDING: usize = 10_000;
+const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
+const PENDING_TTL: Duration = Duration::from_secs(60);
+/// Inbound pulls per peer: a burst, then a steady rate. A 100,000-message
+/// catch-up is 50 pages, so this costs an honest peer about 2 s at most.
+const PULL_BURST: u32 = 30;
+const PULL_RATE: u32 = 10;
+/// Inbound pulls from all peers together. PeerIds are free, so the per-peer
+/// limit alone doesn't bound the work: each pull walks the log's ancestry
+/// on the node's only task.
+const GLOBAL_PULL_BURST: u32 = 100;
+const GLOBAL_PULL_RATE: u32 = 50;
+/// Per-peer pull buckets remembered (also after disconnecting).
+const MAX_TRACKED_PEERS: usize = 4096;
+/// Node events waiting for the app; beyond this, new ones are dropped.
+const EVENT_BUFFER: usize = 65_536;
+/// Largest gossipsub frame: one encoded blob plus signature, key and topic.
+const MAX_GOSSIP_BYTES: usize = MAX_ENCODED_BYTES + 4 * 1024;
+/// Topics one remote peer may subscribe to, in total and per message.
+const MAX_PEER_TOPICS: usize = 1024;
+const MAX_TOPICS_PER_MESSAGE: usize = 128;
+const MAX_INCOMING_CONNECTIONS: u32 = 256;
+/// Peers hand us addresses to dial (Kademlia results, identify), so our own
+/// dialling is capped as well.
+const MAX_OUTGOING_CONNECTIONS: u32 = 128;
+const MAX_CONNECTIONS: u32 = 384;
+const MAX_PENDING_INCOMING: u32 = 64;
+/// A direct and a relayed connection to the same peer can briefly coexist.
+const MAX_CONNECTIONS_PER_PEER: u32 = 2;
 
 pub struct NodeConfig {
     /// Bootstrap/relay node, ending in /p2p/<peer id>.
@@ -96,8 +136,22 @@ struct Behaviour {
     identify: identify::Behaviour,
     ping: ping::Behaviour,
     kad: kad::Behaviour<kad::store::MemoryStore>,
-    gossipsub: gossipsub::Behaviour,
+    gossipsub: gossipsub::Behaviour<gossipsub::IdentityTransform, MaxCountSubscriptionFilter<LogTopics>>,
     sync: request_response::cbor::Behaviour<SyncRequest, SyncResponse>,
+    limits: connection_limits::Behaviour,
+}
+
+/// Remote peers' subscriptions are only tracked for well-formed log topics.
+struct LogTopics;
+
+impl TopicSubscriptionFilter for LogTopics {
+    fn can_subscribe(&mut self, topic: &TopicHash) -> bool {
+        log_of_topic(topic).is_some()
+    }
+}
+
+fn log_of_topic(topic: &TopicHash) -> Option<&str> {
+    topic.as_str().strip_prefix("log/").filter(|log| valid_log_name(log))
 }
 
 /// Handle to a running node. Dropping it does not stop the node; call
@@ -110,7 +164,10 @@ pub struct Node {
 impl Node {
     /// Opens the store, starts networking and returns the handle plus a
     /// stream of events (blobs stored, peers connected).
-    pub async fn start(config: NodeConfig) -> Result<(Node, mpsc::UnboundedReceiver<NodeEvent>)> {
+    pub async fn start(config: NodeConfig) -> Result<(Node, mpsc::Receiver<NodeEvent>)> {
+        for log in &config.logs {
+            ensure!(valid_log_name(log), "invalid log name {log:?}");
+        }
         std::fs::create_dir_all(&config.data_dir)?;
         let key = load_or_create_key(&config.data_dir.join("node.key"))?;
         let store = Store::open(config.data_dir.join("store.db"))?;
@@ -126,7 +183,7 @@ impl Node {
 
         let peer_id = *swarm.local_peer_id();
         let (commands, command_rx) = mpsc::unbounded_channel();
-        let (events, event_rx) = mpsc::unbounded_channel();
+        let (events, event_rx) = mpsc::channel(EVENT_BUFFER);
         let mut task = Task {
             swarm,
             store,
@@ -136,8 +193,9 @@ impl Node {
             connected: HashSet::new(),
             inflight: HashMap::new(),
             again: HashSet::new(),
-            pending: HashMap::new(),
-            pending_count: 0,
+            pending: Pending::new(MAX_PENDING, MAX_PENDING_BYTES),
+            inbound_pulls: RateLimiter::new(PULL_BURST, PULL_RATE, MAX_TRACKED_PEERS),
+            all_inbound_pulls: RateLimiter::new(GLOBAL_PULL_BURST, GLOBAL_PULL_RATE, 1),
             events,
             circuit_listening: false,
         };
@@ -161,6 +219,7 @@ impl Node {
 
     /// Starts syncing a log (channel logs are only synced once opened).
     pub fn open(&self, log: &str) -> Result<()> {
+        ensure!(valid_log_name(log), "invalid log name {log:?}");
         self.send(Command::Open { log: log.into() })
     }
 
@@ -211,13 +270,40 @@ fn build_swarm(key: identity::Keypair) -> Result<Swarm<Behaviour>> {
             kad.set_mode(Some(kad::Mode::Server));
             let gossip_config = gossipsub::ConfigBuilder::default()
                 .heartbeat_interval(Duration::from_millis(500))
+                .max_transmit_size(MAX_GOSSIP_BYTES)
+                // Forward a message only after we checked it (see `on_gossip`),
+                // so invalid blobs don't travel further through us.
+                .validate_messages()
+                // Dedup by content, not by (source, seqno): the same blob
+                // republished by another peer or with a new seqno is one message.
+                .message_id_fn(|m| {
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.update(m.topic.as_str().as_bytes());
+                    hasher.update(&[0]);
+                    hasher.update(&m.data);
+                    gossipsub::MessageId::from(hasher.finalize().as_bytes().to_vec())
+                })
+                // TODO: enable peer scoring so `MessageAcceptance::Reject`
+                // costs the sender something; today it only stops forwarding.
                 .build()
                 .map_err(|e| anyhow::anyhow!(e))?;
-            let gossipsub = gossipsub::Behaviour::new(
+            let gossipsub = gossipsub::Behaviour::new_with_subscription_filter(
                 gossipsub::MessageAuthenticity::Signed(key.clone()),
                 gossip_config,
+                None,
+                MaxCountSubscriptionFilter {
+                    filter: LogTopics,
+                    max_subscribed_topics: MAX_PEER_TOPICS,
+                    max_subscriptions_per_request: MAX_TOPICS_PER_MESSAGE,
+                },
             )
             .map_err(|e| anyhow::anyhow!(e))?;
+            let limits = connection_limits::ConnectionLimits::default()
+                .with_max_established_incoming(Some(MAX_INCOMING_CONNECTIONS))
+                .with_max_pending_incoming(Some(MAX_PENDING_INCOMING))
+                .with_max_established_per_peer(Some(MAX_CONNECTIONS_PER_PEER))
+                .with_max_established_outgoing(Some(MAX_OUTGOING_CONNECTIONS))
+                .with_max_established(Some(MAX_CONNECTIONS));
             Ok(Behaviour {
                 relay_client,
                 identify: identify::Behaviour::new(identify::Config::new(
@@ -231,6 +317,7 @@ fn build_swarm(key: identity::Keypair) -> Result<Swarm<Behaviour>> {
                     [(SYNC_PROTOCOL, ProtocolSupport::Full)],
                     request_response::Config::default().with_request_timeout(Duration::from_secs(30)),
                 ),
+                limits: connection_limits::Behaviour::new(limits),
             })
         })?
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(3600)))
@@ -252,10 +339,11 @@ struct Task {
     inflight: HashMap<request_response::OutboundRequestId, (PeerId, String)>,
     /// Pulls asked for while one was in flight: run again after it.
     again: HashSet<(PeerId, String)>,
-    /// Pushed blobs waiting for a dep, keyed by that dep.
-    pending: HashMap<Id, Vec<(String, Blob)>>,
-    pending_count: usize,
-    events: mpsc::UnboundedSender<NodeEvent>,
+    /// Pushed blobs waiting for a dep.
+    pending: Pending,
+    inbound_pulls: RateLimiter<PeerId>,
+    all_inbound_pulls: RateLimiter<()>,
+    events: mpsc::Sender<NodeEvent>,
     circuit_listening: bool,
 }
 
@@ -278,7 +366,10 @@ impl Task {
                     None => return,
                 },
                 event = self.swarm.select_next_some() => self.on_swarm_event(event),
-                _ = anti_entropy.tick() => self.pull_all(),
+                _ = anti_entropy.tick() => {
+                    self.pending.expire(Instant::now(), PENDING_TTL);
+                    self.pull_all();
+                }
                 _ = discovery.tick() => self.discover(),
             }
         }
@@ -323,8 +414,16 @@ impl Task {
         if !self.logs.contains(log) {
             bail!("log {log} is not open");
         }
-        let blob = Blob::new(self.store.heads(log)?, data);
-        self.store.append(log, &blob)?;
+        ensure!(data.len() <= MAX_DATA_BYTES, "message is {} bytes, limit is {MAX_DATA_BYTES}", data.len());
+        // With more heads than a blob may point at, merge some now; the rest
+        // stay heads and get merged by the next writes.
+        let mut deps = self.store.heads(log)?;
+        deps.truncate(MAX_DEPS);
+        let blob = Blob::new(log, deps, data);
+        match self.store.append(log, &blob)? {
+            Append::Added => {}
+            other => bail!("storing own blob failed: {other:?}"),
+        }
         // No subscribed peers yet is fine: they'll pull it.
         let _ = self.swarm.behaviour_mut().gossipsub.publish(topic(log), blob.encode());
         let id = blob.id;
@@ -333,7 +432,15 @@ impl Task {
     }
 
     fn emit_stored(&self, log: &str, blob: Blob, via: Via) {
-        let _ = self.events.send(NodeEvent::Stored { log: log.into(), blob, via, at: SystemTime::now() });
+        self.emit(NodeEvent::Stored { log: log.into(), blob, via, at: SystemTime::now() });
+    }
+
+    /// Hands an event to the app. If the app stops reading, events are
+    /// dropped rather than piling up; the blobs themselves are in the store.
+    fn emit(&self, event: NodeEvent) {
+        if let Err(mpsc::error::TrySendError::Full(_)) = self.events.try_send(event) {
+            debug!("event buffer full, dropping an event");
+        }
     }
 
     fn discover(&mut self) {
@@ -375,7 +482,7 @@ impl Task {
                     self.swarm.behaviour_mut().kad.get_closest_peers(me);
                 } else if self.connected.insert(peer_id) {
                     info!(%peer_id, address = %endpoint.get_remote_address(), "peer connected");
-                    let _ = self.events.send(NodeEvent::PeerConnected(peer_id));
+                    self.emit(NodeEvent::PeerConnected(peer_id));
                     for log in self.logs.clone() {
                         self.pull(peer_id, &log);
                     }
@@ -384,7 +491,7 @@ impl Task {
             SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. } => {
                 if self.connected.remove(&peer_id) {
                     info!(%peer_id, "peer disconnected");
-                    let _ = self.events.send(NodeEvent::PeerDisconnected(peer_id));
+                    self.emit(NodeEvent::PeerDisconnected(peer_id));
                 }
                 self.inflight.retain(|_, (p, _)| *p != peer_id);
                 self.again.retain(|(p, _)| *p != peer_id);
@@ -424,22 +531,28 @@ impl Task {
             }
             SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message {
                 propagation_source,
+                message_id,
                 message,
-                ..
             })) => {
-                let Some(log) = message.topic.as_str().strip_prefix("log/").map(str::to_string) else { return };
-                if !self.logs.contains(&log) {
-                    return;
-                }
-                match Blob::decode(&message.data) {
-                    Some(blob) => self.on_pushed(propagation_source, log, blob),
-                    None => warn!(%propagation_source, "undecodable pushed blob"),
-                }
+                let acceptance = self.on_gossip(propagation_source, &message);
+                let _ = self.swarm.behaviour_mut().gossipsub.report_message_validation_result(
+                    &message_id,
+                    &propagation_source,
+                    acceptance,
+                );
             }
-            SwarmEvent::Behaviour(BehaviourEvent::Sync(request_response::Event::Message { message, .. })) => {
+            SwarmEvent::Behaviour(BehaviourEvent::Sync(request_response::Event::Message { peer, message })) => {
                 match message {
                     request_response::Message::Request { request, channel, .. } => {
-                        let response = self.answer(request);
+                        let now = Instant::now();
+                        if !self.inbound_pulls.allow(peer, now) || !self.all_inbound_pulls.allow((), now) {
+                            // Dropping the channel fails the request on their side.
+                            debug!(%peer, "pull rate limit exceeded");
+                            return;
+                        }
+                        let started = Instant::now();
+                        let response = answer(&self.store, &self.logs, request);
+                        debug!(n = response.blobs.len(), ms = started.elapsed().as_millis(), "answered pull");
                         let _ = self.swarm.behaviour_mut().sync.send_response(channel, response);
                     }
                     request_response::Message::Response { request_id, response } => {
@@ -462,34 +575,44 @@ impl Task {
         }
     }
 
-    fn answer(&self, request: SyncRequest) -> SyncResponse {
-        if !self.logs.contains(&request.log) {
-            return SyncResponse { blobs: Vec::new(), more: false };
+    /// Checks a pushed message: Accept forwards it to our mesh peers, Reject
+    /// stops it here (and counts against the sender once peer scoring is on).
+    fn on_gossip(&mut self, from: PeerId, message: &gossipsub::Message) -> MessageAcceptance {
+        let Some(log) = log_of_topic(&message.topic) else { return MessageAcceptance::Reject };
+        if !self.logs.contains(log) {
+            return MessageAcceptance::Ignore;
         }
-        let have: Vec<Id> = request.have.iter().filter_map(|b| b.as_slice().try_into().ok()).collect();
-        let started = Instant::now();
-        match self.store.missing_since(&request.log, &have, PAGE) {
-            Ok((blobs, more)) => {
-                debug!(n = blobs.len(), more, ms = started.elapsed().as_millis(), "answering pull");
-                SyncResponse { blobs: blobs.iter().map(|b| ByteBuf::from(b.encode())).collect(), more }
+        let log = log.to_string();
+        match Blob::decode(&log, &message.data) {
+            Ok(blob) => {
+                self.on_pushed(from, log, blob);
+                MessageAcceptance::Accept
             }
             Err(err) => {
-                warn!(%err, "missing_since failed");
-                SyncResponse { blobs: Vec::new(), more: false }
+                warn!(%from, %err, "rejected pushed blob");
+                MessageAcceptance::Reject
             }
         }
     }
 
     fn on_response(&mut self, key: (PeerId, String), response: SyncResponse) {
-        let blobs: Vec<Blob> = response.blobs.iter().filter_map(|b| Blob::decode(b)).collect();
         let (peer, log) = key.clone();
+        let mut blobs = Vec::new();
+        for bytes in &response.blobs {
+            match Blob::decode(&log, bytes) {
+                Ok(blob) => blobs.push(blob),
+                Err(err) => debug!(%peer, %err, "dropped pulled blob"),
+            }
+        }
+        let mut added_any = false;
         if !blobs.is_empty() {
             match self.store.append_all(&log, &blobs) {
                 Ok((added, _skipped)) => {
+                    added_any = !added.is_empty();
                     let added: HashSet<Id> = added.into_iter().collect();
                     let now = SystemTime::now();
                     for blob in blobs.iter().filter(|b| added.contains(&b.id)) {
-                        let _ = self.events.send(NodeEvent::Stored {
+                        self.emit(NodeEvent::Stored {
                             log: log.clone(),
                             blob: blob.clone(),
                             via: Via::Pull,
@@ -503,7 +626,7 @@ impl Task {
                 Err(err) => warn!(%err, "storing pulled blobs failed"),
             }
         }
-        if response.more || self.again.remove(&key) {
+        if follow_up(response.more, added_any) || self.again.remove(&key) {
             self.pull(peer, &log);
         }
     }
@@ -517,12 +640,11 @@ impl Task {
             }
             Ok(Append::Known) => {}
             Ok(Append::MissingDeps(missing)) => {
-                if self.pending_count < MAX_PENDING {
-                    self.pending_count += 1;
-                    self.pending.entry(missing[0]).or_default().push((log.clone(), blob));
-                }
+                self.pending.insert(missing[0], log.clone(), blob, Instant::now());
                 self.pull(from, &log);
             }
+            // Decoding already checked it; this is the store's own guard.
+            Ok(Append::Invalid(err)) => warn!(%from, %err, "rejected pushed blob"),
             Err(err) => warn!(%err, "storing pushed blob failed"),
         }
     }
@@ -531,22 +653,122 @@ impl Task {
     fn release_pending(&mut self, id: Id) {
         let mut ready = vec![id];
         while let Some(id) = ready.pop() {
-            let Some(waiting) = self.pending.remove(&id) else { continue };
-            self.pending_count -= waiting.len();
-            for (log, blob) in waiting {
-                match self.store.append(&log, &blob) {
+            for waiting in self.pending.take(&id) {
+                match self.store.append(&waiting.log, &waiting.blob) {
                     Ok(Append::Added) => {
-                        ready.push(blob.id);
-                        self.emit_stored(&log, blob, Via::Push);
+                        ready.push(waiting.blob.id);
+                        self.emit_stored(&waiting.log, waiting.blob, Via::Push);
                     }
                     Ok(Append::MissingDeps(missing)) => {
-                        self.pending_count += 1;
-                        self.pending.entry(missing[0]).or_default().push((log, blob));
+                        // Subject to the same caps as a new arrival.
+                        self.pending.reinsert(missing[0], waiting);
                     }
-                    Ok(Append::Known) => {}
+                    Ok(Append::Known | Append::Invalid(_)) => {}
                     Err(err) => warn!(%err, "storing pending blob failed"),
                 }
             }
         }
+    }
+}
+
+/// Answers a pull: what the requester is missing from `request.log`, one
+/// page. Unknown or unopened logs get an empty answer; at most [`MAX_HAVE`]
+/// `have` ids are looked at, and malformed ones are skipped.
+fn answer(store: &Store, logs: &HashSet<String>, request: SyncRequest) -> SyncResponse {
+    let empty = SyncResponse { blobs: Vec::new(), more: false };
+    if !logs.contains(&request.log) {
+        return empty;
+    }
+    let have: Vec<Id> =
+        request.have.iter().take(MAX_HAVE).filter_map(|b| b.as_slice().try_into().ok()).collect();
+    match store.missing_since(&request.log, &have, PAGE, PAGE_BYTES) {
+        Ok((blobs, more)) => {
+            SyncResponse { blobs: blobs.iter().map(|b| ByteBuf::from(b.encode())).collect(), more }
+        }
+        Err(err) => {
+            warn!(%err, "missing_since failed");
+            empty
+        }
+    }
+}
+
+/// Whether to ask for the next page right away. A peer that keeps saying
+/// "more" without sending anything new is not followed; the anti-entropy
+/// timer tries again later.
+fn follow_up(more: bool, added_any: bool) -> bool {
+    more && added_any
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(log: &str, have: Vec<ByteBuf>) -> SyncRequest {
+        SyncRequest { log: log.into(), have }
+    }
+
+    fn store_with(log: &str, n: usize, size: usize) -> (Store, Vec<Id>) {
+        let mut store = Store::in_memory().unwrap();
+        let mut deps = vec![];
+        let mut ids = vec![];
+        for i in 0..n {
+            let blob = Blob::new(log, deps, [(i as u32).to_le_bytes().to_vec(), vec![0; size]].concat());
+            store.append(log, &blob).unwrap();
+            deps = vec![blob.id];
+            ids.push(blob.id);
+        }
+        (store, ids)
+    }
+
+    #[test]
+    fn answers_only_open_logs() {
+        let (store, _) = store_with("open", 3, 0);
+        let logs = HashSet::from(["open".to_string()]);
+        assert_eq!(answer(&store, &logs, request("open", vec![])).blobs.len(), 3);
+        assert!(answer(&store, &logs, request("closed", vec![])).blobs.is_empty());
+        assert!(answer(&store, &logs, request("x'; DROP TABLE blobs; --", vec![])).blobs.is_empty());
+        assert_eq!(store.count("open").unwrap(), 3);
+    }
+
+    #[test]
+    fn malformed_and_excess_have_ids_are_ignored() {
+        let (store, ids) = store_with("l", 5, 0);
+        let logs = HashSet::from(["l".to_string()]);
+        let have = vec![ByteBuf::from(vec![1, 2, 3]), ByteBuf::from(ids[4].to_vec())];
+        assert!(answer(&store, &logs, request("l", have)).blobs.is_empty());
+        // 100,000 have ids cost the same as MAX_HAVE.
+        let flood = vec![ByteBuf::from(vec![0xee; 32]); 100_000];
+        assert_eq!(answer(&store, &logs, request("l", flood)).blobs.len(), 5);
+    }
+
+    #[test]
+    fn response_pages_fit_the_codec_limit() {
+        // 400 blobs of 30 KB is 12 MB, more than the 10 MiB response cap.
+        let (store, _) = store_with("l", 400, 30_000);
+        let logs = HashSet::from(["l".to_string()]);
+        let response = answer(&store, &logs, request("l", vec![]));
+        assert!(response.more);
+        let size: usize = response.blobs.iter().map(|b| b.len()).sum();
+        assert!(size <= PAGE_BYTES + MAX_ENCODED_BYTES, "page is {size} bytes");
+        // Every blob in it decodes back to a valid blob of the log.
+        for bytes in &response.blobs {
+            Blob::decode("l", bytes).unwrap();
+        }
+    }
+
+    #[test]
+    fn empty_more_responses_are_not_followed() {
+        assert!(follow_up(true, true));
+        assert!(!follow_up(true, false));
+        assert!(!follow_up(false, true));
+    }
+
+    #[test]
+    fn topic_filter_accepts_only_log_topics() {
+        let mut filter = LogTopics;
+        assert!(filter.can_subscribe(&TopicHash::from_raw("log/general")));
+        assert!(!filter.can_subscribe(&TopicHash::from_raw("log/")));
+        assert!(!filter.can_subscribe(&TopicHash::from_raw("something-else")));
+        assert!(!filter.can_subscribe(&TopicHash::from_raw(format!("log/{}", "x".repeat(10_000)))));
     }
 }

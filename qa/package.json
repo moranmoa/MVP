@@ -1,0 +1,14 @@
+{
+  "name": "mvs-qa",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "license": "UNLICENSED",
+  "scripts": {
+    "smoke": "playwright test --project=smoke",
+    "explore": "playwright test --project=explore"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1"
+  }
+}

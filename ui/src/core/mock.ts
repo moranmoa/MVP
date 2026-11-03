@@ -44,6 +44,8 @@ export interface MockOptions {
   simulateActivity?: boolean;
   /** Announce a ready update after this many ms (undefined = never). */
   updateAfterMs?: number;
+  /** Add members and messages written the way an attacker would (see SECURITY.md). */
+  hostile?: boolean;
   /** Keep the account across reloads. */
   storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 }
@@ -68,9 +70,12 @@ interface ServerState {
   members: Member[];
 }
 
+/**
+ * What the mock keeps in localStorage. Never the recovery words: the real core
+ * keeps those in the OS keychain, and the mock rebuilds them from the account id.
+ */
 interface Persisted {
   identity: Identity;
-  words: string[];
   createdServers: { id: Id; name: string; ageRestriction: AgeRestriction; inviteLink: string }[];
   joinedDemo: boolean;
   demo: boolean;
@@ -175,7 +180,6 @@ export class MockCore implements CoreApi {
     if (this.options.demo) {
       this.persisted = {
         identity: this.makeIdentity('me-demo', { locale: 'he', country: 'IL', birthDate: '1998-04-12' }),
-        words: this.makeWords('me-demo'),
         createdServers: [],
         joinedDemo: false,
         demo: true,
@@ -186,14 +190,20 @@ export class MockCore implements CoreApi {
       try {
         const raw = this.options.storage?.getItem(STORAGE_KEY);
         if (raw) this.persisted = JSON.parse(raw) as Persisted;
+        // Older builds stored the words; drop them.
+        if (this.persisted && 'words' in this.persisted) {
+          delete (this.persisted as Partial<Persisted> & { words?: unknown }).words;
+          this.options.storage?.setItem(STORAGE_KEY, JSON.stringify(this.persisted));
+        }
       } catch {
         this.persisted = null;
       }
     }
     if (!this.persisted) return;
     this.identity = this.persisted.identity;
-    this.words = this.persisted.words;
+    this.words = this.makeWords(this.identity.id);
     if (this.persisted.demo) DEMO_SERVERS.forEach((s) => this.addSeed(s));
+    if (this.persisted.demo && this.options.hostile) this.addHostile(DEMO_SERVERS[0].id);
     if (this.persisted.joinedDemo) this.addSeed(JOINABLE_SERVER);
     for (const s of this.persisted.createdServers) this.addOwnServer(s.id, s.name, s.ageRestriction, s.inviteLink);
   }
@@ -225,6 +235,55 @@ export class MockCore implements CoreApi {
   }
 
   // ---- seeding -------------------------------------------------------------
+
+  /**
+   * Hostile input for the security demo: look-alike and role names, invisible
+   * and "zalgo" names, a colour that tries to load a remote image, and messages
+   * with markup, direction overrides and huge sizes. The UI must show all of it
+   * as harmless text.
+   */
+  private addHostile(serverId: Id): void {
+    const s = this.servers.get(serverId)!;
+    const owner = s.members.find((m) => m.isOwner)!;
+    const RLO = String.fromCharCode(0x202e);
+    const names = [
+      owner.displayName.replace('ר', 'ד'), // מורן -> מודן
+      `${String.fromCharCode(0x391)}dmin`, // Greek capital Alpha
+      String.fromCharCode(0x3164), // a "blank" Hangul filler
+      `Z${String.fromCharCode(0x336).repeat(60)}oe${RLO}`,
+    ];
+    const added: Member[] = names.map((displayName, i) => ({
+      id: `u-hostile-${i}`,
+      serverId,
+      displayName,
+      shortCode: shortCodeFor(`u-hostile-${i}`),
+      avatarColor: i === 3 ? 'url(https://tracker.invalid/p.png)' : AVATAR_COLORS[i],
+      presence: 'online',
+      isOwner: false,
+    }));
+    s.members.push(...added);
+    const ch = s.channels[0];
+    ch.memberIds.push(...added.map((m) => m.id));
+    // Tallest first, so the short ones are what the chat opens on.
+    const bodies = [
+      'line\n'.repeat(2000),
+      `${'A'.repeat(30)} ${'x'.repeat(200_000)}`,
+      `invoice_${RLO}fdp.exe`,
+      '<img src=x onerror="alert(1)"> <a href="javascript:alert(1)">click</a> **bold** [link](javascript:alert(1))',
+    ];
+    bodies.forEach((body, i) => {
+      const index = this.count(ch);
+      ch.appendedCount++;
+      ch.overrides.set(index, {
+        id: this.messageId(ch.channel.id, index),
+        channelId: ch.channel.id,
+        index,
+        authorId: added[i].id,
+        body,
+        createdAt: Date.now() - (bodies.length - i) * 60_000,
+      });
+    });
+  }
 
   private personId(i: number): Id {
     return `u-${i}`;
@@ -433,7 +492,7 @@ export class MockCore implements CoreApi {
     }
     this.identity = this.makeIdentity(id, input);
     this.words = this.makeWords(id);
-    this.persisted = { identity: this.identity, words: this.words, createdServers: [], joinedDemo: false, demo: false };
+    this.persisted = { identity: this.identity, createdServers: [], joinedDemo: false, demo: false };
     this.save();
     return { identity: this.identity, words: [...this.words] };
   }
@@ -467,7 +526,7 @@ export class MockCore implements CoreApi {
       recoveryChecked: true,
     };
     this.words = clean;
-    this.persisted = { identity: this.identity, words: clean, createdServers: [], joinedDemo: false, demo: false };
+    this.persisted = { identity: this.identity, createdServers: [], joinedDemo: false, demo: false };
     this.save();
     return this.identity;
   }

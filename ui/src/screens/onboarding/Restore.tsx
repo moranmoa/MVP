@@ -26,6 +26,8 @@ export function RestoreScreen({ onRestored }: { onRestored: (identity: Identity)
     setBadPositions([]);
     setWords((w) => w.map((x, j) => (j >= i && j - i < parts.length ? parts[j - i].toLowerCase() : x)));
     inputs.current[Math.min(11, i + parts.length - 1)]?.focus();
+    // Best effort: do not leave the recovery words in the clipboard (or its history).
+    void navigator.clipboard?.writeText('').catch(() => undefined);
   };
 
   const submit = async (e: FormEvent) => {

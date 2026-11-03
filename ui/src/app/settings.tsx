@@ -30,9 +30,9 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
 
 function load(): Settings {
   const base = defaultSettings();
-  let stored: Partial<Settings> = {};
+  let stored: Partial<Record<keyof Settings, unknown>> = {};
   try {
-    stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as Partial<Settings>;
+    stored = (JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') ?? {}) as Partial<Record<keyof Settings, unknown>>;
   } catch {
     // ignore broken storage
   }
@@ -40,9 +40,13 @@ function load(): Settings {
   const params = new URLSearchParams(location.search);
   const lang = params.get('lang');
   const theme = params.get('theme');
+  // Stored values are checked one by one; anything odd falls back to the default.
+  const num = (v: unknown, lo: number, hi: number, d: number) => (typeof v === 'number' && Number.isFinite(v) ? clamp(v, lo, hi) : d);
   return {
-    ...base,
-    ...stored,
+    locale: stored.locale === 'he' || stored.locale === 'en' ? stored.locale : base.locale,
+    theme: stored.theme === 'light' || stored.theme === 'dark' || stored.theme === 'system' ? stored.theme : base.theme,
+    uiScale: num(stored.uiScale, SCALE_MIN, SCALE_MAX, base.uiScale),
+    fontSize: num(stored.fontSize, FONT_MIN, FONT_MAX, base.fontSize),
     ...(lang === 'he' || lang === 'en' ? { locale: lang } : {}),
     ...(theme === 'light' || theme === 'dark' ? { theme } : {}),
   };
@@ -89,6 +93,7 @@ export function SettingsProvider({ children, initial }: { children: ReactNode; i
   useEffect(() => {
     const root = document.documentElement;
     root.lang = settings.locale;
+    document.title = messagesFor(settings.locale)['app.name'];
     root.dir = directionOf(settings.locale);
     root.dataset.theme = settings.theme;
     root.style.fontSize = `${16 * settings.uiScale}px`;
