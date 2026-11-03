@@ -376,7 +376,13 @@ Details:
   voided (say its author was kicked concurrently) doesn't count. A witness is
   always a strict descendant, so evaluating in reverse topological order with
   memoisation settles it without iterating, and the result depends only on
-  the record set.
+  the record set. Nested witness checks stop at `MAX_WITNESS_DEPTH` (64); a
+  witness beyond that doesn't count (conservative: void), which only affects
+  hostile chains of removed authors replying to each other.
+- **A missing cut head can only add survivors.** Check in this order: ancestor
+  of a held head (keep), witnessed (keep), some head of the channel not held
+  (pending), otherwise void. Otherwise a kicker could put a made-up head in the
+  cut and keep all of the target's messages pending forever (#62 review).
 - **Scope: non-privileged records only** (posts and channel messages). For the
   target's privileged records (grants, revokes, kicks, rotations), keep
   today's rule. Otherwise a colluding ordinary member could witness a
