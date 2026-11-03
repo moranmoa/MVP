@@ -671,7 +671,9 @@ impl Core {
         let messages = shown[start..end]
             .iter()
             .enumerate()
-            .map(|(i, s)| message_json(s, start + i, channel, me, &*inner.net))
+            .map(|(i, s)| {
+                message_json(s, start + i, channel, me, &Status { net: &*inner.net, db: &inner.db })
+            })
             .collect();
         Ok(MessageRange { channel_id: channel_id.to_owned(), start, messages })
     }
@@ -927,7 +929,10 @@ impl Inner {
         let mut seen = HashMap::new();
         for channel in self.known(server)? {
             for s in self.shown(cipher, server, channel)? {
-                seen.insert(s.record.id(), announced(&s, me, &*self.net));
+                seen.insert(
+                    s.record.id(),
+                    announced(&s, me, &Status { net: &*self.net, db: &self.db }),
+                );
             }
         }
         self.announced.insert(server, seen);
@@ -947,12 +952,22 @@ impl Inner {
             let shown = self.shown(cipher, server, channel)?;
             let seen = self.announced.entry(server).or_default();
             for (index, s) in shown.iter().enumerate() {
-                let state = announced(s, me, &*self.net);
+                let state = announced(s, me, &Status { net: &*self.net, db: &self.db });
                 let event = match seen.insert(s.record.id(), state) {
-                    None => Event::MessageAdded(message_json(s, index, channel, me, &*self.net)),
-                    Some(old) if old != state => {
-                        Event::MessageUpdated(message_json(s, index, channel, me, &*self.net))
-                    }
+                    None => Event::MessageAdded(message_json(
+                        s,
+                        index,
+                        channel,
+                        me,
+                        &Status { net: &*self.net, db: &self.db },
+                    )),
+                    Some(old) if old != state => Event::MessageUpdated(message_json(
+                        s,
+                        index,
+                        channel,
+                        me,
+                        &Status { net: &*self.net, db: &self.db },
+                    )),
                     Some(_) => continue,
                 };
                 events.push(event);
@@ -1085,9 +1100,9 @@ impl Inner {
             .find(|(_, s)| s.record.id() == id)
             .ok_or(ErrorCode::Internal)?;
         // Announced by the command itself; sync won't repeat it.
-        let state = announced(s, me, &*self.net);
+        let state = announced(s, me, &Status { net: &*self.net, db: &self.db });
         self.announced.entry(server).or_default().insert(s.record.id(), state);
-        Ok(message_json(s, index, channel, me, &*self.net))
+        Ok(message_json(s, index, channel, me, &Status { net: &*self.net, db: &self.db }))
     }
 
     /// A fresh key for `channel`, for `members` (we must be a moderator or
@@ -1478,17 +1493,46 @@ fn auth_deps(view: &ServerView) -> Vec<RecordId> {
 /// What was last announced of a message: edit time, deleted, my send state.
 type Announced = (Option<u64>, bool, Option<SendState>);
 
-fn announced(s: &chat::Shown, me: Option<PublicKey>, net: &dyn Network) -> Announced {
-    (s.edited_at, s.deleted, send_state(s, me, net))
+/// Where my messages' send states come from: the network's live state and
+/// the last one stored, so a restart doesn't lose it.
+struct Status<'a> {
+    net: &'a dyn Network,
+    db: &'a Db,
+}
+
+fn announced(s: &chat::Shown, me: Option<PublicKey>, st: &Status) -> Announced {
+    (s.edited_at, s.deleted, send_state(s, me, st))
 }
 
 /// B6, on my own messages only: `pending` until it left this device,
 /// `sent` once it did (`NodeEvent::Sent`), `received` once a member's node
-/// acknowledged it (`NodeEvent::Delivered`). A network that doesn't track
-/// this (in process) says `sent`.
-fn send_state(s: &chat::Shown, me: Option<PublicKey>, net: &dyn Network) -> Option<SendState> {
-    (Some(s.record.author()) == me)
-        .then(|| net.send_state(s.record.id()).unwrap_or(SendState::Sent))
+/// acknowledged it (`NodeEvent::Delivered`). The higher of the live state
+/// and the stored one counts, and a live advance is stored, so a message
+/// written offline is still `pending` after a restart. A network that
+/// doesn't track this (in process) says `sent`.
+fn send_state(s: &chat::Shown, me: Option<PublicKey>, st: &Status) -> Option<SendState> {
+    if Some(s.record.author()) != me {
+        return None;
+    }
+    let id = s.record.id();
+    let live = st.net.send_state(id);
+    let stored = st.db.send_state(id).ok().flatten();
+    if live.map(rank) > stored.map(rank) {
+        // Best effort: losing it only shows an older state.
+        let _ = st.db.set_send_state(id, live.expect("compared above"));
+    }
+    Some(match (live, stored) {
+        (None, None) => SendState::Sent,
+        (a, b) => a.into_iter().chain(b).max_by_key(|s| rank(*s)).expect("one is set"),
+    })
+}
+
+fn rank(state: SendState) -> u8 {
+    match state {
+        SendState::Pending | SendState::Failed => 0,
+        SendState::Sent => 1,
+        SendState::Received => 2,
+    }
 }
 
 fn message_json(
@@ -1496,7 +1540,7 @@ fn message_json(
     index: usize,
     channel: ChannelId,
     me: Option<PublicKey>,
-    net: &dyn Network,
+    st: &Status,
 ) -> Message {
     Message {
         id: model::hex_id(s.record.id().as_bytes()),
@@ -1507,7 +1551,7 @@ fn message_json(
         created_at: s.record.ts(),
         edited_at: s.edited_at,
         deleted: s.deleted.then_some(true),
-        send_state: send_state(s, me, net),
+        send_state: send_state(s, me, st),
     }
 }
 
