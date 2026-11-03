@@ -1,0 +1,256 @@
+name: Release
+
+# Push a tag vMAJOR.MINOR.PATCH (the only version form core/updater accepts)
+# to build unsigned artifacts into a DRAFT pre-release. Nothing here holds or
+# needs the update root key: the owner signs manifest-body.json offline and
+# publishes the draft by hand (docs/release/RELEASING.md).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+# Never cancel a half-uploaded release; a second push of the same tag waits.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "4"
+  TAG: ${{ github.ref_name }}
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
+  # Channel written into the manifest body. Closed alpha only, for now.
+  CHANNEL: alpha
+  # Binaries from core/ shipped in each platform archive.
+  CORE_BINS: "updater spike-peer sync-peer"
+
+# Third-party actions are pinned to full commit SHAs, same as ci.yml.
+
+jobs:
+  prepare:
+    name: draft pre-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - id: version
+        name: Check tag format
+        run: |
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::tag $TAG is not vMAJOR.MINOR.PATCH (no suffixes: core/updater rejects them)"
+            exit 1
+          fi
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+      - name: Create draft (or reuse it on a re-run)
+        run: |
+          if gh release view "$TAG" --json isDraft --jq .isDraft > is_draft 2>/dev/null; then
+            if [ "$(cat is_draft)" != "true" ]; then
+              echo "::error::release $TAG is already published; refusing to replace its assets"
+              exit 1
+            fi
+            echo "draft $TAG exists, re-using it"
+            exit 0
+          fi
+          cat > notes.md <<EOF
+          **Closed alpha - unsigned build. Only install it if you were invited.**
+
+          Built by GitHub Actions from \`${GITHUB_SHA}\`. Check downloads against \`SHA256SUMS\`.
+          \`manifest.json\` (signed offline by the owner) is attached before this is published.
+          EOF
+          gh release create "$TAG" --draft --prerelease --verify-tag \
+            --title "MVS ${TAG} (closed alpha)" --notes-file notes.md
+
+  ui:
+    name: ui build
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Licence policy (lockfile, before installing anything)
+        working-directory: ui
+        run: |
+          # Added to the repo by the CI-hardening PR; skip until it lands.
+          if [ -f ../.github/scripts/npm-licenses.mjs ]; then
+            node ../.github/scripts/npm-licenses.mjs package-lock.json
+          else
+            echo "::warning::npm-licenses.mjs not on this commit; licence check skipped"
+          fi
+      - name: Build
+        working-directory: ui
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+      - name: Upload
+        run: |
+          tar -czf "mvs-ui-${VERSION}.tar.gz" -C ui/dist .
+          gh release upload "$TAG" "mvs-ui-${VERSION}.tar.gz" --clobber
+
+  core:
+    name: core ${{ matrix.platform }}
+    needs: [prepare, ui]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Platform names are the keys of the manifest's `artifacts` map.
+          - { platform: windows-x86_64, os: windows-latest, target: x86_64-pc-windows-msvc, exe: ".exe" }
+          # Intel macOS is cross-compiled on the Apple Silicon runner.
+          - { platform: macos-x86_64, os: macos-latest, target: x86_64-apple-darwin, exe: "" }
+          - { platform: macos-aarch64, os: macos-latest, target: aarch64-apple-darwin, exe: "" }
+          # Oldest still-supported runner = oldest glibc we link against.
+          - { platform: linux-x86_64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, exe: "" }
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10
+        with:
+          toolchain: "1.90"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: core
+          key: release-${{ matrix.target }}
+
+      - name: Build core
+        working-directory: core
+        run: cargo build --release --locked --target "${{ matrix.target }}" --bins
+
+      - name: Stage files
+        run: |
+          stage="stage/mvs-${VERSION}-${{ matrix.platform }}"
+          mkdir -p "$stage/bin" "$stage/ui"
+          for bin in $CORE_BINS; do
+            cp "core/target/${{ matrix.target }}/release/${bin}${{ matrix.exe }}" "$stage/bin/"
+          done
+          gh release download "$TAG" --pattern "mvs-ui-${VERSION}.tar.gz" --dir stage
+          tar -xzf "stage/mvs-ui-${VERSION}.tar.gz" -C "$stage/ui"
+          printf 'MVS %s (%s), closed alpha, UNSIGNED.\nBuilt from %s.\n' \
+            "$VERSION" "${{ matrix.platform }}" "$GITHUB_SHA" > "$stage/README.txt"
+
+      # ------------------------------------------------------------------
+      # SHELL PACKAGING PLUG-IN POINT
+      #
+      # Until the desktop shell is chosen, the updater artifact is the plain
+      # archive built by "Package (no shell yet)". Once it is, set the repo
+      # variable MVS_SHELL to `tauri` or `electron`, flesh out the matching
+      # step below and delete the other one. Whatever it produces MUST be
+      # renamed to dist/mvs-<version>-<platform>.zip|.tar.gz: that file name
+      # is how manifest-body.mjs finds the updater artifact for a platform.
+      # Installers (.msi/.dmg/.AppImage) can be attached alongside it under
+      # any other name. All of it stays unsigned until code-signing certs
+      # exist (CSC_* / APPLE_* / TAURI_SIGNING_* secrets are not set).
+      # ------------------------------------------------------------------
+      - name: "[shell] Tauri bundle (sketch)"
+        if: vars.MVS_SHELL == 'tauri'
+        run: |
+          # Linux needs: sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+          # shell/tauri/src-tauri/tauri.conf.json: frontendDist -> ../../ui/dist (reuse stage/.../ui),
+          # bundle.externalBin -> the core sidecar binaries from stage/.../bin.
+          cd shell/tauri
+          npm ci --ignore-scripts
+          npx tauri build --target "${{ matrix.target }}" --ci
+          # The updater payload is the app bundle archive, not the installer:
+          #   windows: bundle/nsis/*.exe   macOS: bundle/macos/*.app (tar it)   linux: bundle/appimage/*.AppImage
+          # mkdir -p ../../dist && tar/zip it to ../../dist/mvs-${VERSION}-${{ matrix.platform }}.<ext>
+          echo "::error::Tauri packaging is a sketch; finish it before setting MVS_SHELL=tauri"; exit 1
+
+      - name: "[shell] Electron bundle (sketch)"
+        if: vars.MVS_SHELL == 'electron'
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false" # unsigned on purpose
+        run: |
+          # shell/electron/electron-builder.yml: files -> ui dist, extraResources -> stage/.../bin
+          cd shell/electron
+          npm ci --ignore-scripts
+          case "${{ matrix.platform }}" in
+            windows-*) npx electron-builder --win nsis zip --x64 --publish never ;;
+            macos-x86_64) npx electron-builder --mac dmg zip --x64 --publish never ;;
+            macos-aarch64) npx electron-builder --mac dmg zip --arm64 --publish never ;;
+            linux-*) npx electron-builder --linux AppImage tar.gz --x64 --publish never ;;
+          esac
+          # The zip/tar.gz from dist/ is the updater payload:
+          # mv it to ../../dist/mvs-${VERSION}-${{ matrix.platform }}.<ext>
+          echo "::error::Electron packaging is a sketch; finish it before setting MVS_SHELL=electron"; exit 1
+
+      - name: Package (no shell yet)
+        if: vars.MVS_SHELL == ''
+        run: |
+          name="mvs-${VERSION}-${{ matrix.platform }}"
+          mkdir -p dist
+          if [ "${{ matrix.exe }}" = ".exe" ]; then
+            (cd stage && 7z a -tzip "../dist/${name}.zip" "$name" > /dev/null)
+          else
+            tar -czf "dist/${name}.tar.gz" -C stage "$name"
+          fi
+      # ------------------------------------------------------------------
+
+      - name: Upload
+        run: gh release upload "$TAG" dist/* --clobber
+
+  manifest:
+    name: checksums + unsigned manifest body
+    needs: [prepare, core]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+      - name: Download artifacts
+        run: gh release download "$TAG" --pattern "mvs-*" --dir dist
+      - name: SHA256SUMS
+        working-directory: dist
+        run: |
+          sha256sum mvs-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: manifest-body.json (unsigned)
+        run: |
+          node .github/scripts/manifest-body.mjs --version "$VERSION" --channel "$CHANNEL" \
+            --dir dist --days 14 --out dist/manifest-body.json
+          cat dist/manifest-body.json
+      - name: Upload
+        run: gh release upload "$TAG" dist/SHA256SUMS dist/manifest-body.json --clobber
+      - name: Summary
+        run: |
+          {
+            echo "### Draft pre-release ${TAG} is ready for signing"
+            echo
+            echo "Owner: follow docs/release/RELEASING.md (sign offline, upload manifest.json, publish)."
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
