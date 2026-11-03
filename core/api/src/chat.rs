@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use authority::{check_channel, message_text_ok, ChannelGraph, Resolver, Verdict};
+use authority::{check_channel, message_text_ok, ChannelGraph, Resolver, State, Verdict};
 use records::{ChannelId, Kind, PublicKey, Record, RecordId, Scope, ServerId, MAX_DEPS};
 
 use crate::model::Log;
@@ -76,11 +76,16 @@ fn accepted(resolver: &Resolver, record: &Record, graph: &Graph) -> bool {
     check_channel(resolver, record, graph) == Verdict::Accept
 }
 
-/// The channels authority knows for `server`: only the default one until
-/// channel records arrive (B4-3). Nothing about any other channel ever
-/// reaches the cipher, whatever records name it.
-pub(crate) fn known_channels(server: ServerId) -> BTreeSet<ChannelId> {
-    BTreeSet::from([crate::model::default_channel(server)])
+/// The channels authority knows for `server`: those its accepted
+/// `ChannelCreate` records made (`State.channels`, #113). A server from
+/// before #113 has none and keeps its derived #general. Nothing about any
+/// other channel ever reaches the cipher, whatever records name it.
+pub(crate) fn known_channels(server: ServerId, state: &State) -> BTreeSet<ChannelId> {
+    let mut known: BTreeSet<ChannelId> = state.channels.keys().copied().collect();
+    if known.is_empty() {
+        known.insert(crate::model::default_channel(server));
+    }
+    known
 }
 
 fn in_known(record: &Record, known: &BTreeSet<ChannelId>) -> bool {
@@ -94,7 +99,7 @@ fn in_known(record: &Record, known: &BTreeSet<ChannelId>) -> bool {
 /// a rotation it already holds is a no-op (`Applied::Duplicate`).
 /// TODO(perf): replay only after an unlock, once the core drives it.
 pub(crate) fn sync_cipher(cipher: &dyn GroupCipher, server: ServerId, log: &Log) {
-    let known = known_channels(server);
+    let known = known_channels(server, log.resolver.state());
     cipher.set_channels(server, &known);
     let graph = Graph::new(&log.channel);
     let rotations: Vec<&Record> = log
@@ -114,7 +119,36 @@ pub(crate) fn sync_cipher(cipher: &dyn GroupCipher, server: ServerId, log: &Log)
 /// A shown message: its record and opened text.
 pub(crate) struct Shown {
     pub record: Record,
+    /// The latest accepted edit's text, else the original; empty once deleted.
     pub text: String,
+    /// The claimed time of the edit shown, if any.
+    pub edited_at: Option<u64>,
+    /// A tombstone: the message keeps its place, its text is gone.
+    pub deleted: bool,
+}
+
+/// Opens a message or edit body; `None` unless it opens under an accepted
+/// rotation (#21) as text within `message_text_ok`.
+fn open(
+    cipher: &dyn GroupCipher,
+    server: ServerId,
+    channel: ChannelId,
+    author: PublicKey,
+    body: &[u8],
+) -> Option<String> {
+    match cipher.decrypt(server, channel, author, body) {
+        Ok(Opened { plaintext, accepted: true }) => {
+            let text = String::from_utf8(plaintext).ok()?;
+            message_text_ok(&text).then_some(text)
+        }
+        _ => None,
+    }
+}
+
+/// An edit's or delete's target: the first 32 bytes of its body (authority
+/// has checked it names a `Message` in its deps).
+pub(crate) fn target(record: &Record) -> Option<RecordId> {
+    record.body().first_chunk::<32>().map(|id| RecordId::from_bytes(*id))
 }
 
 /// The accepted messages of `channel` that open, oldest first by their
@@ -125,22 +159,40 @@ pub(crate) fn messages(
     channel: ChannelId,
     log: &Log,
 ) -> Vec<Shown> {
-    if !known_channels(server).contains(&channel) {
+    if !known_channels(server, log.resolver.state()).contains(&channel) {
         return Vec::new();
     }
     let records = channel_records(log, channel);
     let graph = Graph::new(&log.channel);
-    let mut shown: Vec<Shown> = records
-        .into_iter()
-        .filter(|r| r.kind() == Kind::Message && accepted(&log.resolver, r, &graph))
+    let ok: Vec<&Record> = records.iter().filter(|r| accepted(&log.resolver, r, &graph)).collect();
+    let deleted: HashSet<RecordId> =
+        ok.iter().filter(|r| r.kind() == Kind::MessageDelete).filter_map(|r| target(r)).collect();
+    // The latest accepted edit per message, by claimed time then ID.
+    let mut edits: HashMap<RecordId, &Record> = HashMap::new();
+    for edit in ok.iter().filter(|r| r.kind() == Kind::MessageEdit) {
+        let Some(of) = target(edit) else { continue };
+        let newer = edits.get(&of).is_none_or(|e| (e.ts(), e.id()) < (edit.ts(), edit.id()));
+        if newer {
+            edits.insert(of, edit);
+        }
+    }
+    let mut shown: Vec<Shown> = ok
+        .iter()
+        .filter(|r| r.kind() == Kind::Message)
         .filter_map(|record| {
-            match cipher.decrypt(server, channel, record.author(), record.body()) {
-                Ok(Opened { plaintext, accepted: true }) => {
-                    let text = String::from_utf8(plaintext).ok()?;
-                    message_text_ok(&text).then_some(Shown { record, text })
-                }
-                _ => None,
+            let original = open(cipher, server, channel, record.author(), record.body())?;
+            let record = (*record).clone();
+            if deleted.contains(&record.id()) {
+                return Some(Shown { record, text: String::new(), edited_at: None, deleted: true });
             }
+            let edit = edits.get(&record.id()).and_then(|e| {
+                let text = open(cipher, server, channel, e.author(), e.body().get(32..)?)?;
+                Some((text, e.ts()))
+            });
+            Some(match edit {
+                Some((text, at)) => Shown { record, text, edited_at: Some(at), deleted: false },
+                None => Shown { record, text: original, edited_at: None, deleted: false },
+            })
         })
         .collect();
     shown.sort_by_key(|s| (s.record.ts(), s.record.id()));
@@ -168,4 +220,24 @@ pub(crate) fn channel_seq(log: &Log, channel: ChannelId, author: &PublicKey) -> 
         .map(|r| r.seq().saturating_add(1))
         .max()
         .unwrap_or(0)
+}
+
+/// Whether `authority` would accept `record` next to the records held: a
+/// dry run, so a refused edit or delete is never stored or sent.
+pub(crate) fn would_accept(log: &Log, record: &Record) -> bool {
+    let mut records = log.channel.clone();
+    records.push(record.clone());
+    accepted(&log.resolver, record, &Graph::new(&records))
+}
+
+/// [`channel_deps`] plus `target`, which an edit or delete must list.
+pub(crate) fn deps_with(log: &Log, channel: ChannelId, target: RecordId) -> Vec<RecordId> {
+    let mut deps: Vec<RecordId> =
+        channel_deps(log, channel).into_iter().filter(|d| *d != target).collect();
+    if deps.len() >= MAX_DEPS {
+        deps.remove(0);
+    }
+    deps.push(target);
+    deps.sort();
+    deps
 }

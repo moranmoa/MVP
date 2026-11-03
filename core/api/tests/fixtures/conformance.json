@@ -71,7 +71,7 @@
           "peer": "alice",
           "cmd": "listChannels",
           "args": { "serverId": "${server}" },
-          "expect": { "ok": [{ "serverId": "${server}", "name": "general", "adult": false }] }
+          "expect": { "ok": [{ "serverId": "${server}", "name": "<string>", "adult": false }] }
         },
         {
           "peer": "alice",

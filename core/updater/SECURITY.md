@@ -48,6 +48,8 @@
 | 18 | `issued_at` far in the future was accepted (QA-15) | A body dated a year ahead pushes the time floor ahead, so every honest manifest then looks expired | Refused beyond `MAX_CLOCK_SKEW_SECS` (1 day) | `qa15_manifest_issued_far_in_the_future_is_refused` |
 | 19 | A state reset forgot failed versions (review of #8) | A corrupt file gives a version that already failed another trial | `InstallState::restore` keeps the readable `failed` list | `reset_keeps_versions_that_already_failed` |
 | 20 | Root version overflow | `rotate` at `u64::MAX` panicked in debug builds | `checked_add` | `version_overflow_is_an_error_not_a_panic` |
+| 21 | Release notes (B8 "what's new") | Notes are shown to every user: a signer could ship terminal escapes or markup, or huge text | `notes` is part of the signed body, ≤ 8 languages × 4 KiB, `ll`/`ll-CC` tags only, no control characters except newline and no bidi overrides (U+202A–202E, U+2066–2069); `sign-manifest` prints them for review; the UI renders text only | `bad_notes_are_refused`, `signed_notes_round_trip_and_pick_a_language` |
+| 22 | Unbounded root-rotation fetch (GAP-12) | A peer answers a root fetch with thousands of files or megabytes | `parse_root_fetch`: ≤ 16 files, ≤ 16 KiB each, ≤ 64 KiB per fetch; over the cap the whole answer is refused (ask another source), never truncated by position (R4) | `root_fetch_over_caps_is_refused_whole`, `root_fetch_within_caps_parses_and_skips_junk` |
 
 Checked and found fine: deeply nested JSON. serde_json's recursion limit refuses it without overflowing the stack (`deeply_nested_json_is_refused_not_a_stack_overflow`).
 

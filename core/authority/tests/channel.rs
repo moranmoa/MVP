@@ -12,10 +12,9 @@ use authority::{
     MAX_MESSAGE_CODE_POINTS,
 };
 use common::{actor, founded, key, rec, server};
-use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
-use rand::SeedableRng;
+mod rng;
 use records::{Draft, Kind, Scope};
+use rng::{SliceRandom, StdRng};
 
 const GENERAL: ChannelId = ChannelId::from_bytes([5; 32]);
 const RANDOM: ChannelId = ChannelId::from_bytes([6; 32]);

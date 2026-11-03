@@ -134,3 +134,18 @@ fn the_binary_wants_a_data_dir() {
         .unwrap();
     assert_eq!(status.code(), Some(2));
 }
+
+#[test]
+fn the_binary_refuses_a_relay_without_a_peer_id() {
+    let dir = std::env::temp_dir().join(format!("mvs-relay-arg-{}", std::process::id()));
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mvs-core"))
+        .arg("--data-dir")
+        .arg(&dir)
+        .args(["--relay", "/dns4/relay.example/tcp/443"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("/p2p/"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

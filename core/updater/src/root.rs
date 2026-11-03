@@ -114,7 +114,8 @@ impl TrustRoot {
     /// signed by a threshold of both the current and the new keys.
     pub fn rotate(&self, update: &SignedRoot) -> Result<TrustRoot, Error> {
         let next = update.body()?;
-        let expected = self.version.checked_add(1).ok_or(Error::RootVersion { expected: u64::MAX, found: next.version })?;
+        let expected =
+            self.version.checked_add(1).ok_or(Error::RootVersion { expected: u64::MAX, found: next.version })?;
         if next.version != expected {
             return Err(Error::RootVersion { expected, found: next.version });
         }
@@ -152,11 +153,8 @@ impl TrustRoot {
     pub fn update_chain(&self, updates: &[SignedRoot]) -> RootChain {
         // Parse each distinct entry once; junk becomes `None`.
         let mut seen = HashSet::new();
-        let entries: Vec<(Option<u64>, &SignedRoot)> = updates
-            .iter()
-            .filter(|u| seen.insert(*u))
-            .map(|u| (u.body().ok().map(|b| b.version), u))
-            .collect();
+        let entries: Vec<(Option<u64>, &SignedRoot)> =
+            updates.iter().filter(|u| seen.insert(*u)).map(|u| (u.body().ok().map(|b| b.version), u)).collect();
 
         let mut root = self.clone();
         let mut fork_at = None;
@@ -180,7 +178,7 @@ impl TrustRoot {
                 _ => break,
             }
         }
-        let skipped = entries.iter().filter(|(v, _)| v.map_or(true, |v| v > root.version)).count();
+        let skipped = entries.iter().filter(|(v, _)| v.is_none_or(|v| v > root.version)).count();
         RootChain { root, skipped, fork_at }
     }
 }
@@ -237,6 +235,42 @@ impl SignedRoot {
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("root update always serialises")
     }
+}
+
+/// Most root rotations one fetch may hand us (GAP-12). Rotations are rare
+/// (a key change), so this covers years; a source only needs to send the
+/// ones above the client's root version.
+pub const MAX_ROOT_UPDATES_PER_FETCH: usize = 16;
+
+/// Most bytes one rotation file may have. An honest one (3 keys, up to
+/// MAX_SIGNATURES signatures) is about 2 KiB.
+pub const MAX_ROOT_UPDATE_BYTES: usize = 16 * 1024;
+
+/// Most bytes one fetch of root rotations may have in total.
+pub const MAX_ROOT_FETCH_BYTES: usize = 64 * 1024;
+
+/// Parses the root rotations from one source (a download, one peer's
+/// answer) for [`TrustRoot::update_chain`] (GAP-12).
+///
+/// A fetch over the count or byte caps is refused **as a whole**, before
+/// any parsing: the caller drops that source and asks another. Nothing is
+/// truncated by position, so an oversized answer cannot hide the honest
+/// rotation behind junk (R4). Within an accepted fetch, entries that are too
+/// large or do not parse are skipped, as `update_chain` skips invalid ones.
+pub fn parse_root_fetch<B: AsRef<[u8]>>(files: &[B]) -> Result<Vec<SignedRoot>, Error> {
+    if files.len() > MAX_ROOT_UPDATES_PER_FETCH {
+        return Err(Error::Malformed(format!("more than {MAX_ROOT_UPDATES_PER_FETCH} root updates in one fetch")));
+    }
+    let total: usize = files.iter().map(|f| f.as_ref().len()).sum();
+    if total > MAX_ROOT_FETCH_BYTES {
+        return Err(Error::Malformed(format!("root updates larger than {MAX_ROOT_FETCH_BYTES} bytes in one fetch")));
+    }
+    Ok(files
+        .iter()
+        .map(AsRef::as_ref)
+        .filter(|f| f.len() <= MAX_ROOT_UPDATE_BYTES)
+        .filter_map(|f| SignedRoot::from_json(f).ok())
+        .collect())
 }
 
 #[cfg(test)]
@@ -390,7 +424,7 @@ mod tests {
         let (_, v1, r2, _) = alpha_to_v2();
         let mut padded = r2.clone();
         let filler = padded.signatures[0].clone();
-        padded.signatures.extend(std::iter::repeat(filler).take(crate::MAX_SIGNATURES));
+        padded.signatures.extend(std::iter::repeat_n(filler, crate::MAX_SIGNATURES));
         let out = v1.update_chain(&[padded, r2]);
         assert_eq!((out.root.version(), out.fork_at), (2, None));
     }
@@ -448,7 +482,9 @@ mod tests {
                 // key, with up to MAX_SIGNATURES garbage signatures each.
                 if i % 2 == 0 {
                     for n in 0..crate::MAX_SIGNATURES - 1 {
-                        forged.signatures.push(SignatureEntry { key: alpha_hex.clone(), sig: format!("{n:02x}").repeat(64) });
+                        forged
+                            .signatures
+                            .push(SignatureEntry { key: alpha_hex.clone(), sig: format!("{n:02x}").repeat(64) });
                     }
                 }
                 forged
@@ -476,11 +512,36 @@ mod tests {
         let (alpha, v1, r2, _) = alpha_to_v2();
         let mut stuffed = r2.clone();
         let real = stuffed.signatures.clone();
-        stuffed.signatures = vec![SignatureEntry { key: hex::encode(alpha.verifying_key().to_bytes()), sig: "00".repeat(64) }];
+        stuffed.signatures =
+            vec![SignatureEntry { key: hex::encode(alpha.verifying_key().to_bytes()), sig: "00".repeat(64) }];
         stuffed.signatures.extend(real);
         // That copy is spoiled (alpha's one try was the bad signature), but
         // the clean copy from another peer still gets through.
         assert!(v1.rotate(&stuffed).is_err());
         assert_eq!(v1.update_chain(&[stuffed, r2]).root.version(), 2);
+    }
+
+    #[test]
+    fn root_fetch_within_caps_parses_and_skips_junk() {
+        let (_, v1, r2, _) = alpha_to_v2();
+        let big = format!("{{\"signed\":\"{}\",\"signatures\":[]}}", "x".repeat(MAX_ROOT_UPDATE_BYTES));
+        let files: Vec<Vec<u8>> = vec![b"{not json".to_vec(), big.into_bytes(), r2.to_json().into_bytes()];
+        let parsed = parse_root_fetch(&files).unwrap();
+        assert_eq!(parsed, vec![r2]);
+        assert_eq!(v1.update_chain(&parsed).root.version(), 2);
+    }
+
+    #[test]
+    fn root_fetch_over_caps_is_refused_whole() {
+        let (_, _, r2, _) = alpha_to_v2();
+        let honest = r2.to_json().into_bytes();
+        let mut too_many = vec![b"{}".to_vec(); MAX_ROOT_UPDATES_PER_FETCH];
+        too_many.push(honest.clone());
+        assert!(matches!(parse_root_fetch(&too_many), Err(Error::Malformed(_))));
+        let bulky = vec![vec![b' '; MAX_ROOT_FETCH_BYTES], honest.clone()];
+        assert!(matches!(parse_root_fetch(&bulky), Err(Error::Malformed(_))));
+        let at_cap = vec![b"{}".to_vec(); MAX_ROOT_UPDATES_PER_FETCH];
+        assert!(parse_root_fetch(&at_cap).unwrap().is_empty());
+        assert!(parse_root_fetch::<Vec<u8>>(&[]).unwrap().is_empty());
     }
 }

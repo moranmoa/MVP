@@ -6,10 +6,9 @@ mod common;
 
 use authority::{resolve, Action, Record, RecordId, Resolver, Role, State};
 use common::{actor, founded, genesis, key, rec, rec_ts, server};
-use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
-use rand::SeedableRng;
+mod rng;
 use records::{Draft, Kind, Scope};
+use rng::{SliceRandom, StdRng};
 
 const ORDERS: u64 = 200;
 
