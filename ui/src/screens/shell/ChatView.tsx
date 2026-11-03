@@ -222,8 +222,12 @@ function Composer({
 
   // QA-10: no silent cut. Past the limit the counter turns red and sending
   // stops, so the person can shorten the text themselves.
-  const nearLimit = text.length >= COUNTER_FROM;
-  const tooLong = nearLimit && (text.length > BODY_MAX || utf8.encode(text).length > BODY_MAX_BYTES);
+  // The limit is in code points (QA-17): an emoji is one character, not two
+  // UTF-16 units. A string never has more code points than units, so the
+  // cheap length check skips the count for normal messages.
+  const chars = text.length >= COUNTER_FROM ? [...text].length : text.length;
+  const nearLimit = chars >= COUNTER_FROM;
+  const tooLong = nearLimit && (chars > BODY_MAX || utf8.encode(text).length > BODY_MAX_BYTES);
   const [failed, setFailed] = useState(false);
 
   const submit = async () => {
@@ -318,7 +322,7 @@ function Composer({
                 </>
               )}
               <span className="char-count" dir="ltr">
-                <FormattedMessage id="chat.charCount" values={{ count: text.length, max: BODY_MAX }} />
+                <FormattedMessage id="chat.charCount" values={{ count: chars, max: BODY_MAX }} />
               </span>
             </>
           )}

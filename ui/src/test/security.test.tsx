@@ -179,6 +179,15 @@ describe('message text', () => {
     expect(cleanText(s).text.endsWith('\uD83D')).toBe(false);
   });
 
+  it('counts the length limit in code points, so emoji count once (QA-17)', () => {
+    const party = '🎉'.repeat(2100); // 4,200 UTF-16 units
+    expect(cleanText(party)).toEqual({ text: party, clipped: false });
+    const over = cleanText('🎉'.repeat(BODY_MAX + 1));
+    expect([...over.text].length).toBe(BODY_MAX);
+    expect(over.clipped).toBe(true);
+    expect(cleanText('🎉'.repeat(BODY_MAX)).clipped).toBe(false);
+  });
+
   it('makes reply excerpts one short line', () => {
     expect(cleanExcerpt('a\nb')).toBe('a b');
     expect([...cleanExcerpt('y'.repeat(10_000))].length).toBe(141);
