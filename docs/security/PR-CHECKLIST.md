@@ -16,6 +16,8 @@ trusted until it has been decoded, verified and authorised.**
 - [ ] No secrets, IPs, hostnames, `.env` files, keys or real recovery words in
       code, tests, fixtures, logs or screenshots. Test keys are generated or
       fixed-seed and named as such.
+- [ ] CI job names are unchanged: `main` requires them by name (ruleset), so a
+      renamed job silently drops a required check.
 - [ ] `cargo test --release --locked` and `cargo deny check` pass in Docker
       (`rust:1.90-bookworm`); `Cargo.lock` is committed for every binary
       (including `infra/relay`).
