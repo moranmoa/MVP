@@ -2,7 +2,7 @@
 //!
 //! Transports: WebSocket (to the relay), relay circuit (through the relay to
 //! a native peer) and webrtc-direct (straight to a native peer). Protocols are
-//! core/sync's: CBOR pull on `/descord-replacement/sync/0.1.0` and gossipsub
+//! core/sync's: CBOR pull on `/mvs/sync/0.1.0` and gossipsub
 //! push on `log/<name>`. Blobs live in memory ([`web_wire::MemStore`]).
 //!
 //! JS API (all async calls return a Promise of a JSON string):
@@ -31,7 +31,8 @@ use serde_bytes::ByteBuf;
 use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
 use web_wire::{
-    Append, Blob, MemStore, SyncRequest, SyncResponse, IDENTIFY_VERSION, PAGE, SYNC_PROTOCOL,
+    Append, Blob, MemStore, SyncRequest, SyncResponse, IDENTIFY_VERSION, MAX_GOSSIP_BYTES, PAGE,
+    PAGE_BYTES, SYNC_PROTOCOL,
 };
 
 #[derive(NetworkBehaviour)]
@@ -207,6 +208,14 @@ fn build_swarm(key: identity::Keypair, eager_flush: bool) -> Result<Swarm<Behavi
                 gossipsub::MessageAuthenticity::Signed(key.clone()),
                 gossipsub::ConfigBuilder::default()
                     .heartbeat_interval(Duration::from_millis(500))
+                    // Same as core/sync: size cap and content-based message ids.
+                    .max_transmit_size(MAX_GOSSIP_BYTES)
+                    .message_id_fn(|m| {
+                        gossipsub::MessageId::from(web_wire::gossip_message_id(
+                            m.topic.as_str(),
+                            &m.data,
+                        ))
+                    })
                     .build()
                     .map_err(|e| e.to_string())?,
             )?;
@@ -291,7 +300,7 @@ impl Task {
                 }
             }
             Cmd::Append { data, reply } => {
-                let blob = Blob::new(self.store.heads(), data);
+                let blob = Blob::new(&self.log, self.store.heads(), data);
                 let id = blob.id;
                 let encoded = blob.encode();
                 self.store.append(blob);
@@ -426,7 +435,7 @@ impl Task {
                 message,
                 ..
             })) => {
-                let Some(blob) = Blob::decode(&message.data) else { return };
+                let Some(blob) = Blob::decode(&self.log, &message.data) else { return };
                 if self.store_blob(blob, true) == Append::MissingDeps {
                     self.sync_request(propagation_source, Outbound::Pull);
                 }
@@ -439,7 +448,7 @@ impl Task {
                     let have: Vec<_> =
                         request.have.iter().filter_map(|b| b.as_slice().try_into().ok()).collect();
                     let (blobs, more) = if request.log == self.log {
-                        self.store.missing_since(&have, PAGE)
+                        self.store.missing_since(&have, PAGE, PAGE_BYTES)
                     } else {
                         (Vec::new(), false)
                     };
@@ -453,7 +462,7 @@ impl Task {
                 request_response::Message::Response { request_id, response } => {
                     let purpose = self.outbound.remove(&request_id);
                     for bytes in &response.blobs {
-                        if let Some(blob) = Blob::decode(bytes) {
+                        if let Some(blob) = Blob::decode(&self.log, bytes) {
                             self.store_blob(blob, false);
                         }
                     }

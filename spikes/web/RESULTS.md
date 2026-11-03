@@ -28,9 +28,11 @@ Two things must change before production. Both are covered below:
    native to browser, work. This needs a libp2p upgrade before WebRTC carries
    real traffic; until then, the relay path is the reliable one.
 
-Measured on 2026-11-03 on the owner's PC (Docker Desktop, Windows 11). All
-peers share one Docker bridge network: no NAT, no WAN latency (see "What
-this does not show").
+Measured on 2026-11-03 on the owner's PC (Docker Desktop, Windows 11),
+against core/sync and infra/relay as they are on main today (the hardened
+sync with recomputed ids, size limits and pull rate limits). All peers share
+one Docker bridge network: no NAT, no WAN latency (see "What this does not
+show").
 
 Reproduce: [README.md](README.md). Per-run tables: [results/runs.md](results/runs.md).
 
@@ -39,7 +41,7 @@ Reproduce: [README.md](README.md). Per-run tables: [results/runs.md](results/run
 | Piece | Where | What |
 |---|---|---|
 | Browser peer | `browser/` | rust-libp2p 0.54 → wasm32 via wasm-bindgen. Transports: WebSocket (`websocket-websys`), relay circuit client, webrtc-direct (`libp2p-webrtc-websys`). Behaviours: identify, ping, gossipsub, request-response (CBOR), same as core/sync. Blobs live in memory. |
-| Wire crate | `wire/` | core/sync's blob encoding, `SyncRequest`/`SyncResponse` and an in-memory log with the same pull rules (have-markers, missing-since, state hash). A test checks it matches `sync::Blob` and `sync::Store` byte for byte. |
+| Wire crate | `wire/` | core/sync's current wire format (`/mvs/sync/0.1.0`: blob = dep count, sorted deps, data; id recomputed from log, deps and data; same size limits; content-based gossipsub message ids), `SyncRequest`/`SyncResponse`, and an in-memory log with the same pull rules (have-markers, missing-since with byte-capped pages, state hash). A test checks it against `sync::Blob` and `sync::Store`: same ids, same bytes, same markers, same pages. |
 | Native WebRTC peer | `native/` | `web-native`: core/sync's SQLite `Store` and protocols plus a webrtc-direct listener (`libp2p-webrtc` 0.8.0-alpha). core/sync's `Node` has no WebRTC, and core/ was off-limits for this spike. |
 | Harness | `harness/` | Docker build, a docker-compose network (relay built from `infra/relay`, core/sync's own `sync-peer`, `web-native`, Playwright 1.56.1) and the test script. |
 
@@ -58,23 +60,23 @@ times are in ms.
 
 | | Chromium 141 | Firefox 142 | WebKit 26 |
 |---|---|---|---|
-| wasm instantiate (page already loaded) | 43–69 | 125–265 | 150 |
+| wasm instantiate (page already loaded) | 41–74 | 97–318 | 61 |
 | **Connect** | | | |
-| browser → relay, WebSocket | 11–13 | 26–67 | 15 |
-| browser → native, relay circuit (incl. WebSocket) | 15–26 | 68–172 | 53–55 |
-| browser → native, webrtc-direct | 135–137 | 233–283 | 153 |
+| browser → relay, WebSocket | 8–16 | 20–27 | 6 |
+| browser → native, relay circuit (incl. WebSocket) | 13–22 | 56–152 | 16–17 |
+| browser → native, webrtc-direct | 135–136 | 226–236 | 112 |
 | **Success rate**, every kind | 30/30 each | 30/30 each | 10/10 each |
 | **Blob delivery, write → stored** (50 each way) | | | |
-| relayed, native → browser / browser → native | 1.4–3.9 / 0–1.6 | 4.2–7.2 / 0.6–4.7 | 3.7 / 6.3 |
-| direct, native → browser / browser → native | 1.6–4.1 / 0–1.6 | 5.2–7.3 / 0.1–3.6 | 2.9 / 4.6 |
+| relayed, native → browser / browser → native | 1.2–3.2 / 0–1.5 | 3.8–5.7 / 1.3–3.8 | 1.1 / 2.0 |
+| direct, native → browser / browser → native | 1.3–3.4 / 0–1.8 | 4.3–6.4 / 0.8–3.5 | 1.2 / 1.9 |
 | **Round trip** | | | |
-| sync request → empty page, relayed | 2.5–3.8 | 8–12 | 9 |
-| sync request → empty page, direct (WebRTC) | 4.1–9.4 | 6–17 | 20 |
-| libp2p ping, relayed | 1.4–1.7 | 3–7 | 5 |
+| sync request → empty page, relayed | 2.7–3.9 | 5–8 | 4 |
+| sync request → empty page, direct (WebRTC) | 4.0–5.0 | 6–7 | 4 |
+| libp2p ping, relayed | 1.2–2.1 | 2–4 | 2 |
 | **Joining peer pulls full history** | | | |
-| from core/sync node, relayed | 31–40 (280 blobs) | 241–631 (520 blobs) | 412 (280 blobs) |
-| from web-native, WebRTC only | 84–147 (280 blobs) | 182–574 (520 blobs) | 292 (280 blobs) |
-| 320 KB pushed over one circuit | 27–28 | 27–99 | 42 |
+| from core/sync node, relayed | 29–80 (280 blobs) | 256–367 (520 blobs) | 33 (280 blobs) |
+| from web-native, WebRTC only | 59–114 (280 blobs) | 191–222 (520 blobs) | 84 (280 blobs) |
+| 320 KB pushed over one circuit | 27 | 27–30 | 26 |
 | State hash identical after exchange | yes | yes | yes |
 
 **WASM bundle** (`web_peer_bg.wasm`, release, `opt-level = "z"`, LTO,
@@ -82,15 +84,17 @@ times are in ms.
 
 | | Raw | gzip -9 | brotli -11 |
 |---|---|---|---|
-| wasm | 1,726 KB | 626 KB | **479 KB** |
+| wasm | 1,729 KB | 628 KB | **480 KB** |
 | JS glue | 33 KB | 6 KB | |
 
 Notes on reading the table:
 
 - "0" latencies happen because the browser and the containers share one
   clock to the millisecond; the sync round trip is the clock-free measure.
-- Firefox's ranges are wider because some runs had a slow start (first run:
-  wasm init 265 ms, WebSocket 67 ms). Chromium is consistently the fastest.
+- Firefox's ranges are wider because its first run had a slow start (wasm
+  init 318 ms, circuit connect 152 ms; later runs 97–103 and 56–67 ms).
+  WebKit was as fast as Chromium on the relayed path and fastest on
+  WebRTC.
 - webrtc-direct connect is slower than relayed in every browser (ICE + DTLS +
   Noise ≈ 3 round trips plus certificate work). That is not a problem for a
   long-lived connection, but it does not make a cheap "first contact" path.
@@ -100,7 +104,7 @@ Notes on reading the table:
 | Problem | Effect | Fix | Before → after (Chromium p50) |
 |---|---|---|---|
 | `libp2p-websocket-websys` 0.4 completes a flush only when a 100 ms interval timer sees the send buffer empty | every handshake step waits for a tick: **~400 ms** per WebSocket connect, in every browser | `EagerFlush` wrapper in `browser/src/lib.rs` (flush returns at once; writes still respect the buffer limit) | 401 → 137 ms |
-| Relay TCP and WebSocket sockets had Nagle's algorithm on (libp2p-tcp's default) | small relayed messages wait for delayed ACKs, about 40 ms per hop | `nodelay(true)` in `infra/relay` for TCP and WebSocket (this PR) | WebSocket connect 137 → 11 ms; circuit connect 151–208 → 15–26 ms; relayed sync round trip 88–97 → 2.5–3.8 ms |
+| Relay TCP and WebSocket sockets had Nagle's algorithm on (libp2p-tcp's default) | small relayed messages wait for delayed ACKs, about 40 ms per hop | `nodelay(true)` in `infra/relay` for TCP and WebSocket (this PR) | WebSocket connect 137–146 → 8–16 ms; circuit connect 151–208 → 13–22 ms; relayed sync round trip 88–97 → 2.7–3.9 ms |
 
 The first fix belongs upstream (or comes with a libp2p upgrade). The second
 also speeds up native peers that are relayed through the relay today.
@@ -130,7 +134,7 @@ also speeds up native peers that are relayed through the relay today.
    `EXTERNAL_ADDRS` in `infra/.env`; keep it set, and alert if it is empty.
 2. **Default circuit limits cut browser sessions.** libp2p's defaults are
    16 circuits in total, 4 per peer, and 2 min or 128 KiB per circuit.
-   Measured with defaults: a 320 KB push over a circuit was cut after 7 of
+   Measured with defaults: a 320 KB push over a circuit was cut after 9 of
    40 blobs. A joining Firefox peer's history pull was cut mid-transfer. An
    early harness version, which left test connections open, hit the
    16-circuit cap after 16 connections. This PR makes the limits
@@ -181,21 +185,27 @@ also speeds up native peers that are relayed through the relay today.
 
 ## What the relay needs in production
 
-- **wss via the reverse proxy.**
+- **wss via the reverse proxy.** infra/ now ships this: the `caddy` service
+  (`--profile proxy`, `RELAY_DOMAIN`) terminates TLS with an automatic
+  Let's Encrypt certificate and proxies the subdomain to the relay's port
+  4002. What the browser side needs from it:
   - A page served over https may only open `wss://`: browsers block `ws://`
-    from https pages as mixed content.
-  - Terminate TLS in the proxy with a normal certificate for the domain
-    (Let's Encrypt). Forward `/` with WebSocket upgrade to `127.0.0.1:4002`.
-  - Set the proxy's idle/read timeout above the libp2p ping interval
-    (15 s by default), or idle browser connections drop. nginx's default
-    `proxy_read_timeout` is 60 s, which is enough while ping is on; a
-    larger value (e.g. 1 h) is safer.
-  - Advertise `/dns4/<domain>/tcp/443/wss` in `EXTERNAL_ADDRS` (already in
-    `.env.example`). The browser dials `/dns4/<domain>/tcp/443/wss/p2p/<relay id>`.
+    from https pages as mixed content. So wss is required, not optional.
+  - Advertise `/dns4/<RELAY_DOMAIN>/tcp/443/wss` in `EXTERNAL_ADDRS` (as
+    `.env.example` does). The browser dials
+    `/dns4/<RELAY_DOMAIN>/tcp/443/wss/p2p/<relay id>`, exactly the ws address
+    used here with `wss` and the domain.
+  - Caddy proxies WebSocket upgrades with no idle timeout by default, so
+    nothing to set. With another proxy (nginx: `proxy_read_timeout` 60 s),
+    keep its timeout above libp2p's ping interval (15 s).
   - Not tested end to end: there is no domain yet. Only plain `ws` was
     measured.
-- **Ports.** 443/tcp on the proxy (wss); 4001/tcp+udp as today for native
-  peers. 4002 stays on localhost behind the proxy.
+- **Ports.** 443/tcp (+ 80 for certificate issuance) on Caddy; 4001/tcp+udp
+  as today for native peers. 4002 stays on localhost behind the proxy.
+- **Resources.** The relay container is capped at 1 CPU / 256 MB. That was
+  sized for bootstrap plus occasional circuits. Once it relays web clients'
+  traffic, check CPU (Noise for every relayed byte) and memory per circuit
+  under load.
 - **`EXTERNAL_ADDRS` must be set** (bug 1).
 - **Raise the circuit limits** (bug 2). As a starting point: `MAX_CIRCUITS`
   sized to concurrent web users (hundreds), `MAX_CIRCUITS_PER_PEER` around

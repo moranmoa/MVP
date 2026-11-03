@@ -225,7 +225,8 @@ async function runBrowser(name, sync, native, syncId, nativeId) {
     out.count = { browser: b.count, native: n.count };
 
     // Round trips: a sync request answered with an empty page, and ping.
-    out.sync_rtt_ms = summary(JSON.parse(await page.evaluate((p) => window.peer.rtt(p, 50), remoteId)).ms);
+    // 20 samples: core/sync rate-limits pulls (burst 30, then 10/s per peer).
+    out.sync_rtt_ms = summary(JSON.parse(await page.evaluate((p) => window.peer.rtt(p, 20), remoteId)).ms);
     out.ping_ms = Object.fromEntries(Object.entries((await state()).ping_ms).map(([k, v]) => [k, summary(v)]));
     if (!connectDirect) out.bulk = await bulk(ctl, remoteId);
     console.log(`[${name}] ${label}:`, JSON.stringify(out));

@@ -13,7 +13,7 @@ esac
 docker build -q -t web-spike-builder -f "$here/builder.Dockerfile" "$here" >/dev/null
 
 docker run --rm -v "$repo_mount:/work" -v cargo-registry:/usr/local/cargo/registry \
-  -v web-spike-target:/target -e CARGO_TARGET_DIR=/target -w /work web-spike-builder bash -euo pipefail -c '
+  -v web-spike-target:/target -e CARGO_TARGET_DIR=/target -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" -w /work web-spike-builder bash -euo pipefail -c '
     out=spikes/web/harness/dist
     rm -rf $out && mkdir -p $out/www/pkg
     (cd core && cargo build --release -p sync --bin sync-peer)

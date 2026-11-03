@@ -3,7 +3,7 @@
 //! without the relay.
 //!
 //! - Store: `sync::Store` (core/sync's SQLite store), one log.
-//! - Protocols: `/descord-replacement/sync/0.1.0` pull (CBOR request-response)
+//! - Protocols: `/mvs/sync/0.1.0` pull (CBOR request-response)
 //!   and gossipsub push on `log/<name>`, exactly as core/sync.
 //! - Transports: TCP, webrtc-direct (UDP), relay circuit (listens on a
 //!   circuit through the relay so browsers can reach it relayed too).
@@ -34,7 +34,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
-use web_wire::{SyncRequest, SyncResponse, IDENTIFY_VERSION, PAGE, SYNC_PROTOCOL};
+use web_wire::{
+    SyncRequest, SyncResponse, IDENTIFY_VERSION, MAX_GOSSIP_BYTES, PAGE, PAGE_BYTES, SYNC_PROTOCOL,
+};
 
 const LOG: &str = "general";
 
@@ -236,6 +238,14 @@ async fn start(
                 gossipsub::MessageAuthenticity::Signed(key.clone()),
                 gossipsub::ConfigBuilder::default()
                     .heartbeat_interval(Duration::from_millis(500))
+                    // Same as core/sync: size cap and content-based message ids.
+                    .max_transmit_size(MAX_GOSSIP_BYTES)
+                    .message_id_fn(|m| {
+                        gossipsub::MessageId::from(web_wire::gossip_message_id(
+                            m.topic.as_str(),
+                            &m.data,
+                        ))
+                    })
                     .build()
                     .map_err(|e| anyhow::anyhow!(e))?,
             )
@@ -316,7 +326,7 @@ impl Task {
         match command {
             NodeCmd::Append { data, reply } => {
                 let result = (|| {
-                    let blob = Blob::new(self.store.heads(LOG)?, data);
+                    let blob = Blob::new(LOG, self.store.heads(LOG)?, data);
                     self.store.append(LOG, &blob)?;
                     let topic = gossipsub::IdentTopic::new(web_wire::topic(LOG));
                     let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, blob.encode());
@@ -401,11 +411,11 @@ impl Task {
                 message,
                 ..
             })) => {
-                let Some(blob) = Blob::decode(&message.data) else { return };
+                let Ok(blob) = Blob::decode(LOG, &message.data) else { return };
                 match self.store.append(LOG, &blob) {
                     Ok(Append::Added) => self.stored(&blob, true),
                     Ok(Append::MissingDeps(_)) => self.pull(propagation_source),
-                    Ok(Append::Known) => {}
+                    Ok(Append::Known | Append::Invalid(_)) => {}
                     Err(err) => warn!(%err, "storing pushed blob failed"),
                 }
             }
@@ -417,7 +427,7 @@ impl Task {
                     let have: Vec<_> =
                         request.have.iter().filter_map(|b| b.as_slice().try_into().ok()).collect();
                     let (blobs, more) =
-                        self.store.missing_since(LOG, &have, PAGE).unwrap_or_default();
+                        self.store.missing_since(LOG, &have, PAGE, PAGE_BYTES).unwrap_or_default();
                     let blobs = blobs.iter().map(|b| ByteBuf::from(b.encode())).collect();
                     let _ = self
                         .swarm
@@ -429,7 +439,7 @@ impl Task {
                     self.inflight.remove(&peer);
                     debug!(%peer, blobs = response.blobs.len(), "pulled");
                     let blobs: Vec<Blob> =
-                        response.blobs.iter().filter_map(|b| Blob::decode(b)).collect();
+                        response.blobs.iter().filter_map(|b| Blob::decode(LOG, b).ok()).collect();
                     match self.store.append_all(LOG, &blobs) {
                         Ok((added, _)) => {
                             let added: HashSet<_> = added.into_iter().collect();
@@ -460,23 +470,35 @@ mod tests {
     /// The browser's wire crate encodes blobs byte-for-byte like core/sync.
     #[test]
     fn wire_matches_core_sync() {
-        let a = sync::Blob::new(vec![], b"a".to_vec());
-        let b = sync::Blob::new(vec![a.id, [7; 32]], "שלום".as_bytes().to_vec());
-        let wb = web_wire::Blob::new(b.deps.clone(), b.data.clone());
+        let a = sync::Blob::new("l", vec![], b"a".to_vec());
+        let b = sync::Blob::new("l", vec![[7; 32], a.id], "שלום".as_bytes().to_vec());
+        let wb = web_wire::Blob::new("l", vec![[7; 32], a.id], b.data.clone());
         assert_eq!(wb.id, b.id);
         assert_eq!(wb.encode(), b.encode());
-        assert_eq!(web_wire::Blob::decode(&b.encode()), Some(wb));
+        assert_eq!(web_wire::Blob::decode("l", &b.encode()), Some(wb.clone()));
+        assert_eq!(sync::Blob::decode("l", &wb.encode()), Ok(b));
 
         let mut store = sync::Store::in_memory().unwrap();
         let mut mem = web_wire::MemStore::default();
         let mut prev = vec![];
-        for i in 0..40 {
-            let blob = sync::Blob::new(prev, format!("{i}").into_bytes());
+        for i in 0..200 {
+            let blob = sync::Blob::new("l", prev, format!("{i}").into_bytes());
             prev = vec![blob.id];
             store.append("l", &blob).unwrap();
-            mem.append(web_wire::Blob::decode(&blob.encode()).unwrap());
+            mem.append(web_wire::Blob::decode("l", &blob.encode()).unwrap());
         }
         assert_eq!(store.state_hash("l").unwrap(), mem.state_hash());
-        assert_eq!(store.have_markers("l").unwrap(), mem.have_markers());
+        let markers = store.have_markers("l").unwrap();
+        assert_eq!(markers, mem.have_markers());
+        let ids = |blobs: Vec<sync::Blob>| blobs.into_iter().map(|b| b.id).collect::<Vec<_>>();
+        let mem_ids =
+            |blobs: Vec<web_wire::Blob>| blobs.into_iter().map(|b| b.id).collect::<Vec<_>>();
+        for (have, max_blobs, max_bytes) in
+            [(vec![], 50, 1 << 20), (markers[3..4].to_vec(), 2000, 100)]
+        {
+            let (s, s_more) = store.missing_since("l", &have, max_blobs, max_bytes).unwrap();
+            let (m, m_more) = mem.missing_since(&have, max_blobs, max_bytes);
+            assert_eq!((ids(s), s_more), (mem_ids(m), m_more));
+        }
     }
 }
