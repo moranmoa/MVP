@@ -109,6 +109,10 @@ impl Network for SyncNetwork {
             std::thread::sleep(POLL);
             records = self.read(&log);
         }
+        // And the default channel (the only one so far).
+        let channel = log_name(server, Scope::Channel(crate::model::default_channel(server)));
+        self.open(&channel);
+        records.extend(self.read(&channel));
         records
     }
 }
