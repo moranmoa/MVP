@@ -119,9 +119,9 @@ Without the variable the build still succeeds, with a warning, but the app
 runs offline and testers can't reach each other. Only tag builds read the
 variable; pull-request dry runs always build with an empty config (the
 repository is public, and so are their artifacts). The value does end up
-inside the released app, so anyone with the download can read it. Whether
-that's acceptable for the domain is the owner's decision; the rule here only
-keeps it out of the repository and its CI artifacts.
+inside the released app, so anyone with the download can read it; the owner
+accepted that (decision 2026-11-03). The rule is that it never goes into the
+repository or into pull-request CI artifacts.
 
 ### Protect release tags
 
