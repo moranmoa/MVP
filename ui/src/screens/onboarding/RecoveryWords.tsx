@@ -7,7 +7,16 @@ import { AlertIcon } from '../../components/icons';
 export function WordGrid({ words }: { words: string[] }) {
   const intl = useIntl();
   return (
-    <ol className="word-grid" dir="ltr" aria-label={intl.formatMessage({ id: 'onb.words.gridLabel' })}>
+    <ol
+      className="word-grid words-shown"
+      dir="ltr"
+      aria-label={intl.formatMessage({ id: 'onb.words.gridLabel' })}
+      // The words are meant for paper. Copying would leave them in the clipboard,
+      // where other apps and clipboard history can read them.
+      onCopy={(e) => e.preventDefault()}
+      onCut={(e) => e.preventDefault()}
+      onDragStart={(e) => e.preventDefault()}
+    >
       {words.map((w, i) => (
         <li key={i}>
           <span className="word-num" aria-hidden="true">

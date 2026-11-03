@@ -14,6 +14,7 @@ export * from './types';
  *   ?demo=unchecked  same, but recovery words not checked yet
  *   ?update=<ms>     announce a ready update after <ms>
  *   ?fresh=1         forget the stored mock account
+ *   ?hostile=1       add attacker-style names and messages (security demo)
  */
 export function createCore(search = typeof location !== 'undefined' ? location.search : ''): CoreApi {
   const params = new URLSearchParams(search);
@@ -25,6 +26,7 @@ export function createCore(search = typeof location !== 'undefined' ? location.s
     demo: !!demo,
     demoUnchecked: demo === 'unchecked',
     simulateActivity: !!demo && !params.has('still'),
+    hostile: params.has('hostile'),
     updateAfterMs: update !== null ? Number(update) || 0 : 45_000,
     storage,
   });

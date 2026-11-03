@@ -236,5 +236,12 @@
   "settings.about.stable": "Stable",
   "settings.about.beta": "Beta",
   "settings.about.channelHint": "Updates always install. You can only choose to get them earlier.",
-  "settings.about.licenses": "Built on open-source components including React, react-intl and TanStack Virtual (MIT and BSD licences)."
+  "settings.about.licenses": "Built on open-source components including React, react-intl and TanStack Virtual (MIT and BSD licences).",
+
+  "chat.clipped": "This message is too long, so only part of it is shown",
+  "members.lookalike": "Look-alike name",
+  "members.lookalikeHint": "This name looks like the server owner’s name or like a role. Check the identity code to see who it really is.",
+  "onb.profile.avatarTooBig": "Pick a PNG, JPEG, WebP or GIF image up to 512 KB.",
+  "chat.back": "Back to channels",
+  "members.close": "Close the member list"
 }

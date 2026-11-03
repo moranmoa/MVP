@@ -4,7 +4,8 @@ import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import { useCore, type Member, type Message, type ServerSummary } from '../../core';
 import { Dialog, Name } from '../../components/common';
-import { CloseIcon, EditIcon, HashIcon, ReplyIcon, SendIcon, UsersIcon, WifiOffIcon } from '../../components/icons';
+import { BackIcon, CloseIcon, EditIcon, HashIcon, ReplyIcon, SendIcon, UsersIcon, WifiOffIcon } from '../../components/icons';
+import { BODY_MAX } from '../../core/sanitize';
 import { MessageList } from './MessageList';
 
 const NO_MEMBERS: Member[] = [];
@@ -14,11 +15,14 @@ export function ChatView({
   channelId,
   membersOpen,
   onToggleMembers,
+  onBack,
 }: {
   server: ServerSummary;
   channelId: string;
   membersOpen: boolean;
   onToggleMembers: () => void;
+  /** Phone layout only: back to the channel list. */
+  onBack?: () => void;
 }) {
   const store = useAppStore();
   const core = useCore();
@@ -66,6 +70,17 @@ export function ChatView({
   return (
     <section className="chat" aria-label={intl.formatMessage({ id: 'chat.messages' }, { channel: channelName })}>
       <header className="chat-header">
+        {onBack && (
+          <button
+            type="button"
+            className="icon-button back-button"
+            onClick={onBack}
+            aria-label={intl.formatMessage({ id: 'chat.back' })}
+            title={intl.formatMessage({ id: 'chat.back' })}
+          >
+            <BackIcon />
+          </button>
+        )}
         <HashIcon />
         <h2>
           <bdi>{channelName}</bdi>
@@ -244,6 +259,7 @@ function Composer({
         <textarea
           ref={ref}
           dir="auto"
+          maxLength={BODY_MAX}
           rows={1}
           value={text}
           placeholder={intl.formatMessage({ id: 'chat.composer' }, { channel: channelName })}

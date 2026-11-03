@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
+import { PHONE_QUERY, useMediaQuery } from '../../app/media';
 import type { Id } from '../../core';
 import { Dialog } from '../../components/common';
 import { ShieldIcon } from '../../components/icons';
@@ -32,6 +33,9 @@ export function Shell() {
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [dialog, setDialog] = useState<ShellDialog>(null);
+  // On a phone the channel list and the chat are two pages; this is the one shown.
+  const phone = useMediaQuery(PHONE_QUERY);
+  const [phoneView, setPhoneView] = useState<'nav' | 'chat'>('nav');
 
   const channels = useStore(store, (s) => (serverId === 'home' ? undefined : s.channels[serverId]));
   const channelId = serverId === 'home' ? undefined : (channelByServer[serverId] ?? channels?.[0]?.id);
@@ -74,8 +78,20 @@ export function Shell() {
     });
   };
 
+  const selectServer = (id: Id | 'home') => {
+    setServerId(id);
+    setPhoneView('nav');
+  };
+  const showMembers = !!server && membersOpen && (!phone || phoneView === 'chat');
+  const layout = [
+    'shell',
+    showMembers ? 'with-members' : '',
+    server ? '' : 'no-sidebar',
+    phone && server ? `phone phone-${phoneView}` : '',
+  ];
+
   return (
-    <div className={`shell ${server && membersOpen ? 'with-members' : ''} ${server ? '' : 'no-sidebar'}`}>
+    <div className={layout.filter(Boolean).join(' ')}>
       <a className="skip-link" href="#chat-main">
         <FormattedMessage id="a11y.skipToChat" />
       </a>
@@ -92,15 +108,18 @@ export function Shell() {
       )}
       <ServerRail
         selected={serverId}
-        onSelect={setServerId}
-        onAdd={() => setServerId('home')}
+        onSelect={selectServer}
+        onAdd={() => selectServer('home')}
         onOpenSettings={() => setSettingsOpen(true)}
       />
       {server && channelId && (
         <ChannelSidebar
           server={server}
           channelId={channelId}
-          onSelectChannel={(id) => setChannelByServer((m) => ({ ...m, [server.id]: id }))}
+          onSelectChannel={(id) => {
+            setChannelByServer((m) => ({ ...m, [server.id]: id }));
+            setPhoneView('chat');
+          }}
           onOpenSettings={() => setSettingsOpen(true)}
         />
       )}
@@ -112,6 +131,7 @@ export function Shell() {
             channelId={channelId}
             membersOpen={membersOpen}
             onToggleMembers={toggleMembers}
+            onBack={phone ? () => setPhoneView('nav') : undefined}
           />
         ) : (
           <Home
@@ -121,7 +141,7 @@ export function Shell() {
           />
         )}
       </main>
-      {server && membersOpen && <MemberList server={server} />}
+      {showMembers && <MemberList server={server} onClose={phone ? toggleMembers : undefined} />}
 
       <CreateServerDialog
         open={dialog === 'create'}
