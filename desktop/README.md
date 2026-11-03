@@ -111,5 +111,32 @@ the asar-only layout, and runs the binary with `ELECTRON_RUN_AS_NODE=1` and a
 hostile `NODE_OPTIONS` to see both ignored. The core's data folder
 (`<userData>/core`) is created `0700`.
 
-Still to come: the NSIS keep/delete-data page, the `mvs://` handler (strict
-parse, `joinServer` argument only), and the release.yml plug-in point.
+## Invite links (mvs://)
+
+The installed app registers `mvs://` for the current user (never in a
+checkout). A link arrives on the first launch's command line, from a second
+launch (`requestSingleInstanceLock` + `second-instance`; the second process
+quits), or as macOS `open-url`. `src/deeplink.js` accepts only the exact core
+format `mvs://join/<64 hex>/<64 hex>` (canonicalised) and main uses it for one
+thing: the argument of `joinServer`, once the window has loaded. The UI sees
+the usual `join.status` and `server.added` events. Tests:
+`test/deeplink.test.js` (unit, hostile links) and `test/deeplink.e2e.test.mjs`
+(first launch, second instance, hostile links reach nothing).
+
+## Windows uninstall
+
+`build/installer.nsh`: the uninstaller asks whether to delete the local data
+(`%APPDATA%MVS`); the default is keep. `/S` keeps it, `/S /DELETEDATA` deletes
+it, an update never deletes it. The identity key in Windows Credential
+Manager is never touched. The `mvs://` registration is always removed.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File test
+sis-uninstall.ps1 -Installer "distMVS Setup 0.1.0.exe"
+```
+
+Build the installer with `electronuserland/builder:wine` (see
+spikes/RESULTS.md) after cross-compiling `mvs-core.exe` into `.core/`
+(`cargo build --release --locked --bin mvs-core --target x86_64-pc-windows-gnu`).
+
+Still to come: the release.yml plug-in point with devops.

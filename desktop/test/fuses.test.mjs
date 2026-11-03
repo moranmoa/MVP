@@ -26,7 +26,7 @@ test('the app code is only in app.asar and the core is next to it', () => {
   assert.ok(existsSync(`${res}app.asar`), 'app.asar');
   assert.ok(!existsSync(`${res}app`), 'no unpacked app folder');
   assert.ok(existsSync(`${res}ui/index.html`), 'ui');
-  assert.ok(existsSync(`${res}mvs-core`), 'mvs-core');
+  assert.ok(existsSync(`${res}mvs-core`) || existsSync(`${res}mvs-core.exe`), 'mvs-core');
 });
 
 test('the binary will not act as Node, and NODE_OPTIONS is ignored', async () => {

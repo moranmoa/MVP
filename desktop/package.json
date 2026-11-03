@@ -7,8 +7,8 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node --test test/security.test.js test/commands.test.js test/sidecar.test.js",
-    "e2e": "node --test --test-concurrency=1 test/e2e.test.mjs",
+    "test": "node --test test/security.test.js test/commands.test.js test/sidecar.test.js test/deeplink.test.js",
+    "e2e": "node --test --test-concurrency=1 test/e2e.test.mjs test/deeplink.e2e.test.mjs",
     "dist:linux": "electron-builder --linux AppImage deb",
     "dist:win": "electron-builder --win nsis",
     "test:fuses": "node --test test/fuses.test.mjs"
@@ -39,14 +39,6 @@
       {
         "from": "../ui/dist",
         "to": "ui"
-      },
-      {
-        "from": ".core",
-        "to": ".",
-        "filter": [
-          "mvs-core",
-          "mvs-core.exe"
-        ]
       }
     ],
     "afterPack": "build/fuses.js",
@@ -59,7 +51,13 @@
         "deb"
       ],
       "category": "Network",
-      "maintainer": "MVS <spike@example.invalid>"
+      "maintainer": "MVS <spike@example.invalid>",
+      "extraResources": [
+        {
+          "from": ".core/mvs-core",
+          "to": "mvs-core"
+        }
+      ]
     },
     "deb": {
       "depends": [
@@ -76,12 +74,29 @@
       ]
     },
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "extraResources": [
+        {
+          "from": ".core/mvs-core.exe",
+          "to": "mvs-core.exe"
+        }
+      ]
     },
     "nsis": {
       "oneClick": false,
       "perMachine": false,
-      "allowElevation": false
-    }
+      "allowElevation": false,
+      "include": "build/installer.nsh",
+      "deleteAppDataOnUninstall": false,
+      "unicode": true
+    },
+    "protocols": [
+      {
+        "name": "MVS invite",
+        "schemes": [
+          "mvs"
+        ]
+      }
+    ]
   }
 }
