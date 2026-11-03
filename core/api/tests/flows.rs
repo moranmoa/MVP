@@ -60,6 +60,7 @@ fn names(events: &[Event]) -> Vec<&'static str> {
             Event::UpdateReady(_) => "update.ready",
             Event::Notice { .. } => "notice",
             Event::MessageAdded(_) => "message.added",
+            Event::MessageUpdated(_) => "message.updated",
         })
         .collect()
 }
