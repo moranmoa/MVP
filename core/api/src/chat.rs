@@ -181,7 +181,7 @@ pub(crate) fn messages(
                 return Some(Shown { record, text: String::new(), edited_at: None, deleted: true });
             }
             let edit = edits.get(&record.id()).and_then(|e| {
-                let text = open(cipher, server, channel, e.author(), &e.body()[32..])?;
+                let text = open(cipher, server, channel, e.author(), e.body().get(32..)?)?;
                 Some((text, e.ts()))
             });
             Some(match edit {
