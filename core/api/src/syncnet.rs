@@ -41,10 +41,8 @@ impl SyncNetwork {
     /// Starts a node in `data_dir` (its `store.db` and `node.key`) that
     /// reaches peers through `relay`.
     pub fn start(relay: Multiaddr, data_dir: &Path, gate: Arc<MemberGate>) -> anyhow::Result<Self> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()?;
+        let runtime =
+            tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
         let config = NodeConfig {
             relay,
             data_dir: data_dir.to_owned(),

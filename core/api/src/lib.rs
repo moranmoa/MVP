@@ -16,8 +16,8 @@ mod gate;
 mod model;
 mod ports;
 mod service;
-pub mod syncnet;
 pub mod sidecar;
+pub mod syncnet;
 pub mod types;
 
 pub use dispatch::NOT_YET;
