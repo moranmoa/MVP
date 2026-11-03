@@ -7,7 +7,8 @@ const { parseInviteLink, inviteFromArgv } = require('../src/deeplink');
 
 const S = 'a'.repeat(64);
 const I = '0123456789abcdef'.repeat(4);
-const GOOD = `mvs://join/${S}/${I}`;
+const K = 'f'.repeat(64); // the server secret (GAP-4)
+const GOOD = `mvs://join/${S}/${I}/${K}`;
 
 test('a well-formed invite link passes, canonicalised', () => {
   assert.equal(parseInviteLink(GOOD), GOOD);
@@ -19,20 +20,24 @@ test('a well-formed invite link passes, canonicalised', () => {
 test('anything else is refused', () => {
   for (const bad of [
     `mvs://join/${S}`,
-    `mvs://join/${S}/${I}/extra`,
-    `mvs://join/${S.slice(1)}/${I}`,
-    `mvs://join/${S}/${I}0`,
-    `mvs://join/${'g'.repeat(64)}/${I}`,
-    `mvs://other/${S}/${I}`,
-    `mvs://join/${S}/${I}?x=1`,
-    `mvs://join/${S}/${I}#x`,
-    `mvs://user@join/${S}/${I}`,
-    `mvs:join/${S}/${I}`,
-    `https://join/${S}/${I}`,
-    `mvs://join/../../${S}/${I}`,
+    // the old two-part form, without the secret, is no invite any more
+    `mvs://join/${S}/${I}`,
+    `mvs://join/${S}/${I}/${K.slice(1)}`,
+    'mvs://join/' + 'a'.repeat(64) + '/' + 'b'.repeat(64) + '/' + 'c'.repeat(64) + 'x'.repeat(60),
+    `mvs://join/${S}/${I}/${K}/extra`,
+    `mvs://join/${S.slice(1)}/${I}/${K}`,
+    `mvs://join/${S}/${I}/${K}0`,
+    `mvs://join/${'g'.repeat(64)}/${I}/${K}`,
+    `mvs://other/${S}/${I}/${K}`,
+    `mvs://join/${S}/${I}/${K}?x=1`,
+    `mvs://join/${S}/${I}/${K}#x`,
+    `mvs://user@join/${S}/${I}/${K}`,
+    `mvs:join/${S}/${I}/${K}`,
+    `https://join/${S}/${I}/${K}`,
+    `mvs://join/../../${S}/${I}/${K}`,
     `mvs://join/${S}/%2e%2e`,
-    `mvs://join/${S}/${I}\u0000`,
-    `mvs://join/${S}/${I} --inspect`,
+    `mvs://join/${S}/${I}/${K}\u0000`,
+    `mvs://join/${S}/${I}/${K} --inspect`,
     'x'.repeat(10_000),
     '',
     null,
