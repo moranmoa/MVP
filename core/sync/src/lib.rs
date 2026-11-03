@@ -25,6 +25,7 @@
 pub mod node;
 pub mod store;
 
+mod keyfile;
 mod limits;
 #[cfg(test)]
 pub(crate) mod testutil;
