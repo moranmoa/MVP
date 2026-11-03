@@ -87,6 +87,10 @@ impl Clock for FixedClock {
 /// for every channel record, so cache the monotone verdict ("owner, or has
 /// a stored Join") per author per server, and drop the cache when a new
 /// control record arrives.
+///
+/// Startup (#64): sync refuses to start when it can't lock down `node.key`
+/// (the Windows ACL). Surface that as a clear error the UI shows, an error
+/// code or a `notice`, never a silently dead sync.
 pub trait Network: Send + Sync {
     /// Offers a record we made or accepted to peers of its server.
     fn publish(&self, record: &Record);
