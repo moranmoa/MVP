@@ -4,10 +4,11 @@ Owner requirement: installing, updating and removing MVS works on every OS,
 and **the identity is never deleted without the user's explicit consent**.
 
 This file has the detailed steps and the automated checks behind QA's cases
-INS-01..16 (`qa/TEST_PLAN.md` §14). Today it covers the two shell
-candidates from the spike (PR #59), Tauri and Electron, so the results feed
-the shell decision. When the real packages exist (B9), the same checks run
-on them with the names below changed.
+INS-01..16 (`qa/TEST_PLAN.md` §14). It covers the two shell spike
+packages (PR #59). **Electron is the chosen shell (decision 7)**, so its
+results are the main path. The Tauri rows stay as measured, for the
+record, and the Tauri jobs can be dropped from CI once the real Electron
+packages (B1-3 / B9) replace the spike ones, with the names below changed.
 
 ## Packages
 
@@ -192,7 +193,7 @@ On a clean VM with a snapshot. Note "before" and "after" for every item in
 | 2026-11-03 | Linux checks, local (Docker Desktop, Debian 13 container), packages from dev-voice-shell's local build of PR #59 | all passed | all passed | Tauri's `.deb` has no conffiles, so after `apt remove` dpkg forgets it and `apt purge <pkg>` reports "unable to locate"; the test purges with `dpkg --purge` |
 | – | CI, Windows + Linux | pending first run | pending | – |
 
-What this means for the shell decision so far:
+What this told the shell decision (Electron was chosen, decision 7):
 
 - Both behave the same on install and remove. Neither leaves anything but
   the data folder.
