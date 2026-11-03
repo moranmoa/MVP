@@ -64,6 +64,33 @@ These override anything below that disagrees.
 - **Channels.** UI `stable` maps to `alpha` during the closed alpha.
 - **Notes.** `manifest-body.mjs --notes-dir` is #111 (after #108).
 
+**dev-voice-shell (desktop/).** These replace the layout in §2:
+- **Base install.** NSIS keeps installing the app the normal
+  electron-builder way into `$INSTDIR`, and that copy is the **base**
+  version. `mvs-launcher[.exe]` ships at `$INSTDIR/` via `build.extraFiles`.
+  Updates unpack into `$INSTDIR/versions/<ver>/`. The launcher falls back
+  to the base copy (`$INSTDIR/MVS.exe`) when no update is healthy; that is
+  A6's "installer's version". The uninstaller already removes all of
+  `$INSTDIR`. A `customInstall` macro in `installer.nsh` (dev-voice-shell)
+  points the Start-menu and desktop shortcuts at the launcher.
+- **The update root is derived, never trusted from argv.** In a packaged
+  app, `update.js` derives the root from `process.execPath`: either
+  `<root>/MVS[.exe]` (base) or `<root>/versions/<ver>/MVS[.exe]`, and
+  `<root>/mvs-launcher[.exe]` must exist. `--mvs-update-root` from argv is
+  accepted only if it equals the derived root; otherwise the app runs with
+  updates off and logs a warning.
+- **mvs://.** `update.js` gives main the launcher path, and main calls
+  `setAsDefaultProtocolClient(scheme, launcherPath, ['--'])`. The launcher
+  forwards everything after `--` verbatim and never parses switches from
+  that tail.
+- **Hooks.** The sidecar gets `extraArgs: ['--update-root', root]` (#121).
+  In main, `restartToUpdate` goes to `update.js` instead of the core;
+  `markHealthy` goes from main to the core only. The 3 hook lines come with
+  `update.js`, reviewed by dev-voice-shell and sec-lead.
+- **Fuses.** `OnlyLoadAppFromAsar` and asar integrity stay on for versioned
+  copies too. The launcher sets no `NODE_OPTIONS` or
+  `ELECTRON_RUN_AS_NODE`, and clears them if they are inherited.
+
 Spec: `docs/spec.md` "עדכונים", which requires:
 - signed updates with automatic rollback;
 - no skipping and no switching updates off;
