@@ -170,8 +170,10 @@ pub enum CipherOutcome {
 ///
 /// The caller MUST, after every `unlock`: call `set_channels` and
 /// `set_accepted` for each server, then replay every stored `KeyRotation`
-/// record through `apply_rotation`. `lock` drops all keys, and nothing is
-/// kept across it.
+/// record through `apply_rotation`. `lock` drops the secret and every
+/// channel's keys. It keeps only public bookkeeping (known channels, member
+/// sets, accepted record IDs), which may be stale by the next `unlock`, hence
+/// the calls above.
 pub trait GroupCipher: Send + Sync {
     fn membership_changed(&self, server: ServerId, members: &BTreeSet<PublicKey>) -> CipherOutcome;
 
