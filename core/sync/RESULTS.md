@@ -189,3 +189,12 @@ The final state hash, `03fdc0808fce1c10`, was identical on all 4 peers.
 - **No signatures or validation in the spike runs.** The 4 spike runs used opaque blobs. Since B4-sync every record is signed and checked at ingest (see "Ingest checks").
 - **Same clock for latency.** Fine on one host; a WAN test needs
   round-trip-based measurement.
+
+## Pruned stubs (B6-p, sync protocol 0.4)
+
+Pull answers now carry tagged entries, full records or pruned stubs, so the protocol is `/mvs/sync/0.4.0`. **0.3 peers can't talk to 0.4 peers.** That's acceptable for the alpha: record format v2 (#136) resets all data anyway.
+
+- **Store.** A stub is kept in place of its record, with the same id, so peers' state hashes still match. A dep held as a stub counts as present.
+- **The stub gate.** The integration layer implements it over `authority::check_stub`. It decides both our own `prune` and a peer's stub: a stub counts only once a held, accepted delete or newer edit replaced its record.
+- **A peer's stub never replaces a full record we hold.**
+- **Pending stubs.** A stub the gate can't accept yet is kept aside, never refused. When the delete that replaced it arrives (it always depends on the stub), both are stored in one transaction. So a newcomer can still get a message everyone else pruned.

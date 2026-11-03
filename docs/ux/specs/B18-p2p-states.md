@@ -1,14 +1,14 @@
 # B18 – מצבי P2P בממשק
 
 - **משימה:** B18 (P1) · **ממצאים:** UX-07, UX-08, UX-09, QA-08
-- **ניסוחים מהאפיון (לא משתנים):** "ממתינה – תישלח כשמישהו מהשרת יתחבר", "אף אחד מהשרת לא מחובר כרגע. אפשר לקרוא את מה שכבר שמור אצלך ולכתוב – ההודעות יישלחו כשמישהו יתחבר", "מחפשים חברים מהשרת…"
+- **ניסוחים מהאפיון:** "ממתינה – תישלח כשמישהו מהשרת יתחבר" ו"מחפשים חברים מהשרת…" לא משתנים. **`chat.offline` ו-`join.nobody` משתנים** לפי §2א, כי הם טוענים טענה כללית ("אף אחד לא מחובר"). את טבלת המיקרו-קופי ב-`docs/spec.md` מעדכן product-lead.
 - **קבצים צפויים:** `ServerRail.tsx`, `ChatView.tsx`, `MessageList.tsx`, `Home.tsx` (דיאלוג ההצטרפות ומסך "השרת מוכן"), `components/PendingJoin.tsx` (חדש), `core/api.ts`, `core/types.ts`, `core/mock.ts`, `i18n/*.json`
 
 ## 1. מטרה
 
-המשתמש צריך לראות בלי להיכנס לשרת:
-- באיזה שרת אין אף אחד מחובר;
-- כמה הודעות שלו ממתינות;
+צריך לראות בלי להיכנס לשרת:
+- לאיזה שרת אין כרגע חיבור לאף אחד;
+- כמה מההודעות שלי ממתינות;
 - איזו הצטרפות עדיין מחפשת ברקע.
 
 בשרת שבו רק אני, מציגים הזמנה לחברים ולא אזהרה.
@@ -19,15 +19,28 @@
 
 | מצב | מתי | בפס השרתים | בערוץ |
 | --- | --- | --- | --- |
-| `connecting` | אחרי הפעלה, עד שהליבה יודעת (עד ~10 שניות) | כרגיל, בלי סימון | בלי פס. כך אין הבהוב של "אף אחד לא מחובר" בכל הפעלה |
-| `online` | לפחות מחשב אחד נוסף מהשרת מחובר | כרגיל | כרגיל |
-| `nobody-online` | אף מחשב אחר לא מחובר | טבעת מקווקוות (§3) | הפס הקיים `chat.offline`, או מצב "רק אני" (§4) |
+| `connecting` | אחרי הפעלה, עד שהליבה יודעת (עד ~10 שניות) | כרגיל, בלי סימון | בלי פס. כך אין הבהוב של "אין חיבור" בכל הפעלה |
+| `online` | יש מהמחשב הזה חיבור חי ומאומת למחשב אחר אחד לפחות מהשרת (§2א) | כרגיל | כרגיל |
+| `nobody-online` | אין מהמחשב הזה חיבור לאף מחשב אחר מהשרת, 15–30 שניות לפחות (§2א) | טבעת מקווקוות (§3) | הפס הקיים `chat.offline`, או מצב "רק אני" (§4) |
+
+## 2א. מה "אונליין" אומר (לפי העיצוב של tech-lead ב-#141)
+
+נוכחות היא **מה שהמחשב הזה רואה**, לא אמת כללית. בלי שרת מרכזי, עמית יכול להיות מחובר לאחרים ולא אליי.
+
+| ברשימת החברים ובכרטיס | מתי | זמן |
+| --- | --- | --- |
+| **אונליין** | יש מהמחשב הזה חיבור חי ומאומת לעמית | תוך כ-5 שניות מהחיבור |
+| **אופליין** | אין חיבור לעמית | אחרי 15–30 שניות בלי חיבור. ניתוק קצר יותר לא משנה את הסימון, כדי שלא יהיה הבהוב |
+
+- **הניסוח לא טוען אמת כללית.** לא כותבים "כולם לא מחוברים" או "אף אחד לא מחובר". כותבים "אין כרגע חיבור לאף אחד מהשרת" (`chat.offline`, `join.nobody`).
+- **הכותרות ברשימת החברים** נשארות קצרות: "אונליין – {count}" / "אופליין – {count}" (B13 §5). לכל כותרת יש `title` עם ההסבר: `members.online.hint` / `members.offline.hint`. אותו הסבר מופיע גם ב-`title` של סימון הנוכחות בכרטיס הפרופיל.
+- **אין "נראה לאחרונה" לעמית בודד** (פרטיות, ולא מדויק בלי שרת). `chat.offline.lastSeen` מדבר רק על החיבור האחרון של המחשב הזה למישהו מהשרת.
 
 ## 3. פס השרתים
 
 **שרת `nobody-online`:**
 - טבעת מקווקוות של 2px בצבע `--offline` סביב האייקון, במרחק 3px. האייקון עצמו ב-`opacity: 0.7`.
-- שם נגיש ו-`title`: `rail.serverNobodyOnline` ("{server} · אף אחד לא מחובר").
+- שם נגיש ו-`title`: `rail.serverNobodyOnline` ("{server} · אין חיבור").
 
 **הודעות ממתינות** (`pendingCount > 0`):
 - תג בפינה התחתונה בצד ה-end: אייקון שעון + מספר, רקע `--bg-elevated`, טקסט `--text`, גבול `--border`.
@@ -87,7 +100,7 @@
 
 | פקודה / אירוע / טיפוס | שינוי | הערה |
 | --- | --- | --- |
-| `ServerSummary` | **שינוי חוזה:** מוסיפים `reachability: 'connecting' \| 'online' \| 'nobody-online'`, `memberCount: number`, `pendingCount: number`, `lastSeenAt?: Timestamp` | `pendingCount` = ההודעות שלי במצב `pending` בכל ערוצי השרת. `lastSeenAt` = הפעם האחרונה שמחשב אחר מהשרת היה מחובר |
+| `ServerSummary` | **שינוי חוזה:** מוסיפים `reachability: 'connecting' \| 'online' \| 'nobody-online'`, `memberCount: number`, `pendingCount: number`, `lastSeenAt?: Timestamp` | `pendingCount` = ההודעות שלי במצב `pending` בכל ערוצי השרת. `lastSeenAt` = הפעם האחרונה שלמחשב הזה היה חיבור למחשב אחר מהשרת |
 | `server.updated` | ללא שינוי בחתימה | נשלח כשאחד השדות החדשים משתנה |
 | `listPendingJoins(): Promise<PendingJoin[]>` | **חדש** | `PendingJoin = { link: string; startedAt: Timestamp }` |
 | `join.pending.changed` | **אירוע חדש:** `{ joins: PendingJoin[] }` | נשלח בכל הוספה או הסרה |
@@ -111,7 +124,7 @@
 
 | מפתח | עברית | English | שינוי |
 | --- | --- | --- | --- |
-| `rail.serverNobodyOnline` | `⁨{server}⁩ · אף אחד לא מחובר` | `⁨{server}⁩ · nobody online` | חדש |
+| `rail.serverNobodyOnline` | `⁨{server}⁩ · אין חיבור` | `⁨{server}⁩ · nobody reachable` | חדש (§2א) |
 | `rail.pendingCount` | `{count, plural, one {הודעה אחת ממתינה} two {שתי הודעות ממתינות} other {# הודעות ממתינות}}` | `{count, plural, one {# message waiting} other {# messages waiting}}` | חדש |
 | `join.pending.title` | `מחפשים את השרת…` | `Looking for the server…` | חדש |
 | `join.pending.body` | `נמשיך לחפש ברקע. השרת יופיע ברשימה ברגע שמישהו ממנו יתחבר.` | `We'll keep looking in the background. The server appears as soon as someone from it connects.` | חדש |
@@ -121,26 +134,31 @@
 | `server.solo.title` | `השרת מוכן. עכשיו צריך חברים.` | `Your server is ready. Now invite friends.` | חדש |
 | `server.solo.body` | `אין שרת מרכזי: השרת קיים על המחשבים של החברים בו. כשיצטרפו עוד אנשים, הוא יישאר זמין גם כשהמחשב הזה כבוי.` | `There's no central server: it lives on its members' computers. Once more people join, it stays available even when this computer is off.` | חדש |
 | `create.done.availability` | `השרת זמין כשלפחות מחשב אחד מהשרת מחובר.` | `The server is available while at least one member's computer is online.` | חדש |
-| `chat.offline.lastSeen` | `מישהו מהשרת היה מחובר לאחרונה ⁨{time}⁩.` | `Someone from the server was last online ⁨{time}⁩.` | חדש. `time` מ-`RelativeTimeFormat` |
+| `chat.offline.lastSeen` | `החיבור האחרון למישהו מהשרת: ⁨{time}⁩.` | `Last reached someone from the server ⁨{time}⁩.` | חדש. `time` מ-`RelativeTimeFormat` (§2א) |
+| `chat.offline` | `אין כרגע חיבור לאף אחד מהשרת. אפשר לקרוא את מה שכבר שמור אצלך ולכתוב – ההודעות יישלחו כשיהיה חיבור.` | `Nobody from the server is reachable right now. You can read what's already saved here and write – messages will send once someone is reachable.` | שינוי (§2א) |
+| `join.nobody` | `אין כרגע חיבור לאף אחד מהשרת. נמשיך לחפש ברקע, והשרת יופיע ברשימה ברגע שיהיה חיבור.` | `Nobody from the server is reachable right now. We'll keep looking in the background, and the server will appear as soon as someone is reachable.` | שינוי (§2א) |
+| `members.online.hint` | `יש אליהם חיבור מהמחשב הזה עכשיו` | `Connected to this computer right now` | חדש (§2א) |
+| `members.offline.hint` | `אין אליהם חיבור מהמחשב הזה כרגע. ייתכן שהם מחוברים לאחרים בשרת.` | `Not connected to this computer right now. They may still be connected to others in the server.` | חדש (§2א) |
 | `chat.pending.cancel` | `ביטול` | `Cancel` | חדש |
 | `chat.pending.cancelConfirm` | `לבטל את השליחה?` | `Cancel sending?` | חדש |
 | `chat.pending.cancelYes` | `ביטול השליחה` | `Cancel sending` | חדש |
 | `chat.pending.keep` | `השארה` | `Keep` | חדש |
 | `chat.pending.alreadySent` | `ההודעה כבר נשלחה.` | `The message was already sent.` | חדש |
 | `chat.history.fromJoin` | `הודעות מלפני ההצטרפות שלך לא מוצגות` | `Messages from before you joined aren't shown` | חדש (עד D30) |
-| `chat.offline`, `chat.state.pending`, `join.searching`, `join.nobody`, `join.keepTrying` | ללא שינוי (מהאפיון) | ללא שינוי | – |
+| `chat.state.pending`, `join.searching`, `join.keepTrying` | ללא שינוי (מהאפיון) | ללא שינוי | – |
 
 ## 10. בדיקות קבלה
 
 **אוטומטיות:**
 1. **QA-08:** הצטרפות עם לינק `offline` ← "להמשיך לחפש ברקע" ← עיגול בפס עם `title` = "מחפשים את השרת…". כשהדמה מוצאת חבר – toast "השרת … נמצא". "לפרטים" ← "הצטרפות" ← העיגול הופך לשרת. בדיקת QA-08 ב-`explore.spec.ts` עוברת מ-`test.fail()` לירוק.
 2. "הפסקת החיפוש" ← `cancelJoin` נקרא והעיגול יורד.
-3. השם הנגיש של כפתור שרת `nobody-online` עם 2 ממתינות: "החבר׳ה · אף אחד לא מחובר, שתי הודעות ממתינות".
+3. השם הנגיש של כפתור שרת `nobody-online` עם 2 ממתינות: "החבר׳ה · אין חיבור, שתי הודעות ממתינות".
 4. שרת חדש מיד אחרי היצירה: אין `.offline-banner` ב-DOM, ויש כרטיס עם "העתקת לינק ההזמנה".
 5. ב-`connecting` אין טבעת ואין פס offline.
 6. ביטול הודעה ממתינה ← היא נעלמת והמונה בפס יורד באחד.
 7. **מצטרפים חדשים:** אחרי הצטרפות לשרת עם הודעות קודמות, בראש הערוץ מופיע `chat.history.fromJoin` ולא "זו תחילת הערוץ". אצל מי שיצרו את השרת השורה לא מופיעה.
-8. **נוכחות (M2, שני מחשבים):** כשהעמית שולח הודעה, הוא מופיע תחת "אונליין" תוך 5 שניות, ואין `.offline-banner` ב-DOM. אחרי שהעמית סוגר את האפליקציה, הוא עובר ל"אופליין" תוך 30 שניות.
+8. **נוכחות (M2, שני מחשבים, §2א):** כשהעמית מתחבר, הוא מופיע תחת "אונליין" תוך 5 שניות, ואין `.offline-banner` ב-DOM. אחרי שהעמית סוגר את האפליקציה, הוא עובר ל"אופליין" אחרי 15–30 שניות, לא לפני 15. ניתוק רשת של 10 שניות לא משנה את הסימון.
+9. **ניסוח:** אין "אף אחד לא מחובר" או "nobody online" בקבצי המחרוזות.
 
 **צילומים:**
 
@@ -149,7 +167,7 @@
 | 100 | `100-rail-nobody-online-he` | "החבר׳ה" עם טבעת מקווקוות ותג שעון "2" |
 | 101 | `101-rail-pending-join-he` | עיגול עם spinner מתחת לשרתים, ו-popover פתוח עם "הפסקת החיפוש" |
 | 102 | `102-solo-server-he` | שרת חדש: כרטיס "השרת מוכן. עכשיו צריך חברים." במרכז, בלי פס צהוב |
-| 103 | `103-offline-last-seen-he` | הפס הצהוב עם שורת "היה מחובר לאחרונה לפני שעתיים" |
+| 103 | `103-offline-last-seen-he` | הפס הצהוב עם שורת "החיבור האחרון למישהו מהשרת: לפני שעתיים" |
 | 104 | `104-pending-cancel-he` | הודעה ממתינה עם "ביטול", ואישור בתוך השורה |
 | 105 | `105-rail-states-en-light` | 100 + 101 באנגלית, LTR (הטבעת והתג בצד הנכון) |
 | 106 | `106-p2p-200` | 200% + 24px: הטבעת והתגים לא נחתכים |

@@ -383,6 +383,20 @@ impl Resolver {
             Action::Invite { .. } | Action::RevokeInvite { .. } => {
                 return self.apply_invite_record(id, at, &action, voided, allowed);
             }
+            Action::AgeClaim { .. } => {
+                // Changes no roles; whether it counts depends on the author's
+                // membership, which must be the same in every pass.
+                if self.owner_unsettled || self.is_unsettled(author, at) {
+                    return Err(Fallback::Other);
+                }
+                if voided {
+                    self.excluded.insert(id);
+                } else if allowed {
+                    self.state.accepted.insert(id);
+                }
+                self.refresh_adult(author);
+                return Ok(());
+            }
             Action::ChannelCreate { channel, adult, name } => {
                 // Only the owner creates channels, and the first create of a
                 // channel in linear order wins, like a use of an invite.
@@ -578,6 +592,26 @@ impl Resolver {
         Ok(())
     }
 
+    /// Recomputes whether `actor` counts as 18+: their latest accepted age
+    /// claim in linear order.
+    fn refresh_adult(&mut self, actor: Actor) {
+        let latest = self.touch.get(&actor).into_iter().flatten().rev().find_map(|id| {
+            match self.actions[id] {
+                Some(Action::AgeClaim { adult })
+                    if self.known[id].author() == actor && self.state.accepted.contains(id) =>
+                {
+                    Some(adult)
+                }
+                _ => None,
+            }
+        });
+        if latest == Some(true) {
+            self.state.adults.insert(actor);
+        } else {
+            self.state.adults.remove(&actor);
+        }
+    }
+
     /// Recomputes an invite's entry in the state from its accepted joins and
     /// revokes.
     fn refresh_invite(&mut self, invite: RecordId) {
@@ -667,6 +701,15 @@ impl Resolver {
                 // Only the owner creates channels, and the owner's role never
                 // changes, so this is never reached; re-resolve to be safe.
                 Action::ChannelCreate { .. } => return Err(Fallback::Other),
+                // The author's membership changed under it.
+                Action::AgeClaim { .. } => {
+                    if now {
+                        self.state.accepted.insert(id);
+                    } else {
+                        self.state.accepted.remove(&id);
+                    }
+                    self.refresh_adult(author);
+                }
                 Action::Genesis => unreachable!("skipped above"),
             }
         }

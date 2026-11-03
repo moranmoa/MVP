@@ -43,6 +43,8 @@
 //! - Channels: only the owner creates them (ש-10), each channel ID once.
 //!   A new server's first channel is created with its genesis
 //!   ([`sign_new_server`]).
+//! - Age: a member claims their own age, 18+ or not, and the latest claim in
+//!   linear order counts. The birth date never leaves the device (B7).
 //! - Ties between concurrent records are broken by the record ID.
 //!
 //! Records come from the `records` crate, so they are signed and their IDs are
@@ -124,6 +126,11 @@ pub enum Action {
     Join {
         invite: RecordId,
     },
+    /// The author's own age claim: 18+ or not (B7). Only the claim, never a
+    /// birth date: that stays on the author's device.
+    AgeClaim {
+        adult: bool,
+    },
     /// The owner creates a channel. Body: the channel ID, `history u8`
     /// (reserved for D30, must be 0), flags (bit 0: 18+, the rest 0), then
     /// the name, 1 to [`MAX_CHANNEL_NAME`] code points.
@@ -160,6 +167,7 @@ impl Action {
             Action::Invite { .. } => Kind::Invite,
             Action::RevokeInvite { .. } => Kind::RevokeInvite,
             Action::Join { .. } => Kind::Join,
+            Action::AgeClaim { .. } => Kind::AgeClaim,
             Action::ChannelCreate { .. } => Kind::ChannelCreate,
             Action::Unban { .. } => Kind::Unban,
         }
@@ -190,6 +198,7 @@ impl Action {
                 [&expires_ms.to_le_bytes()[..], &max_uses.to_le_bytes()].concat()
             }
             Action::RevokeInvite { invite } | Action::Join { invite } => invite.as_bytes().to_vec(),
+            Action::AgeClaim { adult } => vec![u8::from(*adult)],
             Action::ChannelCreate { channel, adult, name } => {
                 [channel.as_bytes().as_slice(), &[0, u8::from(*adult)], name.as_bytes()].concat()
             }
@@ -233,6 +242,11 @@ impl Action {
             }
             Kind::RevokeInvite => Some(Action::RevokeInvite { invite: id(body)? }),
             Kind::Join => Some(Action::Join { invite: id(body)? }),
+            Kind::AgeClaim => match body {
+                [0] => Some(Action::AgeClaim { adult: false }),
+                [1] => Some(Action::AgeClaim { adult: true }),
+                _ => None,
+            },
             Kind::ChannelCreate => {
                 let (channel, rest) = body.split_first_chunk::<32>()?;
                 let [history, flags, name @ ..] = rest else { return None };
@@ -256,7 +270,6 @@ impl Action {
             | Kind::ChannelEdit
             | Kind::ChannelDelete
             | Kind::Leave
-            | Kind::AgeClaim
             | Kind::Message
             | Kind::MessageEdit
             | Kind::MessageDelete
@@ -276,7 +289,8 @@ impl Action {
             | Action::Invite { .. }
             | Action::RevokeInvite { .. }
             | Action::Join { .. }
-            | Action::ChannelCreate { .. } => None,
+            | Action::ChannelCreate { .. }
+            | Action::AgeClaim { .. } => None,
         }
     }
 
@@ -464,6 +478,8 @@ pub struct State {
     pub members: BTreeSet<Actor>,
     /// Accepted invites by record ID.
     pub invites: BTreeMap<RecordId, Invite>,
+    /// Actors whose latest accepted age claim, in linear order, is 18+.
+    pub adults: BTreeSet<Actor>,
     /// Created channels by ID.
     pub channels: BTreeMap<ChannelId, Channel>,
     /// Accepted posts, in display order.
@@ -613,6 +629,8 @@ fn permitted(view: &impl View, record: &Record, action: &Action) -> bool {
         Action::ChannelCreate { channel, .. } => {
             author_role == Role::Owner && !view.has_channel(*channel)
         }
+        // A member claims their own age.
+        Action::AgeClaim { .. } => view.is_member(author),
     }
 }
 
@@ -668,7 +686,19 @@ fn apply(state: &mut State, record: &Record, action: &Action) -> Option<(Actor, 
         Action::Post { .. }
         | Action::Invite { .. }
         | Action::RevokeInvite { .. }
-        | Action::ChannelCreate { .. } => None,
+        | Action::ChannelCreate { .. }
+        | Action::AgeClaim { .. } => None,
+    }
+}
+
+/// Applies an accepted age claim: the latest one in linear order counts.
+fn apply_age(state: &mut State, record: &Record, action: &Action) {
+    if let Action::AgeClaim { adult } = action {
+        if *adult {
+            state.adults.insert(record.author());
+        } else {
+            state.adults.remove(&record.author());
+        }
     }
 }
 
@@ -943,12 +973,15 @@ impl<'a> Graph<'a> {
             pass.state.accepted.insert(record.id());
             apply_invite(&mut pass.state, record, action);
             apply_channel(&mut pass.state, record, action);
+            apply_age(&mut pass.state, record, action);
             match action {
                 Action::Post { .. } => {
                     pass.state.posts.push(record.id());
                     continue;
                 }
-                Action::Invite { .. } | Action::ChannelCreate { .. } => continue,
+                Action::Invite { .. } | Action::ChannelCreate { .. } | Action::AgeClaim { .. } => {
+                    continue
+                }
                 Action::RevokeInvite { invite } => {
                     pass.voided.extend(self.voids_of(i));
                     pass.revoked_invites.push(*invite);
