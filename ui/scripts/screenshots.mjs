@@ -240,7 +240,7 @@ for (const [section, name] of [
 {
   const p = await chat('?demo=1&hostile=1&still=1&lang=he&theme=light&update=999999', 'x');
   await shot(p, '40-hostile-input-chat');
-  await p.getByRole('button', { name: /הפרופיל של מודן/ }).click();
+  await p.getByRole('button', { name: /הפרופיל של \u2068?מודן/ }).click();
   await shot(p, '41-hostile-lookalike-profile');
   const leaked = await p.evaluate(() => ({
     images: document.querySelectorAll('.message-canvas img').length,

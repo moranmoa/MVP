@@ -5,6 +5,7 @@ import { useAppStore } from '../../app/App';
 import { useSettings } from '../../app/settings';
 import { useCore, useCoreEvent, type Identity, type Locale } from '../../core';
 import type { CoreEvents } from '../../core/api';
+import { useUserTextProps } from '../../app/textDir';
 import { safeImageSrc } from '../../core/sanitize';
 import { Avatar, Code } from '../../components/common';
 import { CheckIcon } from '../../components/icons';
@@ -406,6 +407,8 @@ function ProfileStep({ onDone }: { onDone: () => void }) {
   const identity = store.getState().identity!;
   const [name, setName] = useState(identity.displayName);
   const [bio, setBio] = useState(identity.bio ?? '');
+  const nameProps = useUserTextProps(name);
+  const bioProps = useUserTextProps(bio);
   const [avatar, setAvatar] = useState<string | undefined>(identity.avatarDataUrl);
   const [avatarError, setAvatarError] = useState(false);
   const intl = useIntl();
@@ -461,13 +464,13 @@ function ProfileStep({ onDone }: { onDone: () => void }) {
         <span>
           <FormattedMessage id="onb.profile.name" />
         </span>
-        <input dir="auto" value={name} maxLength={32} autoFocus onChange={(e) => setName(e.target.value)} />
+        <input {...nameProps} value={name} maxLength={32} autoFocus onChange={(e) => setName(e.target.value)} />
       </label>
       <label className="field">
         <span>
           <FormattedMessage id="onb.profile.bio" />
         </span>
-        <textarea dir="auto" value={bio} maxLength={190} rows={2} onChange={(e) => setBio(e.target.value)} />
+        <textarea {...bioProps} value={bio} maxLength={190} rows={2} onChange={(e) => setBio(e.target.value)} />
       </label>
       <div className="code-box">
         <span>

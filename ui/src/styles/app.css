@@ -1973,3 +1973,26 @@ meter {
     transition: none !important;
   }
 }
+
+/* ---- user text direction (B17) -------------------------------------------- */
+/* Each piece of user text gets its own direction (src/app/textDir.ts), but it
+   always sits on the interface side, next to the name and avatar. */
+:root[dir='rtl'] .user-text {
+  text-align: right;
+}
+
+:root[dir='ltr'] .user-text {
+  text-align: left;
+}
+
+/* Keyboard shortcuts read left to right inside Hebrew sentences. */
+kbd {
+  direction: ltr;
+  unicode-bidi: isolate;
+  font: inherit;
+  font-size: 0.9em;
+  padding: 0 0.3em;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-input, var(--bg-hover));
+}

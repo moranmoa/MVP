@@ -17,6 +17,7 @@ import {
   ReplyIcon,
   TrashIcon,
 } from '../../components/icons';
+import { textDir, useUiDir } from '../../app/textDir';
 import { displayName, lookalikeIds, LookalikeTag } from './MemberList';
 
 const GROUP_GAP_MS = 5 * 60_000;
@@ -275,6 +276,7 @@ const MessageRow = memo(function MessageRow({
   onJumpToReply: (index: number) => void;
 } & Handlers) {
   const intl = useIntl();
+  const uiDir = useUiDir();
   const name = author ? displayName(author) : '…';
   const tab = actionsTabbable ? 0 : -1;
   const time = new Date(m.createdAt);
@@ -320,7 +322,7 @@ const MessageRow = memo(function MessageRow({
         >
           <ReplyIcon />
           <Name>{replyAuthor ? displayName(replyAuthor) : '…'}</Name>
-          <span dir="auto" className="reply-excerpt">
+          <span dir={textDir(m.replyTo.excerpt, uiDir)} className="reply-excerpt user-text">
             {m.replyTo.excerpt || intl.formatMessage({ id: 'chat.deleted' })}
           </span>
         </button>
@@ -348,7 +350,7 @@ const MessageRow = memo(function MessageRow({
               </time>
             </div>
           )}
-          <p className="msg-body" dir="auto">
+          <p className="msg-body user-text" dir={textDir(m.body, uiDir)}>
             {m.body}
             {m.editedAt && (
               <>
