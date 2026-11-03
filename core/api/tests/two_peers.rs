@@ -186,7 +186,10 @@ fn the_background_sync_delivers_without_sync_now() {
             })
             .collect();
         assert_eq!(added.len(), 1, "one message.added: {added:?}");
-        assert_eq!((added[0].id.as_str(), added[0].body.as_str()), (sent.id.as_str(), "no sync_now here"));
+        assert_eq!(
+            (added[0].id.as_str(), added[0].body.as_str()),
+            (sent.id.as_str(), "no sync_now here")
+        );
 
         stop.store(true, Ordering::SeqCst);
         owner.net.wake();
