@@ -206,6 +206,15 @@ pub trait GroupCipher: Send + Sync {
         let _ = (server, accepted);
     }
 
+    /// The channels of `server` that authority knows now (until B4-3: the
+    /// default channel). Call it before anything else for the server, and
+    /// whenever the set changes. Keys exist only for these; every other
+    /// channel is refused without creating state, and a channel left out
+    /// drops its keys.
+    fn set_channels(&self, server: ServerId, channels: &BTreeSet<records::ChannelId>) {
+        let _ = (server, channels);
+    }
+
     /// The unsigned `KeyRotation` part bodies (at most 32) of a fresh key for
     /// `members`, built on the channel's current key. Service signs every
     /// part with our identity and publishes **all of them or none**, and never

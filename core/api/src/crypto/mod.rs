@@ -46,15 +46,24 @@ struct State {
     members: HashMap<ServerId, BTreeSet<PublicKey>>,
     /// Each server's accepted `KeyRotation` records, from authority.
     accepted: HashMap<ServerId, BTreeSet<RecordId>>,
+    /// Each server's channels, from authority. Keys exist only for these:
+    /// anyone can name a channel in a record, and each `ChannelKeys` may
+    /// hold up to 2 MiB on probation (GAP-8).
+    known: HashMap<ServerId, BTreeSet<ChannelId>>,
 }
 
 impl State {
+    /// The keys of a channel authority knows; `Rejected` for any other,
+    /// without creating anything.
     fn channel(
         &mut self,
         server: ServerId,
         channel: ChannelId,
     ) -> Result<&mut ChannelKeys, CipherError> {
         let secret = self.secret.clone().ok_or(CipherError::Unavailable)?;
+        if !self.known.get(&server).is_some_and(|channels| channels.contains(&channel)) {
+            return Err(CipherError::Rejected);
+        }
         let accepted = self.accepted.get(&server);
         Ok(self.channels.entry((server, channel)).or_insert_with(|| {
             let mut keys = ChannelKeys::new(server, channel, secret);
@@ -93,6 +102,11 @@ impl GroupKeysCipher {
         state.channels.clear();
     }
 
+    /// How many channels hold keys now.
+    pub fn channels_held(&self) -> usize {
+        self.state().channels.len()
+    }
+
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().expect("not poisoned")
     }
@@ -128,7 +142,11 @@ impl GroupCipher for GroupKeysCipher {
     ) -> Result<Vec<u8>, CipherError> {
         let mut state = self.state();
         let members = state.members.get(&server).cloned().unwrap_or_default();
-        let keys = state.channel(server, channel)?;
+        // A channel authority doesn't know has no key to send with.
+        let keys = state.channel(server, channel).map_err(|error| match error {
+            CipherError::Rejected => CipherError::NoKey,
+            other => other,
+        })?;
         keys.encrypt(&members, plaintext, &mut OsRng).map_err(cipher_error)
     }
 
@@ -157,6 +175,12 @@ impl GroupCipher for GroupKeysCipher {
         let (_, evicted) =
             keys.apply(record.id(), record.author(), record.body()).map_err(cipher_error)?;
         Ok(evicted)
+    }
+
+    fn set_channels(&self, server: ServerId, channels: &BTreeSet<ChannelId>) {
+        let mut state = self.state();
+        state.channels.retain(|(at, channel), _| *at != server || channels.contains(channel));
+        state.known.insert(server, channels.clone());
     }
 
     fn set_accepted(&self, server: ServerId, accepted: &BTreeSet<RecordId>) {
