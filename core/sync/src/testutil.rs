@@ -63,3 +63,10 @@ pub fn message_chain(n: usize, size: usize) -> Vec<Record> {
 pub fn control_by(kind: Kind, seq: u64, deps: &[RecordId], key: u8) -> Record {
     sign(Scope::Control, seq, deps, &[], kind, vec![key, seq as u8], key)
 }
+
+/// A control record by the owner naming test key `target` (body: the
+/// target's public key, then a role byte), e.g. a `Grant` or a `Kick`.
+pub fn naming(kind: Kind, seq: u64, deps: &[RecordId], target: u8) -> Record {
+    let body = [public(&test_key(target)).as_bytes().to_vec(), vec![1]].concat();
+    sign(Scope::Control, seq, deps, &[], kind, body, 0)
+}

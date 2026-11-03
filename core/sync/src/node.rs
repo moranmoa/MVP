@@ -438,8 +438,11 @@ enum Ingest {
     Known,
     /// Parked until its deps arrive; not judged yet.
     Waiting,
-    /// Malformed, misfiled, cross-log, or refused by the authorizer.
+    /// Not storable by its own content: misfiled or cross-log.
     Rejected,
+    /// Refused by the authorizer (or built only on refused records). Not the
+    /// sender's fault: a peer with more of the control log may accept it.
+    Refused,
 }
 
 impl Task {
@@ -530,9 +533,20 @@ impl Task {
         // No subscribed peers yet is fine: they'll pull it.
         let _ = self.swarm.behaviour_mut().gossipsub.publish(topic(&log), record.encode());
         let id = record.id();
-        self.emit(NodeEvent::Stored { log, record, via: Via::Local, at: SystemTime::now() });
+        self.stored(log, record, Via::Local, SystemTime::now());
         self.release_pending(id);
         Ok(())
+    }
+
+    /// After a record was stored: tell the app, and if it is a control
+    /// record, forget what we refused in that server's channels. The storage
+    /// gate only opens as control records arrive, so those may be acceptable
+    /// now and should be pulled again.
+    fn stored(&mut self, log: String, record: Record, via: Via, at: SystemTime) {
+        if record.scope() == Scope::Control {
+            self.refused.forget_prefix(&format!("{}/", record.server()));
+        }
+        self.emit(NodeEvent::Stored { log, record, via, at });
     }
 
     fn emit(&mut self, event: NodeEvent) {
@@ -644,7 +658,9 @@ impl Task {
                         }
                     }
                 } else {
-                    for addr in &info.listen_addrs {
+                    // Only addresses we would dial ourselves go into our DHT
+                    // table (which, in server mode, we also serve to others).
+                    for addr in info.listen_addrs.iter().filter(|a| reachable(a, self.allow_lan)) {
                         self.swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
                     }
                     if self.relayed.contains_key(&peer_id) {
@@ -660,9 +676,15 @@ impl Task {
                     if peer.peer_id == *self.swarm.local_peer_id() || self.connected.contains(&peer.peer_id) {
                         continue;
                     }
+                    // Peer-supplied addresses: never let them point us into our own LAN.
+                    let addrs: Vec<Multiaddr> =
+                        peer.addrs.into_iter().filter(|a| reachable(a, self.allow_lan)).collect();
+                    if addrs.is_empty() {
+                        continue;
+                    }
                     debug!(peer = %peer.peer_id, "discovered");
                     let opts = DialOpts::peer_id(peer.peer_id)
-                        .addresses(peer.addrs)
+                        .addresses(addrs)
                         .condition(PeerCondition::DisconnectedAndNotDialing)
                         .build();
                     let _ = self.swarm.dial(opts);
@@ -748,7 +770,7 @@ impl Task {
         };
         match self.ingest(from, record, Via::Push) {
             Ingest::Added => MessageAcceptance::Accept,
-            Ingest::Known | Ingest::Waiting => MessageAcceptance::Ignore,
+            Ingest::Known | Ingest::Waiting | Ingest::Refused => MessageAcceptance::Ignore,
             Ingest::Rejected => MessageAcceptance::Reject,
         }
     }
@@ -757,12 +779,12 @@ impl Task {
     /// until its deps arrive.
     fn ingest(&mut self, from: PeerId, record: Record, via: Via) -> Ingest {
         if self.refused.contains(&record.id()) {
-            return Ingest::Rejected;
+            return Ingest::Refused;
         }
         match self.store.append(&record, &*self.authorizer) {
             Ok(Append::Added) => {
                 let id = record.id();
-                self.emit(NodeEvent::Stored { log: log_of(&record), record, via, at: SystemTime::now() });
+                self.stored(log_of(&record), record, via, SystemTime::now());
                 self.release_pending(id);
                 Ingest::Added
             }
@@ -770,7 +792,7 @@ impl Task {
             Ok(Append::MissingDeps(missing)) if self.refused.covers(&missing) => {
                 // Built only on refused records: refused as well.
                 self.refused.insert(log_of(&record), record.id());
-                Ingest::Rejected
+                Ingest::Refused
             }
             Ok(Append::MissingDeps(missing)) => {
                 let log = log_of(&record);
@@ -790,7 +812,7 @@ impl Task {
             Ok(Append::Unauthorized) => {
                 debug!(%from, "record refused by the authorizer");
                 self.refused.insert(log_of(&record), record.id());
-                Ingest::Rejected
+                Ingest::Refused
             }
             Err(err) => {
                 warn!(%err, "storing record failed");
@@ -823,7 +845,7 @@ impl Task {
                         match outcome {
                             Append::Added => {
                                 added.push(record.id());
-                                self.emit(NodeEvent::Stored { log: log.clone(), record, via: Via::Pull, at: now });
+                                self.stored(log.clone(), record, Via::Pull, now);
                             }
                             Append::Unauthorized => self.refused.insert(log.clone(), record.id()),
                             Append::MissingDeps(missing) if self.refused.covers(&missing) => {
@@ -854,7 +876,7 @@ impl Task {
                     Ok(Append::Added) => {
                         ready.push(waiting.record.id());
                         let log = log_of(&waiting.record);
-                        self.emit(NodeEvent::Stored { log, record: waiting.record, via: Via::Push, at: SystemTime::now() });
+                        self.stored(log, waiting.record, Via::Push, SystemTime::now());
                     }
                     Ok(Append::MissingDeps(missing)) if self.refused.covers(&missing) => {
                         self.refused.insert(log_of(&waiting.record), waiting.record.id());
@@ -941,31 +963,63 @@ fn is_relayed(endpoint: &ConnectedPoint) -> bool {
 
 /// Whether to dial `addr` to reach a peer directly: not a relay circuit, and
 /// a global address unless `allow_lan`. DNS names count as global.
+///
+/// Every address component must be global, not just the last one. A public
+/// DNS name that resolves to a private address (DNS rebinding) is not caught
+/// here: that needs a check at resolve time (residual risk, GAP-6).
 fn dialable(addr: &Multiaddr, allow_lan: bool) -> bool {
+    !addr.iter().any(|p| p == Protocol::P2pCircuit) && reachable(addr, allow_lan)
+}
+
+/// Like [`dialable`], but a relay circuit is fine (it is how peers behind
+/// NAT are reached) as long as the relay's own address is global. Used for
+/// addresses learned from peers (Kademlia, identify) before storing or
+/// dialling them.
+fn reachable(addr: &Multiaddr, allow_lan: bool) -> bool {
     let mut global = true;
     for p in addr.iter() {
         match p {
-            Protocol::P2pCircuit => return false,
-            Protocol::Ip4(ip) => {
-                global = !(ip.is_private()
-                    || ip.is_loopback()
-                    || ip.is_link_local()
-                    || ip.is_unspecified()
-                    || ip.is_broadcast()
-                    || ip.is_documentation()
-                    || ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 64) // CGNAT 100.64/10
-            }
-            Protocol::Ip6(ip) => {
-                let seg = ip.segments()[0];
-                global = !(ip.is_loopback()
-                    || ip.is_unspecified()
-                    || (seg & 0xfe00) == 0xfc00 // unique local
-                    || (seg & 0xffc0) == 0xfe80) // link local
+            Protocol::P2pCircuit => break,
+            Protocol::Ip4(ip) => global &= global_v4(ip),
+            Protocol::Ip6(ip) => global &= global_v6(ip),
+            Protocol::Dns(name) | Protocol::Dns4(name) | Protocol::Dns6(name) | Protocol::Dnsaddr(name) => {
+                global &= global_name(&name)
             }
             _ => {}
         }
     }
     global || allow_lan
+}
+
+fn global_v4(ip: std::net::Ipv4Addr) -> bool {
+    let [a, b, ..] = ip.octets();
+    !(a == 0 // "this network" 0.0.0.0/8
+        || ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_multicast()
+        || a >= 240 // reserved 240/4
+        || (a == 100 && (b & 0xc0) == 64)) // CGNAT 100.64/10
+}
+
+fn global_v6(ip: std::net::Ipv6Addr) -> bool {
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return global_v4(v4);
+    }
+    let seg = ip.segments()[0];
+    !(ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || (seg & 0xfe00) == 0xfc00 // unique local
+        || (seg & 0xffc0) == 0xfe80) // link local
+}
+
+/// Names that only ever mean this machine or its LAN.
+fn global_name(name: &str) -> bool {
+    let name = name.trim_end_matches('.').to_ascii_lowercase();
+    !(name == "localhost" || name.ends_with(".localhost") || name.ends_with(".local"))
 }
 
 /// Why a pushed message isn't ingested: Ignore (not ours to judge) or Reject
@@ -1161,13 +1215,28 @@ mod tests {
             "/ip6/::1/tcp/1",
             "/ip6/fd00::1/tcp/1",
             "/ip6/fe80::1/tcp/1",
+            "/ip4/0.1.2.3/tcp/1",
+            "/ip4/240.0.0.1/tcp/1",
+            "/ip4/224.0.0.251/udp/5353",
+            "/ip6/::ffff:192.168.1.5/tcp/1",
+            "/ip6/ff02::1/tcp/1",
+            "/dns4/localhost/tcp/1",
+            "/dns/printer.local/tcp/1",
+            "/dns4/app.localhost./tcp/1",
         ] {
             assert!(!dialable(&a(local), false), "{local}");
             assert!(dialable(&a(local), true), "{local} with LAN allowed");
         }
-        // Never a relay circuit: that is what we are trying to get off.
-        let circuit = a("/ip4/8.8.8.8/tcp/4001/p2p/12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc/p2p-circuit");
-        assert!(!dialable(&circuit, true));
+        // Every component counts, not only the last.
+        assert!(!dialable(&a("/ip4/10.0.0.1/tcp/1/ip4/8.8.8.8/tcp/2"), false));
+
+        // Never a relay circuit for a direct dial: that is what we are trying to get off.
+        let relay = "/ip4/8.8.8.8/tcp/4001/p2p/12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc/p2p-circuit";
+        assert!(!dialable(&a(relay), true));
+        // But a circuit through a global relay is a fine address to learn and
+        // dial when that's all we have; one through a LAN relay is not.
+        assert!(reachable(&a(relay), false));
+        assert!(!reachable(&a(&relay.replace("8.8.8.8", "192.168.1.5")), false));
     }
 
     #[test]

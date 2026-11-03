@@ -66,6 +66,30 @@ pub struct Store {
     conn: Connection,
 }
 
+/// Read access to one server's stored control log, for an [`Authorizer`]
+/// deciding about a channel record of that server.
+pub struct ControlLog<'a> {
+    conn: &'a Connection,
+    log: String,
+}
+
+impl ControlLog<'_> {
+    /// Every stored control record of the server, decoded, in the order
+    /// they were stored (a topological order).
+    pub fn records(&self) -> rusqlite::Result<Vec<Record>> {
+        let mut stmt = self.conn.prepare_cached("SELECT data FROM records WHERE log = ?1 ORDER BY seq")?;
+        let rows = stmt.query_map([&self.log], |r| r.get::<_, Vec<u8>>(0))?;
+        let mut out = Vec::new();
+        for bytes in rows {
+            // Stored bytes passed decode once; anything corrupt is skipped.
+            if let Ok(record) = Record::decode(&bytes?) {
+                out.push(record);
+            }
+        }
+        Ok(out)
+    }
+}
+
 fn id_of(bytes: [u8; 32]) -> RecordId {
     RecordId::from_bytes(bytes)
 }
@@ -310,8 +334,11 @@ fn append_in(tx: &rusqlite::Transaction, record: &Record, auth: &dyn Authorizer)
     // can change as concurrent ones arrive. Storing them all keeps every
     // peer's set the same whatever the arrival order; authority decides what
     // they mean. Channel records are judged now, with their auth_deps stored.
-    if record.scope() != Scope::Control && auth.check(record) == Verdict::Reject {
-        return Ok(Append::Unauthorized);
+    if record.scope() != Scope::Control {
+        let control = ControlLog { conn: tx, log: log_name(record.server(), Scope::Control) };
+        if auth.check(record, &control) == Verdict::Reject {
+            return Ok(Append::Unauthorized);
+        }
     }
     let log = log_of(record);
     tx.prepare_cached("INSERT INTO records (id, log, data) VALUES (?1, ?2, ?3)")?.execute(params![
@@ -332,7 +359,7 @@ fn append_in(tx: &rusqlite::Transaction, record: &Record, auth: &dyn Authorizer)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{channel, control_by, genesis, message, message_chain, message_with_auth, post, server};
+    use crate::testutil::{channel, control_by, genesis, message, message_chain, message_with_auth, naming, post, server};
     use crate::AcceptAll;
 
     fn chan() -> String {
@@ -397,36 +424,59 @@ mod tests {
 
     /// Refuses every record of one author, as authority would for a kicked
     /// member or a non-member key.
-    struct RefuseAuthor(records::PublicKey);
+    /// A monotone storage gate, as the `Authorizer` contract requires: the
+    /// author is the owner (wrote the genesis), or a stored `Grant` names
+    /// them. Kicks and revokes are deliberately ignored.
+    struct OwnerOrGranted;
 
-    impl Authorizer for RefuseAuthor {
-        fn check(&self, record: &Record) -> Verdict {
-            if record.author() == self.0 { Verdict::Reject } else { Verdict::Accept }
+    impl Authorizer for OwnerOrGranted {
+        fn check(&self, record: &Record, control: &ControlLog<'_>) -> Verdict {
+            let author = record.author();
+            let allowed = control.records().unwrap_or_default().iter().any(|c| match c.kind() {
+                records::Kind::Genesis => c.author() == author,
+                records::Kind::Grant => c.body().get(..32) == Some(&author.as_bytes()[..]),
+                _ => false,
+            });
+            if allowed { Verdict::Accept } else { Verdict::Reject }
         }
     }
 
     #[test]
-    fn unauthorized_records_are_not_stored() {
+    fn the_storage_gate_only_ever_opens_as_control_records_arrive() {
+        use records::Kind;
         let mut store = Store::in_memory().unwrap();
         let g = genesis();
-        let m = message(0, &[], 0);
-        let refuse = RefuseAuthor(m.author());
-        assert_eq!(store.append(&g, &refuse).unwrap(), Append::Added);
-        assert_eq!(store.append(&m, &refuse).unwrap(), Append::Unauthorized);
-        assert_eq!(store.append_all([&m], &refuse).unwrap(), vec![Append::Unauthorized]);
+        let m = message(0, &[], 0); // by test key 1, not the owner
+        assert_eq!(store.append(&g, &OwnerOrGranted).unwrap(), Append::Added);
+        assert_eq!(store.append(&m, &OwnerOrGranted).unwrap(), Append::Unauthorized);
+        assert_eq!(store.append_all([&m], &OwnerOrGranted).unwrap(), vec![Append::Unauthorized]);
         assert!(!store.has(&m.id()).unwrap());
-        assert!(store.heads(&chan()).unwrap().is_empty());
         // The authorizer is only asked once the context is there: a record
         // with a missing dep is reported as missing, not judged.
         let child = message(1, &[m.id()], 0);
-        assert_eq!(store.append(&child, &refuse).unwrap(), Append::MissingDeps(vec![m.id()]));
+        assert_eq!(store.append(&child, &OwnerOrGranted).unwrap(), Append::MissingDeps(vec![m.id()]));
+
+        // A grant for key 1 arrives: the same message is now stored.
+        let grant = naming(Kind::Grant, 1, &[g.id()], 1);
+        store.append(&grant, &OwnerOrGranted).unwrap();
+        assert_eq!(store.append(&m, &OwnerOrGranted).unwrap(), Append::Added);
+        assert_eq!(store.append(&child, &OwnerOrGranted).unwrap(), Append::Added);
+
+        // A kick arriving later changes nothing in the store: key 1's stored
+        // messages stay, and so do honest children of them. Whether they're
+        // shown is decided at display time.
+        let kick = naming(Kind::Kick, 2, &[grant.id()], 1);
+        store.append(&kick, &OwnerOrGranted).unwrap();
+        assert!(store.has(&m.id()).unwrap() && store.has(&child.id()).unwrap());
+        let grandchild = message(2, &[child.id()], 0);
+        assert_eq!(store.append(&grandchild, &OwnerOrGranted).unwrap(), Append::Added);
     }
 
     /// Refuses everything, like an authority that hasn't seen a grant yet.
     struct RefuseAll;
 
     impl Authorizer for RefuseAll {
-        fn check(&self, _: &Record) -> Verdict {
+        fn check(&self, _: &Record, _: &ControlLog<'_>) -> Verdict {
             Verdict::Reject
         }
     }

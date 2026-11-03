@@ -128,6 +128,20 @@ impl Refused {
         }
     }
 
+    /// Forgets everything refused in logs starting with `prefix` (a
+    /// server's logs): a new control record may have made them acceptable,
+    /// so they should be pulled and judged again.
+    pub fn forget_prefix(&mut self, prefix: &str) {
+        let ids = &mut self.ids;
+        self.order.retain(|(log, id)| {
+            let keep = !log.starts_with(prefix);
+            if !keep {
+                ids.remove(id);
+            }
+            keep
+        });
+    }
+
     pub fn contains(&self, id: &RecordId) -> bool {
         self.ids.contains(id)
     }
@@ -257,6 +271,10 @@ mod tests {
         assert!(refused.covers(&[dep(2), dep(3)]));
         assert!(!refused.covers(&[dep(2), dep(9)]));
         assert!(!refused.covers(&[]));
+        // A new control record for server "b" makes its refusals stale.
+        refused.forget_prefix("b");
+        assert!(!refused.contains(&dep(2)) && !refused.contains(&dep(4)) && refused.contains(&dep(3)));
+        assert!(refused.markers("b", 10).is_empty());
     }
 
     #[test]

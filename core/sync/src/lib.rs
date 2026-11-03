@@ -31,7 +31,7 @@ pub(crate) mod testutil;
 
 pub use node::{Node, NodeConfig, NodeEvent, Via};
 pub use records::{ChannelId, Record, RecordId, Scope, ServerId};
-pub use store::{Append, IngestError, Store};
+pub use store::{Append, ControlLog, IngestError, Store};
 
 /// Longest log name, in bytes. A channel log name is 64 + 1 + 64 characters.
 pub const MAX_LOG_NAME: usize = 160;
@@ -57,23 +57,39 @@ pub fn valid_log_name(log: &str) -> bool {
     !log.is_empty() && log.len() <= MAX_LOG_NAME && log.bytes().all(|b| b.is_ascii_graphic())
 }
 
-/// Whether the author of a **channel** record may write it, judged from the
-/// signed control log only (`core/authority`), at the control state named by
-/// its `auth_deps`. Called after the record decoded and all its `deps` and
-/// `auth_deps` are stored, before it is stored itself or forwarded.
-/// Implemented by the integration layer (T1).
+/// The **storage gate** for channel records: may this record be stored and
+/// served? Called after the record decoded and all its `deps` and
+/// `auth_deps` are stored, with read access to the server's stored control
+/// log. Never called for control records (see the crate docs). Implemented
+/// by the integration layer (T1).
 ///
-/// Never called for control records (see the crate docs). A later kick that
-/// voids an accepted message doesn't remove it from the store either:
-/// voiding is decided when displaying, not when storing.
+/// **The verdict must be monotone in the stored control log:** if it accepts
+/// a record while the control log holds the set S, it must accept it for
+/// every superset of S. Rules of the form "the author is the owner, or the
+/// author has a stored `Join` (whose invite is stored)" qualify; so does
+/// "a stored `Grant` names the author".
+///
+/// Kicks, revokes, voided records and the GAP-2 `auth_deps` checks must
+/// **not** be used here (so not `authority::check_channel`): they can flip a
+/// verdict when a record arrives late. A gate that does that leaves honest
+/// children of a refused record waiting forever and splits the channel DAG
+/// between peers that judged it at different times. The full authority
+/// verdict belongs to display, forwarding to the app, and keys; it never
+/// deletes anything from the store. Spam is bounded by per-author quotas
+/// (GAP-8) and members-only transport (GAP-4), not by this gate.
+///
+/// `check` runs inside the store's write transaction on the node's task: it
+/// must not call back into the node.
 pub trait Authorizer: Send + Sync + 'static {
-    fn check(&self, record: &Record) -> Verdict;
+    fn check(&self, record: &Record, control: &ControlLog<'_>) -> Verdict;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
     Accept,
-    /// Not stored and not forwarded; gossip reports it as invalid.
+    /// Not stored, served or forwarded (gossip: Ignore, since a peer with
+    /// more of the control log may rightly accept it). May change to Accept
+    /// once more control records are stored.
     Reject,
 }
 
@@ -82,7 +98,7 @@ pub enum Verdict {
 pub struct AcceptAll;
 
 impl Authorizer for AcceptAll {
-    fn check(&self, _: &Record) -> Verdict {
+    fn check(&self, _: &Record, _: &ControlLog<'_>) -> Verdict {
         Verdict::Accept
     }
 }
