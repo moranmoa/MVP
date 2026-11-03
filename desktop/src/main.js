@@ -16,6 +16,7 @@ const { app, BrowserWindow, Menu, crashReporter, dialog, ipcMain, protocol, sess
 const sec = require('./security');
 const { toRequest } = require('./commands');
 const { Sidecar } = require('./sidecar');
+const deeplink = require('./deeplink');
 
 // One instance only: a second launch (e.g. an mvs:// link, B1-3) focuses this one.
 if (!app.requestSingleInstanceLock()) {
@@ -137,6 +138,46 @@ function lockDownSession(ses) {
   });
 }
 
+/**
+ * An mvs:// invite from the OS. Only a link of the exact invite format gets
+ * through (deeplink.js). Main never joins by itself: a link from outside
+ * must not reveal who we are to someone's server without a click. It sends
+ * the UI a `link.open` event; the UI shows the join screen, pre-filled, and
+ * calls joinServer only when the user presses Join.
+ */
+let pendingInvite = null;
+let uiReady = false;
+
+function openInvite(raw) {
+  const link = deeplink.parseInviteLink(raw);
+  if (!link) return;
+  const win = BrowserWindow.getAllWindows()[0];
+  if (win) {
+    if (win.isMinimized()) win.restore();
+    win.focus();
+  }
+  if (!uiReady || !win || !sec.isInternalUrl(win.webContents.getURL())) {
+    pendingInvite = link;
+    return;
+  }
+  win.webContents.send('core:event', 'link.open', { link });
+}
+
+function flushInvite() {
+  uiReady = true;
+  if (pendingInvite) {
+    const link = pendingInvite;
+    pendingInvite = null;
+    openInvite(link);
+  }
+}
+
+// macOS delivers links as an event (also before ready).
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  openInvite(url);
+});
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1280,
@@ -148,6 +189,7 @@ function createWindow() {
     webPreferences: { ...sec.WEB_PREFERENCES, preload: path.join(__dirname, 'preload.js'), devTools: !app.isPackaged },
   });
   win.once('ready-to-show', () => win.show());
+  win.webContents.once('did-finish-load', flushInvite);
   // The mock demo (?demo) is for checkouts only, never a release build.
   const demo = !app.isPackaged && process.env.MVS_DEMO ? `?demo=${encodeURIComponent(process.env.MVS_DEMO)}` : '';
   win.loadURL(`${sec.ORIGIN}/index.html${demo}`);
@@ -162,17 +204,24 @@ app.whenReady().then(() => {
   lockDownSession(session.defaultSession);
   serveUi();
   serveCoreIpc();
+  // The OS sends mvs:// links to the installed app only; a checkout never registers.
+  // `--` before the link: whatever the link holds can never become a switch.
+  if (app.isPackaged) app.setAsDefaultProtocolClient(deeplink.SCHEME, process.execPath, ['--']);
   startCore();
   createWindow();
+  const first = deeplink.inviteFromArgv(process.argv);
+  if (first) openInvite(first);
   app.on('activate', () => BrowserWindow.getAllWindows().length === 0 && createWindow());
 });
 
-app.on('second-instance', () => {
+app.on('second-instance', (_event, argv) => {
   const win = BrowserWindow.getAllWindows()[0];
   if (win) {
     if (win.isMinimized()) win.restore();
     win.focus();
   }
+  const link = deeplink.inviteFromArgv(argv);
+  if (link) openInvite(link);
 });
 
 app.on('will-quit', () => core?.stop());

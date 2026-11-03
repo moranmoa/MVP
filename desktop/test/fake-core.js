@@ -14,6 +14,20 @@ let buf = '';
 const out = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
 process.stderr.write('fake core up\n');
 
+// Every command received is appended to <data-dir>/commands.log, so tests can
+// see what main sent on its own (e.g. joinServer from an mvs:// link).
+const fs = require('node:fs');
+const path = require('node:path');
+const dataDir = process.argv[process.argv.indexOf('--data-dir') + 1];
+const record = (m) => {
+  try {
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.appendFileSync(path.join(dataDir, 'commands.log'), `${JSON.stringify({ cmd: m.cmd, args: m.args })}\n`);
+  } catch {
+    // no data dir in some unit tests
+  }
+};
+
 process.stdin.on('data', (chunk) => {
   buf += chunk;
   let nl;
@@ -27,6 +41,7 @@ process.stdin.on('data', (chunk) => {
       out({ type: 'response', id: null, error: { code: 'bad-request' } });
       continue;
     }
+    record(m);
     switch (m.cmd) {
       case 'getAppInfo':
         out({ type: 'response', id: m.id, ok: { argv: process.argv.slice(2), env: Object.keys(process.env).sort(), args: m.args } });
