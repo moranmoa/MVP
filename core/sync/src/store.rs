@@ -88,6 +88,16 @@ impl ControlLog<'_> {
         }
         Ok(out)
     }
+
+    /// How many control records of the server are stored. Cheap: an index
+    /// count, nothing is read or decoded (e.g. to cache `records()` and
+    /// notice when the control log grew).
+    pub fn count(&self) -> rusqlite::Result<u64> {
+        self.conn
+            .prepare_cached("SELECT COUNT(*) FROM records WHERE log = ?1")?
+            .query_row([&self.log], |r| r.get::<_, i64>(0))
+            .map(|n| n as u64)
+    }
 }
 
 fn id_of(bytes: [u8; 32]) -> RecordId {
@@ -470,6 +480,33 @@ mod tests {
         assert!(store.has(&m.id()).unwrap() && store.has(&child.id()).unwrap());
         let grandchild = message(2, &[child.id()], 0);
         assert_eq!(store.append(&grandchild, &OwnerOrGranted).unwrap(), Append::Added);
+    }
+
+    /// Records what `ControlLog::count` said each time it was asked.
+    struct Counting(std::sync::Mutex<Vec<u64>>);
+
+    impl Authorizer for Counting {
+        fn check(&self, _: &Record, control: &ControlLog<'_>) -> Verdict {
+            let n = control.count().unwrap();
+            assert_eq!(n as usize, control.records().unwrap().len());
+            self.0.lock().unwrap().push(n);
+            Verdict::Accept
+        }
+    }
+
+    #[test]
+    fn control_log_count_is_the_number_of_stored_control_records() {
+        use records::Kind;
+        let mut store = Store::in_memory().unwrap();
+        let gate = Counting(Default::default());
+        let g = genesis();
+        store.append(&g, &gate).unwrap();
+        store.append(&message(0, &[], 0), &gate).unwrap();
+        let grant = naming(Kind::Grant, 1, &[g.id()], 1);
+        store.append(&grant, &gate).unwrap();
+        store.append(&message(1, &[], 0), &gate).unwrap();
+        // Only channel records reach the gate; channel records aren't counted.
+        assert_eq!(*gate.0.lock().unwrap(), vec![1, 2]);
     }
 
     /// Refuses everything, like an authority that hasn't seen a grant yet.
