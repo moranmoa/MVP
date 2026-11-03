@@ -195,6 +195,13 @@ fn incremental_vs_full_on_a_large_control_log() {
 
     let (resolver, total, _) = apply_all(&written);
     assert_eq!(resolver.state(), &expected);
+    // A live peer re-resolves only for the rare removal that voids
+    // applied records; main was at 5 on this log before membership.
+    assert!(
+        resolver.stats().rebuilds <= 15,
+        "too many re-resolves: {}",
+        describe(resolver.stats())
+    );
     println!(
         "incremental, written order: all {n} records in {total:?} ({:?} per record; {})",
         total / n as u32,

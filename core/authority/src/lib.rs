@@ -20,7 +20,9 @@
 //!   (counted in linear order), hasn't expired and its author isn't kicked.
 //!   A kick ends membership and blocks rejoining. Posts and grants need a
 //!   member. An invite is revoked by its author or by someone ranked above
-//!   them.
+//!   them, and the revoke voids every join through it that isn't one of its
+//!   causal ancestors: a join racing a revoke loses, whatever the linear
+//!   order, and the joiner needs a new invite.
 //! - A revoke voids the target's privileged actions that are concurrent with
 //!   it (not causal ancestors of it). A kick voids all of the target's
 //!   concurrent records. This blocks "backdating": signing new records whose
@@ -33,9 +35,11 @@
 //! content hashes. Records outside the control-log scope are ignored, and so
 //! is a record whose body doesn't parse for its kind (it stays in the graph,
 //! but is never accepted). Timestamps are informational, with one exception:
-//! a join's claimed `ts` is compared with its invite's expiry. A joiner can
-//! backdate it, so peers also drop joins whose `ts` is far from their own
-//! clock when they arrive (the caller's job).
+//! a join's claimed `ts` is compared with its invite's expiry. That expiry is
+//! soft, an accepted risk: a joiner holding the invite can backdate `ts`.
+//! Peers don't drop joins by their own clock, since peers with different
+//! clocks would then disagree. The hard controls are the use limit and a
+//! revoke-invite, which the client posts when an invite expires.
 
 use std::cell::RefCell;
 use std::cmp::Reverse;
@@ -486,10 +490,15 @@ struct Run {
     /// Targets of kicks and revokes accepted in any pass.
     kick_targets: HashSet<Actor>,
     revoke_targets: HashSet<Actor>,
+    /// Invites with a revoke-invite accepted in any pass.
+    revoked_invites: HashSet<RecordId>,
     /// Actors whose role history differs between passes: some pass accepted
     /// a privileged record about them that the final pass didn't, or the
-    /// other way round. Only the final pass's history is kept.
-    unsettled: HashSet<Actor>,
+    /// other way round. Only the final pass's history is kept. When every
+    /// pass accepted the same first kick of the actor, their history is
+    /// frozen from that kick on, so it only differs before it: the kick is
+    /// kept as the bound.
+    unsettled: HashMap<Actor, Option<RecordId>>,
     /// Same, for the genesis: ownership differed between passes.
     owner_unsettled: bool,
     /// Final pass: the writes each actor received, in linear order.
@@ -512,24 +521,35 @@ fn full_run<'a>(server: ServerId, records: impl IntoIterator<Item = &'a Record>)
     let mut excluded = vec![false; order.len()];
     let mut kick_targets = HashSet::new();
     let mut revoke_targets = HashSet::new();
-    let mut earlier_passes: Vec<BTreeSet<usize>> = Vec::new();
+    let mut revoked_invites = HashSet::new();
+    let mut earlier_passes: Vec<(BTreeSet<usize>, HashMap<Actor, usize>)> = Vec::new();
     loop {
         let pass = graph.fold(&excluded);
         kick_targets.extend(pass.kick_targets);
         revoke_targets.extend(pass.revoke_targets);
+        revoked_invites.extend(pass.revoked_invites);
         let fresh: Vec<usize> = pass.voided.into_iter().filter(|i| !excluded[*i]).collect();
         if fresh.is_empty() {
-            let mut unsettled = HashSet::new();
+            let mut unsettled = HashMap::new();
             let mut owner_unsettled = false;
-            for settled in &earlier_passes {
+            for (settled, _) in &earlier_passes {
                 for &i in pass.settled.symmetric_difference(settled) {
                     let author = graph.records[i].author();
                     match graph.actions[i].as_ref().and_then(|a| a.subject(author)) {
                         Some(target) => {
-                            unsettled.insert(target);
+                            unsettled.insert(target, None);
                         }
                         None => owner_unsettled = true,
                     }
+                }
+            }
+            // A kicked actor can't be granted, revoked, kicked or rejoin,
+            // so after the same first kick in every pass their history is
+            // the same in all of them.
+            for (actor, bound) in &mut unsettled {
+                let Some(&kick) = pass.first_kicks.get(actor) else { continue };
+                if earlier_passes.iter().all(|(_, kicks)| kicks.get(actor) == Some(&kick)) {
+                    *bound = Some(order[kick]);
                 }
             }
             let excluded = (0..order.len()).filter(|i| excluded[*i]).map(|i| order[i]).collect();
@@ -539,13 +559,14 @@ fn full_run<'a>(server: ServerId, records: impl IntoIterator<Item = &'a Record>)
                 excluded,
                 kick_targets,
                 revoke_targets,
+                revoked_invites,
                 unsettled,
                 owner_unsettled,
                 writes: pass.writes,
                 genesis: pass.genesis,
             };
         }
-        earlier_passes.push(pass.settled);
+        earlier_passes.push((pass.settled, pass.first_kicks));
         for i in fresh {
             excluded[i] = true;
         }
@@ -588,6 +609,8 @@ struct Graph<'a> {
     /// Positions of each record's deps.
     deps: Vec<Vec<usize>>,
     by_author: HashMap<Actor, Vec<usize>>,
+    /// Invite -> positions of the joins naming it.
+    joins: HashMap<RecordId, Vec<usize>>,
     /// What each accepted removal voids, worked out the first time a pass
     /// accepts it. Only removals need to know their ancestors, so a log full
     /// of posts costs no ancestry memory.
@@ -602,6 +625,9 @@ struct Pass {
     settled: BTreeSet<usize>,
     kick_targets: Vec<Actor>,
     revoke_targets: Vec<Actor>,
+    revoked_invites: Vec<RecordId>,
+    /// Position of the accepted kick of each kicked actor.
+    first_kicks: HashMap<Actor, usize>,
     writes: HashMap<Actor, Vec<Write>>,
     genesis: Option<RecordId>,
 }
@@ -617,8 +643,14 @@ impl<'a> Graph<'a> {
         for (i, record) in records.iter().enumerate() {
             by_author.entry(record.author()).or_default().push(i);
         }
-        let actions = records.iter().map(|r| Action::from_record(r)).collect();
-        Graph { records, actions, deps, by_author, voids: RefCell::default() }
+        let actions: Vec<Option<Action>> = records.iter().map(|r| Action::from_record(r)).collect();
+        let mut joins: HashMap<RecordId, Vec<usize>> = HashMap::new();
+        for (i, action) in actions.iter().enumerate() {
+            if let Some(Action::Join { invite }) = action {
+                joins.entry(*invite).or_default().push(i);
+            }
+        }
+        Graph { records, actions, deps, by_author, joins, voids: RefCell::default() }
     }
 
     fn fold(&self, excluded: &[bool]) -> Pass {
@@ -628,6 +660,8 @@ impl<'a> Graph<'a> {
             settled: BTreeSet::new(),
             kick_targets: Vec::new(),
             revoke_targets: Vec::new(),
+            revoked_invites: Vec::new(),
+            first_kicks: HashMap::new(),
             writes: HashMap::new(),
             genesis: None,
         };
@@ -648,7 +682,12 @@ impl<'a> Graph<'a> {
                     pass.state.posts.push(record.id());
                     continue;
                 }
-                Action::Invite { .. } | Action::RevokeInvite { .. } => continue,
+                Action::Invite { .. } => continue,
+                Action::RevokeInvite { invite } => {
+                    pass.voided.extend(self.voids_of(i));
+                    pass.revoked_invites.push(*invite);
+                    continue;
+                }
                 Action::Genesis => pass.genesis = Some(record.id()),
                 Action::Grant { .. } | Action::Join { .. } => {}
                 Action::Revoke { target } => {
@@ -658,6 +697,7 @@ impl<'a> Graph<'a> {
                 Action::Kick { target } => {
                     pass.voided.extend(self.voids_of(i));
                     pass.kick_targets.push(*target);
+                    pass.first_kicks.insert(*target, i);
                 }
             }
             if let Some((target, write)) = apply(&mut pass.state, record, action) {
@@ -668,14 +708,16 @@ impl<'a> Graph<'a> {
         pass
     }
 
-    /// What the accepted removal at `removal` voids: the target's records it
-    /// hadn't seen (only privileged ones for a revoke). Cached per removal;
-    /// the target and kind are read from the record itself, so the cache key
-    /// says everything.
+    /// What the accepted removal or revoke-invite at `removal` voids: the
+    /// target's records it hadn't seen (only privileged ones for a revoke),
+    /// or the joins through the invite it hadn't seen. Cached per record;
+    /// what it voids is read from the record itself, so the cache key says
+    /// everything.
     fn voids_of(&self, removal: usize) -> Vec<usize> {
-        let (target, privileged_only) = match &self.actions[removal] {
-            Some(Action::Revoke { target }) => (*target, true),
-            Some(Action::Kick { target }) => (*target, false),
+        let (candidates, privileged_only) = match &self.actions[removal] {
+            Some(Action::Revoke { target }) => (self.by_author.get(target), true),
+            Some(Action::Kick { target }) => (self.by_author.get(target), false),
+            Some(Action::RevokeInvite { invite }) => (self.joins.get(invite), false),
             _ => return Vec::new(),
         };
         let mut voids = self.voids.borrow_mut();
@@ -688,8 +730,10 @@ impl<'a> Graph<'a> {
                     stack.extend_from_slice(&self.deps[i]);
                 }
             }
-            let by_target = self.by_author.get(&target).into_iter().flatten().copied();
-            by_target
+            candidates
+                .into_iter()
+                .flatten()
+                .copied()
                 .filter(|&i| {
                     i != removal
                         && !seen.get(i).copied().unwrap_or(false)

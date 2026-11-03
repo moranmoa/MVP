@@ -180,14 +180,27 @@ fn a_higher_rank_revokes_anyone_elses_invite() {
 }
 
 #[test]
-fn a_join_concurrent_with_a_revoke_is_settled_by_linear_order() {
+fn a_revoke_voids_every_join_it_had_not_seen() {
     let g = genesis();
     let link = invite(0, 1, vec![g.id()], 0, 0);
-    let revoke = rec(0, 2, vec![link.id()], Action::RevokeInvite { invite: link.id() });
-    let racer = join(1, 0, &link);
+    let seen = join(1, 0, &link);
+    let revoke = rec(0, 2, vec![link.id(), seen.id()], Action::RevokeInvite { invite: link.id() });
+    // Joins racing the revoke lose whichever side of it the linear order
+    // puts them, and so do their posts.
+    let racers: Vec<Record> = (2..8).map(|n| join(n, 0, &link)).collect();
+    assert!(racers.iter().any(|r| r.id() < revoke.id()));
+    assert!(racers.iter().any(|r| r.id() > revoke.id()));
+    let post = rec(2, 1, vec![racers[0].id()], Action::Post { text: "hi".into() });
+    let late = rec(8, 0, vec![revoke.id(), link.id()], Action::Join { invite: link.id() });
 
-    let state = all_orders(&[g, link, revoke.clone(), racer.clone()]);
-    assert_eq!(state.is_member(actor(1)), racer.id() < revoke.id());
+    let mut records = vec![g, link.clone(), seen.clone(), revoke.clone(), post.clone(), late];
+    records.extend(racers);
+    let state = all_orders(&records);
+    assert_eq!(state.members, [actor(0), actor(1)].into());
+    assert!(state.accepted.contains(&revoke.id()) && !state.accepted.contains(&post.id()));
+    let entry = state.invites[&link.id()];
+    assert!(entry.revoked);
+    assert_eq!(entry.uses, 1);
 }
 
 #[test]
