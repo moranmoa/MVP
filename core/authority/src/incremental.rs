@@ -21,9 +21,9 @@
 //! between passes) so it can judge a new record the way the reference would,
 //! and falls back to a full re-resolve when the earlier passes matter.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use records::{Record, RecordId, Scope};
+use records::{Record, RecordId, Scope, ServerId};
 
 use crate::{apply, full_run, permitted, Action, Actor, Role, State, View, Write};
 
@@ -45,16 +45,50 @@ enum Fallback {
     Other,
 }
 
+/// What [`Resolver::insert`] did with a record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Inserted {
+    /// It joined the log, along with any waiting records it unblocked.
+    Joined,
+    /// Some of its deps haven't arrived; it waits for them. If the pending
+    /// queue was full, the record that had waited longest made room and is
+    /// handed back: request its deps (or the record) again later.
+    Pending { evicted: Option<Box<Record>> },
+    /// A duplicate, another server's record, or not a control-log record.
+    Ignored,
+}
+
+/// Default for how many records may wait on missing deps at once. Anyone can
+/// sign records that point at deps which will never arrive, so the queue is
+/// bounded (at most about 26 MB of control records), and when it is full the
+/// oldest waiting record is evicted: junk ages out instead of holding the
+/// queue.
+pub const MAX_PENDING: usize = 4096;
+
+/// A record waiting on deps.
+struct Waiting {
+    /// How many of its deps haven't joined.
+    missing: usize,
+    /// Arrival number, for evicting the oldest.
+    arrival: u64,
+}
+
 /// Holds one server's control log and its resolved state, updated as records
 /// arrive in any order.
-#[derive(Default)]
 pub struct Resolver {
+    /// The one server whose records this resolver accepts.
+    server: ServerId,
+    /// Most records that may wait on missing deps.
+    pending_limit: usize,
     /// Every control record received, whether or not its deps have arrived.
     known: HashMap<RecordId, Record>,
-    /// Records still waiting on deps: how many are missing.
-    missing: HashMap<RecordId, usize>,
+    /// Records still waiting on deps.
+    missing: HashMap<RecordId, Waiting>,
     /// Missing dep -> the records waiting on it.
     waiting: HashMap<RecordId, Vec<RecordId>>,
+    /// Waiting records by arrival, oldest first.
+    arrivals: BTreeMap<u64, RecordId>,
+    next_arrival: u64,
 
     /// Records that joined the log, in the reference's linear order.
     order: Vec<RecordId>,
@@ -81,8 +115,43 @@ pub struct Resolver {
 }
 
 impl Resolver {
-    pub fn new() -> Self {
-        Self::default()
+    /// A resolver for `server` (see [`ServerId::derive`]).
+    pub fn new(server: ServerId) -> Self {
+        Self::with_pending_limit(server, MAX_PENDING)
+    }
+
+    /// Like [`Self::new`], with room for `limit` (at least 1) records waiting
+    /// on deps.
+    pub fn with_pending_limit(server: ServerId, limit: usize) -> Self {
+        Resolver {
+            server,
+            pending_limit: limit.max(1),
+            known: HashMap::new(),
+            missing: HashMap::new(),
+            waiting: HashMap::new(),
+            arrivals: BTreeMap::new(),
+            next_arrival: 0,
+            order: Vec::new(),
+            pos: HashMap::new(),
+            actions: HashMap::new(),
+            by_author: HashMap::new(),
+            touch: HashMap::new(),
+            state: State::default(),
+            writes: HashMap::new(),
+            genesis: None,
+            excluded: HashSet::new(),
+            kick_targets: HashSet::new(),
+            revoke_targets: HashSet::new(),
+            unsettled: HashSet::new(),
+            owner_unsettled: false,
+            stale: None,
+            stats: Stats::default(),
+        }
+    }
+
+    /// How many records are waiting on missing deps.
+    pub fn pending(&self) -> usize {
+        self.missing.len()
     }
 
     pub fn state(&self) -> &State {
@@ -93,36 +162,45 @@ impl Resolver {
         self.stats
     }
 
-    /// Adds an arriving record. Duplicates and records outside the control
-    /// log are ignored; records with missing deps wait for them.
-    pub fn insert(&mut self, record: Record) {
+    /// Adds an arriving record. Duplicates, other servers' records and
+    /// records outside the control log are ignored; records with missing
+    /// deps wait for them; when the pending queue is full, the oldest waiting
+    /// record is evicted and returned.
+    pub fn insert(&mut self, record: Record) -> Inserted {
         let id = record.id();
-        if record.scope() != Scope::Control || self.known.contains_key(&id) {
-            return;
+        if record.server() != self.server
+            || record.scope() != Scope::Control
+            || self.known.contains_key(&id)
+        {
+            return Inserted::Ignored;
         }
-        let mut missing = 0;
-        for dep in record.deps() {
-            if !self.pos.contains_key(dep) {
-                missing += 1;
+        let missing: Vec<RecordId> =
+            record.deps().iter().filter(|dep| !self.pos.contains_key(*dep)).copied().collect();
+        if !missing.is_empty() {
+            let evicted =
+                if self.missing.len() >= self.pending_limit { self.evict_oldest() } else { None };
+            for dep in &missing {
                 self.waiting.entry(*dep).or_default().push(id);
             }
+            let arrival = self.next_arrival;
+            self.next_arrival += 1;
+            self.arrivals.insert(arrival, id);
+            self.missing.insert(id, Waiting { missing: missing.len(), arrival });
+            self.known.insert(id, record);
+            return Inserted::Pending { evicted: evicted.map(Box::new) };
         }
         self.known.insert(id, record);
-        if missing > 0 {
-            self.missing.insert(id, missing);
-            return;
-        }
 
         let mut ready = vec![id];
         while let Some(id) = ready.pop() {
-            if !self.join(id) {
-                continue;
-            }
+            self.join(id);
             for waiter in self.waiting.remove(&id).unwrap_or_default() {
-                let count = self.missing.get_mut(&waiter).expect("waiter is pending");
-                *count -= 1;
-                if *count == 0 {
+                let entry = self.missing.get_mut(&waiter).expect("waiter is pending");
+                entry.missing -= 1;
+                if entry.missing == 0 {
+                    let arrival = entry.arrival;
                     self.missing.remove(&waiter);
+                    self.arrivals.remove(&arrival);
                     ready.push(waiter);
                 }
             }
@@ -130,15 +208,29 @@ impl Resolver {
         if let Some(reason) = self.stale.take() {
             self.rebuild(reason);
         }
+        Inserted::Joined
     }
 
-    /// Puts a record whose deps have all joined into the log. Returns false
-    /// if it can never join (its deps belong to another server).
-    fn join(&mut self, id: RecordId) -> bool {
-        let record = &self.known[&id];
-        if record.deps().iter().any(|dep| self.known[dep].server() != record.server()) {
-            return false;
+    /// Forgets the record that has waited longest, so a flood of records
+    /// whose deps never arrive ages out instead of holding the queue.
+    fn evict_oldest(&mut self) -> Option<Record> {
+        let (_, id) = self.arrivals.pop_first()?;
+        self.missing.remove(&id);
+        let record = self.known.remove(&id).expect("waiting records are known");
+        for dep in record.deps() {
+            if let Some(waiters) = self.waiting.get_mut(dep) {
+                waiters.retain(|waiter| *waiter != id);
+                if waiters.is_empty() {
+                    self.waiting.remove(dep);
+                }
+            }
         }
+        Some(record)
+    }
+
+    /// Puts a record whose deps have all joined into the log.
+    fn join(&mut self, id: RecordId) {
+        let record = &self.known[&id];
         let author = record.author();
         let action = Action::from_record(record);
         let at = self.insertion_point(record);
@@ -164,7 +256,6 @@ impl Resolver {
                 Err(reason) => self.stale = Some(reason),
             }
         }
-        true
     }
 
     /// Where the reference's min-ID topological sort puts a new record:
@@ -379,8 +470,18 @@ impl Resolver {
     }
 
     fn rebuild(&mut self, reason: Fallback) {
-        let run = full_run(self.order.iter().map(|id| &self.known[id]));
-        assert_eq!(run.order, self.order, "incremental order diverged from the reference");
+        let run = full_run(self.server, self.order.iter().map(|id| &self.known[id]));
+        if run.order != self.order {
+            // Can't happen unless `insertion_point` has a bug. Take the
+            // reference's order rather than panic on records a peer sent.
+            debug_assert!(false, "incremental order diverged from the reference");
+            self.order = run.order;
+            self.pos = self.order.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+            let pos = &self.pos;
+            for list in self.touch.values_mut() {
+                list.sort_by_key(|id| pos[id]);
+            }
+        }
         self.state = run.state;
         self.writes = run.writes;
         self.genesis = run.genesis;
