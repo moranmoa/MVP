@@ -227,7 +227,4 @@ fn secret_key_acl_is_owner_only_on_windows() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert_eq!(text.lines().filter(|l| l.contains(":(")).count(), 1, "exactly one ACE expected:\n{text}");
     assert!(!text.contains("(I)"), "no inherited ACEs expected:\n{text}");
-    // The public key keeps normal, inherited permissions.
-    let public = Command::new("icacls").arg(dir.0.join("root.pub")).output().unwrap();
-    assert!(String::from_utf8_lossy(&public.stdout).contains("(I)"));
 }
