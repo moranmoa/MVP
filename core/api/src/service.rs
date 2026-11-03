@@ -18,7 +18,7 @@ use zeroize::Zeroizing;
 use crate::chat;
 use crate::db::Db;
 use crate::model::{self, GenesisBody, Log, ServerView};
-use crate::ports::{CipherError, GroupCipher, Ports, SharedSecrets};
+use crate::ports::{CipherError, GroupCipher, Network, Ports, SharedSecrets};
 use crate::types::*;
 
 const DEFAULT_STORAGE_LIMIT: u64 = 5 * 1024 * 1024 * 1024;
@@ -85,7 +85,9 @@ struct Inner {
     logs: HashMap<ServerId, Log>,
     /// Messages already announced to the UI, per server, with what was
     /// announced (edit time, deleted), so sync emits only what is new.
-    announced: HashMap<ServerId, HashMap<RecordId, (Option<u64>, bool)>>,
+    announced: HashMap<ServerId, HashMap<RecordId, Announced>>,
+    /// For my messages' send state (B6).
+    net: Arc<dyn Network>,
 }
 
 pub struct Core {
@@ -126,7 +128,14 @@ impl Core {
         let db = Db::open(config.db_path.as_deref())?;
         let vault = Vault::new(SharedSecrets(ports.secrets.clone()));
         let mut inner =
-            Inner { db, vault, me: None, logs: HashMap::new(), announced: HashMap::new() };
+            Inner {
+            db,
+            vault,
+            me: None,
+            logs: HashMap::new(),
+            announced: HashMap::new(),
+            net: ports.network.clone(),
+        };
         if inner.vault.state().map_err(vault_error)? == VaultState::Ready {
             let phrase = inner.vault.open().map_err(vault_error)?;
             inner.me = Some(inner.load_me(phrase)?);
@@ -663,7 +672,7 @@ impl Core {
         let messages = shown[start..end]
             .iter()
             .enumerate()
-            .map(|(i, s)| message_json(s, start + i, channel, me))
+            .map(|(i, s)| message_json(s, start + i, channel, me, &*inner.net))
             .collect();
         Ok(MessageRange { channel_id: channel_id.to_owned(), start, messages })
     }
@@ -915,10 +924,11 @@ impl Inner {
         if self.announced.contains_key(&server) {
             return Ok(());
         }
+        let me = self.me.as_ref().map(Me::key);
         let mut seen = HashMap::new();
         for channel in self.known(server)? {
             for s in self.shown(cipher, server, channel)? {
-                seen.insert(s.record.id(), (s.edited_at, s.deleted));
+                seen.insert(s.record.id(), announced(s, me, &*self.net));
             }
         }
         self.announced.insert(server, seen);
@@ -938,11 +948,11 @@ impl Inner {
             let shown = self.shown(cipher, server, channel)?;
             let seen = self.announced.entry(server).or_default();
             for (index, s) in shown.iter().enumerate() {
-                let state = (s.edited_at, s.deleted);
+                let state = announced(s, me, &*self.net);
                 let event = match seen.insert(s.record.id(), state) {
-                    None => Event::MessageAdded(message_json(s, index, channel, me)),
+                    None => Event::MessageAdded(message_json(s, index, channel, me, &*self.net)),
                     Some(old) if old != state => {
-                        Event::MessageUpdated(message_json(s, index, channel, me))
+                        Event::MessageUpdated(message_json(s, index, channel, me, &*self.net))
                     }
                     Some(_) => continue,
                 };
@@ -1076,8 +1086,9 @@ impl Inner {
             .find(|(_, s)| s.record.id() == id)
             .ok_or(ErrorCode::Internal)?;
         // Announced by the command itself; sync won't repeat it.
-        self.announced.entry(server).or_default().insert(s.record.id(), (s.edited_at, s.deleted));
-        Ok(message_json(s, index, channel, me))
+        let state = announced(s, me, &*self.net);
+        self.announced.entry(server).or_default().insert(s.record.id(), state);
+        Ok(message_json(s, index, channel, me, &*self.net))
     }
 
     /// A fresh key for `channel`, for `members` (we must be a moderator or
@@ -1465,14 +1476,29 @@ fn auth_deps(view: &ServerView) -> Vec<RecordId> {
     heads[heads.len().saturating_sub(records::MAX_AUTH_DEPS)..].to_vec()
 }
 
-/// `sendState: "sent"` on my own messages (they were published).
+/// What was last announced of a message: edit time, deleted, my send state.
+type Announced = (Option<u64>, bool, Option<SendState>);
+
+fn announced(s: &chat::Shown, me: Option<PublicKey>, net: &dyn Network) -> Announced {
+    (s.edited_at, s.deleted, send_state(s, me, net))
+}
+
+/// B6, on my own messages only: `pending` until it left this device,
+/// `sent` once it did (`NodeEvent::Sent`), `received` once a member's node
+/// acknowledged it (`NodeEvent::Delivered`). A network that doesn't track
+/// this (in process) says `sent`.
+fn send_state(s: &chat::Shown, me: Option<PublicKey>, net: &dyn Network) -> Option<SendState> {
+    (Some(s.record.author()) == me)
+        .then(|| net.send_state(s.record.id()).unwrap_or(SendState::Sent))
+}
+
 fn message_json(
     s: &chat::Shown,
     index: usize,
     channel: ChannelId,
     me: Option<PublicKey>,
+    net: &dyn Network,
 ) -> Message {
-    let mine = Some(s.record.author()) == me;
     Message {
         id: model::hex_id(s.record.id().as_bytes()),
         channel_id: model::hex_id(channel.as_bytes()),
@@ -1482,7 +1508,7 @@ fn message_json(
         created_at: s.record.ts(),
         edited_at: s.edited_at,
         deleted: s.deleted.then_some(true),
-        send_state: mine.then_some(SendState::Sent),
+        send_state: send_state(s, me, net),
     }
 }
 
