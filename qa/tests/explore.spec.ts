@@ -275,7 +275,7 @@ test.describe('servers', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('messages', () => {
-  test('mixed RTL/LTR and emoji messages and names send and display (direction: see UX-01)', async ({ page }) => {
+  test('mixed RTL/LTR and emoji messages and names send and display (direction: fixed UX-01)', async ({ page }) => {
     await onboard(page, { displayName: 'Moran מורן' });
     await createServer(page, 'Mixed מעורב');
     const bodies = ['hello שלום 123 world', 'שלום hello, מה נשמע? 🎮🔥', '(1) – רשימה', '👨‍👩‍👧‍👦🏳️‍🌈🇮🇱'];
@@ -289,8 +289,8 @@ test.describe('messages', () => {
     await shot(page, 'mixed-bidi');
   });
 
-  test('UX-01 message direction follows most strong letters, aligned to the interface side', async ({ page }) => {
-    bug('UX-01'); // ux-review-1 blocker, backlog B17
+  test('fixed UX-01: message direction follows most strong letters, aligned to the interface side', async ({ page }) => {
+    // ux-review-1 blocker, fixed by PR #24 (B17); kept as a regression check.
     await onboard(page);
     await createServer(page, 'כיוון');
     // The five strings from UX-01, with the direction they should get in a Hebrew interface.
@@ -305,6 +305,7 @@ test.describe('messages', () => {
       await composer(page).fill(text);
       await composer(page).press('Enter');
     }
+    await expect(page.locator('.msg-body')).toHaveCount(cases.length);
     await shot(page, 'ux-01-direction');
     const shown = await page.locator('.msg-body').evaluateAll((els) =>
       els.map((el) => {
@@ -387,9 +388,11 @@ test.describe('messages', () => {
     await mine.getByRole('button', { name: 'תגובה' }).click();
     await composer(page).fill('תגובה לעצמי');
     await composer(page).press('Enter');
-    await expect(lastMessage(page).getByRole('button', { name: 'ההודעה המקורית' })).toContainText('אחרי עריכה');
-    await lastMessage(page).hover();
-    await lastMessage(page).getByRole('button', { name: 'מחיקה' }).click();
+    // The demo server's members keep talking, so find the reply by its text, not as the last message.
+    const reply = page.getByRole('article').filter({ hasText: 'תגובה לעצמי' }).last();
+    await expect(reply.getByRole('button', { name: 'ההודעה המקורית' })).toContainText('אחרי עריכה');
+    await reply.hover();
+    await reply.getByRole('button', { name: 'מחיקה' }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'מחיקה' }).click();
     await expect(page.getByText('ההודעה נמחקה').last()).toBeVisible();
   });
@@ -700,15 +703,17 @@ test.describe('hostile data from peers', () => {
     expect(errors).toEqual([]);
   });
 
-  test('QA-17 a 5,000-character message is accepted but shown cut for everyone', async ({ page }) => {
+  test('QA-17 one 4,000-code-point limit with a counter from 3,800', async ({ page }) => {
     bug('QA-17');
     await onboard(page);
     await createServer(page, 'קיצוץ');
-    // 5,000 Latin letters = 5,000 bytes: well under the 16 KiB core limit.
+    // Decided (product lead, PR #27): one limit of 4,000 code points in the composer,
+    // the display and the core, with a visible counter from 3,800.
+    await composer(page).fill('a'.repeat(3_900));
+    await expect(page.locator('.composer')).toContainText(/3[,.\s]?900|\b100\b/);
+    // 5,000 letters must not be cut silently: the composer refuses or says so.
     await composer(page).fill('a'.repeat(5_000));
     await composer(page).press('Enter');
-    // Expected: either the composer refuses it up front, or the whole message is shown.
-    // Actual: the body is cut to 4,000 characters (BODY_MAX) with no notice.
-    await expect(lastMessage(page).locator('.msg-body')).toHaveText(/^a{5000}/);
+    await expect(lastMessage(page).locator('.msg-body')).not.toHaveText(/^a{4000}$/);
   });
 });

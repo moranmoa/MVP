@@ -14,6 +14,14 @@ Closed: QA-03, QA-13. Still open: QA-01, 02, 04–12, 14–16, UX-01. New:
 QA-17, QA-18, QA-19. PR #10's hostile-data demo, settings validation, phone
 member sheet and English phone layout passed (see "What passed").
 
+**Re-test 2 – `959b492` (after PR #5, #8, #9, #11, #17, #24), 2026-11-03.**
+Smoke 8/8; explore 46/46 as expected. `cargo test --workspace` 218 green
+(new crates `identity` and `groupkeys` included); cli-checks 37/37. Closed:
+QA-14, QA-15 (PR #8), QA-16 (PR #5), UX-01 (PR #24, kept as a regression
+check). Updated after the PR #27 review: QA-17's expected result (one
+4,000-code-point limit with a counter from 3,800), QA-18 to Medium, QA-03's
+resize follow-up in B11e. No new bugs.
+
 Severity (same scale as TEST_PLAN.md): **Blocker** – identity or data loss,
 or a security bypass; no release. **High** – a main flow works only with a
 workaround, or an MVP security requirement is missed. **Medium** – wrong
@@ -30,7 +38,7 @@ The backlog tasks (B-numbers) are from the product owner's review
 | --- | --- | --- | --- |
 | QA-01 | Blocker | open | B19 (screen returns to the words) + B2 (words kept until checked, `getRecoveryWords` after restart) |
 | QA-02 | Blocker | open | B11e |
-| QA-03 | High | **closed** – fixed by PR #10 (512 KB limit with a message; verified 2026-11-03) | B11e + ש-22 (resize in the core, UI error when `updateProfile` rejects) |
+| QA-03 | High | **closed** – fixed by PR #10 (512 KB limit with a message; verified 2026-11-03) | B11e – the resize behaviour (ש-22: scale down pictures up to 25 MB / 40 MP) is tracked there, plus a UI error when `updateProfile` rejects |
 | QA-04 | Low | open | B7 |
 | QA-05 | Low | open | B22 |
 | QA-06 | Low | open – since PR #10 the server is named "?" instead of blank, still no error | B23 |
@@ -41,12 +49,12 @@ The backlog tasks (B-numbers) are from the product owner's review
 | QA-11 | Low | open | B22 |
 | QA-12 | Medium | open | B12 (with UX-17) |
 | QA-13 | High | **closed** – fixed by PR #10 (`guardCore` strips bidi controls; verified 2026-11-03) | B23 (new, P1: neutralise bidi and invisible characters in UI and core) |
-| QA-14 | High | **assigned** – updater, PR #8 | B8 (max validity 30 days) |
-| QA-15 | Low | **assigned** – updater, PR #8 | B8 (`issued_at` at most 24 h ahead) |
-| QA-16 | Medium | **assigned** – spike-peer, PR #5 | B5 (fix before the NAT experiment) |
-| UX-01 | Blocker | open (reported in ux-review-1) | B17 – repro `UX-01` in explore.spec.ts |
-| QA-17 | Medium | open – new in PR #10 | B6 (one limit for composer, display and core) |
-| QA-18 | High | open – new | B12 / UX-05 |
+| QA-14 | High | **closed** – fixed by PR #8 (verified 2026-11-03, cli-checks) | B8 (max validity 30 days) |
+| QA-15 | Low | **closed** – fixed by PR #8 (verified 2026-11-03, cli-checks) | B8 (`issued_at` at most 24 h ahead) |
+| QA-16 | Medium | **closed** – fixed by PR #5 (verified 2026-11-03, cli-checks: error within 60 s) | B5 (fix before the NAT experiment) |
+| UX-01 | Blocker | **closed** – fixed by PR #24 (verified 2026-11-03) | B17 – regression check `fixed UX-01` in explore.spec.ts |
+| QA-17 | Medium | open – limit decided in the PR #27 review | B6 (one limit of 4,000 code points for composer, display and core; counter from 3,800) |
+| QA-18 | Medium | open – Medium for the closed alpha (the phone app is phase 3) | B12 / UX-05; the fix ships with B19 |
 | QA-19 | Low | open – new | B12 |
 
 ## Bugs
@@ -69,8 +77,8 @@ The backlog tasks (B-numbers) are from the product owner's review
 | QA-14 | **High** | updater | A manifest that never expires can be signed and is accepted | `updater sign-manifest` with `expires_at = 18446744073709551615`, then `verify`. | Spec (security, required before alpha): signed metadata with an expiry so a user cannot be frozen on an old release. A maximum validity window (e.g. 30 days) enforced in `ManifestBody::validate`. | Signed and verified. Any such manifest can be replayed forever to hide newer releases from a client that lost its `ClientPolicy` state. | `cli-checks.sh` |
 | QA-15 | Low | updater | A manifest issued a year in the future is accepted | Body with `issued_at = now + 365 d`, sign, `verify`. | Refused, or at least warned (clock skew allowance). | `signatures ok … exit 0`. | `cli-checks.sh` |
 | QA-16 | Medium | sync | `spike-peer` hangs silently when the relay is unreachable or the relay ID is wrong | `spike-peer dial /ip4/127.0.0.1/tcp/9/p2p/<any id> <any id>` (or a mistyped relay address from a tester). | A `RESULT path=failed …` line or an error within the 30 s dial timeout. | Runs forever with no output after the peer-ID line. The wait for the relay's `identify` has no timeout and ignores `OutgoingConnectionError`; the 30 s deadline starts only afterwards. Testers following `TESTING.md` will just wait. | `cli-checks.sh` |
-| QA-17 | Medium | ui, records | A 4,001–16,384-byte message is accepted but shown cut for everyone, silently | Send 5,000 × "a" (5,000 bytes, under the 16 KiB `Kind::Message` limit). | One limit everywhere: the composer refuses what will not be shown in full, or the full message is shown. | The sanitizer (`BODY_MAX = 4000`, PR #10) cuts the body to 4,000 characters for every reader, including the sender, and the "ההודעה ארוכה מדי" notice does not appear. Extends QA-10. | `QA-17` |
-| QA-18 | High | ui | The recovery-word check does not fit a 375 px phone; "בדיקה" is off-screen | Phone 375×812: onboarding to "בדיקה קצרה". | The step fits the width; the button can be tapped. | Page is 516 px wide (141 px sideways overflow); "בדיקה" is at x = 416, outside the screen, and the hint text is cut on the left. Phone onboarding cannot be finished without sideways scrolling. Same root as UX-05. Screenshot `test-results/explore-shots/phone-word-check.png`. | `QA-18` |
+| QA-17 | Medium | ui, records | A 4,001–16,384-byte message is accepted but shown cut for everyone, silently | Send 5,000 × "a" (5,000 bytes, under the 16 KiB `Kind::Message` limit). | Decided: one limit of 4,000 code points everywhere (composer, display, core), with a visible counter from 3,800; nothing is cut silently. | The sanitizer (`BODY_MAX = 4000`, PR #10) cuts the body to 4,000 characters for every reader, including the sender, and the "ההודעה ארוכה מדי" notice does not appear. Extends QA-10. | `QA-17` |
+| QA-18 | Medium | ui | The recovery-word check does not fit a 375 px phone; "בדיקה" is off-screen | Phone 375×812: onboarding to "בדיקה קצרה". | The step fits the width; the button can be tapped. | Page is 516 px wide (141 px sideways overflow); "בדיקה" is at x = 416, outside the screen, and the hint text is cut on the left. Phone onboarding cannot be finished without sideways scrolling. Same root as UX-05. Screenshot `test-results/explore-shots/phone-word-check.png`. | `QA-18` |
 | QA-19 | Low | ui | Reply reference is a 19 px tap target on phones | Phone 375×812, demo server, a message that replies to another. | Every control ≥ 44×44 px (PR #10 goal). | "ההודעה המקורית" button is about 212×19 px. | `QA-19` |
 
 ### Seen in code, not reproduced through the mock
