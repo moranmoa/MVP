@@ -10,7 +10,8 @@ const { EventEmitter } = require('node:events');
 const { relayFor, validRelay, MAX_RELAY } = require('../src/config');
 const { Sidecar } = require('../src/sidecar');
 
-const RELAY = '/dns4/relay.example.org/tcp/4001/p2p/12D3KooWExampleExampleExampleExampleExample';
+const ID = '12D3KooW' + 'A'.repeat(44);
+const RELAY = `/dns4/relay.example.org/tcp/443/wss/p2p/${ID}`;
 
 function resources(content) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mvs-res-'));
@@ -20,11 +21,17 @@ function resources(content) {
 
 test('valid relay addresses', () => {
   assert.equal(validRelay(RELAY), true);
-  assert.equal(validRelay('/ip4/192.0.2.1/udp/4001/quic-v1'), true);
+  assert.equal(validRelay(`/ip4/192.0.2.1/udp/4001/quic-v1/p2p/${ID}`), true);
 });
 
 test('invalid relay values are refused', () => {
-  for (const bad of ['', '/', 'relay.example.org:4001', ` ${RELAY}`, `${RELAY} --inspect`, `${RELAY}\n`, '/' + 'a'.repeat(MAX_RELAY), 42, null, {}, ['/x']]) {
+  for (const bad of [
+    // #114: the peer ID must be pinned
+    '/dns4/relay.example.org/tcp/443/wss',
+    `/dns4/relay.example.org/tcp/443/wss/p2p/${ID.slice(0, 40)}`,
+    `/dns4/relay.example.org/tcp/443/wss/p2p/${ID}0OIl`,
+    `/dns4/relay.example.org/tcp/443/wss/p2p/${ID}/extra`,
+    '', '/', 'relay.example.org:4001', ` ${RELAY}`, `${RELAY} --inspect`, `${RELAY}\n`, '/' + 'a'.repeat(MAX_RELAY), 42, null, {}, ['/x']]) {
     assert.equal(validRelay(bad), false, String(bad).slice(0, 40));
   }
 });

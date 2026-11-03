@@ -3,7 +3,7 @@
 // puts it next to the app as resources/mvs-config.json. A checkout uses the
 // MVS_RELAY environment variable instead.
 //
-//   { "relay": "/dns4/<host>/tcp/4001/p2p/<peer id>" }
+//   { "relay": "/dns4/<host>/tcp/443/wss/p2p/<peer id>" }
 //
 // Anything malformed is ignored with a warning: the app then runs without a
 // relay (offline) rather than handing the core something unchecked.
@@ -15,9 +15,18 @@ const path = require('node:path');
 
 const MAX_RELAY = 512;
 
-/** A multiaddr-shaped string: starts with '/', no whitespace, bounded. */
+/** The relay's peer ID must be pinned (#114): the address ends in /p2p/<base58 ID>. */
+const PEER_SUFFIX = /\/p2p\/[1-9A-HJ-NP-Za-km-z]{46,60}$/;
+
+/** A multiaddr-shaped string: starts with '/', no whitespace, bounded, ends in /p2p/<id>. */
 function validRelay(value) {
-  return typeof value === 'string' && value.length > 1 && value.length <= MAX_RELAY && value.startsWith('/') && !/\s/.test(value);
+  return (
+    typeof value === 'string' &&
+    value.length <= MAX_RELAY &&
+    value.startsWith('/') &&
+    !/\s/.test(value) &&
+    PEER_SUFFIX.test(value)
+  );
 }
 
 /**
