@@ -1,13 +1,17 @@
 import { createContext, useContext, useEffect } from 'react';
 import type { CoreApi, CoreEventName, CoreEvents } from './api';
+import { createIpcCore, hasDesktopBridge } from './ipc';
 import { MockCore } from './mock';
 
 export type { CoreApi } from './api';
 export * from './types';
 
 /**
- * Picks the core implementation. When the Rust core lands, this is the one
- * place that changes: e.g. `if ('__TAURI_INTERNALS__' in window) return new TauriCore()`.
+ * Picks the core implementation. In the desktop app (B1, Electron) the preload
+ * script exposes `window.mvs` and the real core is reached over IPC; the URL
+ * flags are ignored there. Anywhere else (browser, tests, screenshots) it is
+ * the mock. Either way App wraps the result in guardCore() once, so what the
+ * core returns is cleaned before the UI sees it.
  *
  * URL flags for the mock (handy for demos and screenshots):
  *   ?demo=1          start signed in with sample servers
@@ -19,6 +23,7 @@ export * from './types';
  *   ?bidi=1          add the mixed-direction messages of B17 §2 to "כללי"
  */
 export function createCore(search = typeof location !== 'undefined' ? location.search : ''): CoreApi {
+  if (hasDesktopBridge()) return createIpcCore();
   const params = new URLSearchParams(search);
   const demo = params.get('demo');
   const storage = typeof localStorage !== 'undefined' ? localStorage : undefined;
