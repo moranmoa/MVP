@@ -125,6 +125,7 @@
   "create.submit": "Create",
   "create.needCheck": "Before creating a server, check your recovery words – they also protect your ownership of the server.",
   "create.error.name": "Give the server a name.",
+  "name.invalidChars": "The name contains characters that can't be used in names.",
   "create.error.age": "Choose an age limit.",
   "create.done.title": "Your server is ready",
   "create.done.body": "Here's the invite link. Send it to friends.",

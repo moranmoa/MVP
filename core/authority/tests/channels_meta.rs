@@ -6,8 +6,8 @@
 mod common;
 
 use authority::{
-    channel_name_ok, resolve, sign_new_server, Action, Channel, ChannelId, Record, Resolver, Role,
-    State, MAX_CHANNEL_NAME,
+    channel_name_ok, display_text_ok, resolve, sign_new_server, Action, Channel, ChannelId, Record,
+    Resolver, Role, State, MAX_CHANNEL_NAME,
 };
 use common::{actor, founded, key, rec, server, NONCE};
 mod rng;
@@ -106,6 +106,73 @@ fn channel_names_count_code_points() {
     assert!(!channel_name_ok(&"ש".repeat(MAX_CHANNEL_NAME + 1)));
     assert!(!channel_name_ok(""));
     assert!(channel_name_ok("😀"));
+}
+
+/// B23: no bidi controls, other control characters or zero-width characters
+/// in names, in the helper and in records.
+#[test]
+fn names_refuse_invisible_and_direction_characters() {
+    let hostile = [
+        "\u{202A}x",
+        "\u{202B}x",
+        "\u{202C}x",
+        "\u{202D}x",
+        "a\u{202E}gnp.exe",
+        "\u{2066}x",
+        "\u{2067}x",
+        "\u{2068}x",
+        "\u{2069}x",
+        "a\u{200E}b",
+        "a\u{200F}b",
+        "a\u{061C}b",
+        "a\u{0000}b",
+        "a\nb",
+        "a\tb",
+        "a\u{007F}b",
+        "a\u{0085}b",
+        "a\u{009B}b",
+        "ad\u{200B}min",
+        "a\u{200C}b",
+        "👨\u{200D}👩",
+        "a\u{2060}b",
+        "\u{FEFF}general",
+    ];
+    for name in hostile {
+        assert!(!display_text_ok(name), "{name:?}");
+        assert!(!channel_name_ok(name), "{name:?}");
+    }
+    for name in ["general", "כללי", "عام", "חדשות-ועדכונים", "😀", "a b", "café"]
+    {
+        assert!(display_text_ok(name), "{name:?}");
+        assert!(channel_name_ok(name), "{name:?}");
+    }
+
+    // A record with a hostile name never parses, so it is never accepted.
+    let (mut records, heads) = founded(&[]);
+    let refused: Vec<Record> = hostile
+        .iter()
+        .enumerate()
+        .map(|(seq, name)| {
+            let body = [RANDOM.as_bytes().as_slice(), &[0, 0], name.as_bytes()].concat();
+            Draft {
+                server: server(),
+                scope: Scope::Control,
+                seq: 10 + seq as u64,
+                deps: heads.clone(),
+                auth_deps: vec![],
+                ts: 0,
+                kind: Kind::ChannelCreate,
+                body,
+            }
+            .sign(&key(0))
+            .unwrap()
+        })
+        .collect();
+    for record in &refused {
+        assert_eq!(Action::from_record(record), None);
+    }
+    records.extend(refused);
+    assert!(all_orders(&records).channels.is_empty());
 }
 
 /// Bodies `encode` never produces, or reserved fields set: never accepted.
