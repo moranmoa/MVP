@@ -77,6 +77,11 @@ impl Clock for FixedClock {
 /// TODO(sync, PR #5): adapter over `sync` (libp2p pull by have-markers plus
 /// gossipsub push). Until then only [`LoopbackNetwork`] exists, which
 /// connects cores inside one process.
+///
+/// For that adapter: `sync`'s Node drops events when its channel is full, so
+/// an event is a hint, never the data. Treat a gap (a sequence number that
+/// skips, or a `Lagged` event) as "re-read the store", and `Record::decode`
+/// every record at ingest (GAP-1) before it reaches the core.
 pub trait Network: Send + Sync {
     /// Offers a record we made or accepted to peers of its server.
     fn publish(&self, record: &Record);

@@ -105,10 +105,14 @@ fn create_identity_server_grant_kick() {
     assert!(members.iter().any(|m| m.id == bob_id && m.display_name == "Bob"));
 
     // A member can't kick; a moderator can kick a member, not the owner.
+    // A refused action is never sent.
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let sent = world.network.fetch(server_key).len();
     assert_eq!(
         alice.core.kick_member(&server.id, &bob_id).unwrap_err().code,
         ErrorCode::NotAllowed
     );
+    assert_eq!(world.network.fetch(server_key).len(), sent);
     assert_eq!(
         alice.core.grant_role(&server.id, &bob_id, Role::Moderator).unwrap_err().code,
         ErrorCode::NotAllowed

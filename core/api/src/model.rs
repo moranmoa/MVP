@@ -1,9 +1,9 @@
 //! A server as the records describe it: derived IDs, the genesis and join
 //! bodies, and members from `authority`'s resolved state.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use authority::{Action, State};
+use authority::{Action, Resolver, State};
 use records::{ChannelId, Kind, PublicKey, Record, RecordId, Scope, ServerId};
 use serde::{Deserialize, Serialize};
 
@@ -72,30 +72,66 @@ pub(crate) struct GenesisBody {
     pub age_restriction: AgeRestriction,
 }
 
-/// Body of the control-log post a member makes on joining.
-///
-/// TODO(records): a dedicated `Join` kind; `Post` is borrowed until then.
-/// TODO(groupkeys): the display name is readable by anyone holding the
-/// records (relays too) until control-log content is encrypted.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+// ---- Joins ------------------------------------------------------------------
+//
+// TODO(records B4, GAP-3): `Kind::Join` and a members set in `State`. Until
+// then a control-log `Post` tagged `mvs/join/v1` is borrowed. These two
+// functions are the only place that knows; swap them when B4 lands.
+// TODO(groupkeys): the display name is readable by anyone holding the
+// records (relays too) until control-log content is encrypted.
+
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct JoinBody {
-    pub mvs: String,
-    pub display_name: String,
+struct JoinBody {
+    mvs: String,
+    display_name: String,
 }
 
-impl JoinBody {
-    pub fn new(display_name: &str) -> JoinBody {
-        JoinBody { mvs: JOIN_TAG.to_owned(), display_name: display_name.to_owned() }
+/// The control action a member signs on joining.
+pub(crate) fn join_action(display_name: &str) -> Action {
+    let body = JoinBody { mvs: JOIN_TAG.to_owned(), display_name: display_name.to_owned() };
+    Action::Post { text: serde_json::to_string(&body).expect("plain struct") }
+}
+
+/// The display name, if `record` is an accepted-kind join.
+fn parse_join(record: &Record) -> Option<String> {
+    let Some(Action::Post { text }) = Action::from_record(record) else { return None };
+    let body: JoinBody = serde_json::from_str(&text).ok()?;
+    (body.mvs == JOIN_TAG).then_some(body.display_name)
+}
+
+/// One server's records as held locally, with its resolver kept up to date
+/// (one `insert` per record, never a full re-resolve per action).
+pub(crate) struct Log {
+    pub records: Vec<Record>,
+    pub resolver: Resolver,
+    ids: HashSet<RecordId>,
+}
+
+impl Log {
+    pub fn new(server: ServerId, records: impl IntoIterator<Item = Record>) -> Log {
+        let mut log =
+            Log { records: Vec::new(), resolver: Resolver::new(server), ids: HashSet::new() };
+        for record in records {
+            log.add(record);
+        }
+        log
     }
 
-    pub fn text(&self) -> String {
-        serde_json::to_string(self).expect("plain struct")
+    /// Adds a record; false if already held.
+    pub fn add(&mut self, record: Record) -> bool {
+        if !self.ids.insert(record.id()) {
+            return false;
+        }
+        // Pending (deps missing) and evicted records stay in `records` and
+        // are re-offered to a fresh resolver on the next load.
+        let _ = self.resolver.insert(record.clone());
+        self.records.push(record);
+        true
     }
 
-    fn parse(text: &str) -> Option<JoinBody> {
-        let body: JoinBody = serde_json::from_str(text).ok()?;
-        (body.mvs == JOIN_TAG).then_some(body)
+    pub fn accepted(&self, id: &RecordId) -> bool {
+        self.resolver.state().accepted.contains(id)
     }
 }
 
@@ -105,35 +141,32 @@ pub(crate) struct MemberInfo {
     pub display_name: String,
 }
 
-/// One server, resolved from the control records held.
-pub(crate) struct ServerView {
+/// One server, as its [`Log`] resolves it.
+pub(crate) struct ServerView<'a> {
     pub id: ServerId,
     pub genesis: GenesisBody,
     pub owner: PublicKey,
-    pub state: State,
-    pub records: Vec<Record>,
+    pub state: &'a State,
+    pub records: &'a [Record],
 }
 
-impl ServerView {
-    /// `None` without a genesis for `id`. (`records` refuses a genesis whose
-    /// author and nonce don't give its server ID, so it is the owner's.)
-    pub fn build(id: ServerId, records: Vec<Record>) -> Option<ServerView> {
-        let genesis = records.iter().find(|r| {
+impl<'a> ServerView<'a> {
+    /// `None` without an accepted genesis for `id`. (`records` refuses a
+    /// genesis whose author and nonce don't give its server ID.)
+    pub fn build(id: ServerId, log: &'a Log) -> Option<ServerView<'a>> {
+        let state = log.resolver.state();
+        let genesis = log.records.iter().find(|r| {
             r.kind() == Kind::Genesis && r.scope() == Scope::Control && r.server() == id
         })?;
         let metadata = genesis.body().get(records::GENESIS_NONCE_LEN..)?;
         let body: GenesisBody = serde_json::from_slice(metadata).ok()?;
-        if body.v != 1 {
-            return None;
-        }
         let owner = genesis.author();
-        let state = authority::resolve(id, &records);
-        (state.owner == Some(owner)).then_some(ServerView {
+        (body.v == 1 && state.owner == Some(owner)).then_some(ServerView {
             id,
             genesis: body,
             owner,
             state,
-            records,
+            records: &log.records,
         })
     }
 
@@ -148,10 +181,9 @@ impl ServerView {
         let mut names: BTreeMap<PublicKey, String> = BTreeMap::new();
         for id in &self.state.posts {
             let Some(record) = by_id.get(id) else { continue };
-            let Some(Action::Post { text }) = Action::from_record(record) else { continue };
-            if let Some(join) = JoinBody::parse(&text) {
+            if let Some(name) = parse_join(record) {
                 // Later joins (a new display name) win.
-                names.insert(record.author(), join.display_name);
+                names.insert(record.author(), name);
             }
         }
         let mut keys: BTreeSet<PublicKey> = names.keys().copied().collect();

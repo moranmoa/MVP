@@ -33,8 +33,8 @@ own async layer.
 | Area | Commands | Backed by |
 | --- | --- | --- |
 | Identity | `getIdentity`, `createIdentity` (with progress events), `checkRecoveryWords`, `getRecoveryWords`, `restoreIdentity`, `updateProfile` | `identity::Vault` in the OS keychain; the profile is in SQLite, sealed with the identity's storage key |
-| Servers | `createServer` (after the recovery check), `listServers`, `listChannels`, `listMembers`, `joinServer`, `cancelJoin` | Genesis plus join records (`records`); roles from `authority::resolve` |
-| Moderation | `kickMember`, plus additions `grantRole` and `revokeRole` | `authority` rules. A record `authority` wouldn't accept is refused (`not-allowed`) and never stored or sent |
+| Servers | `createServer` (after the recovery check), `listServers`, `listChannels`, `listMembers`, `joinServer`, `cancelJoin` | Genesis plus join records (`records`); roles from one `authority::Resolver` per server, loaded once and fed record by record |
+| Moderation | `kickMember`, plus additions `grantRole` and `revokeRole` | `authority` rules. Dry run on the live resolver: a record it does not accept is refused (`not-allowed`), never stored or sent, and the log is rebuilt from the store. TODO(records B4): `Resolver::would_accept` |
 | App | storage usage and limit, `clearCache`, `exportDiagnostics` (counts only), `getAppInfo`, `setUpdateChannel`, `restartToUpdate`, `blockUser`, `markRead` | SQLite |
 | Not yet | `getMessageCount`, `getMessages`, `sendMessage`, `editMessage`, `deleteMessage`, `retryMessage` | Answer `not-implemented`. Next step, on top of `groupkeys` |
 

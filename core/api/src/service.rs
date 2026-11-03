@@ -1,6 +1,6 @@
 //! The core: `CoreCommands` from `ui/src/core/api.ts`, one method each.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
@@ -11,7 +11,7 @@ use records::{PublicKey, Record, ServerId};
 use serde::{Deserialize, Serialize};
 
 use crate::db::Db;
-use crate::model::{self, GenesisBody, JoinBody, ServerView};
+use crate::model::{self, GenesisBody, Log, ServerView};
 use crate::ports::{CipherOutcome, Ports, SharedSecrets};
 use crate::types::*;
 
@@ -52,6 +52,8 @@ struct Inner {
     db: Db,
     vault: Vault<SharedSecrets>,
     me: Option<Me>,
+    /// Loaded on first use per server, then kept current record by record.
+    logs: HashMap<ServerId, Log>,
 }
 
 pub struct Core {
@@ -91,7 +93,7 @@ impl Core {
     pub fn open(config: Config, ports: Ports) -> CoreResult<Core> {
         let db = Db::open(config.db_path.as_deref())?;
         let vault = Vault::new(SharedSecrets(ports.secrets.clone()));
-        let mut inner = Inner { db, vault, me: None };
+        let mut inner = Inner { db, vault, me: None, logs: HashMap::new() };
         if inner.vault.state().map_err(vault_error)? == VaultState::Ready {
             let phrase = inner.vault.open().map_err(vault_error)?;
             inner.me = Some(inner.load_me(phrase)?);
@@ -211,24 +213,25 @@ impl Core {
     // ---- servers ----------------------------------------------------------
 
     pub fn list_servers(&self) -> CoreResult<Vec<ServerSummary>> {
-        let inner = self.lock();
+        let mut inner = self.lock();
         let mut out = Vec::new();
         for id in inner.db.servers()? {
+            inner.load(id)?;
             out.push(inner.view(id)?.summary());
         }
         Ok(out)
     }
 
     pub fn list_channels(&self, server_id: &str) -> CoreResult<Vec<Channel>> {
-        let inner = self.lock();
-        let view = inner.my_view(parse_server(server_id)?)?;
-        Ok(vec![view.default_channel()])
+        let mut inner = self.lock();
+        let server = inner.load_mine(parse_server(server_id)?)?;
+        Ok(vec![inner.view(server)?.default_channel()])
     }
 
     pub fn list_members(&self, server_id: &str) -> CoreResult<Vec<Member>> {
-        let inner = self.lock();
-        let view = inner.my_view(parse_server(server_id)?)?;
-        inner.members_json(&view)
+        let mut inner = self.lock();
+        let server = inner.load_mine(parse_server(server_id)?)?;
+        inner.members_json(&inner.view(server)?)
     }
 
     pub fn create_server(
@@ -260,12 +263,13 @@ impl Core {
                 1,
                 vec![genesis.id()],
                 ports.clock.now_ms(),
-                &Action::Post { text: JoinBody::new(&me.profile.display_name).text() },
+                &model::join_action(&me.profile.display_name),
             )
             .map_err(|_| ErrorCode::BadRequest)?;
-            for record in [&genesis, &join] {
-                inner.db.put_record(record)?;
-                ports.network.publish(record);
+            inner.logs.insert(server, Log::new(server, []));
+            for record in [genesis, join] {
+                ports.network.publish(&record);
+                inner.store(server, record)?;
             }
             inner.db.add_server(server, ports.clock.now_ms())?;
             let summary = inner.view(server)?.summary();
@@ -320,11 +324,12 @@ impl Core {
     fn control_action(&self, server_id: &str, action: Action) -> CoreResult<()> {
         let server = parse_server(server_id)?;
         self.run(|inner, ports, events| {
+            inner.load_mine(server)?;
             let me = inner.me.as_ref().ok_or(ErrorCode::NotFound)?;
-            let view = inner.my_view(server)?;
-            if action.clone() == (Action::Kick { target: me.key() }) {
+            if action == (Action::Kick { target: me.key() }) {
                 return Err(ErrorCode::NotAllowed.into());
             }
+            let view = inner.view(server)?;
             let record = authority::sign_control(
                 me.identity.signing_key(),
                 server,
@@ -334,9 +339,15 @@ impl Core {
                 &action,
             )
             .map_err(|_| ErrorCode::BadRequest)?;
-            let mut records = view.records.clone();
-            records.push(record.clone());
-            if !authority::resolve(server, &records).accepted.contains(&record.id()) {
+            // Dry run on the live resolver. Its deps are our heads, so it
+            // joins at once; if `authority` doesn't accept it, it was never
+            // stored or sent, and the log is rebuilt from the store so it
+            // leaves no trace.
+            // TODO(records B4): `Resolver::would_accept` instead.
+            let log = inner.logs.get_mut(&server).expect("loaded above");
+            log.add(record.clone());
+            if !log.accepted(&record.id()) {
+                inner.logs.remove(&server);
                 return Err(ErrorCode::NotAllowed.into());
             }
             inner.db.put_record(&record)?;
@@ -367,22 +378,19 @@ impl Core {
             let Some(me) = inner.me.as_ref() else { return Ok(()) };
             let me = me.key();
             for server in inner.db.servers()? {
-                let before = inner.view(server)?;
-                let fresh: Vec<Record> = ports
-                    .network
-                    .fetch(server)
-                    .into_iter()
-                    .filter(|r| r.server() == server)
-                    .collect();
-                for record in &fresh {
-                    inner.db.put_record(record)?;
+                inner.load(server)?;
+                let mut changed = false;
+                for record in ports.network.fetch(server) {
+                    if record.server() == server {
+                        changed |= inner.store(server, record)?;
+                    }
                 }
                 let after = inner.view(server)?;
                 if after.is_kicked(&me) {
                     inner.db.remove_server(server)?;
                     events
                         .push(Event::ServerRemoved { server_id: model::hex_id(server.as_bytes()) });
-                } else if after.records.len() != before.records.len() {
+                } else if changed {
                     events.push(Event::MembersChanged {
                         server_id: model::hex_id(server.as_bytes()),
                         members: inner.members_json(&after)?,
@@ -398,6 +406,7 @@ impl Core {
         self.run(|inner, _, events| {
             inner.db.toggle_block(&user)?;
             for server in inner.db.servers()? {
+                inner.load(server)?;
                 let view = inner.view(server)?;
                 if view.members().iter().any(|m| m.key == user) {
                     events.push(Event::MembersChanged {
@@ -502,17 +511,38 @@ impl Inner {
         })
     }
 
-    fn view(&self, server: ServerId) -> CoreResult<ServerView> {
-        ServerView::build(server, self.db.records(server)?)
-            .ok_or_else(|| ErrorCode::NotFound.into())
+    /// Loads `server`'s log from the store unless it is already in memory.
+    fn load(&mut self, server: ServerId) -> CoreResult<()> {
+        if !self.logs.contains_key(&server) {
+            let log = Log::new(server, self.db.records(server)?);
+            self.logs.insert(server, log);
+        }
+        Ok(())
     }
 
-    /// A server I'm in.
-    fn my_view(&self, server: ServerId) -> CoreResult<ServerView> {
+    /// Loads a server I'm in; `not-found` for any other.
+    fn load_mine(&mut self, server: ServerId) -> CoreResult<ServerId> {
         if !self.db.has_server(server)? {
             return Err(ErrorCode::NotFound.into());
         }
-        self.view(server)
+        self.load(server)?;
+        Ok(server)
+    }
+
+    /// A loaded server's view.
+    fn view(&self, server: ServerId) -> CoreResult<ServerView<'_>> {
+        let log = self.logs.get(&server).ok_or(ErrorCode::Internal)?;
+        ServerView::build(server, log).ok_or_else(|| ErrorCode::NotFound.into())
+    }
+
+    /// Stores a record and adds it to the loaded log; false if already held.
+    fn store(&mut self, server: ServerId, record: Record) -> CoreResult<bool> {
+        let log = self.logs.get_mut(&server).ok_or(ErrorCode::Internal)?;
+        if !log.add(record.clone()) {
+            return Ok(false);
+        }
+        self.db.put_record(&record)?;
+        Ok(true)
     }
 
     fn members_json(&self, view: &ServerView) -> CoreResult<Vec<Member>> {
@@ -556,7 +586,8 @@ impl Inner {
         if fetched.is_empty() {
             return Ok(JoinStatus::NobodyOnline { link });
         }
-        let Some(view) = ServerView::build(server, fetched.clone()) else {
+        let log = Log::new(server, fetched);
+        let Some(view) = ServerView::build(server, &log) else {
             return Ok(JoinStatus::Invalid { link });
         };
         let required = view.genesis.age_restriction;
@@ -574,20 +605,22 @@ impl Inner {
             view.next_seq(&me.key()),
             view.heads(),
             ports.clock.now_ms(),
-            &Action::Post { text: JoinBody::new(&me.profile.display_name).text() },
+            &model::join_action(&me.profile.display_name),
         )
         .map_err(|_| ErrorCode::BadRequest)?;
-        for record in fetched.iter().chain([&join]) {
+        for record in &log.records {
             self.db.put_record(record)?;
         }
+        self.logs.insert(server, log);
         ports.network.publish(&join);
+        self.store(server, join)?;
         self.db.add_server(server, ports.clock.now_ms())?;
         events.push(Event::ServerAdded(self.view(server)?.summary()));
         Ok(JoinStatus::Joined { link, server_id: server_hex })
     }
 }
 
-impl ServerView {
+impl ServerView<'_> {
     fn summary(&self) -> ServerSummary {
         let id = model::hex_id(self.id.as_bytes());
         ServerSummary {
