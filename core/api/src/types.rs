@@ -372,3 +372,15 @@ pub enum Event {
     #[serde(rename = "notice", rename_all = "camelCase")]
     Notice { kind: NoticeKind, server_id: Id },
 }
+
+/// Rust addition (`listRemovedMembers`): an account the owner may let back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemovedMember {
+    pub id: Id,
+    pub short_code: String,
+    /// Its last display name, if it ever posted one.
+    pub display_name: String,
+    /// When it was kicked (the kick's claimed time).
+    pub removed_at: Timestamp,
+}
