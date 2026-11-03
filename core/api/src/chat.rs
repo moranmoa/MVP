@@ -102,11 +102,8 @@ pub(crate) fn sync_cipher(cipher: &dyn GroupCipher, server: ServerId, log: &Log)
         .iter()
         .filter(|r| r.kind() == Kind::KeyRotation && in_known(r, &known))
         .collect();
-    let ok: BTreeSet<RecordId> = rotations
-        .iter()
-        .filter(|r| accepted(&log.resolver, r, &graph))
-        .map(|r| r.id())
-        .collect();
+    let ok: BTreeSet<RecordId> =
+        rotations.iter().filter(|r| accepted(&log.resolver, r, &graph)).map(|r| r.id()).collect();
     cipher.set_accepted(server, &ok);
     for record in rotations {
         // An error is a rotation we can't use; nothing else to do.

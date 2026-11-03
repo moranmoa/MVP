@@ -12,12 +12,10 @@ use std::time::{Duration, Instant};
 use api::crypto::GroupKeysCipher;
 use api::syncnet::SyncNetwork;
 use api::*;
-use groupkeys::MemberSecret;
-use identity::{MemoryStore, RecoveryPhrase};
+use identity::MemoryStore;
 use records::{Kind, Scope};
 
-/// BIP-39 test vectors, so the test knows each identity's key and can unlock
-/// its cipher. TODO: once `GroupCipher` has unlock/lock, the core does it.
+/// BIP-39 test vectors: fixed identities for the three peers.
 const OWNER: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 const GUEST: &str = "legal winner thank year wave sausage worth useful legal winner thank yellow";
@@ -37,9 +35,8 @@ fn peer(name: &str, words: &str, relay: &str) -> Peer {
     let net = Arc::new(
         SyncNetwork::start(relay.parse().unwrap(), &dir, Arc::new(MemberGate::new())).unwrap(),
     );
-    let phrase = RecoveryPhrase::parse(words).unwrap();
-    let secret = Arc::new(MemberSecret::new(phrase.identity().signing_key()));
-    let cipher = Arc::new(GroupKeysCipher::new(secret));
+    // Locked: the core unlocks it when the identity is restored.
+    let cipher = Arc::new(GroupKeysCipher::locked());
     let core = Core::open(
         Config { db_path: Some(dir.join("core.db")), app_version: "test".into() },
         Ports {

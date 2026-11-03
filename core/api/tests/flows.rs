@@ -672,9 +672,24 @@ fn members_chat_through_the_group_cipher() {
     // stored, never handed to the cipher, never shown.
     let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
     let key = identity::RecoveryPhrase::parse(OWNER_WORDS).unwrap().identity();
-    let control: Vec<_> = world.network.fetch(server_key).iter().filter(|r| r.scope() == Scope::Control).map(|r| r.id()).collect();
+    let control: Vec<_> = world
+        .network
+        .fetch(server_key)
+        .iter()
+        .filter(|r| r.scope() == Scope::Control)
+        .map(|r| r.id())
+        .collect();
     let unknown = records::ChannelId::from_bytes([0xee; 32]);
-    for (seq, kind) in [(0, Kind::KeyRotation), (1, Kind::Message)] {
+    // A real rotation part's body, so the record itself is valid.
+    let part = world
+        .network
+        .fetch(server_key)
+        .into_iter()
+        .find(|r| r.kind() == Kind::KeyRotation)
+        .expect("the owner rotated")
+        .body()
+        .to_vec();
+    for (seq, kind, body) in [(0, Kind::KeyRotation, part), (1, Kind::Message, vec![1; 40])] {
         let record = Draft {
             server: server_key,
             scope: Scope::Channel(unknown),
@@ -683,16 +698,21 @@ fn members_chat_through_the_group_cipher() {
             auth_deps: vec![*control.iter().max().unwrap()],
             ts: 1,
             kind,
-            body: vec![1; 40],
+            body,
         }
         .sign(key.signing_key())
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{kind:?}: {e:?}"));
         world.network.publish(&record);
     }
     owner.core.sync_now().unwrap();
     assert_eq!(owner.core.get_message_count(&channel).unwrap(), 2);
-    assert!(!spy.channels.lock().unwrap().contains(&unknown), "an unknown channel reached the cipher");
-    assert!(spy.channels.lock().unwrap().contains(&records::ChannelId::from_bytes(hex::decode(&channel).unwrap().try_into().unwrap())));
+    assert!(
+        !spy.channels.lock().unwrap().contains(&unknown),
+        "an unknown channel reached the cipher"
+    );
+    assert!(spy.channels.lock().unwrap().contains(&records::ChannelId::from_bytes(
+        hex::decode(&channel).unwrap().try_into().unwrap()
+    )));
 }
 
 const OWNER_WORDS: &str =
@@ -718,11 +738,22 @@ impl GroupCipher for Spy {
     fn membership_changed(&self, server: ServerId, members: &BTreeSet<PublicKey>) -> CipherOutcome {
         self.inner.membership_changed(server, members)
     }
-    fn encrypt(&self, s: ServerId, c: records::ChannelId, p: &[u8]) -> Result<Vec<u8>, CipherError> {
+    fn encrypt(
+        &self,
+        s: ServerId,
+        c: records::ChannelId,
+        p: &[u8],
+    ) -> Result<Vec<u8>, CipherError> {
         self.saw(c);
         self.inner.encrypt(s, c, p)
     }
-    fn decrypt(&self, s: ServerId, c: records::ChannelId, a: PublicKey, b: &[u8]) -> Result<Opened, CipherError> {
+    fn decrypt(
+        &self,
+        s: ServerId,
+        c: records::ChannelId,
+        a: PublicKey,
+        b: &[u8],
+    ) -> Result<Opened, CipherError> {
         self.saw(c);
         self.inner.decrypt(s, c, a, b)
     }
@@ -745,7 +776,12 @@ impl GroupCipher for Spy {
     fn lock(&self) {
         self.inner.lock()
     }
-    fn rotate(&self, s: ServerId, c: records::ChannelId, m: &BTreeSet<PublicKey>) -> Result<Vec<Vec<u8>>, CipherError> {
+    fn rotate(
+        &self,
+        s: ServerId,
+        c: records::ChannelId,
+        m: &BTreeSet<PublicKey>,
+    ) -> Result<Vec<Vec<u8>>, CipherError> {
         self.saw(c);
         self.inner.rotate(s, c, m)
     }
