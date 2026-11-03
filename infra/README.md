@@ -78,15 +78,22 @@ And in the relay itself (`relay/src/main.rs`):
   ```
 
 - Circuit limits come from `MAX_CIRCUITS`, `MAX_CIRCUITS_PER_PEER`,
-  `MAX_CIRCUIT_SECS` and `MAX_CIRCUIT_BYTES`. The compose file raises them
-  to 256 / 16 / 1 h / 256 MiB (libp2p's defaults are 16 / 4 / 2 min /
-  128 KiB); an empty value in `.env` means libp2p's default. The relay logs
-  the values in effect at startup. These are provisional; the final
-  relay-only budgets are decision R11 (threat model).
+  `MAX_CIRCUIT_SECS` and `MAX_CIRCUIT_BYTES`. The compose file sets them to
+  **256 circuits, 8 per peer, 1 h and 32 MiB per circuit** (decision R11;
+  libp2p's defaults are 16 / 4 / 2 min / 128 KiB). An empty value in `.env`
+  means libp2p's default. The relay logs the values in effect at startup.
+  32 MiB is about 8 times a 10,000-message catch-up (below) and stays this
+  low on purpose: until sync pulls are gated on membership (GAP-4), the
+  relay carries circuits for any peer. Review after the alpha using the
+  `stats` line (`circuits_denied`, `circuits_open`).
 - When the relay accepts a reservation, it puts the peer's circuit address
   (`<external>/p2p/<relay>/p2p-circuit`) into the DHT. Without this, a peer
   reachable only through the relay was usually not findable: the DHT only
   learned its direct addresses (identify runs before the reservation).
+  Kademlia's routing table keeps addresses with no time limit (its
+  `record_ttl` applies to stored records, not to peer addresses), so the
+  relay removes the circuit addresses itself when the reservation times
+  out or the peer's last connection closes, which ends the reservation.
 - `EXTERNAL_ADDRS` must not be empty: reservations then carry no address and
   no client can listen on a circuit. The relay warns at startup.
 
@@ -103,7 +110,8 @@ p1 writes 10,000 messages while p2 is off, then p2 starts. Result on one PC
 | `MAX_CIRCUIT_BYTES` 1 MiB | 8,000 / 10,000 after 45 s: each new circuit gets about one page (2,000 messages) before it is cut |
 | 4 MiB | 10,000 in 1.0 s |
 | 16 MiB | 10,000 in 1.2 s |
-| compose values (256 MiB, 1 h) | 10,000 in 0.9–1.2 s (3 runs) |
+| 256 MiB, 1 h (first draft) | 10,000 in 0.9–1.2 s (3 runs) |
+| compose values (R11: 32 MiB, 1 h, 8 per peer) | 10,000 in 1.1–1.2 s (3 runs) |
 
 So a 10,000-message catch-up is about 4 MB through the relay. Before the
 reservation fix above, only 1 run in 5 formed a circuit at all. There is no

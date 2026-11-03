@@ -8,6 +8,7 @@
 //! connection; the Docker healthcheck runs it (the image has no curl/nc).
 
 use std::{
+    collections::HashSet,
     env, fs,
     io::Write,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream},
@@ -23,7 +24,7 @@ use libp2p::{
     identify, identity, kad, memory_connection_limits,
     multiaddr::Protocol,
     noise, ping, relay,
-    swarm::{NetworkBehaviour, SwarmEvent},
+    swarm::{NetworkBehaviour, Swarm, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, StreamProtocol, SwarmBuilder,
 };
 use tracing::{debug, info, warn};
@@ -286,6 +287,8 @@ async fn run() -> Result<()> {
 
     let started = Instant::now();
     let mut stats = Stats::default();
+    // Peers whose circuit addresses we put into the DHT.
+    let mut reserved = HashSet::new();
     let mut stats_timer = tokio::time::interval(stats_every);
 
     loop {
@@ -319,16 +322,24 @@ async fn run() -> Result<()> {
                 }
             }
             SwarmEvent::Behaviour(BehaviourEvent::Relay(event)) => {
-                if let relay::Event::ReservationReqAccepted { src_peer_id, .. } = &event {
+                match &event {
                     // The peer is now reachable through us. Identify ran before
                     // the reservation existed, so without this the DHT would only
                     // hold its direct addresses and a relay-only peer could not
                     // be found.
-                    let relay_id = *swarm.local_peer_id();
-                    let addrs = circuit_addrs(swarm.external_addresses(), relay_id);
-                    for addr in addrs {
-                        swarm.behaviour_mut().kademlia.add_address(src_peer_id, addr);
+                    relay::Event::ReservationReqAccepted { src_peer_id, .. } => {
+                        reserved.insert(*src_peer_id);
+                        let relay_id = *swarm.local_peer_id();
+                        for addr in circuit_addrs(swarm.external_addresses(), relay_id) {
+                            swarm.behaviour_mut().kademlia.add_address(src_peer_id, addr);
+                        }
                     }
+                    // Kademlia's routing table has no TTL, so the circuit
+                    // addresses are withdrawn when the reservation ends.
+                    relay::Event::ReservationTimedOut { src_peer_id } => {
+                        forget_circuit(&mut swarm, &mut reserved, src_peer_id)
+                    }
+                    _ => {}
                 }
                 match &event {
                     relay::Event::ReservationReqAccepted { renewed: false, .. } => stats.reservations_accepted += 1,
@@ -346,8 +357,23 @@ async fn run() -> Result<()> {
             // Per-connection lines are debug-only so the log doesn't grow with
             // every peer; the stats line carries the totals.
             SwarmEvent::ConnectionEstablished { peer_id, .. } => debug!(%peer_id, "connected"),
-            SwarmEvent::ConnectionClosed { peer_id, .. } => debug!(%peer_id, "disconnected"),
+            SwarmEvent::ConnectionClosed { peer_id, num_established, .. } => {
+                debug!(%peer_id, "disconnected");
+                // The relay drops a reservation silently with its connection.
+                if num_established == 0 {
+                    forget_circuit(&mut swarm, &mut reserved, &peer_id);
+                }
+            }
             _ => {}
+        }
+    }
+}
+
+fn forget_circuit(swarm: &mut Swarm<Behaviour>, reserved: &mut HashSet<PeerId>, peer: &PeerId) {
+    if reserved.remove(peer) {
+        let relay_id = *swarm.local_peer_id();
+        for addr in circuit_addrs(swarm.external_addresses(), relay_id) {
+            swarm.behaviour_mut().kademlia.remove_address(peer, &addr);
         }
     }
 }

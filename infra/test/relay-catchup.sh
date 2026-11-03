@@ -24,9 +24,9 @@ PORT_A=${PORT_A:-17101}
 PORT_B=${PORT_B:-17102}
 # Same defaults as docker-compose.yml; set one to empty for libp2p's value.
 export MAX_CIRCUITS=${MAX_CIRCUITS-256}
-export MAX_CIRCUITS_PER_PEER=${MAX_CIRCUITS_PER_PEER-16}
+export MAX_CIRCUITS_PER_PEER=${MAX_CIRCUITS_PER_PEER-8}
 export MAX_CIRCUIT_SECS=${MAX_CIRCUIT_SECS-3600}
-export MAX_CIRCUIT_BYTES=${MAX_CIRCUIT_BYTES-268435456}
+export MAX_CIRCUIT_BYTES=${MAX_CIRCUIT_BYTES-33554432}
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   docker build -t "$IMAGE" --build-arg CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" "$here/../relay"
