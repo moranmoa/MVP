@@ -177,3 +177,21 @@ fn kek(
         .map_err(|_| LockError::Corrupt)?;
     Ok(key)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the lock KDF: Argon2id v0x13 with the passphrase NFC-normalised.
+    /// A dependency bump must not change it, or existing app locks stop
+    /// opening. Small cost so the test is fast; the parameters are part of
+    /// the input, not the pin.
+    #[test]
+    fn lock_kdf_is_pinned() {
+        let params = LockParams { m_kib: 1024, t: 2, p: 1 };
+        let key = kek("סיסמה correct horse", b"0123456789abcdef", params).unwrap();
+        assert_eq!(hex::encode(*key), GOLDEN_KEK);
+    }
+
+    const GOLDEN_KEK: &str = "3e7f80dfa6fad77c2a2013f1babcf80aa795ef9a2a3b8d2048d1ec9eccdf659f";
+}
