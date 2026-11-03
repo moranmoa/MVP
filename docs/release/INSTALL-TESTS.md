@@ -22,7 +22,7 @@ Built by `spikes/shell/build-packages.sh [out dir]` (Docker only).
 | Linux x64 | `shell-{tauri,electron}-linux-amd64.AppImage` | `chmod +x`, run it | delete the file | no |
 | macOS | none yet | – | – | – |
 
-**Per-user install without admin rights (INS-04):** supported on Windows
+**Per-user install without admin rights (INS-04, as narrowed in QA #79):** supported on Windows
 (both NSIS installers are per-user) and on Linux through the AppImage. The
 `.deb` needs root by design. macOS isn't tested until there's a package.
 
@@ -110,7 +110,8 @@ attaches.
 
 CI can't cover these, and they stay manual:
 
-- the uninstall UI and the keep/delete prompt (INS-09);
+- the uninstall UI and the keep/delete prompt (INS-09, INS-17);
+- the packaged app against the real core (INS-18);
 - a real N-1 → N update (INS-05, 06; there is one version of each spike);
 - interrupted installs (INS-07);
 - restoring from the 12 words (INS-12; needs the real core);
@@ -143,7 +144,8 @@ On a clean VM with a snapshot. Note "before" and "after" for every item in
       works. `mvs://` is not registered (a spike gap).
 - [ ] INS-03: first launch: UI language and RTL, no firewall prompt (none is
       expected yet), usable in under 2 s.
-- [ ] INS-04: as a standard user, install with no UAC prompt.
+- [ ] INS-04: as a standard user, the NSIS per-user installer runs with no
+      UAC prompt.
 - [ ] INS-05: install over it again; Settings → Apps lists one entry and
       there's one shortcut.
 - [ ] INS-07: cancel mid-install, run it again: it completes and the app
@@ -168,7 +170,8 @@ On a clean VM with a snapshot. Note "before" and "after" for every item in
 - [ ] INS-03, 08, 10, 11: as on Windows, with `apt remove`, `apt purge`
       and deleting the AppImage. `~/.local/share/...` / `~/.config/...` must
       survive all three.
-- [ ] INS-04: AppImage as a user without sudo.
+- [ ] INS-04: AppImage as a user without sudo. (The `.deb` asking for
+      root is expected, not a failure.)
 
 ### macOS
 
@@ -185,6 +188,12 @@ On a clean VM with a snapshot. Note "before" and "after" for every item in
 - [ ] INS-10: the keychain entry survives every uninstall route.
 - [ ] INS-12: after uninstalling with data deleted, reinstall, choose
       "I have an account", enter the 12 words: same identity code.
+- [ ] INS-17 (Windows): the uninstaller dialog. "Keep my data" is the
+      default; choosing delete shows the INS-09 warning first; Cancel
+      deletes nothing.
+- [ ] INS-18: the packaged app against the real core. Onboarding up to and
+      including the recovery-word check, then create a server; it is still
+      there after restarting the app.
 
 ## Results
 
