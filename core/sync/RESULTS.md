@@ -26,6 +26,8 @@ Other numbers from the same runs:
 
 ## How it works
 
+This describes the spike, where records were opaque blobs. Since B4-sync the unit is a signed `records::Record`; see "Ingest checks" below. The sync mechanics are unchanged.
+
 - **Store** (`src/store.rs`): SQLite (bundled). A blob is accepted only when
   all of its deps are already stored. Because of that rule, insertion order is
   a topological order of the DAG, and having a blob implies having all of its
@@ -48,26 +50,56 @@ Other numbers from the same runs:
   returns. Each peer also listens on a relay circuit as a fallback for NAT. In
   these runs every peer connection was direct TCP.
 
+## Ingest checks (B4-sync)
+
+Every record from a peer passes these checks, in order, before it is stored, forwarded on gossip (`Accept`) or served to anyone:
+
+1. `Record::decode`: size, canonical form, signature. The record id is computed from the signed bytes.
+2. The log is derived from the record (`<server>/control` or `<server>/<channel>`), never from the gossip topic or the pull request. A record pushed on another log's topic is rejected; a pulled page may only contain the requested log.
+3. `deps` are stored in the same log, and `auth_deps` in the same server's control log. Missing ones park the record and trigger a pull (of the control log, for `auth_deps`). Ones found in the wrong log reject it.
+4. For **channel** records, the `Authorizer` (supplied by the integration layer) is a **storage gate that must be monotone in the stored control log**: whatever it accepts with control set S, it accepts with any superset (e.g. "the author is the owner or has a stored `Join`"). It sees the server's stored control log and runs inside the store's write transaction, only once everything the record relies on is present. Kicks, revokes, voids and the GAP-2 checks are *not* used here: they belong to display, forwarding to the app and keys, and never delete anything. A refused channel record is remembered (bounded) and listed in later pulls' `have`, so peers stop re-sending it; the list for a server is cleared whenever one of its control records is stored, since the gate may now open.
+
+   **Control records are never refused at ingest.** Authority is a function of the whole set of well-formed control records, and whether one counts can change when a concurrent record arrives. Refusing them would make the stored set depend on arrival order, so every one that decodes and has its deps is stored and forwarded, and authority decides what it means. Likewise, voiding (e.g. by a later kick) is decided when displaying, never by deleting from the store.
+
+Gossip outcomes: stored → `Accept`; duplicate, still waiting for deps, or refused by the gate → `Ignore` (a peer with more of the control log may rightly accept it, so the sender isn't blamed); undecodable, misfiled or cross-log → `Reject`.
+
+### Harness with signed records (2 runs, 2026-11-03)
+
+| Measure | Run 1 | Run 2 |
+|---|---|---|
+| 1,000 concurrent messages → identical state | 810 ms | 482 ms |
+| Live p95 delivery latency | 10.3 ms | 2.4 ms |
+| Catch-up of 10,000 missed messages | 1,208 ms | 1,356 ms |
+| Join → first messages | 263 ms | 314 ms |
+| Join → full history (11,600 messages) | 1,423 ms | 2,026 ms |
+
+Every target still passes. Catch-up takes about 1 s longer than with unsigned blobs, which is the cost of checking 10,000 Ed25519 signatures. That work runs on blocking threads, not on the network task.
+
+**Discovery.** The relay now publishes only global addresses (relay PR #30), so on the Docker network the peers would only meet through relay circuits, which are capped at 128 KiB and 2 minutes. The node therefore:
+- dials `bootstrap` peers directly (the harness passes `p1..p4`);
+- replaces a relayed connection with a direct one as soon as one exists;
+- upgrades from what identify reports. Non-global addresses are dialled only with `allow_lan`, which is on in the harness and off for real users.
+
 ## Limits on peer input (added after the spike)
 
 Everything a peer sends is untrusted. The node enforces these limits:
 
 | What | Limit |
 |---|---|
-| Blob id | Never read from the wire. It is recomputed as BLAKE3 over the log name, deps and data, and checked again on every `append`. |
-| Deps | Strictly ascending (one valid encoding per blob), and all in the same log as the blob. |
-| Blob size | At most 64 deps and 32 KiB of data; larger blobs are rejected before allocation. |
-| Log names | 1–128 printable ASCII characters. Peers' gossip subscriptions are tracked only for `log/<valid name>`, at most 1,024 topics per peer. |
+| Record id | Never read from the wire: `Record::decode` computes it from the signed bytes and checks the signature. |
+| Deps | Strictly ascending (enforced by `records`), `deps` in the same log, `auth_deps` in the server's control log. |
+| Record size | `records::MAX_RECORD_BYTES` (about 19 KiB), checked before parsing. |
+| Log names | 1–160 printable ASCII characters. Peers' gossip subscriptions are tracked only for `log/<valid name>`, at most 1,024 topics per peer. |
 | `have` list in a pull | Only the first 64 ids are used. |
-| Pull response page | At most 2,000 blobs or 4 MiB, under the CBOR codec's 10 MiB cap. |
-| Inbound pulls | Per peer: a burst of 30, then 10 per second; buckets survive reconnects (4,096 peers remembered). All peers together: a burst of 100, then 50 per second. |
+| Pull response page | At most 2,000 records or 4 MiB, under the CBOR codec's 10 MiB cap. |
+| Inbound pulls | Per peer: a burst of 30, then 10 per second; buckets survive reconnects (4,096 peers remembered). All peers together: a burst of 100, then 50 per second. Answered on a blocking thread with a read-only store connection, at most 8 at once, so a large log never stalls the network task. |
 | "More" in a response | Followed only if the page added something new. |
-| Gossip messages | About 38 KiB max per frame (one maximal blob plus 4 KiB of framing). Invalid blobs are rejected and not forwarded. Messages are deduplicated by content. |
-| Pushed blobs waiting for deps | At most 10,000 blobs or 16 MiB, expiring after 60 s; copies of one blob are kept once. Re-parking a blob counts against the same cap. |
-| Events to the app | A 65,536-event buffer; when the app falls behind, new events are dropped (the blobs are still stored). |
+| Gossip messages | One maximal record plus 4 KiB of framing. Only records that passed the ingest checks are forwarded. Messages are deduplicated by content. |
+| Pushed records waiting for deps | At most 10,000 records or 16 MiB, expiring after 60 s; copies of one record are kept once. Re-parking a record counts against the same cap. |
+| Events to the app | A 65,536-event buffer; when the app falls behind, new events are dropped (the records are still stored) and a `Lagged { dropped }` event follows, telling the app to re-read the open logs from the store. |
 | Connections | 256 incoming, 64 pending incoming, 128 outgoing, 384 in total, 2 per peer. |
 
-What these limits do not cover yet: who may write. Until `core/records` is wired in, any peer can put well-formed blobs into any log it knows the name of. Signatures and roles are checked there, before `append`.
+Who may write is the `Authorizer`'s call. The harness uses `AcceptAll`, which lets anyone write; the integration layer (T1) supplies the real one. Serving only members (GAP-4) is not done yet: today anyone who knows a log's name can pull it.
 
 ## Full report of run 4
 
@@ -138,7 +170,6 @@ The final state hash, `03fdc0808fce1c10`, was identical on all 4 peers.
   peers, pull. The process itself and the container stay up.
 - **One log.** The code handles any number of logs (one gossipsub topic and
   one pull per log, opened on demand), but the harness uses one channel log.
-- **No signatures or validation.** Blobs are opaque here. Rejecting invalid
-  records is `core/records`' job, and should happen before `append`.
+- **No signatures or validation in the spike runs.** The 4 spike runs used opaque blobs. Since B4-sync every record is signed and checked at ingest (see "Ingest checks").
 - **Same clock for latency.** Fine on one host; a WAN test needs
   round-trip-based measurement.
