@@ -132,6 +132,9 @@ pub struct Context<'a> {
     rule: VoidRule,
     memo: HashMap<RecordId, Verdict>,
     depth: usize,
+    /// A witness check was cut off at [`MAX_WITNESS_DEPTH`] while judging the
+    /// current record; such verdicts aren't memoized.
+    truncated: bool,
 }
 
 impl Context<'_> {
@@ -145,6 +148,7 @@ impl Context<'_> {
     /// doesn't count, so a colluder can't revive a backdated record.
     pub fn witnessed(&mut self, record: &Record, removal: &Removal<'_>) -> bool {
         if self.depth >= MAX_WITNESS_DEPTH {
+            self.truncated = true;
             return false;
         }
         let mut queue: BTreeSet<RecordId> = self.graph.children(record.id()).into_iter().collect();
@@ -173,8 +177,12 @@ impl Context<'_> {
         if let Some(verdict) = self.memo.get(&record.id()) {
             return verdict.clone();
         }
+        let outer = std::mem::take(&mut self.truncated);
         let verdict = self.check(record);
-        self.memo.insert(record.id(), verdict.clone());
+        if !self.truncated {
+            self.memo.insert(record.id(), verdict.clone());
+        }
+        self.truncated |= outer;
         verdict
     }
 
@@ -263,8 +271,9 @@ impl Context<'_> {
 /// others had already replied to; by a revoke, only if it is privileged.
 /// Privileged records keep the plain cut rule: a witness can't save a
 /// backdated rotation. A channel the cut doesn't name is not voided at all.
-/// While a head the cut names for the channel isn't held, the answer is
-/// pending rather than void.
+/// Only a record that nothing keeps waits on a missing head: if a head the
+/// cut names for its channel isn't held, the verdict is pending rather than
+/// void. A fake head can't hold back records a held head or a witness keeps.
 pub fn witness(
     record: &Record,
     privileged: bool,
@@ -281,17 +290,19 @@ pub fn witness(
     if heads.is_empty() {
         return Void::Keep;
     }
-    let missing: Vec<RecordId> =
-        heads.iter().copied().filter(|head| cx.graph().record(*head).is_none()).collect();
-    if !missing.is_empty() {
-        return Void::Pending(missing);
-    }
+    // Keep first, then wait: a head the caller doesn't hold (or a fake one)
+    // only matters for a record nothing else saves.
     if heads.iter().any(|head| cx.graph().is_ancestor(record.id(), *head))
         || (!privileged && cx.witnessed(record, removal))
     {
-        Void::Keep
-    } else {
+        return Void::Keep;
+    }
+    let missing: Vec<RecordId> =
+        heads.iter().copied().filter(|head| cx.graph().record(*head).is_none()).collect();
+    if missing.is_empty() {
         Void::Void
+    } else {
+        Void::Pending(missing)
     }
 }
 
@@ -330,7 +341,8 @@ pub fn check_channel_with<G: ChannelGraph>(
     graph: &G,
     rule: VoidRule,
 ) -> Verdict {
-    let mut cx = Context { resolver, graph, rule, memo: HashMap::new(), depth: 0 };
+    let mut cx =
+        Context { resolver, graph, rule, memo: HashMap::new(), depth: 0, truncated: false };
     cx.judge(record)
 }
 

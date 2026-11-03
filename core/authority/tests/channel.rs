@@ -537,3 +537,32 @@ fn only_messages_are_edited_or_deleted() {
     assert_eq!(check_channel(&r, &delete(0, &rotate, 0), &store), bad, "owner deletes a rotation");
     assert_eq!(check_channel(&r, &delete(1, &fix, 15), &store), bad, "delete an edit");
 }
+
+/// A kicker can't freeze a channel by naming a head that doesn't exist:
+/// what a held head or a witness keeps is still kept; only a record nothing
+/// keeps waits on the missing head.
+#[test]
+fn a_fake_cut_head_holds_back_nothing_already_kept() {
+    let (mut control, heads) = founded(&[1, 2]);
+    let mut store = Store::default();
+    let seen = message(1, 0, vec![], &heads);
+    let real_head = message(2, 0, vec![seen.id()], &heads);
+    let replied = message(1, 1, vec![], &heads);
+    let reply = message(2, 1, vec![replied.id()], &heads);
+    let alone = message(1, 2, vec![], &heads);
+    for record in [&seen, &real_head, &replied, &reply, &alone] {
+        store.add(record);
+    }
+    let fake = RecordId::from_bytes([66; 32]);
+    let kick = rec(
+        0,
+        2,
+        heads.clone(),
+        Action::Kick { target: actor(1), cut: cut(&[(GENERAL, real_head.id()), (GENERAL, fake)]) },
+    );
+    control.push(kick);
+    let r = resolver(&control);
+    assert_eq!(check_channel(&r, &seen, &store), Verdict::Accept, "ancestor of a held head");
+    assert_eq!(check_channel(&r, &replied, &store), Verdict::Accept, "witnessed");
+    assert_eq!(check_channel(&r, &alone, &store), Verdict::Pending { missing: vec![fake] });
+}
