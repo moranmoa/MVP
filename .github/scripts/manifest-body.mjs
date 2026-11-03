@@ -81,6 +81,40 @@ function sha256(path) {
   });
 }
 
+// Mirrors core/updater MAX_UNPACKED_BYTES.
+const MAX_UNPACKED_BYTES = 2 * 1024 ** 3;
+
+/**
+ * Total uncompressed size of a .zip, from its central directory (the
+ * updater holds the unpack to exactly this; B8-2). Zip64 is refused: no
+ * payload needs it, and the updater caps unpacking at 2 GiB anyway.
+ */
+function zipUnpackedBytes(path) {
+  const buf = readFileSync(path);
+  // End of central directory: 22 bytes plus a comment of up to 64 KiB.
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 22 - 0xffff); i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) fail(`${path}: not a zip (no end of central directory)`);
+  const entries = buf.readUInt16LE(eocd + 10);
+  let off = buf.readUInt32LE(eocd + 16);
+  if (entries === 0xffff || off === 0xffffffff) fail(`${path}: zip64 is not supported`);
+  let total = 0;
+  for (let n = 0; n < entries; n++) {
+    if (off + 46 > buf.length || buf.readUInt32LE(off) !== 0x02014b50) fail(`${path}: bad central directory`);
+    const size = buf.readUInt32LE(off + 24);
+    if (size === 0xffffffff) fail(`${path}: zip64 entry is not supported`);
+    total += size;
+    off += 46 + buf.readUInt16LE(off + 28) + buf.readUInt16LE(off + 30) + buf.readUInt16LE(off + 32);
+  }
+  if (total === 0 || total > MAX_UNPACKED_BYTES) fail(`${path}: unpacked size ${total} is out of range`);
+  return total;
+}
+
 function write(path, body) {
   writeFileSync(path, JSON.stringify(body, null, 2) + "\n");
   const until = new Date(body.expires_at * 1000).toISOString();
@@ -113,6 +147,7 @@ if (a.restamp) {
     if (artifacts[platform]) fail(`two artifacts for ${platform}`);
     const path = join(dir, file);
     artifacts[platform] = { sha256: await sha256(path), size: statSync(path).size };
+    if (m[2] === "zip") artifacts[platform].unpacked_bytes = zipUnpackedBytes(path);
   }
   for (const p of platforms) if (!artifacts[p]) fail(`no ${prefix}${p} artifact in ${dir}`);
 
