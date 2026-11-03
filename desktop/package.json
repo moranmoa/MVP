@@ -1,0 +1,17 @@
+{
+  "name": "mvs-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Desktop shell (Electron) for the MVS app",
+  "license": "UNLICENSED",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/security.test.js",
+    "e2e": "node --test --test-concurrency=1 test/e2e.test.mjs"
+  },
+  "devDependencies": {
+    "electron": "44.7.0",
+    "playwright-core": "1.56.1"
+  }
+}
