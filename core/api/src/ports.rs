@@ -176,7 +176,10 @@ pub trait GroupCipher: Send + Sync {
         server: ServerId,
         channel: records::ChannelId,
         plaintext: &[u8],
-    ) -> Result<Vec<u8>, CipherError>;
+    ) -> Result<Vec<u8>, CipherError> {
+        let _ = (server, channel, plaintext);
+        Err(CipherError::Unavailable)
+    }
 
     /// Opens a channel message body whose record `author` signed.
     fn decrypt(
@@ -185,15 +188,23 @@ pub trait GroupCipher: Send + Sync {
         channel: records::ChannelId,
         author: PublicKey,
         body: &[u8],
-    ) -> Result<Opened, CipherError>;
+    ) -> Result<Opened, CipherError> {
+        let _ = (server, channel, author, body);
+        Err(CipherError::Unavailable)
+    }
 
     /// Takes in one `KeyRotation` record. Returns the part records evicted
     /// to stay within the probation caps, for sync to fetch again.
-    fn apply_rotation(&self, record: &Record) -> Result<Vec<records::RecordId>, CipherError>;
+    fn apply_rotation(&self, record: &Record) -> Result<Vec<records::RecordId>, CipherError> {
+        let _ = record;
+        Err(CipherError::Unavailable)
+    }
 
     /// The `KeyRotation` records of `server` that authority accepts now
     /// (deny by default: only these can become a channel's key).
-    fn set_accepted(&self, server: ServerId, accepted: &BTreeSet<records::RecordId>);
+    fn set_accepted(&self, server: ServerId, accepted: &BTreeSet<records::RecordId>) {
+        let _ = (server, accepted);
+    }
 }
 
 /// A decrypted channel message.
