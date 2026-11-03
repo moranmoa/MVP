@@ -82,7 +82,7 @@ impl ClientPolicy {
             }
             None => (ClientPolicy::new(channel), true),
         };
-        if p.newest.map_or(true, |(v, _)| v < installed) {
+        if p.newest.is_none_or(|(v, _)| v < installed) {
             p.newest = Some((installed, 0));
         }
         p.time_floor = p.time_floor.max(base.build_time);

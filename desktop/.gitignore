@@ -1,2 +1,4 @@
 .core/
 dist/
+# Written by the release workflow (relay address from MVS_RELAY_ADDR); never commit it.
+build/mvs-config.json

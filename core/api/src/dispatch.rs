@@ -57,6 +57,19 @@ struct SendArg {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct MessageIdArg {
+    message_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EditArg {
+    message_id: String,
+    body: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ServerUserArgs {
     server_id: String,
     user_id: String,
@@ -129,7 +142,7 @@ fn ok<T: serde::Serialize>(value: CoreResult<T>) -> CoreResult<Value> {
 
 /// Every command in `CoreCommands`, plus the Rust additions. Commands from
 /// the contract this core doesn't do yet answer `not-implemented`.
-pub const NOT_YET: &[&str] = &["editMessage", "deleteMessage", "retryMessage"];
+pub const NOT_YET: &[&str] = &[];
 
 impl Core {
     /// Takes a request JSON text, returns the response JSON text.
@@ -178,6 +191,12 @@ impl Core {
                 let a: SendArg = args(raw)?;
                 ok(self.send_message(&a.channel_id, &a.body, a.reply_to_id.as_deref()))
             }
+            "editMessage" => {
+                let a: EditArg = args(raw)?;
+                ok(self.edit_message(&a.message_id, &a.body))
+            }
+            "deleteMessage" => ok(self.delete_message(&args::<MessageIdArg>(raw)?.message_id)),
+            "retryMessage" => ok(self.retry_message(&args::<MessageIdArg>(raw)?.message_id)),
             "listMembers" => ok(self.list_members(&args::<ServerArg>(raw)?.server_id)),
             "createServer" => {
                 let a: CreateServerArgs = args(raw)?;

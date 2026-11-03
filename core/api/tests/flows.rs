@@ -60,6 +60,7 @@ fn names(events: &[Event]) -> Vec<&'static str> {
             Event::UpdateReady(_) => "update.ready",
             Event::Notice { .. } => "notice",
             Event::MessageAdded(_) => "message.added",
+            Event::MessageUpdated(_) => "message.updated",
         })
         .collect()
 }
@@ -912,6 +913,74 @@ fn a_kick_re_keys_the_channel() {
         .map(|m| m.body)
         .collect();
     assert_eq!(bodies, ["before", "after", "still here", "back"]);
+}
+
+/// Edits (author only), deletes (author, or a higher rank) as tombstones that
+/// keep their place, and retry (same record, mine only), all judged by
+/// authority before anything is stored or sent.
+#[test]
+fn edit_delete_and_retry_messages() {
+    use api::crypto::GroupKeysCipher;
+
+    let world = World::new();
+    let open = |words: &str, name: &str| {
+        let cipher = Arc::new(GroupKeysCipher::locked());
+        let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
+        peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        peer.core.update_profile(profile).unwrap();
+        peer
+    };
+    let owner = open(OWNER_WORDS, "Owner");
+    let guest = open(LEGAL, "Guest");
+    let server = owner.core.create_server("Edits", AgeRestriction::None).unwrap();
+    guest.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    let one = owner.core.send_message(&channel, "one", None).unwrap();
+    guest.core.sync_now().unwrap();
+    let two = guest.core.send_message(&channel, "two", None).unwrap();
+    let sent = world
+        .network
+        .fetch(ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap()))
+        .len();
+
+    // The author edits; everyone sees the new text and when.
+    guest.events.take();
+    guest.core.edit_message(&two.id, "two, edited").unwrap();
+    assert_eq!(names(&guest.events.take()), ["message.updated"]);
+    owner.core.sync_now().unwrap();
+    let got = owner.core.get_messages(&channel, 0, 10).unwrap().messages;
+    assert_eq!(got[1].body, "two, edited");
+    assert!(got[1].edited_at.is_some() && got[1].deleted.is_none());
+
+    // Refused before anything is stored or sent: someone else's message, a
+    // higher rank's message, bad input, an unknown ID.
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let before = world.network.fetch(server_key).len();
+    assert_eq!(before, sent + 1);
+    assert_eq!(
+        guest.core.edit_message(&one.id, "mine now").unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+    assert_eq!(guest.core.delete_message(&one.id).unwrap_err().code, ErrorCode::NotAllowed);
+    assert_eq!(guest.core.edit_message(&two.id, " ").unwrap_err().code, ErrorCode::BadRequest);
+    assert_eq!(guest.core.delete_message(&"ab".repeat(32)).unwrap_err().code, ErrorCode::NotFound);
+    assert_eq!(world.network.fetch(server_key).len(), before);
+
+    // The owner outranks the guest: deleting leaves a tombstone in place.
+    owner.core.delete_message(&two.id).unwrap();
+    guest.core.sync_now().unwrap();
+    assert_eq!(guest.core.get_message_count(&channel).unwrap(), 2);
+    let got = guest.core.get_messages(&channel, 0, 10).unwrap().messages;
+    assert_eq!((got[1].index, got[1].body.as_str(), got[1].deleted), (1, "", Some(true)));
+    assert_eq!(got[0].body, "one");
+
+    // Retry: my own message, the same record again; nobody else's.
+    guest.core.retry_message(&two.id).unwrap();
+    assert_eq!(world.network.fetch(server_key).len(), before + 1, "nothing new was signed");
+    assert_eq!(guest.core.retry_message(&one.id).unwrap_err().code, ErrorCode::NotAllowed);
+    assert_eq!(guest.core.retry_message("nope").unwrap_err().code, ErrorCode::NotFound);
 }
 
 /// A re-key that fails after a kick fails closed: the kick still stands

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
-import { useCore, type Member, type Message, type ServerSummary } from '../../core';
+import { isCoreError, useCore, type Member, type Message, type ServerSummary } from '../../core';
 import { Dialog, Name, RICH } from '../../components/common';
 import { BackIcon, CloseIcon, EditIcon, HashIcon, ReplyIcon, SendIcon, UsersIcon, WifiOffIcon } from '../../components/icons';
 import { useUserTextProps } from '../../app/textDir';
@@ -61,7 +61,7 @@ export function ChatView({
     setEditing(m);
   }, []);
   const onDelete = useCallback((m: Message) => setToDelete(m), []);
-  const onRetry = useCallback((m: Message) => void core.retryMessage(m.id), [core]);
+  const onRetry = useCallback((m: Message) => void core.retryMessage(m.id).catch(() => {}), [core]);
 
   const editLast = () => {
     for (let i = win.count - 1; i >= Math.max(0, win.count - 50); i--) {
@@ -159,7 +159,8 @@ export function ChatView({
             className="danger"
             autoFocus
             onClick={() => {
-              if (toDelete) void core.deleteMessage(toDelete.id);
+              // The real core can't delete yet (not-implemented); nothing changes then.
+              if (toDelete) core.deleteMessage(toDelete.id).catch(() => {});
               setToDelete(null);
             }}
           >
@@ -228,20 +229,23 @@ function Composer({
   const chars = text.length >= COUNTER_FROM ? [...text].length : text.length;
   const nearLimit = chars >= COUNTER_FROM;
   const tooLong = nearLimit && (chars > BODY_MAX || utf8.encode(text).length > BODY_MAX_BYTES);
-  const [failed, setFailed] = useState(false);
+  // Why the last send failed: no channel key yet (`not-allowed`: a moderator
+  // has to renew it), a feature the core doesn't have yet, or anything else.
+  const [failed, setFailed] = useState<'no-key' | 'not-yet' | 'other' | null>(null);
 
   const submit = async () => {
     const body = text.trim();
     if (!body || tooLong) return;
-    setFailed(false);
+    setFailed(null);
     if (!editing) setText('');
     try {
       await onSubmit(body);
       if (editing) setText('');
-    } catch {
+    } catch (e) {
       // The core refused it: give the text back instead of losing it.
       setText((t) => t || body);
-      setFailed(true);
+      const code = isCoreError(e) ? e.code : null;
+      setFailed(code === 'not-allowed' ? 'no-key' : code === 'not-implemented' ? 'not-yet' : 'other');
     }
   };
 
@@ -290,7 +294,7 @@ function Composer({
           placeholder={intl.formatMessage({ id: 'chat.composer' }, { channel: channelName })}
           aria-label={intl.formatMessage({ id: 'chat.composer' }, { channel: channelName })}
           onChange={(e) => {
-            setFailed(false);
+            setFailed(null);
             setText(e.target.value);
           }}
           onKeyDown={(e) => {
@@ -313,7 +317,7 @@ function Composer({
       {(nearLimit || failed) && (
         <p id="composer-status" className={`composer-status ${tooLong || failed ? 'error' : 'muted'}`} role={tooLong || failed ? 'alert' : undefined}>
           {failed ? (
-            <FormattedMessage id="chat.sendFailed" />
+            <FormattedMessage id={failed === 'no-key' ? 'chat.cantWriteYet' : failed === 'not-yet' ? 'chat.notYet' : 'chat.sendFailed'} />
           ) : (
             <>
               {tooLong && (

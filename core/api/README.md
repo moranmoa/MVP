@@ -60,7 +60,7 @@ that fails. Secrets stay in the OS keychain. A bad argument exits with 2.
 | Records | — | Only records the resolver has joined are stored, used as heads (at most 64, the latest) or read for members. Records waiting on deps are held in memory, bounded by the resolver's pending limit; what it evicts is dropped, and sync redelivers it |
 | Moderation | `kickMember`, plus additions `grantRole` and `revokeRole` | `authority` rules. Dry run on the live resolver: a record it does not accept is refused (`not-allowed`), never stored or sent, and the log is rebuilt from the store. TODO(records B4): `Resolver::would_accept` |
 | App | storage usage and limit, `clearCache`, `exportDiagnostics` (counts only), `getAppInfo`, `setUpdateChannel`, `restartToUpdate`, `blockUser`, `markRead` | SQLite |
-| Not yet | `getMessageCount`, `getMessages`, `sendMessage`, `editMessage`, `deleteMessage`, `retryMessage` | Answer `not-implemented`. Next step, on top of `groupkeys` |
+| Messages | `sendMessage`, `getMessageCount`, `getMessages`, `editMessage`, `deleteMessage`, `retryMessage` | Channel records judged by `authority::check_channel`, sealed and opened through `GroupCipher` (groupkeys). Edits apply the author's latest accepted edit (`editedAt`); deletes leave a tombstone in place (`deleted: true`). Retry resends the same stored record. Replies: `not-implemented` |
 
 ## Formats (frozen for the alpha)
 
