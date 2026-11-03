@@ -176,8 +176,6 @@ pub(crate) struct Log {
     pub channel: Vec<Record>,
     server: ServerId,
     channel_ids: HashSet<RecordId>,
-    /// `KeyRotation` records already handed to the cipher.
-    pub rotations_applied: HashSet<RecordId>,
 }
 
 impl Log {
@@ -199,7 +197,6 @@ impl Log {
             channel: Vec::new(),
             server,
             channel_ids: HashSet::new(),
-            rotations_applied: HashSet::new(),
         };
         for record in records {
             log.add(record);

@@ -2,9 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use authority::Action;
+use groupkeys::MemberSecret;
 use identity::{PhraseError, RecoveryPhrase, Vault, VaultError, VaultState};
 use rand_core::{OsRng, RngCore};
 use records::{ChannelId, Draft, Kind, PublicKey, Record, RecordId, Scope, ServerId};
@@ -115,8 +116,21 @@ impl Core {
         if inner.vault.state().map_err(vault_error)? == VaultState::Ready {
             let phrase = inner.vault.open().map_err(vault_error)?;
             inner.me = Some(inner.load_me(phrase)?);
+            unlock_cipher(&ports, inner.me.as_ref());
         }
         Ok(Core { inner: Mutex::new(inner), ports, app_version: config.app_version })
+    }
+
+    /// What the app lock and sign-out call: the group cipher drops our
+    /// secret and every channel key. TODO(app lock): the commands.
+    pub fn lock_keys(&self) {
+        self.ports.cipher.lock();
+    }
+
+    /// After the app lock: the cipher gets our secret back. The next read or
+    /// send replays what it lost (see `unlock_cipher`).
+    pub fn unlock_keys(&self) {
+        unlock_cipher(&self.ports, self.lock().me.as_ref());
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -148,7 +162,7 @@ impl Core {
     }
 
     pub fn create_identity(&self, input: NewIdentityInput) -> CoreResult<CreatedIdentity> {
-        self.run(|inner, _, events| {
+        self.run(|inner, ports, events| {
             if inner.me.is_some() {
                 return Err(ErrorCode::NotAllowed.into());
             }
@@ -167,6 +181,7 @@ impl Core {
             let words = phrase.words().iter().map(|w| (*w).to_owned()).collect();
             let identity = inner.identity_json(&me)?;
             inner.me = Some(me);
+            unlock_cipher(ports, inner.me.as_ref());
             events.push(progress(ProgressStep::Done, 100));
             Ok(CreatedIdentity { identity, words })
         })
@@ -256,7 +271,7 @@ impl Core {
     }
 
     pub fn restore_identity(&self, words: Vec<String>) -> CoreResult<Identity> {
-        self.run(|inner, _, _| {
+        self.run(|inner, ports, _| {
             if inner.me.is_some() {
                 return Err(ErrorCode::NotAllowed.into());
             }
@@ -268,6 +283,7 @@ impl Core {
             let me = inner.new_me(phrase, Profile::default())?;
             let identity = inner.identity_json(&me)?;
             inner.me = Some(me);
+            unlock_cipher(ports, inner.me.as_ref());
             Ok(identity)
         })
     }
@@ -1013,5 +1029,15 @@ fn cipher_error(error: CipherError) -> CoreError {
         CipherError::NoKey | CipherError::RotationRequired => ErrorCode::NotAllowed.into(),
         CipherError::Unavailable => ErrorCode::NotImplemented.into(),
         CipherError::Rejected => ErrorCode::Internal.into(),
+    }
+}
+
+/// Hands the group cipher our member secret: at identity load, create and
+/// restore, and again after the app lock (`Core::unlock_keys`). The next
+/// read or send gives it the channels, the accepted set and the stored
+/// rotations again (`chat::sync_cipher`).
+fn unlock_cipher(ports: &Ports, me: Option<&Me>) {
+    if let Some(me) = me {
+        ports.cipher.unlock(Arc::new(MemberSecret::new(me.identity.signing_key())));
     }
 }

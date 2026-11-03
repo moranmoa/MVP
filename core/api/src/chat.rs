@@ -76,20 +76,42 @@ fn accepted(resolver: &Resolver, record: &Record, graph: &Graph) -> bool {
     check_channel(resolver, record, graph) == Verdict::Accept
 }
 
-/// Hands the cipher every rotation it hasn't seen and the accepted set.
-pub(crate) fn sync_cipher(cipher: &dyn GroupCipher, server: ServerId, log: &mut Log) {
+/// The channels authority knows for `server`: only the default one until
+/// channel records arrive (B4-3). Nothing about any other channel ever
+/// reaches the cipher, whatever records name it.
+pub(crate) fn known_channels(server: ServerId) -> BTreeSet<ChannelId> {
+    BTreeSet::from([crate::model::default_channel(server)])
+}
+
+fn in_known(record: &Record, known: &BTreeSet<ChannelId>) -> bool {
+    matches!(record.scope(), Scope::Channel(c) if known.contains(&c))
+}
+
+/// Brings the cipher up to date for `server`, in the order it needs:
+/// the known channels, then the accepted rotations, then every stored
+/// rotation of those channels. Done before every read and send, so an
+/// unlock (which starts from nothing) or a lock in between loses nothing;
+/// a rotation it already holds is a no-op (`Applied::Duplicate`).
+/// TODO(perf): replay only after an unlock, once the core drives it.
+pub(crate) fn sync_cipher(cipher: &dyn GroupCipher, server: ServerId, log: &Log) {
+    let known = known_channels(server);
+    cipher.set_channels(server, &known);
     let graph = Graph::new(&log.channel);
-    let mut ok = BTreeSet::new();
-    for record in log.channel.iter().filter(|r| r.kind() == Kind::KeyRotation) {
-        if log.rotations_applied.insert(record.id()) {
-            // An error is a rotation we can't use; nothing else to do.
-            let _ = cipher.apply_rotation(record);
-        }
-        if accepted(&log.resolver, record, &graph) {
-            ok.insert(record.id());
-        }
-    }
+    let rotations: Vec<&Record> = log
+        .channel
+        .iter()
+        .filter(|r| r.kind() == Kind::KeyRotation && in_known(r, &known))
+        .collect();
+    let ok: BTreeSet<RecordId> = rotations
+        .iter()
+        .filter(|r| accepted(&log.resolver, r, &graph))
+        .map(|r| r.id())
+        .collect();
     cipher.set_accepted(server, &ok);
+    for record in rotations {
+        // An error is a rotation we can't use; nothing else to do.
+        let _ = cipher.apply_rotation(record);
+    }
 }
 
 /// A shown message: its record and opened text.
@@ -106,6 +128,9 @@ pub(crate) fn messages(
     channel: ChannelId,
     log: &Log,
 ) -> Vec<Shown> {
+    if !known_channels(server).contains(&channel) {
+        return Vec::new();
+    }
     let records = channel_records(log, channel);
     let graph = Graph::new(&log.channel);
     let mut shown: Vec<Shown> = records
