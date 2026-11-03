@@ -24,6 +24,9 @@ const CODE_ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 pub(crate) const COLORS: [&str; 8] =
     ["#5865f2", "#2f9e44", "#e8590c", "#d6336c", "#1098ad", "#7048e8", "#f08c00", "#0ca678"];
 
+/// #general's name as created. TODO(ui): the creator's language ("כללי").
+pub(crate) const GENERAL: &str = "general";
+
 pub(crate) fn default_channel(server: ServerId) -> ChannelId {
     ChannelId::from_bytes(blake3::derive_key(DEFAULT_CHANNEL_CTX, server.as_bytes()))
 }

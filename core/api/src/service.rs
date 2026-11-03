@@ -330,7 +330,7 @@ impl Core {
     pub fn list_channels(&self, server_id: &str) -> CoreResult<Vec<Channel>> {
         let mut inner = self.lock();
         let server = inner.load_mine(parse_server(server_id)?)?;
-        Ok(vec![inner.view(server)?.default_channel()])
+        inner.view(server).map(|view| view.channels())
     }
 
     pub fn list_members(&self, server_id: &str) -> CoreResult<Vec<Member>> {
@@ -354,16 +354,22 @@ impl Core {
             let mut nonce = [0u8; records::GENESIS_NONCE_LEN];
             OsRng.fill_bytes(&mut nonce);
             let body = GenesisBody { v: 1, name: name.to_owned(), age_restriction };
-            let genesis = authority::sign_genesis(
+            // The genesis and #general (UX-04). #general keeps the derived ID,
+            // so peers and sync agree on its log without reading the record.
+            let server = ServerId::derive(&me.key(), &nonce);
+            let [genesis, general] = authority::sign_new_server(
                 me.identity.signing_key(),
                 nonce,
                 ports.clock.now_ms(),
                 &serde_json::to_vec(&body).expect("plain struct"),
+                model::default_channel(server),
+                model::GENERAL,
             )
             .map_err(|_| ErrorCode::BadRequest)?;
-            let server = genesis.server();
+            debug_assert_eq!(genesis.server(), server);
             // The owner is a member from the genesis: the first invite (for
-            // the link) and the profile post follow it.
+            // the link) and the profile post follow.
+
             let sign = |seq, deps, action: &Action| {
                 authority::sign_control(
                     me.identity.signing_key(),
@@ -375,12 +381,12 @@ impl Core {
                 )
                 .map_err(|_| CoreError::from(ErrorCode::BadRequest))
             };
-            let invite = sign(1, vec![genesis.id()], &model::FIRST_INVITE)?;
+            let invite = sign(2, vec![general.id()], &model::FIRST_INVITE)?;
             let profile =
-                sign(2, vec![invite.id()], &model::profile_action(&me.profile.display_name))?;
+                sign(3, vec![invite.id()], &model::profile_action(&me.profile.display_name))?;
             let me_key = me.key();
             inner.logs.insert(server, Log::new(server, []));
-            for record in [genesis, invite, profile] {
+            for record in [genesis, general, invite, profile] {
                 ports.network.publish(&record);
                 inner.store(server, record)?;
             }
@@ -757,6 +763,12 @@ impl Core {
 }
 
 impl Inner {
+    /// The channels authority knows for a loaded server.
+    fn known(&self, server: ServerId) -> CoreResult<BTreeSet<ChannelId>> {
+        let log = self.logs.get(&server).ok_or(ErrorCode::Internal)?;
+        Ok(chat::known_channels(server, log.resolver.state()))
+    }
+
     /// The first time a server is synced: what is already there counts as
     /// announced (the UI reads history with `getMessages`).
     fn seed_announced(&mut self, cipher: &dyn GroupCipher, server: ServerId) -> CoreResult<()> {
@@ -764,7 +776,7 @@ impl Inner {
             return Ok(());
         }
         let mut seen = HashMap::new();
-        for channel in chat::known_channels(server) {
+        for channel in self.known(server)? {
             for s in self.shown(cipher, server, channel)? {
                 seen.insert(s.record.id(), (s.edited_at, s.deleted));
             }
@@ -782,7 +794,7 @@ impl Inner {
         events: &mut Events,
     ) -> CoreResult<()> {
         let me = self.me.as_ref().map(Me::key);
-        for channel in chat::known_channels(server) {
+        for channel in self.known(server)? {
             let shown = self.shown(cipher, server, channel)?;
             let seen = self.announced.entry(server).or_default();
             for (index, s) in shown.iter().enumerate() {
@@ -883,7 +895,7 @@ impl Inner {
         for server in self.db.servers()? {
             self.load(server)?;
             let log = self.logs.get(&server).ok_or(ErrorCode::Internal)?;
-            let known = chat::known_channels(server);
+            let known = chat::known_channels(server, log.resolver.state());
             let found = log.channel.iter().find(|r| {
                 r.id() == id
                     && r.kind() == Kind::Message
@@ -980,7 +992,7 @@ impl Inner {
         let log = self.logs.get(&server).ok_or(ErrorCode::Internal)?;
         chat::sync_cipher(cipher, server, log);
         let server_id = model::hex_id(server.as_bytes());
-        for channel in chat::known_channels(server) {
+        for channel in self.known(server)? {
             // A probe: an empty plaintext, never sent.
             if cipher.encrypt(server, channel, b"") != Err(CipherError::RotationRequired) {
                 continue;
@@ -1003,8 +1015,8 @@ impl Inner {
         let channel =
             model::parse_hex32(channel_id).map(ChannelId::from_bytes).ok_or(ErrorCode::NotFound)?;
         for server in self.db.servers()? {
-            if model::default_channel(server) == channel {
-                self.load(server)?;
+            self.load(server)?;
+            if self.known(server)?.contains(&channel) {
                 return Ok((server, channel));
             }
         }
@@ -1259,15 +1271,23 @@ impl ServerView<'_> {
         }
     }
 
-    fn default_channel(&self) -> Channel {
-        Channel {
-            id: model::hex_id(model::default_channel(self.id).as_bytes()),
-            server_id: model::hex_id(self.id.as_bytes()),
-            name: "general".to_owned(),
-            adult: false,
+    /// The channels authority knows, with their names as created; a server
+    /// from before #113 shows its derived #general.
+    /// TODO(#116): hide 18+ channels from members without an 18+ claim.
+    fn channels(&self) -> Vec<Channel> {
+        let server_id = model::hex_id(self.id.as_bytes());
+        let channel = |id: ChannelId, name: &str, adult: bool| Channel {
+            id: model::hex_id(id.as_bytes()),
+            server_id: server_id.clone(),
+            name: name.to_owned(),
+            adult,
             unread: false,
             mentions: 0,
+        };
+        if self.state.channels.is_empty() {
+            return vec![channel(model::default_channel(self.id), model::GENERAL, false)];
         }
+        self.state.channels.iter().map(|(id, c)| channel(*id, &c.name, c.adult)).collect()
     }
 }
 
