@@ -1096,3 +1096,74 @@ fn sync_announces_new_and_changed_messages_once() {
     owner.core.sync_now().unwrap();
     assert!(added(owner.events.take()).is_empty());
 }
+
+/// Channels are authority's (`State.channels`, #113): #general from
+/// `sign_new_server`, one the owner creates, and not one a member tries to.
+#[test]
+fn channels_come_from_channel_create_records() {
+    use api::crypto::GroupKeysCipher;
+
+    let world = World::new();
+    let open = |words: &str, name: &str| {
+        let cipher = Arc::new(GroupKeysCipher::locked());
+        let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
+        peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        peer.core.update_profile(profile).unwrap();
+        peer
+    };
+    let owner = open(OWNER_WORDS, "Owner");
+    let guest = open(LEGAL, "Guest");
+    let server = owner.core.create_server("Rooms", AgeRestriction::None).unwrap();
+    guest.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    let names = |peer: &Peer| -> Vec<String> {
+        peer.core.list_channels(&server.id).unwrap().into_iter().map(|c| c.name).collect()
+    };
+    assert_eq!(names(&owner), ["general"]);
+
+    // A ChannelCreate each: the owner's is accepted, the guest's isn't.
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let heads = |w: &World| -> Vec<records::RecordId> {
+        let mut ids: Vec<_> = w
+            .network
+            .fetch(server_key)
+            .iter()
+            .filter(|r| r.scope() == Scope::Control)
+            .map(|r| r.id())
+            .collect();
+        ids.sort();
+        ids
+    };
+    let create = |words: &str, seq: u64, id: u8, name: &str| {
+        let key = identity::RecoveryPhrase::parse(words).unwrap().identity();
+        let action = authority::Action::ChannelCreate {
+            channel: records::ChannelId::from_bytes([id; 32]),
+            adult: false,
+            name: name.into(),
+        };
+        let mut deps = heads(&world);
+        deps.truncate(records::MAX_DEPS);
+        let record =
+            authority::sign_control(key.signing_key(), server_key, seq, deps, 5, &action).unwrap();
+        world.network.publish(&record);
+    };
+    create(OWNER_WORDS, 10, 0x51, "random");
+    create(LEGAL, 10, 0x52, "guests-only");
+    for peer in [&owner, &guest] {
+        peer.core.sync_now().unwrap();
+    }
+    let mut got = names(&guest);
+    got.sort();
+    assert_eq!(got, ["general", "random"]);
+
+    // The new channel works end to end; the refused one isn't a channel.
+    let random = hex::encode([0x51; 32]);
+    owner.core.send_message(&random, "in random", None).unwrap();
+    guest.core.sync_now().unwrap();
+    assert_eq!(guest.core.get_messages(&random, 0, 9).unwrap().messages[0].body, "in random");
+    assert_eq!(
+        guest.core.get_message_count(&hex::encode([0x52; 32])).unwrap_err().code,
+        ErrorCode::NotFound
+    );
+}
