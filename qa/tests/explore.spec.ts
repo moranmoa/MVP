@@ -75,8 +75,7 @@ test.describe('onboarding', () => {
     await expect(page.getByLabel(he.displayName)).toBeVisible({ timeout: 2_000 });
   });
 
-  test('QA-03 a large profile picture does not trap the user on the profile step', async ({ page }) => {
-    bug('QA-03');
+  test('fixed QA-03: a large profile picture does not trap the user on the profile step', async ({ page }) => {
     const errors = trackErrors(page);
     await toBirthDate(page);
     await enterBirthDate(page, 5, 5, 1995);
@@ -405,8 +404,7 @@ test.describe('messages', () => {
     await expect(composer(page)).toHaveValue('טיוטה שלא נשלחה');
   });
 
-  test('QA-13 bidi control characters in a display name cannot reorder it', async ({ page }) => {
-    bug('QA-13');
+  test('fixed QA-13: bidi control characters in a display name cannot reorder it', async ({ page }) => {
     // U+202E (RIGHT-TO-LEFT OVERRIDE) makes "evil" render as "live".
     await onboard(page, { displayName: `Moran ${String.fromCodePoint(0x202e)}evil` });
     await createServer(page, 'התחזות');
@@ -537,11 +535,11 @@ test.describe('layout', () => {
           }),
         [button, heading],
       );
-    // Best of 3 round trips: other test workers share the CPU.
+    // Best of 6 round trips: other test workers share the CPU.
     const server: number[] = [];
     const channel: number[] = [];
     let mcChannel = 'general'; // the server remembers its last channel
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 6; i++) {
       server.push(await timeSwitch('Minecraft IL', mcChannel));
       await page.waitForTimeout(200);
       mcChannel = mcChannel === 'general' ? 'builds' : 'general';
@@ -584,4 +582,133 @@ test('the diagnostics file contains no words, birth date or message text', async
   for (const w of words) expect(text).not.toContain(`"${w}"`);
   expect(text).not.toContain('1993-08-21');
   expect(text).not.toContain('סוד-מאוד-פרטי');
+});
+
+// ---------------------------------------------------------------------------
+// PR #10: sanitised core data, phone layout (< 40rem), validated settings
+// ---------------------------------------------------------------------------
+
+test.describe('phone layout', () => {
+  test.use({ viewport: { width: 375, height: 812 }, hasTouch: true, isMobile: true });
+
+  test('QA-18 the recovery-word check fits a 375 px phone', async ({ page }) => {
+    bug('QA-18');
+    await toBirthDate(page);
+    await enterBirthDate(page, 1, 1, 1990);
+    await page.getByRole('button', { name: he.written }).click({ timeout: 10_000 });
+    await expect(page.getByRole('heading', { name: he.checkTitle })).toBeVisible();
+    await shot(page, 'phone-word-check');
+    expect(await pageOverflow(page)).toBeLessThanOrEqual(0);
+    await expect(page.getByRole('button', { name: he.verify, exact: true })).toBeInViewport({ ratio: 1 });
+  });
+
+  test('send a message and switch pages on a 375 px phone, no sideways scroll', async ({ page }) => {
+    const errors = trackErrors(page);
+    await page.goto('/?demo=1&still=1&update=600000');
+    await page.getByRole('button', { name: /^כללי/ }).first().click();
+    await expect(composer(page)).toBeInViewport();
+    await composer(page).fill('שלום מהטלפון');
+    await composer(page).press('Enter');
+    await expect(lastMessage(page).locator('.msg-body')).toContainText('שלום מהטלפון');
+    expect(await pageOverflow(page)).toBeLessThanOrEqual(0);
+    await shot(page, 'phone-chat');
+    // Back to the channel page and into another channel.
+    await page.getByRole('button', { name: 'חזרה לערוצים' }).click();
+    await expect(composer(page)).toBeHidden();
+    await page.getByRole('button', { name: /^clips/ }).click();
+    await expect(composer(page)).toBeInViewport();
+    expect(errors).toEqual([]);
+  });
+
+  test('member sheet opens as a dialog and Esc closes it', async ({ page }) => {
+    await page.goto('/?demo=1&still=1&update=600000');
+    await page.getByRole('button', { name: /^כללי/ }).first().click();
+    await page.getByRole('button', { name: 'רשימת החברים' }).click();
+    const sheet = page.getByRole('dialog');
+    await expect(sheet).toBeVisible();
+    await shot(page, 'phone-members');
+    await page.keyboard.press('Escape');
+    await expect(sheet).toBeHidden();
+    await expect(composer(page)).toBeInViewport();
+  });
+
+  test('QA-19 chat controls on a phone are at least 44×44 px', async ({ page }) => {
+    bug('QA-19'); // the reply reference ("ההודעה המקורית") is ~19 px tall
+    await page.goto('/?demo=1&still=1&update=600000');
+    await page.getByRole('button', { name: /^כללי/ }).first().click();
+    await expect(composer(page)).toBeVisible();
+    const small = await page.locator('main button:visible').evaluateAll((els) =>
+      els
+        .map((el) => ({ name: el.getAttribute('aria-label') ?? el.textContent?.trim(), r: el.getBoundingClientRect() }))
+        .filter(({ r }) => r.width > 0 && (r.width < 44 || r.height < 44))
+        .map(({ name, r }) => `${name} ${Math.round(r.width)}×${Math.round(r.height)}`),
+    );
+    expect(small).toEqual([]);
+  });
+
+  test('English phone layout is LTR and does not scroll sideways', async ({ page }) => {
+    await page.goto('/?demo=1&still=1&update=600000&lang=en');
+    await expect(page.locator('html')).toHaveAttribute('dir', 'ltr');
+    await page.getByRole('button', { name: /^כללי/ }).first().click();
+    await expect(composer(page).or(page.getByRole('textbox', { name: /^Message #/ }))).toBeInViewport();
+    expect(await pageOverflow(page)).toBeLessThanOrEqual(0);
+  });
+});
+
+test.describe('hostile data from peers', () => {
+  test('?hostile=1: markup, overrides, zalgo, remote colours and huge messages stay harmless', async ({ page }) => {
+    const errors = trackErrors(page);
+    const remote: string[] = [];
+    page.on('request', (r) => {
+      if (!r.url().startsWith('http://localhost')) remote.push(r.url());
+    });
+    page.on('dialog', (d) => {
+      errors.push(`dialog: ${d.message()}`);
+      void d.dismiss();
+    });
+    await page.goto('/?demo=1&still=1&update=600000&hostile=1');
+    await expect(page.getByRole('article').first()).toBeVisible();
+    await page.waitForTimeout(500);
+    await shot(page, 'hostile');
+    expect(remote).toEqual([]);
+    expect(errors).toEqual([]);
+    expect(await page.locator('.msg-body img, .msg-body a').count()).toBe(0);
+    expect(await pageOverflow(page)).toBeLessThanOrEqual(0);
+    const controls = await page.evaluate(() =>
+      [...document.body.innerText].filter((c) => /[\u202A-\u202E\u2066-\u2069]/.test(c)).length,
+    );
+    expect(controls).toBe(0);
+    // The look-alike of the owner (מורן → מודן) is flagged.
+    await expect(page.getByText('שם דומה').first()).toBeVisible();
+  });
+
+  test('corrupt settings in storage fall back to defaults', async ({ page }) => {
+    const errors = trackErrors(page);
+    await page.addInitScript(() =>
+      localStorage.setItem('mvp.settings.v1', JSON.stringify({ locale: 'xx', theme: '<b>', uiScale: 100, fontSize: 'big' })),
+    );
+    await page.goto('/?demo=1&still=1&update=600000');
+    await expect(page.getByRole('navigation').first()).toBeVisible();
+    const root = await page.evaluate(() => ({
+      lang: document.documentElement.lang,
+      size: document.documentElement.style.fontSize,
+      theme: document.documentElement.dataset.theme,
+    }));
+    expect(['he', 'en']).toContain(root.lang);
+    expect(Number.parseFloat(root.size)).toBeLessThanOrEqual(32);
+    expect(['system', 'light', 'dark']).toContain(root.theme);
+    expect(errors).toEqual([]);
+  });
+
+  test('QA-17 a 5,000-character message is accepted but shown cut for everyone', async ({ page }) => {
+    bug('QA-17');
+    await onboard(page);
+    await createServer(page, 'קיצוץ');
+    // 5,000 Latin letters = 5,000 bytes: well under the 16 KiB core limit.
+    await composer(page).fill('a'.repeat(5_000));
+    await composer(page).press('Enter');
+    // Expected: either the composer refuses it up front, or the whole message is shown.
+    // Actual: the body is cut to 4,000 characters (BODY_MAX) with no notice.
+    await expect(lastMessage(page).locator('.msg-body')).toHaveText(/^a{5000}/);
+  });
 });
