@@ -9,7 +9,7 @@
 // HOME (so its own Electron data folder and core data dir) and its own D-Bus
 // session and keyring (MVS_BUS_A / MVS_BUS_B). Both cores sync through a
 // throwaway relay (MVS_CORE_PATH is a wrapper that adds --relay). A creates a
-// server and posts; B joins by the invite link and sees A's message; B posts
+// server, B joins by the invite link, A posts and B sees it; B posts
 // and A sees it (203–206). Run by ui/scripts/real-core-two.sh.
 //
 // Runs in desktop's real-core image. Build ui/dist and desktop/.core/mvs-core
@@ -141,8 +141,6 @@ if (!process.env.MVS_TWO) {
   await onboard(a.page, 'מורן');
   const link = await createServer(a.page, 'ערב חברים');
   say('invite link ok');
-  await post(a.page, FROM_A);
-  await shot(a.page, '203-real-core-two-a-posted');
 
   const b = await launch(envB);
   await onboard(b.page, 'נועה');
@@ -150,6 +148,11 @@ if (!process.env.MVS_TWO) {
   await b.page.getByLabel('לינק הזמנה').fill(link);
   await b.page.getByRole('button', { name: 'הצטרפות', exact: true }).click();
   await b.page.getByRole('textbox', { name: /^כתיבה ב-/ }).waitFor({ timeout: SYNC_WAIT });
+  // A posts once B is a member: the channel key is made for the members of
+  // that moment, so a message from before the join is not B's to read.
+  await a.page.locator('.members').getByText('נועה').waitFor({ timeout: SYNC_WAIT });
+  await post(a.page, FROM_A);
+  await shot(a.page, '203-real-core-two-a-posted');
   await b.page.getByText(FROM_A).waitFor({ timeout: SYNC_WAIT });
   await shot(b.page, '204-real-core-two-b-joined');
 
