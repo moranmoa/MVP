@@ -471,7 +471,7 @@ impl Core {
             // M2: removed members must not read what comes next.
             if matches!(action, Action::Kick { .. } | Action::Revoke { .. }) {
                 // The kick is stored and sent: a failed re-key must not undo that.
-                if                 inner.rekey(ports, server, events).is_err() {
+                if inner.rekey(ports, server, events).is_err() {
                     events.push(Event::Notice {
                         kind: NoticeKind::RekeyWaiting,
                         server_id: server_id.to_owned(),
@@ -630,7 +630,7 @@ impl Core {
                     });
                     // M2: a kick or revoke we read, that nobody re-keyed for.
                     // Never aborts the other servers; the next sync retries.
-                    if                     inner.rekey(ports, server, events).is_err() {
+                    if inner.rekey(ports, server, events).is_err() {
                         events.push(Event::Notice {
                             kind: NoticeKind::RekeyWaiting,
                             server_id: model::hex_id(server.as_bytes()),

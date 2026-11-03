@@ -965,7 +965,13 @@ fn a_failed_re_key_fails_closed() {
     spy.fail_rotate.store(false, Ordering::SeqCst);
     owner.core.send_message(&channel, "after", None).unwrap();
     guest.core.sync_now().unwrap();
-    let bodies: Vec<String> =
-        guest.core.get_messages(&channel, 0, 10).unwrap().messages.into_iter().map(|m| m.body).collect();
+    let bodies: Vec<String> = guest
+        .core
+        .get_messages(&channel, 0, 10)
+        .unwrap()
+        .messages
+        .into_iter()
+        .map(|m| m.body)
+        .collect();
     assert_eq!(bodies, ["before", "after"]);
 }
