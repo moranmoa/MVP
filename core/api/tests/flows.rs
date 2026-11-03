@@ -1211,3 +1211,34 @@ fn general_is_named_in_the_creators_language() {
     english.core.join_server(&he_server.invite_link).unwrap();
     assert_eq!(english.core.list_channels(&he_server.id).unwrap()[0].name, "כללי");
 }
+
+/// GAP-4: each server's sync secret is in its invite link, stored sealed
+/// (never in the clear in the database), and the same after a restart.
+#[test]
+fn the_server_secret_is_sealed_and_kept() {
+    let world = World::new();
+    let secrets = Arc::new(MemoryStore::new());
+    let dir = std::env::temp_dir().join(format!("mvs-api-secret-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("core.db");
+    let _ = std::fs::remove_file(&db);
+    let peer = world.peer_with(secrets.clone(), Some(db.clone()), Arc::new(PendingGroupKeys));
+    sign_up(&peer, "Owner");
+    let server = peer.core.create_server("Secret", AgeRestriction::None).unwrap();
+    let parts: Vec<&str> =
+        server.invite_link.trim_start_matches("mvs://join/").split('/').collect();
+    assert_eq!(parts.len(), 3, "server, invite, secret");
+    let secret = hex::decode(parts[2]).unwrap();
+    assert_eq!(secret.len(), 32);
+    drop(peer);
+
+    let bytes = std::fs::read(&db).unwrap();
+    assert!(!contains(&bytes, &secret), "the secret is in the db in the clear");
+    assert!(!contains(&bytes, parts[2].as_bytes()), "the secret's hex is in the db");
+
+    let peer = world.peer_with(secrets, Some(db), Arc::new(PendingGroupKeys));
+    let again = peer.core.list_servers().unwrap().remove(0);
+    assert_eq!(again.invite_link, server.invite_link);
+    drop(peer);
+    let _ = std::fs::remove_dir_all(&dir);
+}

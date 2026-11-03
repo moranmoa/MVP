@@ -26,7 +26,7 @@ struct Peer {
     core: Core,
     events: Arc<CollectingSink>,
     net: Arc<SyncNetwork>,
-    cipher: Arc<GroupKeysCipher>,
+    _cipher: Arc<GroupKeysCipher>,
     _dir: std::path::PathBuf,
 }
 
@@ -53,7 +53,7 @@ fn peer(name: &str, words: &str, relay: &str) -> Peer {
     core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
     let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
     core.update_profile(profile).unwrap();
-    Peer { core, events, net, cipher, _dir: dir }
+    Peer { core, events, net, _cipher: cipher, _dir: dir }
 }
 
 fn eventually(what: &str, mut ok: impl FnMut() -> bool) {
