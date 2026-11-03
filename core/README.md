@@ -2,7 +2,8 @@
 
 | Crate | What it is |
 | --- | --- |
-| `authority` | Deterministic resolution of a server's control log: roles, revoke, kick, and voiding of concurrent "backdated" actions |
+| `records` | Signed record envelope: canonical binary encoding, BLAKE3 content IDs, Ed25519 signatures, per-kind size limits |
+| `authority` | Deterministic resolution of a server's control log: roles, revoke, kick, and voiding of concurrent "backdated" actions. `resolve` recomputes from scratch (the reference); `Resolver` applies arriving records incrementally |
 | `spike-peer` | Spike experiment 1: connects two peers through the relay, then tries a direct hole-punched connection. Tester instructions (Hebrew): `spike-peer/TESTING.md` |
 | `updater` | Spike experiment 7: signed update chain. Release manifest with 1-of-1 or 2-of-3 Ed25519 root signatures, expiry, no-downgrade and revocation rules, artifact hash check, and a rollback state machine. CLI: `keygen`, `make-root`, `hash`, `sign-manifest`, `verify` |
 
@@ -16,7 +17,9 @@ docker run --rm -v "${PWD}:/work" -v cargo-registry:/usr/local/cargo/registry -v
 
 Run it from this folder. `tests/convergence.rs` is spike experiment 3: 10,000
 random scenarios, each delivered to a peer in 3 random orders, must all reach
-the same state.
+the same state, and after every arrival the incremental `Resolver` must equal
+`resolve` over the records held so far. It also prints timings for a ~5,000
+record log, incremental vs full.
 
 ## Building spike-peer.exe for Windows testers
 

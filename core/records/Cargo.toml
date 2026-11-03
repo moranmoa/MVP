@@ -1,0 +1,11 @@
+[package]
+name = "records"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# BSD-3-Clause
+ed25519-dalek = "2"
+# CC0-1.0 OR Apache-2.0
+blake3 = "1"
