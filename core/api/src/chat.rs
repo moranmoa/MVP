@@ -205,11 +205,21 @@ pub(crate) fn messages(
         .chain(pruned)
         .filter_map(|(meta, record)| {
             if replaced.deleted.contains(&meta.id) {
-                return Some(Shown { record: meta, text: String::new(), edited_at: None, deleted: true });
+                return Some(Shown {
+                    record: meta,
+                    text: String::new(),
+                    edited_at: None,
+                    deleted: true,
+                });
             }
             if let Some(edit) = replaced.latest_edit.get(&meta.id) {
                 let text = open(cipher, server, channel, edit.author(), edit.body().get(32..)?)?;
-                return Some(Shown { record: meta, text, edited_at: Some(edit.ts()), deleted: false });
+                return Some(Shown {
+                    record: meta,
+                    text,
+                    edited_at: Some(edit.ts()),
+                    deleted: false,
+                });
             }
             // Neither deleted nor edited: only a full record has a text.
             let record = record?;
@@ -262,8 +272,11 @@ struct Replaced {
 impl Replaced {
     fn of(log: &Log, channel: ChannelId) -> Replaced {
         let graph = Graph::new(&log.channel, &log.stubs);
-        let mut replaced =
-            Replaced { deleted: HashSet::new(), latest_edit: HashMap::new(), edits: HashMap::new() };
+        let mut replaced = Replaced {
+            deleted: HashSet::new(),
+            latest_edit: HashMap::new(),
+            edits: HashMap::new(),
+        };
         for record in channel_records(log, channel) {
             let kind = record.kind();
             if !matches!(kind, Kind::MessageDelete | Kind::MessageEdit)

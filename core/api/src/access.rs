@@ -11,12 +11,13 @@
 //! The server secret itself is kept by the core, sealed in its database
 //! (`db::save_server_secret`), and never logged.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, RwLock};
 
+use authority::{ChannelGraph, Entry, Resolver, Verdict};
 use ed25519_dalek::Signer;
-use records::{PublicKey, ServerId, SigningKey};
-use sync::{Binder, ControlLog, ReadGate};
+use records::{PublicKey, Record, RecordId, ServerId, SigningKey, Stub};
+use sync::{Binder, ChannelLog, ControlLog, Held, ReadGate, StubGate, StubVerdict};
 
 /// The only messages [`KeyBinder`] signs start with this.
 pub const BINDING_PREFIX: &[u8] = b"mvs/peer-binding/v1";
@@ -103,6 +104,80 @@ impl ReadGate for MemberReadGate {
         }
         cache.insert(key, (count, verdict));
         verdict
+    }
+}
+
+/// B6-p: sync stores a peer's stub in place of a record, or prunes one of
+/// ours, only once authority accepts the stub, that is, a held accepted
+/// delete or newer edit replaced its record. A hostile peer serving stubs
+/// can't make messages disappear.
+pub struct MemberStubGate;
+
+/// Sync's view of one channel, as `authority` asks about it.
+struct SyncGraph<'a, 'b>(&'a ChannelLog<'b>);
+
+impl SyncGraph<'_, '_> {
+    fn held(&self, id: RecordId) -> Option<Held> {
+        self.0.entry(&id).ok().flatten()
+    }
+}
+
+impl ChannelGraph for SyncGraph<'_, '_> {
+    fn is_ancestor(&self, ancestor: RecordId, of: RecordId) -> bool {
+        let mut seen = HashSet::new();
+        let mut stack = vec![of];
+        while let Some(id) = stack.pop() {
+            if id == ancestor {
+                return true;
+            }
+            if seen.insert(id) {
+                if let Some(held) = self.held(id) {
+                    stack.extend(held_entry(held).deps().iter().copied());
+                }
+            }
+        }
+        false
+    }
+
+    fn record(&self, id: RecordId) -> Option<Record> {
+        match self.held(id)? {
+            Held::Full(record) => Some(record),
+            Held::Stub(_) => None,
+        }
+    }
+
+    fn entry(&self, id: RecordId) -> Option<Entry> {
+        self.held(id).map(held_entry)
+    }
+
+    fn children(&self, id: RecordId) -> Vec<RecordId> {
+        self.0.children(&id).map(|c| c.iter().map(Held::id).collect()).unwrap_or_default()
+    }
+}
+
+fn held_entry(held: Held) -> Entry {
+    match held {
+        Held::Full(record) => Entry::Full(record),
+        Held::Stub(stub) => Entry::Pruned(stub),
+    }
+}
+
+impl StubGate for MemberStubGate {
+    fn check(&self, stub: &Stub, channel: &ChannelLog<'_>) -> StubVerdict {
+        let Ok(control) = channel.control().records() else { return StubVerdict::Pending };
+        let mut resolver = Resolver::new(stub.server());
+        for record in control {
+            resolver.insert(record);
+        }
+        match authority::check_stub(&resolver, stub, &SyncGraph(channel)) {
+            // Replaced by a held, accepted delete or edit (a voided record
+            // may go too: it is never shown).
+            Verdict::Accept | Verdict::Voided { .. } | Verdict::Hidden { .. } => {
+                StubVerdict::Accept
+            }
+            Verdict::Pending { .. } => StubVerdict::Pending,
+            Verdict::Refused(_) => StubVerdict::Reject,
+        }
     }
 }
 

@@ -307,7 +307,6 @@ impl Log {
         self.pending.len()
     }
 
-
     /// A stub from the store (a record pruned earlier).
     pub fn add_stub(&mut self, stub: Stub) {
         if stub.server() == self.server && self.channel_ids.insert(stub.id()) {

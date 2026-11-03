@@ -560,18 +560,10 @@ impl Core {
             return Err(ErrorCode::BadRequest.into());
         }
         self.run(|inner, ports, events| {
-            let (server, channel, target) = inner.find_message(message_id)?;
+            let (server, channel, target, _) = inner.find_message(message_id)?;
             let sealed = inner.seal(ports, server, channel, body)?;
-            let body = [target.id().as_bytes().as_slice(), &sealed].concat();
-            inner.tombstone_or_edit(
-                ports,
-                events,
-                server,
-                channel,
-                &target,
-                Kind::MessageEdit,
-                body,
-            )
+            let body = [target.as_bytes().as_slice(), &sealed].concat();
+            inner.tombstone_or_edit(ports, events, server, channel, target, Kind::MessageEdit, body)
         })
     }
 
@@ -579,14 +571,14 @@ impl Core {
     /// keeps its place as a tombstone (`deleted: true`, no text).
     pub fn delete_message(&self, message_id: &str) -> CoreResult<()> {
         self.run(|inner, ports, events| {
-            let (server, channel, target) = inner.find_message(message_id)?;
-            let body = target.id().as_bytes().to_vec();
+            let (server, channel, target, _) = inner.find_message(message_id)?;
+            let body = target.as_bytes().to_vec();
             inner.tombstone_or_edit(
                 ports,
                 events,
                 server,
                 channel,
-                &target,
+                target,
                 Kind::MessageDelete,
                 body,
             )
@@ -597,7 +589,9 @@ impl Core {
     /// re-signed (another record would be another message).
     pub fn retry_message(&self, message_id: &str) -> CoreResult<()> {
         let mut inner = self.lock();
-        let (_, _, record) = inner.find_message(message_id)?;
+        // A pruned message (B6-p) has no record left to send.
+        let (_, _, _, record) = inner.find_message(message_id)?;
+        let record = record.ok_or(ErrorCode::NotAllowed)?;
         let me = inner.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
         if record.author() != me {
             return Err(ErrorCode::NotAllowed.into());
@@ -946,18 +940,18 @@ impl Inner {
         events: &mut Events,
         server: ServerId,
         channel: ChannelId,
-        target: &Record,
+        target: RecordId,
         kind: Kind,
         body: Vec<u8>,
     ) -> CoreResult<()> {
-        let record = self.sign_in_channel(ports, server, channel, Some(target.id()), kind, body)?;
+        let record = self.sign_in_channel(ports, server, channel, Some(target), kind, body)?;
         let log = self.logs.get(&server).ok_or(ErrorCode::Internal)?;
         if !chat::would_accept(log, &record) {
             return Err(ErrorCode::NotAllowed.into());
         }
         self.store(server, record.clone())?;
         ports.network.publish(&record);
-        let message = self.message(&*ports.cipher, server, channel, target.id())?;
+        let message = self.message(&*ports.cipher, server, channel, target)?;
         self.prune(ports, server)?;
         events.push(Event::MessageUpdated(message));
         Ok(())
@@ -965,21 +959,29 @@ impl Inner {
 
     /// The `Message` record `message_id` in one of my servers' known
     /// channels; `not-found` otherwise.
-    fn find_message(&mut self, message_id: &str) -> CoreResult<(ServerId, ChannelId, Record)> {
+    /// Also a message pruned to its stub (B6-p): then no full record.
+    fn find_message(
+        &mut self,
+        message_id: &str,
+    ) -> CoreResult<(ServerId, ChannelId, RecordId, Option<Record>)> {
         let id =
             model::parse_hex32(message_id).map(RecordId::from_bytes).ok_or(ErrorCode::NotFound)?;
         for server in self.db.servers()? {
             self.load(server)?;
             let log = self.logs.get(&server).ok_or(ErrorCode::Internal)?;
             let known = chat::known_channels(server, log.resolver.state());
-            let found = log.channel.iter().find(|r| {
-                r.id() == id
-                    && r.kind() == Kind::Message
-                    && matches!(r.scope(), Scope::Channel(c) if known.contains(&c))
-            });
-            if let Some(record) = found {
-                let Scope::Channel(channel) = record.scope() else { unreachable!("matched") };
-                return Ok((server, channel, record.clone()));
+            let in_known = |kind: Kind, scope: Scope| {
+                kind == Kind::Message && matches!(scope, Scope::Channel(c) if known.contains(&c))
+            };
+            if let Some(r) =
+                log.channel.iter().find(|r| r.id() == id && in_known(r.kind(), r.scope()))
+            {
+                let Scope::Channel(channel) = r.scope() else { unreachable!("matched") };
+                return Ok((server, channel, id, Some(r.clone())));
+            }
+            if let Some(s) = log.stubs.get(&id).filter(|s| in_known(s.kind(), s.scope())) {
+                let Scope::Channel(channel) = s.scope() else { unreachable!("matched") };
+                return Ok((server, channel, id, None));
             }
         }
         Err(ErrorCode::NotFound.into())
