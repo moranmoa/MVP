@@ -7,7 +7,7 @@ use std::sync::{Mutex, MutexGuard};
 use authority::Action;
 use identity::{PhraseError, RecoveryPhrase, Vault, VaultError, VaultState};
 use rand_core::{OsRng, RngCore};
-use records::{PublicKey, Record, ServerId};
+use records::{PublicKey, Record, RecordId, ServerId};
 use serde::{Deserialize, Serialize};
 
 use crate::db::Db;
@@ -212,7 +212,7 @@ impl Core {
             me.profile.bio = input.bio;
             me.profile.avatar_data_url = input.avatar_data_url;
             // TODO(profiles): publish the new name to my servers; members
-            // see the name from my join post until then.
+            // see the name from my profile post until then.
             let profile = me.profile.clone();
             let key = *me.identity.storage_key().expose_secret();
             inner.db.save_profile(&key, &serde_json::to_vec(&profile).expect("plain struct"))?;
@@ -229,7 +229,7 @@ impl Core {
         let mut out = Vec::new();
         for id in inner.db.servers()? {
             inner.load(id)?;
-            out.push(inner.view(id)?.summary());
+            out.push(inner.view(id)?.summary(inner.me.as_ref().map(Me::key)));
         }
         Ok(out)
     }
@@ -269,22 +269,30 @@ impl Core {
             )
             .map_err(|_| ErrorCode::BadRequest)?;
             let server = genesis.server();
-            let join = authority::sign_control(
-                me.identity.signing_key(),
-                server,
-                1,
-                vec![genesis.id()],
-                ports.clock.now_ms(),
-                &model::join_action(&me.profile.display_name),
-            )
-            .map_err(|_| ErrorCode::BadRequest)?;
+            // The owner is a member from the genesis: the first invite (for
+            // the link) and the profile post follow it.
+            let sign = |seq, deps, action: &Action| {
+                authority::sign_control(
+                    me.identity.signing_key(),
+                    server,
+                    seq,
+                    deps,
+                    ports.clock.now_ms(),
+                    action,
+                )
+                .map_err(|_| CoreError::from(ErrorCode::BadRequest))
+            };
+            let invite = sign(1, vec![genesis.id()], &model::FIRST_INVITE)?;
+            let profile =
+                sign(2, vec![invite.id()], &model::profile_action(&me.profile.display_name))?;
+            let me_key = me.key();
             inner.logs.insert(server, Log::new(server, []));
-            for record in [genesis, join] {
+            for record in [genesis, invite, profile] {
                 ports.network.publish(&record);
                 inner.store(server, record)?;
             }
             inner.db.add_server(server, ports.clock.now_ms())?;
-            let summary = inner.view(server)?.summary();
+            let summary = inner.view(server)?.summary(Some(me_key));
             events.push(Event::ServerAdded(summary.clone()));
             Ok(summary)
         })
@@ -293,11 +301,7 @@ impl Core {
     /// Resolves with the first status; the outcome follows as `join.status`.
     pub fn join_server(&self, link: &str) -> CoreResult<JoinStatus> {
         let link = link.trim().to_owned();
-        let Some(server) = link
-            .strip_prefix(model::INVITE_PREFIX)
-            .and_then(model::parse_hex32)
-            .map(ServerId::from_bytes)
-        else {
+        let Some((server, invite)) = model::parse_invite_link(&link) else {
             return Ok(JoinStatus::Invalid { link });
         };
         let searching = JoinStatus::Searching { link: link.clone() };
@@ -306,7 +310,7 @@ impl Core {
         let fetched: Vec<Record> =
             self.ports.network.fetch(server).into_iter().filter(|r| r.server() == server).collect();
         self.run(|inner, ports, events| {
-            let status = inner.join(ports, server, &link, fetched, events)?;
+            let status = inner.join(ports, server, invite, &link, fetched, events)?;
             events.push(Event::JoinStatus(status));
             Ok(searching)
         })
@@ -355,7 +359,7 @@ impl Core {
                 me.identity.signing_key(),
                 server,
                 view.next_seq(&me.key()),
-                view.heads(),
+                view.deps(None),
                 ports.clock.now_ms(),
                 &action,
             )
@@ -620,6 +624,7 @@ impl Inner {
         &mut self,
         ports: &Ports,
         server: ServerId,
+        invite: RecordId,
         link: &str,
         fetched: Vec<Record>,
         events: &mut Events,
@@ -633,7 +638,7 @@ impl Inner {
         if fetched.is_empty() {
             return Ok(JoinStatus::NobodyOnline { link });
         }
-        let log = Log::new(server, fetched);
+        let mut log = Log::new(server, fetched);
         let Some(view) = ServerView::build(server, &log) else {
             return Ok(JoinStatus::Invalid { link });
         };
@@ -642,41 +647,67 @@ impl Inner {
         if required.min_age() > 0 && age.is_none_or(|age| age < required.min_age()) {
             return Ok(JoinStatus::AgeBlocked { link, required });
         }
-        if view.is_kicked(&me.key()) {
+        let key = me.key();
+        if view.is_kicked(&key) {
             // TODO(ui): a "you were removed from this server" phase.
             return Ok(JoinStatus::Invalid { link });
         }
-        let join = authority::sign_control(
-            me.identity.signing_key(),
-            server,
-            view.next_seq(&me.key()),
-            view.heads(),
-            ports.clock.now_ms(),
-            &model::join_action(&me.profile.display_name),
-        )
-        .map_err(|_| ErrorCode::BadRequest)?;
+        let sign = |view: &ServerView, deps, action: &Action| {
+            authority::sign_control(
+                me.identity.signing_key(),
+                server,
+                view.next_seq(&key),
+                deps,
+                ports.clock.now_ms(),
+                action,
+            )
+            .map_err(|_| CoreError::from(ErrorCode::BadRequest))
+        };
+        // Already a member (this device lost its copy): no new join needed.
+        let mut mine = Vec::new();
+        if !view.state.is_member(key) {
+            // An invite we don't hold, revoked or used up: `authority`
+            // refuses the join, and nothing is stored or sent.
+            // TODO(ui): phases for "invite expired" and "invite used up".
+            let join = sign(&view, view.deps(Some(invite)), &Action::Join { invite })?;
+            log.add(join.clone());
+            if !log.accepted(&join.id()) {
+                return Ok(JoinStatus::Invalid { link });
+            }
+            mine.push(join);
+        }
+        let view = ServerView::build(server, &log).ok_or(ErrorCode::Internal)?;
+        let profile =
+            sign(&view, view.deps(None), &model::profile_action(&me.profile.display_name))?;
         for record in &log.records {
             self.db.put_record(record)?;
         }
         self.logs.insert(server, log);
-        ports.network.publish(&join);
-        self.store(server, join)?;
+        mine.push(profile.clone());
+        self.store(server, profile)?;
+        for record in &mine {
+            ports.network.publish(record);
+        }
         self.db.add_server(server, ports.clock.now_ms())?;
-        events.push(Event::ServerAdded(self.view(server)?.summary()));
+        events.push(Event::ServerAdded(self.view(server)?.summary(Some(key))));
         Ok(JoinStatus::Joined { link, server_id: server_hex })
     }
 }
 
 impl ServerView<'_> {
-    fn summary(&self) -> ServerSummary {
+    /// `me` picks my own invite for the link when I have one.
+    fn summary(&self, me: Option<PublicKey>) -> ServerSummary {
         let id = model::hex_id(self.id.as_bytes());
+        // No usable invite left: no link, until someone makes a new one.
+        let invite_link =
+            self.invite(me).map(|invite| model::invite_link(self.id, invite)).unwrap_or_default();
         ServerSummary {
             name: self.genesis.name.clone(),
             initials: model::initials(&self.genesis.name),
             color: model::color_for(self.id.as_bytes()),
             age_restriction: self.genesis.age_restriction,
             owner_id: model::hex_id(self.owner.as_bytes()),
-            invite_link: format!("{}{id}", model::INVITE_PREFIX),
+            invite_link,
             unread: false,
             mentions: 0,
             id,

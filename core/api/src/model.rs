@@ -13,11 +13,11 @@ use crate::types::{AgeRestriction, ErrorCode, ProfileInput, Role};
 const DEFAULT_CHANNEL_CTX: &str = "mvs 2026-11 default channel id v1";
 const SHORT_CODE_CTX: &str = "mvs 2026-11 short code v1";
 
-/// Join posts start with this, so ordinary posts are never read as joins.
-const JOIN_TAG: &str = "mvs/join/v1";
-// TODO(#46): not frozen. The link will carry the invite ID (ideally with a
-// secret), not only the server ID.
-pub(crate) const INVITE_PREFIX: &str = "mvs://join/";
+/// Profile posts carry this tag, so ordinary posts are never read as one.
+const PROFILE_TAG: &str = "mvs/profile/v1";
+/// `mvs://join/<server id hex>/<invite record id hex>`. Not frozen.
+/// TODO(#46): a secret in the link, so the invite ID alone isn't enough.
+const INVITE_PREFIX: &str = "mvs://join/";
 pub(crate) const MAX_NAME_CHARS: usize = 100;
 
 const CODE_ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -113,32 +113,47 @@ pub(crate) struct GenesisBody {
     pub age_restriction: AgeRestriction,
 }
 
-// ---- Joins ------------------------------------------------------------------
+// ---- Invites and profiles ---------------------------------------------------
 //
-// TODO(records B4, GAP-3): `Kind::Join` and a members set in `State`. Until
-// then a control-log `Post` tagged `mvs/join/v1` is borrowed. These two
-// functions are the only place that knows; swap them when B4 lands.
+// Membership is `authority`'s: a `Join` naming an invite (B4, #46). The
+// display name goes in a control-log `Post` tagged `mvs/profile/v1`, signed
+// right after the join (posts need a member).
 // TODO(groupkeys): the display name is readable by anyone holding the
 // records (relays too) until control-log content is encrypted.
+// TODO(profiles): updateProfile re-posts it to every server.
+
+pub(crate) fn invite_link(server: ServerId, invite: RecordId) -> String {
+    format!("{INVITE_PREFIX}{}/{}", hex_id(server.as_bytes()), hex_id(invite.as_bytes()))
+}
+
+/// `(server, invite)` from an invite link.
+pub(crate) fn parse_invite_link(link: &str) -> Option<(ServerId, RecordId)> {
+    let (server, invite) = link.strip_prefix(INVITE_PREFIX)?.split_once('/')?;
+    Some((ServerId::from_bytes(parse_hex32(server)?), RecordId::from_bytes(parse_hex32(invite)?)))
+}
+
+/// The first invite a new server gets: no expiry, no use limit.
+/// TODO(ui): invites with expiry and use limits, and revoking them.
+pub(crate) const FIRST_INVITE: Action = Action::Invite { expires_ms: 0, max_uses: 0 };
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct JoinBody {
+struct ProfileBody {
     mvs: String,
     display_name: String,
 }
 
-/// The control action a member signs on joining.
-pub(crate) fn join_action(display_name: &str) -> Action {
-    let body = JoinBody { mvs: JOIN_TAG.to_owned(), display_name: display_name.to_owned() };
+/// The post a member signs to tell the server their display name.
+pub(crate) fn profile_action(display_name: &str) -> Action {
+    let body = ProfileBody { mvs: PROFILE_TAG.to_owned(), display_name: display_name.to_owned() };
     Action::Post { text: serde_json::to_string(&body).expect("plain struct") }
 }
 
-/// The display name, if `record` is an accepted-kind join.
-fn parse_join(record: &Record) -> Option<String> {
+/// The display name, if `record` is a profile post.
+fn parse_profile(record: &Record) -> Option<String> {
     let Some(Action::Post { text }) = Action::from_record(record) else { return None };
-    let body: JoinBody = serde_json::from_str(&text).ok()?;
-    (body.mvs == JOIN_TAG).then_some(body.display_name)
+    let body: ProfileBody = serde_json::from_str(&text).ok()?;
+    (body.mvs == PROFILE_TAG).then_some(body.display_name)
 }
 
 /// One server's records as held locally, with its resolver kept up to date
@@ -281,24 +296,23 @@ impl<'a> ServerView<'a> {
         self.state.kicked.contains(key)
     }
 
-    /// Owner, anyone holding a role, and anyone whose join post was
-    /// accepted; minus the kicked. Ordered by role, then key.
+    /// `authority`'s member set, with names from profile posts. Ordered by
+    /// role, then key.
     pub fn members(&self) -> Vec<MemberInfo> {
         let by_id: HashMap<RecordId, &Record> = self.records.iter().map(|r| (r.id(), r)).collect();
         let mut names: BTreeMap<PublicKey, String> = BTreeMap::new();
         for id in &self.state.posts {
             let Some(record) = by_id.get(id) else { continue };
-            if let Some(name) = parse_join(record) {
-                // Later joins (a new display name) win.
+            if let Some(name) = parse_profile(record) {
+                // Later profile posts (a new display name) win.
                 names.insert(record.author(), name);
             }
         }
-        let mut keys: BTreeSet<PublicKey> = names.keys().copied().collect();
-        keys.insert(self.owner);
-        keys.extend(self.state.roles.keys().copied());
-        let mut members: Vec<MemberInfo> = keys
-            .into_iter()
-            .filter(|key| !self.is_kicked(key))
+        let mut members: Vec<MemberInfo> = self
+            .state
+            .members
+            .iter()
+            .copied()
             .map(|key| MemberInfo {
                 key,
                 role: self.state.role(key).into(),
@@ -309,16 +323,44 @@ impl<'a> ServerView<'a> {
         members
     }
 
-    /// Joined control records no other joined one depends on: the latest
-    /// [`MAX_DEPS`] in join order, so a record signed on them joins at once.
-    pub fn heads(&self) -> Vec<RecordId> {
+    /// Deps for a record signed now: joined control records no other joined
+    /// one depends on (the latest in join order), plus `extra` (a join's or
+    /// revoke-invite's invite). At most [`MAX_DEPS`], sorted as `records`
+    /// requires, so the record joins at once.
+    pub fn deps(&self, extra: Option<RecordId>) -> Vec<RecordId> {
         let control: Vec<&Record> =
             self.records.iter().filter(|r| r.scope() == Scope::Control).collect();
         let referenced: BTreeSet<RecordId> =
             control.iter().flat_map(|r| r.deps().iter().copied()).collect();
-        let heads: Vec<RecordId> =
-            control.iter().map(|r| r.id()).filter(|id| !referenced.contains(id)).collect();
-        heads[heads.len().saturating_sub(MAX_DEPS)..].to_vec()
+        let heads: Vec<RecordId> = control
+            .iter()
+            .map(|r| r.id())
+            .filter(|id| !referenced.contains(id) && Some(*id) != extra)
+            .collect();
+        let room = MAX_DEPS - usize::from(extra.is_some());
+        let mut deps: Vec<RecordId> = heads[heads.len().saturating_sub(room)..].to_vec();
+        deps.extend(extra);
+        deps.sort();
+        deps
+    }
+
+    /// An invite to put in this server's link: one that still lets people
+    /// join, mine first, then the oldest.
+    pub fn invite(&self, me: Option<PublicKey>) -> Option<RecordId> {
+        let usable: Vec<(RecordId, PublicKey)> = self
+            .records
+            .iter()
+            .filter(|r| r.kind() == Kind::Invite)
+            .filter_map(|r| {
+                let invite = self.state.invites.get(&r.id())?;
+                let open = !invite.revoked
+                    && !self.is_kicked(&invite.author)
+                    && (invite.max_uses == 0 || invite.uses < invite.max_uses);
+                // TODO(ui): compare `expires_ms` with now once invites expire.
+                (open && invite.expires_ms == 0).then_some((r.id(), invite.author))
+            })
+            .collect();
+        usable.iter().find(|(_, author)| Some(*author) == me).or(usable.first()).map(|(id, _)| *id)
     }
 
     pub fn next_seq(&self, author: &PublicKey) -> u64 {
@@ -459,10 +501,11 @@ mod tests {
             state: log.resolver.state(),
             records: &log.records,
         };
-        let heads = view.heads();
+        let heads = view.deps(None);
         assert_eq!(heads.len(), MAX_DEPS);
         assert!(!heads.contains(&orphan.id()));
-        assert_eq!(heads.last(), log.records.last().map(Record::id).as_ref());
+        assert!(heads.contains(&log.records.last().unwrap().id()));
+        assert!(heads.windows(2).all(|w| w[0] < w[1]), "sorted, as records requires");
     }
 
     #[test]
