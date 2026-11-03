@@ -18,6 +18,8 @@ use crate::types::*;
 const DEFAULT_STORAGE_LIMIT: u64 = 5 * 1024 * 1024 * 1024;
 const KV_STORAGE_LIMIT: &str = "storage-limit";
 const KV_UPDATE_CHANNEL: &str = "update-channel";
+/// Positions a recovery check needs before it marks the account (#28, #31).
+pub const MIN_CHECK_POSITIONS: usize = 3;
 
 pub struct Config {
     /// `None` keeps everything in memory (tests).
@@ -153,7 +155,11 @@ impl Core {
         })
     }
 
-    /// `answers`: 1-based position → typed word.
+    /// `answers`: 1-based position → typed word. True when every answer
+    /// matches. The account is marked checked only by a call with at least
+    /// [`MIN_CHECK_POSITIONS`] positions that all match; fewer only answer.
+    /// TODO(#31): lock gate and a growing delay after 5 misses, together
+    /// with the app-lock commands.
     pub fn check_recovery_words(&self, answers: BTreeMap<usize, String>) -> CoreResult<bool> {
         self.run(|inner, _, events| {
             let me = inner.me.as_ref().ok_or(ErrorCode::NotFound)?;
@@ -162,6 +168,9 @@ impl Core {
             }
             let answers: Vec<(usize, &str)> =
                 answers.iter().map(|(p, w)| (p - 1, w.as_str())).collect();
+            if answers.len() < MIN_CHECK_POSITIONS {
+                return Ok(me.phrase.check_words(&answers));
+            }
             let ok =
                 inner.vault.confirm_recovery_check(&me.phrase, &answers).map_err(vault_error)?;
             if ok {

@@ -21,5 +21,5 @@ pub use ports::{
     CipherOutcome, Clock, CollectingSink, EventSink, FixedClock, GroupCipher, LoopbackNetwork,
     Network, PendingGroupKeys, Ports, SharedSecrets, SystemClock,
 };
-pub use service::{Config, Core};
+pub use service::{Config, Core, MIN_CHECK_POSITIONS};
 pub use types::*;

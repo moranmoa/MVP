@@ -19,7 +19,8 @@ fn adult() -> NewIdentityInput {
 /// Creates an identity and passes the recovery check.
 fn sign_up(peer: &Peer, name: &str) -> Identity {
     let created = peer.core.create_identity(adult()).unwrap();
-    let answers: BTreeMap<usize, String> = [(1, created.words[0].clone())].into();
+    let answers: BTreeMap<usize, String> =
+        (1..=3).map(|p| (p, created.words[p - 1].clone())).collect();
     assert!(peer.core.check_recovery_words(answers).unwrap());
     peer.core
         .update_profile(ProfileInput {
@@ -75,8 +76,23 @@ fn create_identity_server_grant_kick() {
         owner.core.create_server("Team", AgeRestriction::None).unwrap_err().code,
         ErrorCode::RecoveryCheckRequired
     );
-    let answers: BTreeMap<usize, String> =
-        [(3, created.words[2].clone()), (9, created.words[8].clone())].into();
+    // One or two matching words only answer (the UI checks word by word);
+    // three or more mark the account.
+    let one: BTreeMap<usize, String> = [(5, created.words[4].clone())].into();
+    assert!(owner.core.check_recovery_words(one).unwrap());
+    let wrong: BTreeMap<usize, String> = [(5, "zzzz".to_owned())].into();
+    assert!(!owner.core.check_recovery_words(wrong).unwrap());
+    assert!(!owner.core.get_identity().unwrap().unwrap().recovery_checked);
+    assert_eq!(
+        owner.core.create_server("Team", AgeRestriction::None).unwrap_err().code,
+        ErrorCode::RecoveryCheckRequired
+    );
+    let answers: BTreeMap<usize, String> = [
+        (3, created.words[2].clone()),
+        (9, created.words[8].clone()),
+        (12, created.words[11].clone()),
+    ]
+    .into();
     assert!(owner.core.check_recovery_words(answers).unwrap());
     assert!(owner.core.get_identity().unwrap().unwrap().recovery_checked);
 
