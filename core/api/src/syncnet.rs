@@ -19,13 +19,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use libp2p::Multiaddr;
-use records::{ChannelId, Record, Scope, ServerId};
+use records::{ChannelId, Record, RecordId, Scope, ServerId};
 use sync::{log_name, log_of, Access, Node, NodeConfig, NodeEvent, ServerSecret, Store};
 use tokio::runtime::Runtime;
 
 use crate::access::{KeyBinder, MemberReadGate, MemberStubGate};
 use crate::gate::MemberGate;
 use crate::ports::Network;
+use crate::types::SendState;
 
 /// How long `fetch` waits for a server it has never seen to arrive, so a
 /// join right after opening the log can find it.
@@ -43,6 +44,28 @@ pub fn relay_addr(text: &str) -> Result<Multiaddr, String> {
         _ => Err("must end in /p2p/<relay peer id>".to_owned()),
     }
 }
+type SendStates = Arc<Mutex<HashMap<RecordId, SendState>>>;
+
+/// Send states kept; past this the delivered ones are forgotten.
+const MAX_SEND_STATES: usize = 65_536;
+
+/// Moves a record's state forward (pending, sent, received), never back.
+/// True if it changed.
+fn advance(states: &SendStates, id: RecordId, to: SendState) -> bool {
+    let rank = |s: SendState| match s {
+        SendState::Pending | SendState::Failed => 0,
+        SendState::Sent => 1,
+        SendState::Received => 2,
+    };
+    let mut states = states.lock().expect("not poisoned");
+    let Some(now) = states.get_mut(&id) else { return false };
+    if rank(to) <= rank(*now) {
+        return false;
+    }
+    *now = to;
+    true
+}
+
 pub struct SyncNetwork {
     runtime: Runtime,
     node: Node,
@@ -52,6 +75,8 @@ pub struct SyncNetwork {
     /// Servers fetched at least once (the first fetch waits for the pull).
     fetched: Mutex<HashSet<ServerId>>,
     binder: Arc<KeyBinder>,
+    /// B6: where each record written here stands.
+    send_states: SendStates,
     hints: Mutex<Option<Receiver<()>>>,
     waker: SyncSender<()>,
 }
@@ -85,11 +110,20 @@ impl SyncNetwork {
         // Events are only hints: a stored record wakes the core's sync loop
         // (`Core::run_sync_loop`), which re-reads the store. Coalesced (one
         // pending hint is enough) and drained, so the node never blocks.
+        let send_states: SendStates = Arc::default();
+        let states = send_states.clone();
         let (hint, hints) = std::sync::mpsc::sync_channel(1);
         let waker = hint.clone();
         runtime.spawn(async move {
             while let Some(event) = events.recv().await {
-                if matches!(event, NodeEvent::Stored { .. } | NodeEvent::Lagged { .. }) {
+                let wake = match event {
+                    NodeEvent::Stored { .. } | NodeEvent::Lagged { .. } => true,
+                    // B6: my messages' send state moves on; a round re-announces.
+                    NodeEvent::Sent { id } => advance(&states, id, SendState::Sent),
+                    NodeEvent::Delivered { id } => advance(&states, id, SendState::Received),
+                    _ => false,
+                };
+                if wake {
                     let _ = hint.try_send(());
                 }
             }
@@ -101,6 +135,7 @@ impl SyncNetwork {
             opened: Mutex::new(HashMap::new()),
             fetched: Mutex::new(HashSet::new()),
             binder,
+            send_states,
             hints: Mutex::new(Some(hints)),
             waker,
         })
@@ -134,6 +169,12 @@ impl Network for SyncNetwork {
     /// The server must have been opened (`open_server`): logs are never
     /// opened by their plain names, which anyone could ask for (GAP-4).
     fn publish(&self, record: &Record) {
+        let mut states = self.send_states.lock().expect("not poisoned");
+        if states.len() >= MAX_SEND_STATES {
+            states.retain(|_, s| *s != SendState::Received);
+        }
+        states.entry(record.id()).or_insert(SendState::Pending);
+        drop(states);
         if let Err(e) = self.runtime.block_on(self.node.append(record.clone())) {
             eprintln!("mvs-core: sync didn't take a record: {e}");
         }
@@ -163,6 +204,10 @@ impl Network for SyncNetwork {
 
     fn lock(&self) {
         self.binder.lock();
+    }
+
+    fn send_state(&self, id: RecordId) -> Option<SendState> {
+        self.send_states.lock().expect("not poisoned").get(&id).copied()
     }
 
     fn prune(&self, id: records::RecordId) {

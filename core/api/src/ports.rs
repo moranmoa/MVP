@@ -105,6 +105,12 @@ pub trait Network: Send + Sync {
 
     fn lock(&self) {}
 
+    /// B6: where a record written here stands; `None` if not tracked.
+    fn send_state(&self, id: records::RecordId) -> Option<crate::types::SendState> {
+        let _ = id;
+        None
+    }
+
     /// B6-p: replace a held record by its stub, if the stub gate agrees.
     fn prune(&self, id: records::RecordId) {
         let _ = id;
