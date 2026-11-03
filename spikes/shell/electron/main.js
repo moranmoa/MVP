@@ -14,7 +14,10 @@ app.whenReady().then(() => {
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
-    webPreferences: { contextIsolation: true, sandbox: true },
+    // In the bench, timers must keep running when the window is covered,
+    // or the scroll driver in bench.js stalls (WebView2 in Tauri does not
+    // throttle it).
+    webPreferences: { contextIsolation: true, sandbox: true, backgroundThrottling: !benchOut },
   });
   const res = app.isPackaged ? process.resourcesPath : path.join(__dirname, '..');
   if (benchOut) {

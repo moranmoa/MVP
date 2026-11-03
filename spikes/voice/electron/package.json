@@ -6,7 +6,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dist:win": "electron-builder --win portable",
+    "dist:win": "electron-builder --win dir",
     "dist:linux": "electron-builder --linux AppImage",
     "dist:mac": "electron-builder --mac zip"
   },
@@ -40,7 +40,7 @@
       "maintainer": "MVP spike <spike@example.invalid>"
     },
     "win": {
-      "target": "portable"
+      "target": "dir"
     }
   },
   "description": "Voice spike, Electron variant",

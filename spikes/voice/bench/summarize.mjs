@@ -2,10 +2,12 @@
 // receive direction (sender variant -> receiver variant).
 //
 //   node summarize.mjs [room ...]     (default: every room in results/)
+//   RESULTS=results-windows node summarize.mjs win6
 
 import { readdirSync, readFileSync } from 'node:fs';
 
-const rooms = process.argv.slice(2).length ? process.argv.slice(2) : readdirSync('results');
+const base = process.env.RESULTS || 'results';
+const rooms = process.argv.slice(2).length ? process.argv.slice(2) : readdirSync(base);
 const median = (xs) => {
   const s = xs.filter((x) => typeof x === 'number').sort((a, b) => a - b);
   return s.length ? s[Math.floor(s.length / 2)] : null;
@@ -20,7 +22,7 @@ console.log('| room | netem | direction | links | latency median ms | latency p9
 console.log('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |');
 const cpuRows = [];
 for (const room of rooms) {
-  const reports = readdirSync(`results/${room}`).map((n) => JSON.parse(readFileSync(`results/${room}/${n}`, 'utf8')));
+  const reports = readdirSync(`${base}/${room}`).map((n) => JSON.parse(readFileSync(`${base}/${room}/${n}`, 'utf8')));
   const groups = new Map();
   for (const r of reports) {
     for (const p of Object.values(r.peers)) {

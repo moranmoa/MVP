@@ -40,7 +40,7 @@ for ($i = 1; $i -le $NElectron; $i++) {
   Start-Sleep -Seconds 2
 }
 for ($i = 1; $i -le $NStr0m; $i++) {
-  $p = Start-Process -FilePath $Str0m -PassThru -WindowStyle Hidden -ArgumentList @('--signal', 'ws://localhost:8080', '--room', $Room, '--name', "s$i", '--src', 'pulses', '--duration', "$($Duration + 5)", '--results', $Results)
+  $p = Start-Process -FilePath $Str0m -PassThru -WindowStyle Hidden -ArgumentList @('--signal', 'ws://localhost:8080', '--room', $Room, '--name', "s$i", '--src', 'pulses', '--duration', "$($Duration + 5)", '--results', "`"$Results`"")
   $peers += [pscustomobject]@{ name = "s$i"; variant = 'str0m'; proc = $p }
   Start-Sleep -Seconds 2
 }
