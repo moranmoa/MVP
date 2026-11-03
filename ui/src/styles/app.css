@@ -2002,3 +2002,15 @@ kbd {
   border: 1px solid var(--border);
   background: var(--bg-input, var(--bg-hover));
 }
+
+/* Composer length and send errors (QA-10). */
+.composer-status {
+  margin: 0.25rem 0.25rem 0;
+  font-size: 0.75rem;
+  text-align: end;
+}
+
+.char-count {
+  unicode-bidi: isolate;
+  font-variant-numeric: tabular-nums;
+}

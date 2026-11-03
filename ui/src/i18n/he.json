@@ -243,5 +243,8 @@
   "members.lookalikeHint": "השם הזה דומה לשם של בעלי השרת או לשם של תפקיד. כדי לדעת מי זה באמת, כדאי לבדוק את קוד הזהות.",
   "onb.profile.avatarTooBig": "אפשר לבחור תמונה מסוג PNG, JPEG, WebP או GIF, עד 512 KB.",
   "chat.back": "חזרה לערוצים",
-  "members.close": "סגירת רשימת החברים"
+  "members.close": "סגירת רשימת החברים",
+  "chat.charCount": "{count, number} / {max, number}",
+  "chat.tooLong": "ההודעה ארוכה מדי. אפשר לשלוח עד {max, number} תווים.",
+  "chat.sendFailed": "ההודעה לא נשלחה, והטקסט חזר לתיבה. אפשר לנסות שוב."
 }
