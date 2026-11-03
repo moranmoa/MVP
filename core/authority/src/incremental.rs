@@ -279,9 +279,16 @@ impl Resolver {
             let i = list.partition_point(|other| pos[other] < at);
             list.insert(i, id);
         }
+        // Only records that depend on the invite they name can be accepted.
+        let depends = action
+            .as_ref()
+            .and_then(Action::invite)
+            .is_some_and(|invite| self.known[&id].deps().contains(&invite));
         let named = match &action {
-            Some(Action::Join { invite }) => Some((&mut self.invite_joins, *invite)),
-            Some(Action::RevokeInvite { invite }) => Some((&mut self.invite_revokes, *invite)),
+            Some(Action::Join { invite }) if depends => Some((&mut self.invite_joins, *invite)),
+            Some(Action::RevokeInvite { invite }) if depends => {
+                Some((&mut self.invite_revokes, *invite))
+            }
             _ => None,
         };
         if let Some((lists, invite)) = named {
@@ -322,6 +329,7 @@ impl Resolver {
         match self.unsettled.get(&actor) {
             None => false,
             Some(None) => true,
+            // TODO(Unban): an unban ends the freeze; bound it there too.
             Some(Some(kick)) => self.pos[kick] >= at,
         }
     }
@@ -341,7 +349,8 @@ impl Resolver {
         // it is new, so it can't be an ancestor of anything already here.
         let voided = self.kick_targets.contains(&author)
             || (action.is_privileged() && self.revoke_targets.contains(&author))
-            || matches!(&action, Action::Join { invite } if self.revoked_invites.contains(invite));
+            || matches!(&action, Action::Join { invite }
+                if self.known[&id].deps().contains(invite) && self.invite_is_dead(*invite));
         let allowed = permitted(&self.at(at), &self.known[&id], &action);
 
         let target = match action {
@@ -679,19 +688,36 @@ impl Resolver {
         }
     }
 
-    /// Records by `target` that the removal `id` hadn't seen.
+    /// What the removal `id` of `target` voids: the target's records it
+    /// hadn't seen (only privileged ones for a revoke), and the joins
+    /// through the target's invites it hadn't seen.
     fn concurrent_by(&self, id: RecordId, target: Actor, privileged_only: bool) -> Vec<RecordId> {
         let seen = self.ancestors(id);
-        self.by_author
-            .get(&target)
-            .into_iter()
-            .flatten()
-            .copied()
-            .filter(|other| *other != id && !seen.contains(other))
-            .filter(|other| {
-                !privileged_only || self.actions[other].as_ref().is_some_and(Action::is_privileged)
-            })
-            .collect()
+        let mine = self.by_author.get(&target).into_iter().flatten();
+        let own = mine.clone().copied().filter(|other| {
+            !privileged_only || self.actions[other].as_ref().is_some_and(Action::is_privileged)
+        });
+        let invites =
+            mine.filter(|other| matches!(self.actions[*other], Some(Action::Invite { .. })));
+        let joins = invites.filter_map(|invite| self.invite_joins.get(invite)).flatten().copied();
+        let mut voided: Vec<RecordId> =
+            own.chain(joins).filter(|other| *other != id && !seen.contains(other)).collect();
+        voided.sort_unstable();
+        voided.dedup();
+        voided
+    }
+
+    /// Whether an accepted revoke-invite, or a revoke or kick of the
+    /// invite's author, voids every join through it that is new.
+    fn invite_is_dead(&self, invite: RecordId) -> bool {
+        if self.revoked_invites.contains(&invite) {
+            return true;
+        }
+        let Some(Some(Action::Invite { .. })) = self.actions.get(&invite) else {
+            return false;
+        };
+        let author = self.known[&invite].author();
+        self.kick_targets.contains(&author) || self.revoke_targets.contains(&author)
     }
 
     fn ancestors(&self, id: RecordId) -> HashSet<RecordId> {

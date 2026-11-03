@@ -22,7 +22,10 @@
 //!   member. An invite is revoked by its author or by someone ranked above
 //!   them, and the revoke voids every join through it that isn't one of its
 //!   causal ancestors: a join racing a revoke loses, whatever the linear
-//!   order, and the joiner needs a new invite.
+//!   order, and the joiner needs a new invite. A revoke or kick of the
+//!   invite's author does the same for all their invites, so a demoted or
+//!   kicked moderator's links stop working even for joins that only depend
+//!   on the invite.
 //! - A revoke voids the target's privileged actions that are concurrent with
 //!   it (not causal ancestors of it). A kick voids all of the target's
 //!   concurrent records. This blocks "backdating": signing new records whose
@@ -646,8 +649,11 @@ impl<'a> Graph<'a> {
         let actions: Vec<Option<Action>> = records.iter().map(|r| Action::from_record(r)).collect();
         let mut joins: HashMap<RecordId, Vec<usize>> = HashMap::new();
         for (i, action) in actions.iter().enumerate() {
+            // Only a join that depends on its invite can be accepted.
             if let Some(Action::Join { invite }) = action {
-                joins.entry(*invite).or_default().push(i);
+                if records[i].deps().contains(invite) {
+                    joins.entry(*invite).or_default().push(i);
+                }
             }
         }
         Graph { records, actions, deps, by_author, joins, voids: RefCell::default() }
@@ -708,16 +714,22 @@ impl<'a> Graph<'a> {
         pass
     }
 
-    /// What the accepted removal or revoke-invite at `removal` voids: the
-    /// target's records it hadn't seen (only privileged ones for a revoke),
-    /// or the joins through the invite it hadn't seen. Cached per record;
+    /// What the accepted removal or revoke-invite at `removal` voids, of the
+    /// records it hadn't seen: for a kick, all the target's records; for a
+    /// revoke, the target's privileged ones; for both, the joins through
+    /// the target's invites (a removed moderator's links stop working); for
+    /// a revoke-invite, the joins through that invite. Cached per record;
     /// what it voids is read from the record itself, so the cache key says
     /// everything.
     fn voids_of(&self, removal: usize) -> Vec<usize> {
-        let (candidates, privileged_only) = match &self.actions[removal] {
-            Some(Action::Revoke { target }) => (self.by_author.get(target), true),
-            Some(Action::Kick { target }) => (self.by_author.get(target), false),
-            Some(Action::RevokeInvite { invite }) => (self.joins.get(invite), false),
+        let (own, privileged_only, invites) = match &self.actions[removal] {
+            Some(Action::Revoke { target }) => {
+                (self.by_author.get(target), true, self.invites_by(*target))
+            }
+            Some(Action::Kick { target }) => {
+                (self.by_author.get(target), false, self.invites_by(*target))
+            }
+            Some(Action::RevokeInvite { invite }) => (None, false, vec![*invite]),
             _ => return Vec::new(),
         };
         let mut voids = self.voids.borrow_mut();
@@ -730,18 +742,27 @@ impl<'a> Graph<'a> {
                     stack.extend_from_slice(&self.deps[i]);
                 }
             }
-            candidates
-                .into_iter()
-                .flatten()
-                .copied()
-                .filter(|&i| {
-                    i != removal
-                        && !seen.get(i).copied().unwrap_or(false)
-                        && (!privileged_only
-                            || self.actions[i].as_ref().is_some_and(Action::is_privileged))
-                })
-                .collect()
+            let own = own.into_iter().flatten().copied().filter(|&i| {
+                !privileged_only || self.actions[i].as_ref().is_some_and(Action::is_privileged)
+            });
+            let joins =
+                invites.iter().filter_map(|invite| self.joins.get(invite)).flatten().copied();
+            let mut voided: Vec<usize> = own
+                .chain(joins)
+                .filter(|&i| i != removal && !seen.get(i).copied().unwrap_or(false))
+                .collect();
+            voided.sort_unstable();
+            voided.dedup();
+            voided
         });
         voided.clone()
+    }
+
+    /// The invites `author` signed.
+    fn invites_by(&self, author: Actor) -> Vec<RecordId> {
+        let mine = self.by_author.get(&author).into_iter().flatten();
+        mine.filter(|&&i| matches!(self.actions[i], Some(Action::Invite { .. })))
+            .map(|&i| self.records[i].id())
+            .collect()
     }
 }

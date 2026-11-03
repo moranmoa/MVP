@@ -1,4 +1,4 @@
-//! Membership (GAP-3): invites, joins, revoked invites, and who counts as a
+﻿//! Membership (GAP-3): invites, joins, revoked invites, and who counts as a
 //! member. Every test runs the reference `resolve` and the incremental
 //! `Resolver` over many delivery orders and requires them to agree.
 
@@ -240,6 +240,43 @@ fn a_kicked_moderators_invites_stop_working() {
     let state = all_orders(&records);
     assert!(state.is_member(actor(2)));
     assert!(!state.is_member(actor(3)));
+}
+
+/// A join that depends only on the invite is concurrent with a later revoke
+/// or kick of the invite's author, so it may sort before it. It is voided
+/// anyway: a removed moderator's link admits nobody the removal hadn't seen.
+#[test]
+fn a_removed_moderators_links_stop_working_even_for_backdated_joins() {
+    for kick in [false, true] {
+        let (mut records, heads) = founded(&[1]);
+        let moderator = rec(0, 2, heads, Action::Grant { target: actor(1), role: Role::Moderator });
+        let link = invite(1, 1, vec![moderator.id()], 0, 0);
+        let seen = join(2, 0, &link);
+        let removal = if kick {
+            Action::Kick { target: actor(1) }
+        } else {
+            Action::Revoke { target: actor(1) }
+        };
+        let removal = rec(0, 3, vec![link.id(), seen.id()], removal);
+        // Joins on the invite alone, the attack: several keys, so some sort
+        // before the removal and some after.
+        let backdated: Vec<Record> = (3..20).map(|n| join(n, 0, &link)).collect();
+        assert!(backdated.iter().any(|r| r.id() < removal.id()));
+        assert!(backdated.iter().any(|r| r.id() > removal.id()));
+        let post = rec(3, 1, vec![backdated[0].id()], Action::Post { text: "in".into() });
+        records.extend([moderator, link.clone(), seen, removal.clone(), post.clone()]);
+        records.extend(backdated);
+
+        let state = all_orders(&records);
+        assert!(state.accepted.contains(&removal.id()), "kick: {kick}");
+        assert_eq!(
+            state.members,
+            [actor(0), actor(2)].into_iter().chain((!kick).then(|| actor(1))).collect(),
+            "kick: {kick}"
+        );
+        assert!(!state.accepted.contains(&post.id()));
+        assert_eq!(state.invites[&link.id()].uses, 1);
+    }
 }
 
 #[test]
