@@ -36,9 +36,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use records::{Record, RecordId, Scope, ServerId};
+use records::{ChannelId, Record, RecordId, Scope, ServerId};
 
-use crate::{apply, full_run, permitted, Action, Actor, Invite, Role, State, View, Write};
+use crate::{apply, full_run, permitted, Action, Actor, Channel, Invite, Role, State, View, Write};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -114,6 +114,8 @@ pub struct Resolver {
     /// accepted or not.
     invite_joins: HashMap<RecordId, Vec<RecordId>>,
     invite_revokes: HashMap<RecordId, Vec<RecordId>>,
+    /// Channel -> the records creating it, accepted or not.
+    channel_creates: HashMap<ChannelId, Vec<RecordId>>,
 
     // What the reference run would hold for the joined records.
     state: State,
@@ -166,6 +168,7 @@ impl Resolver {
             touch: HashMap::new(),
             invite_joins: HashMap::new(),
             invite_revokes: HashMap::new(),
+            channel_creates: HashMap::new(),
             state: State::default(),
             writes: HashMap::new(),
             genesis: None,
@@ -298,6 +301,9 @@ impl Resolver {
             let i = list.partition_point(|other| pos[other] < at);
             list.insert(i, id);
         }
+        if let Some(Action::ChannelCreate { channel, .. }) = &action {
+            self.channel_creates.entry(*channel).or_default().push(id);
+        }
         self.actions.insert(id, action);
 
         self.stats.joined += 1;
@@ -376,6 +382,22 @@ impl Resolver {
             }
             Action::Invite { .. } | Action::RevokeInvite { .. } => {
                 return self.apply_invite_record(id, at, &action, voided, allowed);
+            }
+            Action::ChannelCreate { channel, adult, name } => {
+                // Only the owner creates channels, and the first create of a
+                // channel in linear order wins, like a use of an invite.
+                let creates = &self.channel_creates[&channel];
+                if self.owner_unsettled || creates.len() > 1 {
+                    return Err(Fallback::Other);
+                }
+                if voided {
+                    self.excluded.insert(id);
+                } else if allowed {
+                    self.state.accepted.insert(id);
+                    let entry = Channel { name, adult, created: id };
+                    self.state.channels.insert(channel, entry);
+                }
+                return Ok(());
             }
             Action::Join { invite } => {
                 // Whether a revoke of the invite voids it is unknown. That only
@@ -642,6 +664,9 @@ impl Resolver {
                 // These change which joins are accepted, and joins compete
                 // for an invite's uses.
                 Action::Invite { .. } | Action::Join { .. } => return Err(Fallback::Other),
+                // Only the owner creates channels, and the owner's role never
+                // changes, so this is never reached; re-resolve to be safe.
+                Action::ChannelCreate { .. } => return Err(Fallback::Other),
                 Action::Genesis => unreachable!("skipped above"),
             }
         }
@@ -859,6 +884,15 @@ impl AtPosition<'_> {
 }
 
 impl View for AtPosition<'_> {
+    fn has_channel(&self, id: ChannelId) -> bool {
+        let r = self.resolver;
+        r.channel_creates
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .any(|create| r.pos[create] < self.at && r.state.accepted.contains(create))
+    }
+
     fn owner(&self) -> Option<Actor> {
         let r = self.resolver;
         r.genesis.filter(|genesis| r.pos[genesis] < self.at).and(r.state.owner)

@@ -8,8 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rand_core::OsRng;
 use updater::{
-    hash_reader, verify_artifact, ClientPolicy, Decision, ManifestBody, SignedManifest, SignedRoot, SigningKey,
-    TrustRoot, TrustRootFile, Version,
+    hash_reader, parse_root_fetch, verify_artifact, ClientPolicy, Decision, ManifestBody, SignedManifest, SignedRoot,
+    SigningKey, TrustRoot, TrustRootFile, Version,
 };
 
 const USAGE: &str = "\
@@ -189,7 +189,10 @@ fn restrict_to_owner(file: &fs::File, path: &Path) -> Result<(), String> {
     let sddl: Vec<u16> = format!("D:P(A;;FA;;;{sid})").encode_utf16().chain([0]).collect();
     let mut sd: PSECURITY_DESCRIPTOR = null_mut();
     // SAFETY: `sddl` is NUL-terminated; `sd` is freed with LocalFree below.
-    if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut sd, null_mut()) } == 0 {
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut sd, null_mut())
+    } == 0
+    {
         return Err(format!("building the ACL failed: {}", std::io::Error::last_os_error()));
     }
     let (mut present, mut defaulted, mut dacl): (i32, i32, *mut ACL) = (0, 0, null_mut());
@@ -346,6 +349,13 @@ fn print_body(body: &ManifestBody) {
         let revoked: Vec<String> = body.revoked.iter().map(ToString::to_string).collect();
         println!("  revokes: {}", revoked.join(", "));
     }
+    // The signer reads exactly what users will see.
+    for (lang, text) in &body.notes {
+        println!("  notes [{lang}]:");
+        for line in text.lines() {
+            println!("    | {line}");
+        }
+    }
 }
 
 fn sign_manifest(a: &Args) -> Result<(), String> {
@@ -385,20 +395,23 @@ fn sign_manifest(a: &Args) -> Result<(), String> {
 fn verify(a: &Args) -> Result<(), String> {
     let manifest = SignedManifest::from_json(&read(a.need("manifest")?)?).map_err(|e| e.to_string())?;
     let mut root = load_root(a.need("root")?)?;
-    let updates = a
-        .all("root-update")
-        .into_iter()
-        .map(|p| SignedRoot::from_json(&read(p)?).map_err(|e| format!("{p}: {e}")))
-        .collect::<Result<Vec<_>, String>>()?;
-    if !updates.is_empty() {
+    // Same caps as a client fetch (GAP-12); unparseable files are reported
+    // as skipped below, like any other invalid rotation.
+    let files = a.all("root-update").into_iter().map(read).collect::<Result<Vec<_>, String>>()?;
+    let updates = parse_root_fetch(&files).map_err(|e| format!("--root-update: {e}"))?;
+    let unparsed = files.len() - updates.len();
+    if !files.is_empty() {
         let chain = root.update_chain(&updates);
         if let Some(v) = chain.fork_at {
             return Err(format!(
                 "two different validly signed rotations to root v{v}: a current root key has leaked; not choosing one"
             ));
         }
-        if chain.skipped > 0 {
-            println!("warning: {} root update(s) could not be applied (invalid, forged or after a gap)", chain.skipped);
+        if chain.skipped + unparsed > 0 {
+            println!(
+                "warning: {} root update(s) could not be applied (unreadable, invalid, forged or after a gap)",
+                chain.skipped + unparsed
+            );
         }
         root = chain.root;
         println!("trust root now v{} ({} of its keys must sign)", root.version(), root.threshold());

@@ -32,6 +32,11 @@ fn random_action(rng: &mut StdRng, author: u8, invites: &[RecordId], rich: bool)
         }
         1 => Action::Revoke { target, cut: cut(rng) },
         2 => Action::Kick { target, cut: cut(rng) },
+        3 if rich => Action::ChannelCreate {
+            channel: ChannelId::from_bytes([rng.gen_range(0..3); 32]),
+            adult: rng.gen_bool(0.2),
+            name: format!("c{author}"),
+        },
         4 if rich => Action::Unban { target },
         5 => Action::Invite {
             expires_ms: *[0, 30, 60].choose(rng).unwrap(),
@@ -66,8 +71,8 @@ fn heads(known: &BTreeSet<RecordId>, all: &BTreeMap<RecordId, Record>) -> Vec<Re
 
 /// Actors write records against their own partial view of the log and
 /// occasionally sync with each other, so plenty of records are concurrent.
-/// If `rich`, kicks and revokes carry random cuts and unbans are written too
-/// (far more often than an owner would). Returns the records in the order
+/// If `rich`, kicks and revokes carry random cuts, and unbans (far more
+/// often than an owner would) and channel creates are written too. Returns the records in the order
 /// they were written.
 fn random_scenario(rng: &mut StdRng, steps: usize, rich: bool) -> Vec<Record> {
     let genesis = genesis();

@@ -40,6 +40,9 @@
 //!   join again through an invite. When two kicks of the same
 //!   target are concurrent, only the first in linear order is accepted (the
 //!   target is already kicked by the second), so only its voids apply.
+//! - Channels: only the owner creates them (ש-10), each channel ID once.
+//!   A new server's first channel is created with its genesis
+//!   ([`sign_new_server`]).
 //! - Ties between concurrent records are broken by the record ID.
 //!
 //! Records come from the `records` crate, so they are signed and their IDs are
@@ -120,6 +123,14 @@ pub enum Action {
     Join {
         invite: RecordId,
     },
+    /// The owner creates a channel. Body: the channel ID, `history u8`
+    /// (reserved for D30, must be 0), flags (bit 0: 18+, the rest 0), then
+    /// the name, 1 to [`MAX_CHANNEL_NAME`] code points.
+    ChannelCreate {
+        channel: ChannelId,
+        adult: bool,
+        name: String,
+    },
     /// The owner lets a kicked key back: it may join again through an invite.
     /// It isn't made a member.
     Unban {
@@ -148,6 +159,7 @@ impl Action {
             Action::Invite { .. } => Kind::Invite,
             Action::RevokeInvite { .. } => Kind::RevokeInvite,
             Action::Join { .. } => Kind::Join,
+            Action::ChannelCreate { .. } => Kind::ChannelCreate,
             Action::Unban { .. } => Kind::Unban,
         }
     }
@@ -177,6 +189,9 @@ impl Action {
                 [&expires_ms.to_le_bytes()[..], &max_uses.to_le_bytes()].concat()
             }
             Action::RevokeInvite { invite } | Action::Join { invite } => invite.as_bytes().to_vec(),
+            Action::ChannelCreate { channel, adult, name } => {
+                [channel.as_bytes().as_slice(), &[0, u8::from(*adult)], name.as_bytes()].concat()
+            }
             Action::Unban { target } => target.as_bytes().to_vec(),
         }
     }
@@ -217,13 +232,26 @@ impl Action {
             }
             Kind::RevokeInvite => Some(Action::RevokeInvite { invite: id(body)? }),
             Kind::Join => Some(Action::Join { invite: id(body)? }),
+            Kind::ChannelCreate => {
+                let (channel, rest) = body.split_first_chunk::<32>()?;
+                let [history, flags, name @ ..] = rest else { return None };
+                // No history mode is defined before D30, and only the 18+ flag.
+                if *history != 0 || *flags > 1 {
+                    return None;
+                }
+                let name = String::from_utf8(name.to_vec()).ok().filter(|n| channel_name_ok(n))?;
+                Some(Action::ChannelCreate {
+                    channel: ChannelId::from_bytes(*channel),
+                    adult: *flags == 1,
+                    name,
+                })
+            }
             Kind::Unban => Some(Action::Unban { target: key(body)? }),
             // Channel kinds are judged by the channel checks (B4-4); server,
             // channel and leave records come in B4-3. Until then they are
             // never accepted.
             Kind::ServerEdit
             | Kind::ServerClose
-            | Kind::ChannelCreate
             | Kind::ChannelEdit
             | Kind::ChannelDelete
             | Kind::Leave
@@ -246,7 +274,8 @@ impl Action {
             | Action::Post { .. }
             | Action::Invite { .. }
             | Action::RevokeInvite { .. }
-            | Action::Join { .. } => None,
+            | Action::Join { .. }
+            | Action::ChannelCreate { .. } => None,
         }
     }
 
@@ -270,7 +299,10 @@ impl Action {
     /// Needs a rank above member; a revoke voids these when concurrent.
     fn is_privileged(&self) -> bool {
         self.target().is_some()
-            || matches!(self, Action::Invite { .. } | Action::RevokeInvite { .. })
+            || matches!(
+                self,
+                Action::Invite { .. } | Action::RevokeInvite { .. } | Action::ChannelCreate { .. }
+            )
     }
 
     fn is_removal(&self) -> bool {
@@ -344,6 +376,15 @@ impl Cut {
     }
 }
 
+/// Most Unicode code points in a channel name, the same limit as the UI.
+pub const MAX_CHANNEL_NAME: usize = 32;
+
+/// Whether `name` can name a channel: 1 to [`MAX_CHANNEL_NAME`] code points.
+/// Which characters are allowed is B23's.
+pub fn channel_name_ok(name: &str) -> bool {
+    (1..=MAX_CHANNEL_NAME).contains(&name.chars().count())
+}
+
 /// Signs a control-log record carrying `action`.
 pub fn sign_control(
     key: &SigningKey,
@@ -389,6 +430,25 @@ pub fn sign_genesis(
     .sign(key)
 }
 
+/// Creates a new server with its first channel (UX-04): the genesis, then
+/// the owner's `ChannelCreate` of `general` named `name`, in the creator's
+/// language ("general", "כללי"). The name is stored, so it doesn't change
+/// with anyone's UI language later. `name` must pass [`channel_name_ok`],
+/// or the channel record is never accepted.
+pub fn sign_new_server(
+    key: &SigningKey,
+    nonce: [u8; GENESIS_NONCE_LEN],
+    ts: u64,
+    metadata: &[u8],
+    general: ChannelId,
+    name: &str,
+) -> Result<[Record; 2], RecordError> {
+    let genesis = sign_genesis(key, nonce, ts, metadata)?;
+    let create = Action::ChannelCreate { channel: general, adult: false, name: name.to_owned() };
+    let channel = sign_control(key, genesis.server(), 1, vec![genesis.id()], ts, &create)?;
+    Ok([genesis, channel])
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct State {
     pub owner: Option<Actor>,
@@ -403,9 +463,21 @@ pub struct State {
     pub members: BTreeSet<Actor>,
     /// Accepted invites by record ID.
     pub invites: BTreeMap<RecordId, Invite>,
+    /// Created channels by ID.
+    pub channels: BTreeMap<ChannelId, Channel>,
     /// Accepted posts, in display order.
     pub posts: Vec<RecordId>,
     pub accepted: BTreeSet<RecordId>,
+}
+
+/// A created channel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Channel {
+    pub name: String,
+    /// 18+: hidden from members without an 18+ claim (ש-12).
+    pub adult: bool,
+    /// The `ChannelCreate` record.
+    pub created: RecordId,
 }
 
 /// An accepted invite and how it has been used.
@@ -440,6 +512,8 @@ trait View {
     fn has_joined(&self, actor: Actor) -> bool;
     /// An accepted invite as it stands at this point.
     fn invite(&self, id: RecordId) -> Option<Invite>;
+    /// Whether the channel has been created at this point.
+    fn has_channel(&self, id: ChannelId) -> bool;
 
     fn role_of(&self, actor: Actor) -> Role {
         if self.owner() == Some(actor) {
@@ -473,6 +547,10 @@ impl View for State {
 
     fn invite(&self, id: RecordId) -> Option<Invite> {
         self.invites.get(&id).copied()
+    }
+
+    fn has_channel(&self, id: ChannelId) -> bool {
+        self.channels.contains_key(&id)
     }
 }
 
@@ -529,6 +607,11 @@ fn permitted(view: &impl View, record: &Record, action: &Action) -> bool {
         }
         // Undoing a kick is the owner's alone (spec B11, ש-4).
         Action::Unban { target } => author_role == Role::Owner && view.is_kicked(*target),
+        // In the MVP only the owner manages channels (ש-10), and a channel ID
+        // is created once.
+        Action::ChannelCreate { channel, .. } => {
+            author_role == Role::Owner && !view.has_channel(*channel)
+        }
     }
 }
 
@@ -581,7 +664,18 @@ fn apply(state: &mut State, record: &Record, action: &Action) -> Option<(Actor, 
             state.removed.remove(target);
             Some((*target, write(Role::Member, false, false)))
         }
-        Action::Post { .. } | Action::Invite { .. } | Action::RevokeInvite { .. } => None,
+        Action::Post { .. }
+        | Action::Invite { .. }
+        | Action::RevokeInvite { .. }
+        | Action::ChannelCreate { .. } => None,
+    }
+}
+
+/// Adds an accepted channel creation to the state.
+fn apply_channel(state: &mut State, record: &Record, action: &Action) {
+    if let Action::ChannelCreate { channel, adult, name } = action {
+        let entry = Channel { name: name.clone(), adult: *adult, created: record.id() };
+        state.channels.insert(*channel, entry);
     }
 }
 
@@ -847,12 +941,13 @@ impl<'a> Graph<'a> {
             }
             pass.state.accepted.insert(record.id());
             apply_invite(&mut pass.state, record, action);
+            apply_channel(&mut pass.state, record, action);
             match action {
                 Action::Post { .. } => {
                     pass.state.posts.push(record.id());
                     continue;
                 }
-                Action::Invite { .. } => continue,
+                Action::Invite { .. } | Action::ChannelCreate { .. } => continue,
                 Action::RevokeInvite { invite } => {
                     pass.voided.extend(self.voids_of(i));
                     pass.revoked_invites.push(*invite);
