@@ -40,18 +40,19 @@ export function Shell() {
   // An mvs:// link from the OS (desktop app) opens the join dialog pre-filled.
   // It never joins by itself: that waits for the Join button.
   const [invite, setInvite] = useState<string | undefined>();
-  useCoreEvent(
-    'link.open',
-    ({ link }) => {
-      if (!link) return; // guardCore blanks anything that isn't an exact invite link
-      // While the join dialog is open, a new link must not replace the one the
-      // person is looking at just before they press Join (security review of #80).
-      if (dialog === 'join') return;
-      setInvite(link);
-      setDialog('join');
-    },
-    [dialog],
-  );
+  // The open dialog as of now, not as of the last render: the subscription
+  // below is made once, and a second link can arrive before React re-renders.
+  const dialogNow = useRef(dialog);
+  dialogNow.current = dialog;
+  useCoreEvent('link.open', ({ link }) => {
+    if (!link) return; // guardCore blanks anything that isn't an exact invite link
+    // While the join dialog is open, a new link must not replace the one the
+    // person is looking at just before they press Join (security review of #80).
+    if (dialogNow.current === 'join') return;
+    dialogNow.current = 'join';
+    setInvite(link);
+    setDialog('join');
+  });
   // The reminder can show the words again (the panel loads them on demand).
   const [showWords, setShowWords] = useState(false);
   const closeCheck = () => {
