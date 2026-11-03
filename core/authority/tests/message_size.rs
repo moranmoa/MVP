@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use authority::{message_text_ok, MAX_MESSAGE_CODE_POINTS};
 use groupkeys::{ChannelKeys, MemberSecret, MESSAGE_OVERHEAD};
-use rand::rngs::OsRng;
+use rand_core::OsRng;
 use records::{
     ChannelId, Draft, Kind, PublicKey, Record, RecordId, Scope, ServerId, SigningKey,
     MAX_AUTH_DEPS, MAX_DEPS, MAX_RECORD_BYTES,

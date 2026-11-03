@@ -10,10 +10,9 @@ use authority::{
     State, MAX_CHANNEL_NAME,
 };
 use common::{actor, founded, key, rec, server, NONCE};
-use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
-use rand::SeedableRng;
+mod rng;
 use records::{Draft, Kind, Scope};
+use rng::{SliceRandom, StdRng};
 
 const ORDERS: u64 = 200;
 const GENERAL: ChannelId = ChannelId::from_bytes([5; 32]);
