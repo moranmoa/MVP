@@ -217,3 +217,17 @@ fn one_key_to_two_of_three_rotation_flow() {
     let out = ok(&["verify", "--manifest", &new, "--root", &v1, "--root-update", &rot]);
     assert!(out.contains("trust root now v2"), "{out}");
 }
+
+#[cfg(windows)]
+#[test]
+fn secret_key_acl_is_owner_only_on_windows() {
+    let dir = TempDir::new("acl");
+    ok(&["keygen", "--out", dir.0.to_str().unwrap()]);
+    let out = Command::new("icacls").arg(dir.0.join("root.key")).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(text.lines().filter(|l| l.contains(":(")).count(), 1, "exactly one ACE expected:\n{text}");
+    assert!(!text.contains("(I)"), "no inherited ACEs expected:\n{text}");
+    // The public key keeps normal, inherited permissions.
+    let public = Command::new("icacls").arg(dir.0.join("root.pub")).output().unwrap();
+    assert!(String::from_utf8_lossy(&public.stdout).contains("(I)"));
+}

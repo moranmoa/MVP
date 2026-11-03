@@ -120,6 +120,15 @@ fn write_new(path: &Path, contents: &str, secret: bool) -> Result<(), String> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
+    // Windows checks access when a handle is opened, so a reader that opened
+    // the file before the ACL change would keep its handle. No sharing at
+    // all while ours is open closes that window (icacls only needs
+    // READ_CONTROL / WRITE_DAC, which share modes do not restrict).
+    #[cfg(windows)]
+    if secret {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.share_mode(0);
+    }
     let mut f = opts.open(path).map_err(err)?;
     if secret {
         if let Err(e) = restrict_to_owner(path) {
@@ -337,7 +346,16 @@ fn verify(a: &Args) -> Result<(), String> {
         .map(|p| SignedRoot::from_json(&read(p)?).map_err(|e| format!("{p}: {e}")))
         .collect::<Result<Vec<_>, String>>()?;
     if !updates.is_empty() {
-        root = root.update_chain(&updates).map_err(|e| format!("root rotation: {e}"))?;
+        let chain = root.update_chain(&updates);
+        if let Some(v) = chain.fork_at {
+            return Err(format!(
+                "two different validly signed rotations to root v{v}: a current root key has leaked; not choosing one"
+            ));
+        }
+        if chain.skipped > 0 {
+            println!("warning: {} root update(s) could not be applied (invalid, forged or after a gap)", chain.skipped);
+        }
+        root = chain.root;
         println!("trust root now v{} ({} of its keys must sign)", root.version(), root.threshold());
     }
     let now = match a.get("now") {

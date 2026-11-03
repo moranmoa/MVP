@@ -1,4 +1,6 @@
-# Keeps the SHA-pinned actions in ci.yml up to date (one weekly PR).
+# Weekly update PRs for the SHA-pinned actions in ci.yml and for the
+# dependency trees that the licence checks cover. CI (tests + licence
+# policy) runs on each of them.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -8,3 +10,13 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+  - package-ecosystem: cargo
+    directory: /core
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: npm
+    directory: /ui
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

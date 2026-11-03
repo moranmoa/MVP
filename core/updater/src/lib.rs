@@ -30,11 +30,11 @@ pub use artifact::{hash_reader, store_artifact, verify_artifact, StoredArtifact,
 pub use error::Error;
 pub use manifest::{
     is_valid_name, Artifact, ManifestBody, SignatureEntry, SignedManifest, VerifiedManifest, FORMAT,
-    MAX_MANIFEST_BYTES, MAX_SIGNATURES, MAX_VALIDITY_SECS, SIGNING_CONTEXT,
+    MAX_CLOCK_SKEW_SECS, MAX_MANIFEST_BYTES, MAX_SIGNATURES, MAX_VALIDITY_SECS, SIGNING_CONTEXT,
 };
 pub use policy::{Baseline, ClientPolicy, Decision, Freshness};
 pub use rollback::{Boot, Committed, InstallState, Trial, MAX_ATTEMPTS};
-pub use root::{parse_public_key, SignedRoot, TrustRoot, TrustRootFile, ROOT_SIGNING_CONTEXT};
+pub use root::{parse_public_key, RootChain, SignedRoot, TrustRoot, TrustRootFile, MAX_ROOT_UPDATES, ROOT_SIGNING_CONTEXT};
 pub use version::{ParseVersionError, Version};
 
 pub use ed25519_dalek::{SigningKey, VerifyingKey};

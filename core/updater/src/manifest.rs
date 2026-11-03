@@ -25,7 +25,7 @@ pub const FORMAT: u32 = 1;
 
 /// Prepended to the body before signing, so a root key's signature on a
 /// manifest can never be mistaken for a signature on anything else.
-pub const SIGNING_CONTEXT: &[u8] = b"p2p-chat/update-manifest/v1\0";
+pub const SIGNING_CONTEXT: &[u8] = b"mvs/update-manifest/v1\0";
 
 /// Peers hand us manifests; refuse anything absurdly large before parsing.
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
@@ -35,8 +35,14 @@ pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 pub const MAX_SIGNATURES: usize = 8;
 
 /// Longest allowed gap between `issued_at` and `expires_at`. A manifest
-/// that stayed valid for years would defeat freeze protection.
-pub const MAX_VALIDITY_SECS: u64 = 90 * 86_400;
+/// that stayed valid for years would defeat freeze protection (QA-14).
+pub const MAX_VALIDITY_SECS: u64 = 30 * 86_400;
+
+/// How far `issued_at` may be ahead of the local clock (QA-15). Accepting a
+/// manifest "issued" far in the future would push the client's time floor
+/// ahead and make every honest manifest look expired. Clocks more than a day
+/// behind cannot update until fixed; the app should say "check your clock".
+pub const MAX_CLOCK_SKEW_SECS: u64 = 86_400;
 
 /// What one release contains. Written by the release engineer, then signed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,6 +228,9 @@ impl SignedManifest {
             return Err(Error::InsufficientSignatures { valid, required: root.threshold() });
         }
         let body = self.body_unverified()?;
+        if body.issued_at > now.saturating_add(MAX_CLOCK_SKEW_SECS) {
+            return Err(Error::IssuedInFuture { issued_at: body.issued_at, now });
+        }
         if now >= body.expires_at {
             return Err(Error::Expired { expires_at: body.expires_at, now });
         }
@@ -513,5 +522,41 @@ pub(crate) mod tests {
         let mut m = SignedManifest { signed: deep, signatures: vec![] };
         m.sign(&k);
         assert!(matches!(m.verify(&root(&[&k], 1), NOW), Err(Error::Malformed(_))));
+    }
+
+    // --- QA-14 / QA-15 ---
+
+    #[test]
+    fn qa14_manifest_that_never_expires_is_refused() {
+        let mut b = body("1.0.0");
+        b.expires_at = u64::MAX;
+        assert!(matches!(SignedManifest::new(&b), Err(Error::Malformed(_))));
+        // Even if some other tool signs it, clients refuse it.
+        let k = key();
+        let mut m = SignedManifest { signed: serde_json::to_string(&b).unwrap(), signatures: vec![] };
+        m.sign(&k);
+        assert!(matches!(m.verify(&root(&[&k], 1), NOW), Err(Error::Malformed(_))));
+        // 30 days is the limit.
+        b.expires_at = b.issued_at + 30 * 86_400;
+        assert!(SignedManifest::new(&b).is_ok());
+    }
+
+    #[test]
+    fn qa15_manifest_issued_far_in_the_future_is_refused() {
+        let k = key();
+        let r = root(&[&k], 1);
+        let mut b = body("1.0.0");
+        b.issued_at = NOW + 365 * 86_400;
+        b.expires_at = b.issued_at + 7 * 86_400;
+        assert_eq!(
+            signed_by(&b, &[&k]).verify(&r, NOW),
+            Err(Error::IssuedInFuture { issued_at: b.issued_at, now: NOW })
+        );
+        // Within the allowance (a clock a few hours behind) it still works.
+        b.issued_at = NOW + MAX_CLOCK_SKEW_SECS;
+        b.expires_at = b.issued_at + 7 * 86_400;
+        assert!(signed_by(&b, &[&k]).verify(&r, NOW).is_ok());
+        b.issued_at += 1;
+        assert!(matches!(signed_by(&b, &[&k]).verify(&r, NOW), Err(Error::IssuedInFuture { .. })));
     }
 }

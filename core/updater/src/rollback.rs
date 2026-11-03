@@ -63,6 +63,15 @@ struct RawInstallState {
     max_attempts: u32,
 }
 
+/// The part of a damaged state file still worth keeping (no unknown-field
+/// check, so it reads even when the full struct does not).
+#[derive(Deserialize)]
+struct FailedOnly {
+    platform: String,
+    #[serde(default)]
+    failed: BTreeSet<Version>,
+}
+
 impl TryFrom<RawInstallState> for InstallState {
     type Error = Error;
 
@@ -132,7 +141,17 @@ impl InstallState {
     pub fn restore(saved: Option<&[u8]>, installed: Version, platform: &str, max_attempts: u32) -> (Self, bool) {
         match saved.and_then(|b| serde_json::from_slice::<InstallState>(b).ok()) {
             Some(s) if s.platform == platform && s.current >= installed => (s, false),
-            _ => (InstallState::new(installed, platform, max_attempts), true),
+            _ => {
+                let mut fresh = InstallState::new(installed, platform, max_attempts);
+                // Keep the versions that already failed here, if that part can
+                // still be read: a reset must not give them another trial.
+                if let Some(old) = saved.and_then(|b| serde_json::from_slice::<FailedOnly>(b).ok()) {
+                    if old.platform == platform {
+                        fresh.failed = old.failed.into_iter().filter(|v| *v > installed).collect();
+                    }
+                }
+                (fresh, true)
+            }
         }
     }
 
@@ -454,7 +473,7 @@ mod tests {
             assert!(serde_json::from_str::<InstallState>(&json).is_err(), "{what} should be refused");
             let (s, reset) = InstallState::restore(Some(json.as_bytes()), v("1.0.0"), "linux-x86_64", 3);
             assert!(reset, "{what}");
-            assert_eq!(s, InstallState::new(v("1.0.0"), "linux-x86_64", 3));
+            assert_eq!((s.current(), s.trial()), (v("1.0.0"), None), "{what}");
         }
     }
 
@@ -469,5 +488,20 @@ mod tests {
         assert!(InstallState::restore(Some(good.as_bytes()), v("1.0.0"), "windows-x86_64", 3).1);
         // State claiming an older current than the launcher knows is installed.
         assert!(InstallState::restore(Some(good.as_bytes()), v("1.0.5"), "linux-x86_64", 3).1);
+    }
+
+    #[test]
+    fn reset_keeps_versions_that_already_failed() {
+        // Review of #8: a corrupt file must not hand a failed version another trial.
+        let mut s = InstallState::new(v("1.0.0"), "linux-x86_64", 1);
+        s.stage(&art("1.1.0"), &none()).unwrap();
+        s.begin_boot(&none());
+        s.begin_boot(&none()); // rolled back, 1.1.0 failed
+        let mut json = serde_json::to_value(&s).unwrap();
+        json["max_attempts"] = 0.into(); // now invalid
+        let (mut r, reset) = InstallState::restore(Some(json.to_string().as_bytes()), v("1.0.0"), "linux-x86_64", 3);
+        assert!(reset);
+        assert!(r.has_failed(v("1.1.0")));
+        assert_eq!(r.stage(&art("1.1.0"), &none()), Err(Error::PreviouslyFailed(v("1.1.0"))));
     }
 }

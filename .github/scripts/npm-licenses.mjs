@@ -54,7 +54,9 @@ for (const [path, pkg] of Object.entries(lock.packages)) {
   if (pkg.link) continue; // workspace symlink; its own entry is checked
   const name = path.slice(path.lastIndexOf("node_modules/") + "node_modules/".length);
   const id = `${name}@${pkg.version}`;
-  const isDev = pkg.dev === true || pkg.devOptional === true;
+  // Only `dev` is tooling. `devOptional` means "dev dependency here, but also an
+  // optional dependency of something shipped", so it may ship: strict list.
+  const isDev = pkg.dev === true;
   isDev ? dev++ : shipped++;
   const licence = typeof pkg.license === "string" ? pkg.license : undefined;
   if (EXCEPTIONS[id]) continue;

@@ -10,15 +10,15 @@
 
 ## Rules a client enforces
 
-1. The root chain is applied (`TrustRoot::update_chain`). Each rotation must be signed by a threshold of the old keys **and** of the new keys.
+1. The root chain is applied (`TrustRoot::update_chain`). Each rotation must be signed by a threshold of the old keys **and** of the new keys. Invalid entries from peers are skipped, never fatal; two different valid rotations to one version stop the walk and raise a compromise alarm (`RootChain::fork_at`).
 2. A manifest needs a threshold of distinct trusted signatures. At most 8 signature entries are allowed, the manifest is capped at 64 KiB, and the signatures use a manifest-specific domain prefix.
 3. The body must be valid:
    - format 1
    - channel and platform names in `[a-z0-9_-]{1,32}`
    - lowercase SHA-256 hashes
-   - a validity period of at most 90 days
+   - a validity period of at most 30 days (QA-14)
    - it must not revoke its own version
-4. The manifest must not be expired, measured against `max(local clock, highest signed issued_at seen, build time)`.
+4. The manifest must not be expired, measured against `max(local clock, highest signed issued_at seen, build time)`, and its `issued_at` must not be more than one day ahead of the local clock (QA-15).
 5. Ordered by `(version, issued_at)`, it must not be older than the newest manifest already accepted.
 6. The version must not be revoked by any manifest seen so far, and must not be lower than the installed version.
 7. The artifact is stored through `store_artifact` (hashed while it is written; only a match gets the final name). It is then read through the handle from `open_verified`, both to install it and to serve it to peers.
@@ -38,11 +38,16 @@
 | 8 | Staging ignored the platform | A Windows artifact staged on Linux (bricks the trial) | `InstallState` holds its platform; `stage` checks it | `artifact_for_another_platform_cannot_be_staged` |
 | 9 | Unbounded signature list | 300 entries claiming a trusted key means 300 Ed25519 verifications per manifest | At most 8 entries; repeats of an already-counted key are skipped before verifying | `too_many_signature_entries_are_refused` |
 | 10 | No cap when reading from a stream | An endless manifest exhausts memory | `SignedManifest::from_reader` reads at most 64 KiB + 1 | `oversized_input_is_refused_before_parsing` |
-| 11 | No limit on the validity period | A manifest valid for 10 years defeats freeze protection | At most 90 days | `validity_period_is_capped` |
+| 11 | No limit on the validity period | A manifest valid for 10 years defeats freeze protection | At most 30 days (was 90; QA-14 asked for 30) | `validity_period_is_capped`, `qa14_manifest_that_never_expires_is_refused` |
 | 12 | Blind co-signing | Hand the second key holder a manifest for a different version than discussed | `sign-manifest --manifest` prints the body and requires `--expect-version`; same for `sign-root --expect-root-version` | `co_signer_must_name_the_version_they_sign` |
 | 13 | Wrong clock on the signing machine | `issued_at` far in the future pushes every client's time floor ahead, so later manifests look expired | The CLI refuses `issued_at > now + 1h` and already-expired bodies | `refuses_to_sign_a_body_from_the_future` |
 | 14 | No way to rotate keys | Moving from 1 key to 2-of-3 meant either trusting both forever or reinstalling | `SignedRoot` + `TrustRoot::rotate` / `update_chain`; the old keys stop counting once applied | `root.rs` tests, `one_key_to_two_of_three_rotation_flow` |
-| 15 | Secret key file kept inherited ACLs on Windows | Other accounts and admins on the machine can read the root key | The file is created empty, its ACL set to only the current user's SID (`icacls /inheritance:r`) and checked, then the key is written; on failure the file is deleted | Checked by hand on Windows 11 (`icacls` shows only `user:(F)`) |
+| 15 | Secret key file kept inherited ACLs on Windows | Other accounts and admins on the machine can read the root key; one that opened the empty file before the ACL change keeps its handle | The file is created with **no sharing** (`share_mode(0)`), its ACL set to only the current user's SID (`icacls /inheritance:r`) and checked, then the key is written; on failure the file is deleted | `secret_key_acl_is_owner_only_on_windows` (runs in the Windows CI job) |
+| 16 | Root chain aborted on the first bad entry (review of #8) | Any peer adds a junk entry, a forged same-version rotation, or a padded copy: the client stays on the retired root and rejects every manifest signed with the new keys | `update_chain` skips entries it cannot apply, looks at most 32, and returns the furthest root | `junk_entry_does_not_block_rotation`, `forged_same_version_entry_listed_first_does_not_block_rotation`, `padded_copy_does_not_block_the_clean_one` |
+| 17 | Two valid rotations to one version were resolved silently | A leaked current-root key forks clients onto the thief's root | Detected and reported as `RootChain::fork_at`; neither is applied; the CLI fails with a compromise message | `two_valid_rotations_to_one_version_raise_the_alarm` |
+| 18 | `issued_at` far in the future was accepted (QA-15) | A body dated a year ahead pushes the time floor ahead, so every honest manifest then looks expired | Refused beyond `MAX_CLOCK_SKEW_SECS` (1 day) | `qa15_manifest_issued_far_in_the_future_is_refused` |
+| 19 | A state reset forgot failed versions (review of #8) | A corrupt file gives a version that already failed another trial | `InstallState::restore` keeps the readable `failed` list | `reset_keeps_versions_that_already_failed` |
+| 20 | Root version overflow | `rotate` at `u64::MAX` panicked in debug builds | `checked_add` | `version_overflow_is_an_error_not_a_panic` |
 
 Checked and found fine: deeply nested JSON. serde_json's recursion limit refuses it without overflowing the stack (`deeply_nested_json_is_refused_not_a_stack_overflow`).
 
@@ -50,7 +55,9 @@ Checked and found fine: deeply nested JSON. serde_json's recursion limit refuses
 
 - **Withholding.** A network attacker can always stop delivering new manifests. After the last one expires, `ClientPolicy::freshness` reports `Stale`. The app should then tell the user and try the project seeder and, later, HTTPS. Recommendation: manifests valid for 14 days, re-issued weekly.
 - **Where the trust root lives.** The client persists the latest root it reached and falls back to the root embedded in its binary. **Every release must embed the latest root**, so deleting state only drops the client back to that release's root, and fresh installs never start from an old one.
-- **Rotations do not expire.** If an *old* root key leaks after the rotation, it still can't sign anything for clients that have applied the rotation. Clients that never applied it stay exposed until they do, because the chain arrives with every manifest. Destroy retired keys after rotating.
+- **Rotations do not expire.** If an *old* root key leaks after the rotation, it still can't sign anything for clients that have applied the rotation. Clients that never applied it stay exposed until they do, because the chain arrives with every manifest. Destroy retired keys after rotating. In the single-key closed alpha one leaked key is enough to sign a competing rotation; `fork_at` turns that into an alarm instead of a silent fork.
+- **Clock far behind.** A device whose clock is more than a day behind real time refuses fresh manifests (rule 4) until the clock is fixed, like TLS does. The app should say "check your clock".
+- **`ClientPolicy` is not validated on load** the way `InstallState` is: its fields can only be checked against the current time, and the point of the time floor is not to trust the local clock. A damaged file is at worst a local denial of service, fixed by deleting it; `restore` never goes below the baseline.
 - **Version numbers across channels.** Switching channel resets the replay floor to the installed version but keeps revocations and the time floor. Beta and stable must share one version sequence.
 - **Local malware** that runs as the user can edit state files and the install directory. That is outside this model. The OS account boundary and code signing (planned before public launch) are the controls.
 - **Delta updates and staged rollout** (stage 2) must keep rule 7: the patched result is hashed against the manifest before staging.

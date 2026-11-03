@@ -160,7 +160,16 @@ impl StoredArtifact {
     /// Opens the stored file, re-hashes it through the returned handle and
     /// rewinds it. Install from (or serve to peers from) this handle only.
     pub fn open_verified(&self) -> Result<File, Error> {
-        let mut f = File::open(&self.path)?;
+        let mut opts = OpenOptions::new();
+        opts.read(true);
+        // On Windows, also refuse writers while the handle is held.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_SHARE_READ: u32 = 1;
+            opts.share_mode(FILE_SHARE_READ);
+        }
+        let mut f = opts.open(&self.path)?;
         let (sha256, size) = hash_reader((&mut f).take(self.artifact.size.saturating_add(1)))?;
         if size != self.artifact.size {
             return Err(Error::SizeMismatch { expected: self.artifact.size, actual: size });

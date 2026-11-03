@@ -22,7 +22,7 @@ use crate::manifest::{add_signature, valid_signers, SignatureEntry, MAX_MANIFEST
 use crate::Error;
 
 /// Domain prefix for root-rotation signatures (distinct from manifests).
-pub const ROOT_SIGNING_CONTEXT: &[u8] = b"p2p-chat/trust-root/v1\0";
+pub const ROOT_SIGNING_CONTEXT: &[u8] = b"mvs/trust-root/v1\0";
 
 /// The set of root public keys, plus how many of them must sign.
 /// Closed alpha: one key, threshold 1. From the open alpha on: three
@@ -114,8 +114,9 @@ impl TrustRoot {
     /// signed by a threshold of both the current and the new keys.
     pub fn rotate(&self, update: &SignedRoot) -> Result<TrustRoot, Error> {
         let next = update.body()?;
-        if next.version != self.version + 1 {
-            return Err(Error::RootVersion { expected: self.version + 1, found: next.version });
+        let expected = self.version.checked_add(1).ok_or(Error::RootVersion { expected: u64::MAX, found: next.version })?;
+        if next.version != expected {
+            return Err(Error::RootVersion { expected, found: next.version });
         }
         let old = valid_signers(ROOT_SIGNING_CONTEXT, &update.signed, &update.signatures, self)?;
         if old < self.threshold {
@@ -129,21 +130,62 @@ impl TrustRoot {
         Ok(new)
     }
 
-    /// Applies a chain of rotations in version order. Updates at or below
-    /// the current version are skipped, so peers can always send the whole
-    /// chain; a gap or a bad link stops with an error.
-    pub fn update_chain(&self, updates: &[SignedRoot]) -> Result<TrustRoot, Error> {
-        let mut pending: Vec<(u64, &SignedRoot)> =
-            updates.iter().map(|u| Ok((u.body()?.version, u))).collect::<Result<_, Error>>()?;
-        pending.sort_by_key(|(v, _)| *v);
+    /// Advances through a set of rotations as far as valid links allow.
+    ///
+    /// The set comes from peers, so it is never trusted to be clean: junk
+    /// entries, forged rotations and padded copies are skipped instead of
+    /// aborting (an abort would let any peer freeze clients on a retired
+    /// root). Entries at or below the current version are ignored, so peers
+    /// can always send the whole chain. A gap simply stops the walk.
+    ///
+    /// Two *different* rotations to the same version that are both validly
+    /// signed can only mean a current-root key leaked. The walk then stops
+    /// before that version and reports it in [`RootChain::fork_at`]; the app
+    /// should raise a compromise alarm rather than pick one.
+    pub fn update_chain(&self, updates: &[SignedRoot]) -> RootChain {
+        let updates = &updates[..updates.len().min(MAX_ROOT_UPDATES)];
         let mut root = self.clone();
-        for (v, u) in pending {
-            if v > root.version {
-                root = root.rotate(u)?;
+        let mut fork_at = None;
+        loop {
+            let Some(target) = root.version.checked_add(1) else { break };
+            let mut next: Option<TrustRoot> = None;
+            for u in updates {
+                // Cheap version check first; signatures only for candidates.
+                if u.body().map(|b| b.version) != Ok(target) {
+                    continue;
+                }
+                let Ok(candidate) = root.rotate(u) else { continue };
+                match &next {
+                    None => next = Some(candidate),
+                    Some(seen) if *seen == candidate => {}
+                    Some(_) => fork_at = Some(target),
+                }
+            }
+            match next {
+                Some(n) if fork_at.is_none() => root = n,
+                _ => break,
             }
         }
-        Ok(root)
+        let skipped = updates.iter().filter(|u| u.body().map_or(true, |b| b.version > root.version)).count();
+        RootChain { root, skipped, fork_at }
     }
+}
+
+/// At most this many root updates are looked at per call, capping the
+/// signature work a peer can cause. Rotations are rare; 32 is plenty.
+pub const MAX_ROOT_UPDATES: usize = 32;
+
+/// The outcome of [`TrustRoot::update_chain`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RootChain {
+    /// The newest root reached. Use it, even if `skipped > 0`.
+    pub root: TrustRoot,
+    /// Entries above `root`'s version that could not be applied (junk,
+    /// forged, or beyond a gap). Informational.
+    pub skipped: usize,
+    /// Two different validly signed rotations to this version were seen:
+    /// a current-root key has leaked. Alarm; `root` stops just before it.
+    pub fork_at: Option<u64>,
 }
 
 pub fn parse_public_key(hex_key: &str) -> Option<VerifyingKey> {
@@ -297,11 +339,85 @@ mod tests {
         let v1 = TrustRoot::single(k1.verifying_key()).unwrap();
         let r2 = rotation(&file(2, &[&k2], 1), &[&k1, &k2]);
         let r3 = rotation(&file(3, &[&k3], 1), &[&k2, &k3]);
-        let latest = v1.update_chain(&[r3.clone(), r2.clone()]).unwrap();
-        assert_eq!(latest.version(), 3);
+        let latest = v1.update_chain(&[r3.clone(), r2.clone()]);
+        assert_eq!((latest.root.version(), latest.skipped, latest.fork_at), (3, 0, None));
         // A client already at v3 that receives the whole chain stays at v3.
-        assert_eq!(latest.update_chain(&[r2, r3.clone()]).unwrap(), latest);
-        // A gap is an error, not a silent skip.
-        assert!(matches!(v1.update_chain(&[r3]), Err(Error::RootVersion { expected: 2, found: 3 })));
+        assert_eq!(latest.root.update_chain(&[r2, r3.clone()]).root, latest.root);
+        // A gap stops the walk where it is.
+        let gap = v1.update_chain(&[r3]);
+        assert_eq!((gap.root.version(), gap.skipped), (1, 1));
+    }
+
+    // Review of #8: a peer must not be able to block rotation with junk.
+
+    fn alpha_to_v2() -> (SigningKey, TrustRoot, SignedRoot, SigningKey) {
+        let alpha = key();
+        let next = key();
+        let v1 = TrustRoot::single(alpha.verifying_key()).unwrap();
+        let r2 = rotation(&file(2, &[&next], 1), &[&alpha, &next]);
+        (alpha, v1, r2, next)
+    }
+
+    #[test]
+    fn junk_entry_does_not_block_rotation() {
+        let (_, v1, r2, _) = alpha_to_v2();
+        let junk = SignedRoot { signed: "{not json".into(), signatures: vec![] };
+        let out = v1.update_chain(&[junk, r2]);
+        assert_eq!((out.root.version(), out.skipped, out.fork_at), (2, 1, None));
+    }
+
+    #[test]
+    fn forged_same_version_entry_listed_first_does_not_block_rotation() {
+        let (_, v1, r2, _) = alpha_to_v2();
+        let attacker = key();
+        let forged = rotation(&file(2, &[&attacker], 1), &[&attacker]);
+        let out = v1.update_chain(&[forged, r2]);
+        assert_eq!((out.root.version(), out.skipped, out.fork_at), (2, 0, None));
+    }
+
+    #[test]
+    fn padded_copy_does_not_block_the_clean_one() {
+        let (_, v1, r2, _) = alpha_to_v2();
+        let mut padded = r2.clone();
+        let filler = padded.signatures[0].clone();
+        padded.signatures.extend(std::iter::repeat(filler).take(crate::MAX_SIGNATURES));
+        let out = v1.update_chain(&[padded, r2]);
+        assert_eq!((out.root.version(), out.fork_at), (2, None));
+    }
+
+    #[test]
+    fn same_rotation_twice_is_not_a_fork() {
+        let (_, v1, r2, _) = alpha_to_v2();
+        let out = v1.update_chain(&[r2.clone(), r2]);
+        assert_eq!((out.root.version(), out.fork_at), (2, None));
+    }
+
+    #[test]
+    fn two_valid_rotations_to_one_version_raise_the_alarm() {
+        // A leaked alpha key: the thief signs their own v2 with it.
+        let (alpha, v1, r2, _) = alpha_to_v2();
+        let thief = key();
+        let evil = rotation(&file(2, &[&thief], 1), &[&alpha, &thief]);
+        let out = v1.update_chain(&[r2, evil]);
+        assert_eq!(out.fork_at, Some(2));
+        assert_eq!(out.root.version(), 1, "neither branch is picked");
+    }
+
+    #[test]
+    fn number_of_updates_looked_at_is_capped() {
+        let (_, v1, r2, _) = alpha_to_v2();
+        let junk = SignedRoot { signed: "x".into(), signatures: vec![] };
+        let mut updates = vec![junk; MAX_ROOT_UPDATES];
+        updates.push(r2);
+        assert_eq!(v1.update_chain(&updates).root.version(), 1, "entries past the cap are not read");
+    }
+
+    #[test]
+    fn version_overflow_is_an_error_not_a_panic() {
+        let k = key();
+        let top = TrustRoot::with_version(u64::MAX, vec![k.verifying_key()], 1).unwrap();
+        let r = rotation(&file(u64::MAX, &[&k], 1), &[&k]);
+        assert!(matches!(top.rotate(&r), Err(Error::RootVersion { .. })));
+        assert_eq!(top.update_chain(&[r]).root.version(), u64::MAX);
     }
 }

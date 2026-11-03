@@ -14,6 +14,8 @@ pub enum Error {
     InsufficientSignatures { valid: usize, required: usize },
     /// `now` is at or past the manifest's `expires_at`.
     Expired { expires_at: u64, now: u64 },
+    /// `issued_at` is further ahead of `now` than the clock-skew allowance.
+    IssuedInFuture { issued_at: u64, now: u64 },
     /// The manifest is for another update channel.
     WrongChannel { expected: String, found: String },
     /// The manifest is older than one this client already accepted (replay).
@@ -53,6 +55,9 @@ impl fmt::Display for Error {
             }
             Error::Expired { expires_at, now } => {
                 write!(f, "manifest expired at {expires_at} (now {now})")
+            }
+            Error::IssuedInFuture { issued_at, now } => {
+                write!(f, "manifest issued at {issued_at}, more than a day after now ({now}); check the clock")
             }
             Error::WrongChannel { expected, found } => {
                 write!(f, "manifest is for channel {found:?}, client is on {expected:?}")
