@@ -228,14 +228,19 @@ function cleanJoin(j: JoinStatus): JoinStatus {
 
 const cleanRange = (r: MessageRange): MessageRange => ({ ...r, messages: r.messages.map(cleanMessage) });
 
-/** mvs://join/<server id, 32 bytes hex>/<invite record id, 32 bytes hex>, as the desktop shell checks it. */
-const INVITE_LINK = /^mvs:\/\/join\/([0-9a-f]{64})\/([0-9a-f]{64})\/?$/;
+/**
+ * mvs://join/<server id>/<invite record id>/<server secret>, each 32 bytes in
+ * hex (GAP-4: the secret is required to sync the server). The secret is a
+ * bearer credential: the link is never logged, only shown, copied and passed
+ * to joinServer.
+ */
+const INVITE_LINK = /^mvs:\/\/join\/([0-9a-f]{64})\/([0-9a-f]{64})\/([0-9a-f]{64})\/?$/;
 
 /** The canonical invite link, or '' when it is not exactly that format. */
 export function cleanInviteLink(raw: unknown): string {
-  if (typeof raw !== 'string' || raw.length > 200) return '';
+  if (typeof raw !== 'string' || raw.length > 256) return '';
   const m = INVITE_LINK.exec(raw.trim().toLowerCase());
-  return m ? `mvs://join/${m[1]}/${m[2]}` : '';
+  return m ? `mvs://join/${m[1]}/${m[2]}/${m[3]}` : '';
 }
 
 const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[E] } = {

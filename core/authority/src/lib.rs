@@ -30,15 +30,22 @@
 //!   kicked moderator's links stop working even for joins that only depend
 //!   on the invite.
 //! - A revoke voids the target's privileged actions that are concurrent with
-//!   it (not causal ancestors of it). A kick voids all of the target's
-//!   concurrent records. This blocks "backdating": signing new records whose
-//!   deps point at state from before the removal. When two kicks of the same
+//!   it (neither causal ancestors nor descendants of it). A kick voids all of
+//!   the target's concurrent records. This blocks "backdating": signing new
+//!   records whose deps point at state from before the removal. A record
+//!   that descends from the removal was signed knowing it and is judged by
+//!   the state there, so a re-granted moderator acts again, and a key the
+//!   owner unbanned can join again.
+//! - Only the owner unbans a kicked key. It doesn't make them a member: they
+//!   join again through an invite. When two kicks of the same
 //!   target are concurrent, only the first in linear order is accepted (the
 //!   target is already kicked by the second), so only its voids apply.
 //! - Channels: only the owner creates, renames and deletes them (ש-10),
 //!   each channel ID once; the latest edit counts, and a deleted ID isn't
 //!   reused. A new server's first channel, #general, is created with its
 //!   genesis ([`sign_new_server`]) and can't be deleted (ש-20).
+//! - Age: a member claims their own age, 18+ or not, and the latest claim in
+//!   linear order counts. The birth date never leaves the device (B7).
 //! - Ties between concurrent records are broken by the record ID.
 //!
 //! Records come from the `records` crate, so they are signed and their IDs are
@@ -120,6 +127,11 @@ pub enum Action {
     Join {
         invite: RecordId,
     },
+    /// The author's own age claim: 18+ or not (B7). Only the claim, never a
+    /// birth date: that stays on the author's device.
+    AgeClaim {
+        adult: bool,
+    },
     /// The owner creates a channel. Body: the channel ID, `history u8`
     /// (reserved for D30, must be 0), flags (bit 0: 18+, the rest 0), then
     /// the name, 1 to [`MAX_CHANNEL_NAME`] code points. The server's first
@@ -138,6 +150,11 @@ pub enum Action {
     /// The owner deletes a channel, never #general. Body: the channel ID.
     ChannelDelete {
         channel: ChannelId,
+    },
+    /// The owner lets a kicked key back: it may join again through an invite.
+    /// It isn't made a member.
+    Unban {
+        target: Actor,
     },
 }
 
@@ -162,16 +179,19 @@ impl Action {
             Action::Invite { .. } => Kind::Invite,
             Action::RevokeInvite { .. } => Kind::RevokeInvite,
             Action::Join { .. } => Kind::Join,
+            Action::AgeClaim { .. } => Kind::AgeClaim,
             Action::ChannelCreate { .. } => Kind::ChannelCreate,
             Action::ChannelEdit { .. } => Kind::ChannelEdit,
             Action::ChannelDelete { .. } => Kind::ChannelDelete,
+            Action::Unban { .. } => Kind::Unban,
         }
     }
 
     /// Body encoding: target key (32 bytes), then the role byte for a grant
     /// or the cut for a revoke or kick;
     /// UTF-8 text for a post; `expires_ms` (u64 LE) then `max_uses` (u32 LE)
-    /// for an invite; the invite's record ID for a revoke-invite or a join.
+    /// for an invite; the invite's record ID for a revoke-invite or a join;
+    /// the target key alone for an unban.
     /// A genesis body (nonce, then server metadata) is not read here: write
     /// one with [`sign_genesis`].
     pub fn body(&self) -> Vec<u8> {
@@ -197,6 +217,8 @@ impl Action {
                 [channel.as_bytes().as_slice(), &[0, u8::from(*adult)], name.as_bytes()].concat()
             }
             Action::ChannelDelete { channel } => channel.as_bytes().to_vec(),
+            Action::AgeClaim { adult } => vec![u8::from(*adult)],
+            Action::Unban { target } => target.as_bytes().to_vec(),
         }
     }
 
@@ -236,6 +258,11 @@ impl Action {
             }
             Kind::RevokeInvite => Some(Action::RevokeInvite { invite: id(body)? }),
             Kind::Join => Some(Action::Join { invite: id(body)? }),
+            Kind::AgeClaim => match body {
+                [0] => Some(Action::AgeClaim { adult: false }),
+                [1] => Some(Action::AgeClaim { adult: true }),
+                _ => None,
+            },
             Kind::ChannelCreate | Kind::ChannelEdit => {
                 let (channel, rest) = body.split_first_chunk::<32>()?;
                 let [history, flags, name @ ..] = rest else { return None };
@@ -254,14 +281,13 @@ impl Action {
             Kind::ChannelDelete => Some(Action::ChannelDelete {
                 channel: ChannelId::from_bytes(body.try_into().ok()?),
             }),
+            Kind::Unban => Some(Action::Unban { target: key(body)? }),
             // Channel kinds are judged by the channel checks (B4-4); server,
             // channel and leave records come in B4-3. Until then they are
             // never accepted.
             Kind::ServerEdit
             | Kind::ServerClose
             | Kind::Leave
-            | Kind::AgeClaim
-            | Kind::Unban
             | Kind::Message
             | Kind::MessageEdit
             | Kind::MessageDelete
@@ -269,12 +295,13 @@ impl Action {
         }
     }
 
-    /// The actor whose role is changed by a grant, revoke or kick.
+    /// The actor whose role is changed by a grant, revoke, kick or unban.
     fn target(&self) -> Option<Actor> {
         match self {
             Action::Grant { target, .. }
             | Action::Revoke { target, .. }
-            | Action::Kick { target, .. } => Some(*target),
+            | Action::Kick { target, .. }
+            | Action::Unban { target } => Some(*target),
             Action::Genesis
             | Action::Post { .. }
             | Action::Invite { .. }
@@ -282,7 +309,8 @@ impl Action {
             | Action::Join { .. }
             | Action::ChannelCreate { .. }
             | Action::ChannelEdit { .. }
-            | Action::ChannelDelete { .. } => None,
+            | Action::ChannelDelete { .. }
+            | Action::AgeClaim { .. } => None,
         }
     }
 
@@ -400,10 +428,38 @@ impl Cut {
 /// Most Unicode code points in a channel name, the same limit as the UI.
 pub const MAX_CHANNEL_NAME: usize = 32;
 
-/// Whether `name` can name a channel: 1 to [`MAX_CHANNEL_NAME`] code points.
-/// Which characters are allowed is B23's.
+/// Whether `name` can name a channel: 1 to [`MAX_CHANNEL_NAME`] code points,
+/// and [`display_text_ok`].
 pub fn channel_name_ok(name: &str) -> bool {
-    (1..=MAX_CHANNEL_NAME).contains(&name.chars().count())
+    (1..=MAX_CHANNEL_NAME).contains(&name.chars().count()) && display_text_ok(name)
+}
+
+/// Whether text other people see as a name (a channel, a display name, a
+/// server name) is free of characters that change how text around it looks
+/// or hide what it says (B23, QA-06, QA-13):
+/// - bidi controls: embeddings and overrides U+202A–202E, isolates
+///   U+2066–2069, and the marks U+200E, U+200F and U+061C;
+/// - other control characters (C0, DEL, C1);
+/// - zero-width characters: U+200B–200D, U+2060 and U+FEFF. That includes
+///   the zero-width joiner, so emoji joined into one (a family, a flag with
+///   a modifier) are refused in names.
+///
+/// Right-to-left text needs none of these: "כללי" and "general" both pass.
+pub fn display_text_ok(text: &str) -> bool {
+    !text.chars().any(|c| {
+        c.is_control()
+            || matches!(
+                c,
+                '\u{202A}'..='\u{202E}'
+                    | '\u{2066}'..='\u{2069}'
+                    | '\u{200E}'
+                    | '\u{200F}'
+                    | '\u{061C}'
+                    | '\u{200B}'..='\u{200D}'
+                    | '\u{2060}'
+                    | '\u{FEFF}'
+            )
+    })
 }
 
 /// Signs a control-log record carrying `action`.
@@ -475,11 +531,17 @@ pub struct State {
     pub owner: Option<Actor>,
     pub roles: BTreeMap<Actor, Role>,
     pub kicked: BTreeSet<Actor>,
+    /// The kicked actors and the kick that removed each one, for the owner's
+    /// list of removed accounts (`listRemovedMembers`); the kick record's `ts`
+    /// is when it happened.
+    pub removed: BTreeMap<Actor, RecordId>,
     /// Current members, the owner included. This is the member set
     /// `groupkeys` rotates to.
     pub members: BTreeSet<Actor>,
     /// Accepted invites by record ID.
     pub invites: BTreeMap<RecordId, Invite>,
+    /// Actors whose latest accepted age claim, in linear order, is 18+.
+    pub adults: BTreeSet<Actor>,
     /// Created channels by ID.
     pub channels: BTreeMap<ChannelId, Channel>,
     /// Deleted channels: their IDs aren't created again.
@@ -645,6 +707,8 @@ fn permitted(view: &impl View, record: &Record, action: &Action) -> bool {
                         && (invite.expires_ms == 0 || record.ts() <= invite.expires_ms)
                 })
         }
+        // Undoing a kick is the owner's alone (spec B11, ש-4).
+        Action::Unban { target } => author_role == Role::Owner && view.is_kicked(*target),
         // In the MVP only the owner manages channels (ש-10), and a channel ID
         // is created once.
         Action::ChannelCreate { channel, .. } => {
@@ -659,6 +723,8 @@ fn permitted(view: &impl View, record: &Record, action: &Action) -> bool {
             author_role == Role::Owner
                 && view.channel(*channel) == ChannelStatus::Live { general: false }
         }
+        // A member claims their own age.
+        Action::AgeClaim { .. } => view.is_member(author),
     }
 }
 
@@ -698,18 +764,37 @@ fn apply(state: &mut State, record: &Record, action: &Action) -> Option<(Actor, 
             state.roles.remove(target);
             state.kicked.insert(*target);
             state.members.remove(target);
+            state.removed.insert(*target, record.id());
             Some((*target, write(Role::Member, true, false)))
         }
         Action::Join { .. } => {
             state.members.insert(record.author());
             Some((record.author(), write(Role::Member, false, true)))
         }
+        Action::Unban { target } => {
+            // Not a member again: they rejoin through an invite.
+            state.kicked.remove(target);
+            state.removed.remove(target);
+            Some((*target, write(Role::Member, false, false)))
+        }
         Action::Post { .. }
         | Action::Invite { .. }
         | Action::RevokeInvite { .. }
         | Action::ChannelCreate { .. }
         | Action::ChannelEdit { .. }
-        | Action::ChannelDelete { .. } => None,
+        | Action::ChannelDelete { .. }
+        | Action::AgeClaim { .. } => None,
+    }
+}
+
+/// Applies an accepted age claim: the latest one in linear order counts.
+fn apply_age(state: &mut State, record: &Record, action: &Action) {
+    if let Action::AgeClaim { adult } = action {
+        if *adult {
+            state.adults.insert(record.author());
+        } else {
+            state.adults.remove(&record.author());
+        }
     }
 }
 
@@ -781,17 +866,17 @@ struct Run {
     state: State,
     /// Records voided in any pass.
     excluded: HashSet<RecordId>,
-    /// Targets of kicks and revokes accepted in any pass.
-    kick_targets: HashSet<Actor>,
-    revoke_targets: HashSet<Actor>,
+    /// Kicks and revokes accepted in any pass, by target.
+    kick_targets: HashMap<Actor, Vec<RecordId>>,
+    revoke_targets: HashMap<Actor, Vec<RecordId>>,
     /// Invites with a revoke-invite accepted in any pass.
     revoked_invites: HashSet<RecordId>,
     /// Actors whose role history differs between passes: some pass accepted
     /// a privileged record about them that the final pass didn't, or the
     /// other way round. Only the final pass's history is kept. When every
-    /// pass accepted the same first kick of the actor, their history is
-    /// frozen from that kick on, so it only differs before it: the kick is
-    /// kept as the bound.
+    /// pass accepted the same first kick of the actor and their history only
+    /// differs before it, it is the same in all passes from that kick on: the
+    /// kick is kept as the bound.
     unsettled: HashMap<Actor, Option<RecordId>>,
     /// Same, for the genesis: ownership differed between passes.
     owner_unsettled: bool,
@@ -813,39 +898,55 @@ fn full_run<'a>(server: ServerId, records: impl IntoIterator<Item = &'a Record>)
     // order, so fold again until no new records get voided. The excluded set
     // only grows, so this terminates.
     let mut excluded = vec![false; order.len()];
-    let mut kick_targets = HashSet::new();
-    let mut revoke_targets = HashSet::new();
+    let mut kick_targets: HashMap<Actor, Vec<RecordId>> = HashMap::new();
+    let mut revoke_targets: HashMap<Actor, Vec<RecordId>> = HashMap::new();
     let mut revoked_invites = HashSet::new();
     let mut earlier_passes: Vec<(BTreeSet<usize>, HashMap<Actor, usize>)> = Vec::new();
     loop {
         let pass = graph.fold(&excluded);
-        kick_targets.extend(pass.kick_targets);
-        revoke_targets.extend(pass.revoke_targets);
+        for (targets, removals) in
+            [(&mut kick_targets, pass.kick_targets), (&mut revoke_targets, pass.revoke_targets)]
+        {
+            for (target, removal) in removals {
+                let ids = targets.entry(target).or_default();
+                if !ids.contains(&removal) {
+                    ids.push(removal);
+                }
+            }
+        }
         revoked_invites.extend(pass.revoked_invites);
         let fresh: Vec<usize> = pass.voided.into_iter().filter(|i| !excluded[*i]).collect();
         if fresh.is_empty() {
-            let mut unsettled = HashMap::new();
+            // Actor -> the last position where their history differs.
+            let mut differs: HashMap<Actor, usize> = HashMap::new();
             let mut owner_unsettled = false;
             for (settled, _) in &earlier_passes {
                 for &i in pass.settled.symmetric_difference(settled) {
                     let author = graph.records[i].author();
                     match graph.actions[i].as_ref().and_then(|a| a.subject(author)) {
                         Some(target) => {
-                            unsettled.insert(target, None);
+                            let last = differs.entry(target).or_insert(i);
+                            *last = (*last).max(i);
                         }
                         None => owner_unsettled = true,
                     }
                 }
             }
-            // A kicked actor can't be granted, revoked, kicked or rejoin,
-            // so after the same first kick in every pass their history is
-            // the same in all of them.
-            for (actor, bound) in &mut unsettled {
-                let Some(&kick) = pass.first_kicks.get(actor) else { continue };
-                if earlier_passes.iter().all(|(_, kicks)| kicks.get(actor) == Some(&kick)) {
-                    *bound = Some(order[kick]);
-                }
-            }
+            // Writes are full snapshots, so when every pass accepted the same
+            // first kick of an actor and their history differs only before
+            // it, it is the same in all passes from that kick on.
+            let unsettled = differs
+                .into_iter()
+                .map(|(actor, last)| {
+                    let kick = pass.first_kicks.get(&actor).copied().filter(|&kick| {
+                        last < kick
+                            && earlier_passes
+                                .iter()
+                                .all(|(_, kicks)| kicks.get(&actor) == Some(&kick))
+                    });
+                    (actor, kick.map(|kick| order[kick]))
+                })
+                .collect();
             let excluded = (0..order.len()).filter(|i| excluded[*i]).map(|i| order[i]).collect();
             return Run {
                 order,
@@ -902,6 +1003,8 @@ struct Graph<'a> {
     actions: Vec<Option<Action>>,
     /// Positions of each record's deps.
     deps: Vec<Vec<usize>>,
+    /// Positions of the records that list each record in their deps.
+    children: Vec<Vec<usize>>,
     by_author: HashMap<Actor, Vec<usize>>,
     /// Invite -> positions of the joins naming it.
     joins: HashMap<RecordId, Vec<usize>>,
@@ -915,12 +1018,13 @@ struct Pass {
     state: State,
     voided: Vec<usize>,
     /// Positions of accepted records that write a role history: the
-    /// genesis, grants, revokes, kicks and joins.
+    /// genesis, grants, revokes, kicks, joins and unbans.
     settled: BTreeSet<usize>,
-    kick_targets: Vec<Actor>,
-    revoke_targets: Vec<Actor>,
+    /// Accepted kicks and revokes: (target, record).
+    kick_targets: Vec<(Actor, RecordId)>,
+    revoke_targets: Vec<(Actor, RecordId)>,
     revoked_invites: Vec<RecordId>,
-    /// Position of the accepted kick of each kicked actor.
+    /// Position of the first accepted kick of each kicked actor.
     first_kicks: HashMap<Actor, usize>,
     writes: HashMap<Actor, Vec<Write>>,
     genesis: Option<RecordId>,
@@ -931,7 +1035,7 @@ impl<'a> Graph<'a> {
         let position: HashMap<RecordId, usize> =
             order.iter().enumerate().map(|(i, id)| (*id, i)).collect();
         let records: Vec<&Record> = order.iter().map(|id| by_id[id]).collect();
-        let deps =
+        let deps: Vec<Vec<usize>> =
             records.iter().map(|r| r.deps().iter().map(|dep| position[dep]).collect()).collect();
         let mut by_author: HashMap<Actor, Vec<usize>> = HashMap::new();
         for (i, record) in records.iter().enumerate() {
@@ -947,7 +1051,13 @@ impl<'a> Graph<'a> {
                 }
             }
         }
-        Graph { records, actions, deps, by_author, joins, voids: RefCell::default() }
+        let mut children: Vec<Vec<usize>> = vec![Vec::new(); records.len()];
+        for (i, deps) in deps.iter().enumerate() {
+            for &dep in deps {
+                children[dep].push(i);
+            }
+        }
+        Graph { records, actions, deps, children, by_author, joins, voids: RefCell::default() }
     }
 
     fn fold(&self, excluded: &[bool]) -> Pass {
@@ -975,6 +1085,7 @@ impl<'a> Graph<'a> {
             pass.state.accepted.insert(record.id());
             apply_invite(&mut pass.state, record, action);
             apply_channel(&mut pass.state, record, action);
+            apply_age(&mut pass.state, record, action);
             match action {
                 Action::Post { .. } => {
                     pass.state.posts.push(record.id());
@@ -983,22 +1094,23 @@ impl<'a> Graph<'a> {
                 Action::Invite { .. }
                 | Action::ChannelCreate { .. }
                 | Action::ChannelEdit { .. }
-                | Action::ChannelDelete { .. } => continue,
+                | Action::ChannelDelete { .. }
+                | Action::AgeClaim { .. } => continue,
                 Action::RevokeInvite { invite } => {
                     pass.voided.extend(self.voids_of(i));
                     pass.revoked_invites.push(*invite);
                     continue;
                 }
                 Action::Genesis => pass.genesis = Some(record.id()),
-                Action::Grant { .. } | Action::Join { .. } => {}
+                Action::Grant { .. } | Action::Join { .. } | Action::Unban { .. } => {}
                 Action::Revoke { target, .. } => {
                     pass.voided.extend(self.voids_of(i));
-                    pass.revoke_targets.push(*target);
+                    pass.revoke_targets.push((*target, record.id()));
                 }
                 Action::Kick { target, .. } => {
                     pass.voided.extend(self.voids_of(i));
-                    pass.kick_targets.push(*target);
-                    pass.first_kicks.insert(*target, i);
+                    pass.kick_targets.push((*target, record.id()));
+                    pass.first_kicks.entry(*target).or_insert(i);
                 }
             }
             if let Some((target, write)) = apply(&mut pass.state, record, action) {
@@ -1017,14 +1129,15 @@ impl<'a> Graph<'a> {
     /// what it voids is read from the record itself, so the cache key says
     /// everything.
     fn voids_of(&self, removal: usize) -> Vec<usize> {
-        let (own, privileged_only, invites) = match &self.actions[removal] {
+        // `inviter`: whose invites stop admitting; `named`: one invite.
+        let (own, privileged_only, inviter, named) = match &self.actions[removal] {
             Some(Action::Revoke { target, .. }) => {
-                (self.by_author.get(target), true, self.invites_by(*target))
+                (self.by_author.get(target), true, Some(*target), None)
             }
             Some(Action::Kick { target, .. }) => {
-                (self.by_author.get(target), false, self.invites_by(*target))
+                (self.by_author.get(target), false, Some(*target), None)
             }
-            Some(Action::RevokeInvite { invite }) => (None, false, vec![*invite]),
+            Some(Action::RevokeInvite { invite }) => (None, false, None, Some(*invite)),
             _ => return Vec::new(),
         };
         let mut voids = self.voids.borrow_mut();
@@ -1037,9 +1150,30 @@ impl<'a> Graph<'a> {
                     stack.extend_from_slice(&self.deps[i]);
                 }
             }
+            // Only the target's records concurrent with the removal: one that
+            // descends from it was signed knowing it and is judged by state.
+            // Descendants come later in the linear order.
+            let mut below = vec![false; self.records.len()];
+            let mut stack = self.children[removal].clone();
+            while let Some(i) = stack.pop() {
+                if !std::mem::replace(&mut below[i], true) {
+                    stack.extend_from_slice(&self.children[i]);
+                }
+            }
             let own = own.into_iter().flatten().copied().filter(|&i| {
-                !privileged_only || self.actions[i].as_ref().is_some_and(Action::is_privileged)
+                (!privileged_only || self.actions[i].as_ref().is_some_and(Action::is_privileged))
+                    && !below[i]
             });
+            // The removed actor's invites signed knowing the removal (after a
+            // new grant) keep working.
+            let invites: Vec<RecordId> = inviter
+                .map(|inviter| self.invites_by(inviter))
+                .into_iter()
+                .flatten()
+                .filter(|&i| !below[i])
+                .map(|i| self.records[i].id())
+                .chain(named)
+                .collect();
             let joins =
                 invites.iter().filter_map(|invite| self.joins.get(invite)).flatten().copied();
             let mut voided: Vec<usize> = own
@@ -1053,11 +1187,9 @@ impl<'a> Graph<'a> {
         voided.clone()
     }
 
-    /// The invites `author` signed.
-    fn invites_by(&self, author: Actor) -> Vec<RecordId> {
+    /// Positions of the invites `author` signed.
+    fn invites_by(&self, author: Actor) -> Vec<usize> {
         let mine = self.by_author.get(&author).into_iter().flatten();
-        mine.filter(|&&i| matches!(self.actions[i], Some(Action::Invite { .. })))
-            .map(|&i| self.records[i].id())
-            .collect()
+        mine.filter(|&&i| matches!(self.actions[i], Some(Action::Invite { .. }))).copied().collect()
     }
 }

@@ -153,7 +153,7 @@ async fn handle(peer: &Arc<Peer>, command: Command) -> Result<Value> {
                 allow_lan: true,
             };
             // Every harness peer may read; pulls carry this peer's binding.
-            let access = Access { binder: Some(Arc::new(peer.key.clone())), read_gate: Some(Arc::new(AcceptAll)) };
+            let access = Access { binder: Some(Arc::new(peer.key.clone())), read_gate: Some(Arc::new(AcceptAll)), stub_gate: None };
             let (started, events) = Node::start_with(config, access).await?;
             let (server, channel, secret) = harness_channel();
             started.open_server(server, secret)?;

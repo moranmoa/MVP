@@ -70,3 +70,22 @@ pub fn naming(kind: Kind, seq: u64, deps: &[RecordId], target: u8) -> Record {
     let body = [public(&test_key(target)).as_bytes().to_vec(), vec![1]].concat();
     sign(Scope::Control, seq, deps, &[], kind, body, 0)
 }
+
+/// A delete of `target` by test key 1 (the author of `message`).
+pub fn delete(seq: u64, target: &Record) -> Record {
+    sign(Scope::Channel(channel()), seq, &[target.id()], &[], Kind::MessageDelete, target.id().as_bytes().to_vec(), 1)
+}
+
+/// A stub gate like authority's rule, simplified: a stub counts once a held
+/// `MessageDelete` names it; until then it is pending.
+pub struct DeletedOnly;
+
+impl crate::StubGate for DeletedOnly {
+    fn check(&self, stub: &records::Stub, channel: &crate::ChannelLog<'_>) -> crate::StubVerdict {
+        let replaced = channel.children(&stub.id()).unwrap_or_default().iter().any(|child| match child {
+            crate::Held::Full(r) => r.kind() == Kind::MessageDelete && r.body() == stub.id().as_bytes(),
+            crate::Held::Stub(_) => false,
+        });
+        if replaced { crate::StubVerdict::Accept } else { crate::StubVerdict::Pending }
+    }
+}
