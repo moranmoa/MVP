@@ -1,15 +1,21 @@
-//! SQLite store of opaque, content-addressed blobs grouped into logs.
+//! SQLite store of signed records, grouped into logs.
 //!
-//! A blob is only accepted once all of its deps are stored, so the local
-//! insertion order (`seq`) is always a topological order of the DAG, and
-//! "I have X" always implies "I have every ancestor of X". A blob is also only
-//! accepted if its id matches its content ([`Blob::verify`]).
+//! Only a [`Record`] can be appended, and holding one means `Record::decode`
+//! (or signing) already checked its format and signature. The log is derived
+//! from the record ([`log_of`]). A record is only accepted once all of its
+//! deps are stored in the same log and all of its `auth_deps` in the server's
+//! control log, so the local insertion order (`seq`) is always a topological
+//! order, and "I have X" implies "I have every ancestor of X" (and everything
+//! X's author relied on for permission).
+//!
+//! The stored bytes are the record's canonical encoding: pages are served
+//! from them as they are, without re-encoding.
 
 use std::path::Path;
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
-use crate::{Blob, BlobError, Id};
+use crate::{log_name, log_of, Authorizer, Record, RecordId, Scope, Verdict};
 
 /// Most `have` ids looked at per [`Store::missing_since`] call; the rest are
 /// ignored. [`Store::have_markers`] never produces more.
@@ -23,19 +29,58 @@ pub enum Append {
     Added,
     /// Already had it.
     Known,
-    /// Not stored: these deps are not in the store yet.
-    MissingDeps(Vec<Id>),
-    /// Not stored: the id doesn't match the content, or a limit is exceeded.
-    Invalid(BlobError),
+    /// Not stored: these deps or auth_deps are not in the store yet.
+    MissingDeps(Vec<RecordId>),
+    /// Not stored, and never will be.
+    Invalid(IngestError),
+    /// Not stored: the [`Authorizer`] refused it.
+    Unauthorized,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngestError {
+    /// A dep is stored under another log. Pulls only send one log, so peers
+    /// without that other log open could never store this record.
+    DepInOtherLog,
+    /// An auth_dep is stored somewhere other than this server's control log.
+    AuthDepNotInControlLog,
+}
+
+impl std::fmt::Display for IngestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IngestError::DepInOtherLog => write!(f, "a dep belongs to another log"),
+            IngestError::AuthDepNotInControlLog => write!(f, "an auth_dep is not in the server's control log"),
+        }
+    }
+}
+
+/// A stored record as served to peers: its id and canonical bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stored {
+    pub id: RecordId,
+    pub bytes: Vec<u8>,
 }
 
 pub struct Store {
     conn: Connection,
 }
 
+fn id_of(bytes: [u8; 32]) -> RecordId {
+    RecordId::from_bytes(bytes)
+}
+
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
         Self::init(Connection::open(path)?)
+    }
+
+    /// A second, read-only connection to a store another [`Store`] writes,
+    /// for answering pulls off the network task (WAL lets it read while the
+    /// writer writes). Only the read methods work on it.
+    pub fn open_read_only(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI;
+        Ok(Self { conn: Connection::open_with_flags(path, flags)? })
     }
 
     pub fn in_memory() -> rusqlite::Result<Self> {
@@ -46,13 +91,13 @@ impl Store {
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
-             CREATE TABLE IF NOT EXISTS blobs (
+             CREATE TABLE IF NOT EXISTS records (
                  seq  INTEGER PRIMARY KEY AUTOINCREMENT,
                  id   BLOB NOT NULL UNIQUE,
                  log  TEXT NOT NULL,
                  data BLOB NOT NULL
              );
-             CREATE INDEX IF NOT EXISTS blobs_log ON blobs (log, seq);
+             CREATE INDEX IF NOT EXISTS records_log ON records (log, seq);
              CREATE TABLE IF NOT EXISTS deps (
                  child  BLOB NOT NULL,
                  parent BLOB NOT NULL,
@@ -67,114 +112,121 @@ impl Store {
         Ok(Self { conn })
     }
 
-    pub fn has(&self, id: &Id) -> rusqlite::Result<bool> {
-        self.conn
-            .query_row("SELECT 1 FROM blobs WHERE id = ?1", [&id[..]], |_| Ok(()))
-            .optional()
-            .map(|r| r.is_some())
+    pub fn has(&self, id: &RecordId) -> rusqlite::Result<bool> {
+        Ok(self.log_of_id(id)?.is_some())
     }
 
-    pub fn append(&mut self, log: &str, blob: &Blob) -> rusqlite::Result<Append> {
+    fn log_of_id(&self, id: &RecordId) -> rusqlite::Result<Option<String>> {
+        let mut stmt = self.conn.prepare_cached("SELECT log FROM records WHERE id = ?1")?;
+        stmt.query_row([&id.as_bytes()[..]], |r| r.get(0)).optional()
+    }
+
+    /// What storing `record` would need: `Ok(missing)` lists absent deps and
+    /// auth_deps (empty: it can be stored now), `Err` means it never can be.
+    /// The node calls this before asking the [`crate::Authorizer`], which
+    /// needs the record's whole context present.
+    pub fn check(&self, record: &Record) -> rusqlite::Result<Result<Vec<RecordId>, IngestError>> {
+        check_in(&self.conn, record)
+    }
+
+    /// Stores `record` if its context is present and `auth` accepts it.
+    /// `auth` runs inside the write transaction: it must not call back into
+    /// the node or this store.
+    pub fn append(&mut self, record: &Record, auth: &dyn Authorizer) -> rusqlite::Result<Append> {
         let tx = self.conn.transaction()?;
-        let result = append_in(&tx, log, blob)?;
+        let result = append_in(&tx, record, auth)?;
         tx.commit()?;
         Ok(result)
     }
 
-    /// Appends many blobs in one transaction (much faster than one by one).
-    /// Returns the ids added and the blobs skipped (missing deps or invalid).
+    /// Appends many records in one transaction (much faster than one by
+    /// one). Returns the ids added; the rest were known, missing deps or
+    /// invalid.
     pub fn append_all<'a>(
         &mut self,
-        log: &str,
-        blobs: impl IntoIterator<Item = &'a Blob>,
-    ) -> rusqlite::Result<(Vec<Id>, Vec<&'a Blob>)> {
+        records: impl IntoIterator<Item = &'a Record>,
+        auth: &dyn Authorizer,
+    ) -> rusqlite::Result<Vec<RecordId>> {
         let tx = self.conn.transaction()?;
         let mut added = Vec::new();
-        let mut skipped = Vec::new();
-        for blob in blobs {
-            match append_in(&tx, log, blob)? {
-                Append::Added => added.push(blob.id),
-                Append::Known => {}
-                Append::MissingDeps(_) | Append::Invalid(_) => skipped.push(blob),
+        for record in records {
+            if append_in(&tx, record, auth)? == Append::Added {
+                added.push(record.id());
             }
         }
         tx.commit()?;
-        Ok((added, skipped))
+        Ok(added)
     }
 
-    pub fn get(&self, id: &Id) -> rusqlite::Result<Option<Blob>> {
-        let data: Option<Vec<u8>> = self
-            .conn
-            .query_row("SELECT data FROM blobs WHERE id = ?1", [&id[..]], |r| r.get(0))
-            .optional()?;
-        let Some(data) = data else { return Ok(None) };
-        Ok(Some(Blob { id: *id, deps: self.deps_of(id)?, data }))
+    /// The stored canonical bytes of a record.
+    pub fn get(&self, id: &RecordId) -> rusqlite::Result<Option<Vec<u8>>> {
+        self.conn.query_row("SELECT data FROM records WHERE id = ?1", [&id.as_bytes()[..]], |r| r.get(0)).optional()
     }
 
-    fn deps_of(&self, id: &Id) -> rusqlite::Result<Vec<Id>> {
-        let mut stmt = self.conn.prepare_cached("SELECT parent FROM deps WHERE child = ?1 ORDER BY parent")?;
-        let rows = stmt.query_map([&id[..]], |r| r.get::<_, Id>(0))?;
-        rows.collect()
+    /// A stored record, decoded (and so re-verified).
+    pub fn get_record(&self, id: &RecordId) -> rusqlite::Result<Option<Record>> {
+        Ok(self.get(id)?.and_then(|bytes| Record::decode(&bytes).ok()))
     }
 
-    /// Blobs of the log that nothing else in the log depends on.
-    pub fn heads(&self, log: &str) -> rusqlite::Result<Vec<Id>> {
+    /// Records of the log that nothing else in the log depends on.
+    pub fn heads(&self, log: &str) -> rusqlite::Result<Vec<RecordId>> {
         let mut stmt = self.conn.prepare_cached("SELECT id FROM heads WHERE log = ?1 ORDER BY id")?;
-        let rows = stmt.query_map([log], |r| r.get::<_, Id>(0))?;
+        let rows = stmt.query_map([log], |r| r.get::<_, [u8; 32]>(0).map(id_of))?;
         rows.collect()
     }
 
-    /// What to tell a peer we have: our heads plus a few older blobs at
+    /// What to tell a peer we have: our heads plus a few older records at
     /// exponentially growing distances (like git's negotiation). Even when the
-    /// peer doesn't know our newest blobs, it most likely knows one of these,
-    /// so it won't resend the shared history. At most [`MAX_HAVE`] ids.
-    pub fn have_markers(&self, log: &str) -> rusqlite::Result<Vec<Id>> {
+    /// peer doesn't know our newest records, it most likely knows one of
+    /// these, so it won't resend the shared history. At most [`MAX_HAVE`] ids.
+    pub fn have_markers(&self, log: &str) -> rusqlite::Result<Vec<RecordId>> {
         let mut have = self.heads(log)?;
         have.truncate(MAX_HAVE_HEADS);
         let mut stmt = self
             .conn
-            .prepare_cached("SELECT id FROM blobs WHERE log = ?1 ORDER BY seq DESC LIMIT 1 OFFSET ?2")?;
+            .prepare_cached("SELECT id FROM records WHERE log = ?1 ORDER BY seq DESC LIMIT 1 OFFSET ?2")?;
         let mut offset = 1i64;
         while have.len() < MAX_HAVE {
-            let id: Option<Id> = stmt.query_row(params![log, offset], |r| r.get(0)).optional()?;
+            let id: Option<[u8; 32]> = stmt.query_row(params![log, offset], |r| r.get(0)).optional()?;
             let Some(id) = id else { break };
-            have.push(id);
+            have.push(id_of(id));
             offset = offset.saturating_mul(2);
         }
         Ok(have)
     }
 
-    /// Blobs of the log that a peer which has `have` (and all their ancestors)
-    /// is missing, in an order they can be appended in. Ids we don't know are
-    /// ignored, and so is everything past the first [`MAX_HAVE`] ids. Returns
-    /// at most `max_blobs` blobs and about `max_bytes` of data (always at
-    /// least one blob if any is missing), and whether more remain.
+    /// Records of the log that a peer which has `have` (and all their
+    /// ancestors) is missing, in an order they can be appended in. Ids we
+    /// don't know are ignored, and so is everything past the first
+    /// [`MAX_HAVE`] ids. Returns at most `max_records` records and about
+    /// `max_bytes` of data (always at least one if any is missing), and
+    /// whether more remain.
     pub fn missing_since(
         &self,
         log: &str,
-        have: &[Id],
-        max_blobs: usize,
+        have: &[RecordId],
+        max_records: usize,
         max_bytes: usize,
-    ) -> rusqlite::Result<(Vec<Blob>, bool)> {
-        // `temp.have` belongs to this connection only, and the store is used
-        // from one task, so reusing it between calls is safe; it is emptied
-        // first in case an earlier call failed half way.
+    ) -> rusqlite::Result<(Vec<Stored>, bool)> {
+        // `temp.have` belongs to this connection only, and each connection is
+        // used by one thread at a time, so reusing it between calls is safe;
+        // it is emptied first in case an earlier call failed half way.
         self.conn.execute_batch(
             "CREATE TEMP TABLE IF NOT EXISTS have (id BLOB PRIMARY KEY) WITHOUT ROWID; DELETE FROM temp.have;",
         )?;
         {
             let mut insert = self.conn.prepare_cached("INSERT OR IGNORE INTO temp.have (id) VALUES (?1)")?;
             for id in have.iter().take(MAX_HAVE) {
-                insert.execute([&id[..]])?;
+                insert.execute([&id.as_bytes()[..]])?;
             }
         }
         let mut stmt = self.conn.prepare_cached(
             "WITH RECURSIVE known(id) AS (
-                 SELECT b.id FROM blobs b JOIN temp.have h ON h.id = b.id
+                 SELECT r.id FROM records r JOIN temp.have h ON h.id = r.id
                  UNION
                  SELECT d.parent FROM deps d JOIN known k ON d.child = k.id
              )
-             SELECT id, data, (SELECT COUNT(*) FROM deps WHERE child = blobs.id) FROM blobs
+             SELECT id, data FROM records
              WHERE log = ?1 AND id NOT IN known
              ORDER BY seq",
         )?;
@@ -185,29 +237,26 @@ impl Store {
         // Rows are read lazily, so a full page never loads the whole log.
         while let Some(row) = rows.next()? {
             let data: Vec<u8> = row.get(1)?;
-            let size = data.len() + 32 * row.get::<_, i64>(2)? as usize;
-            if out.len() >= max_blobs || (bytes + size > max_bytes && !out.is_empty()) {
+            if out.len() >= max_records || (bytes + data.len() > max_bytes && !out.is_empty()) {
                 more = true;
                 break;
             }
-            bytes += size;
-            out.push(Blob { id: row.get(0)?, deps: Vec::new(), data });
-        }
-        drop(rows);
-        for blob in &mut out {
-            blob.deps = self.deps_of(&blob.id)?;
+            bytes += data.len();
+            out.push(Stored { id: id_of(row.get(0)?), bytes: data });
         }
         Ok((out, more))
     }
 
     pub fn count(&self, log: &str) -> rusqlite::Result<u64> {
-        self.conn.query_row("SELECT COUNT(*) FROM blobs WHERE log = ?1", [log], |r| r.get::<_, i64>(0)).map(|n| n as u64)
+        self.conn
+            .query_row("SELECT COUNT(*) FROM records WHERE log = ?1", [log], |r| r.get::<_, i64>(0))
+            .map(|n| n as u64)
     }
 
-    /// Hash of the set of blob ids in the log: equal on two peers exactly when
-    /// they hold the same blobs.
+    /// Hash of the set of record ids in the log: equal on two peers exactly
+    /// when they hold the same records.
     pub fn state_hash(&self, log: &str) -> rusqlite::Result<String> {
-        let mut stmt = self.conn.prepare_cached("SELECT id FROM blobs WHERE log = ?1 ORDER BY id")?;
+        let mut stmt = self.conn.prepare_cached("SELECT id FROM records WHERE log = ?1 ORDER BY id")?;
         let mut rows = stmt.query([log])?;
         let mut hasher = blake3::Hasher::new();
         while let Some(row) = rows.next()? {
@@ -217,195 +266,200 @@ impl Store {
     }
 }
 
-fn append_in(tx: &rusqlite::Transaction, log: &str, blob: &Blob) -> rusqlite::Result<Append> {
-    // Checked before the "already have it" shortcut: a forged blob claiming a
-    // stored id must never look like a duplicate of it either.
-    if let Err(err) = blob.verify(log) {
-        return Ok(Append::Invalid(err));
-    }
-    let log_of = |id: &Id| -> rusqlite::Result<Option<String>> {
-        let mut stmt = tx.prepare_cached("SELECT log FROM blobs WHERE id = ?1")?;
-        stmt.query_row([&id[..]], |r| r.get(0)).optional()
-    };
-    if log_of(&blob.id)?.is_some() {
-        return Ok(Append::Known);
-    }
-    // Deps stay inside the log: pulls only ever send blobs of one log, so a
-    // dep in another log would be unreachable for peers without that log
-    // open, and they would re-download the blob forever. An id belongs to
-    // exactly one log (the log is hashed into it), so this is definite.
+fn check_in(conn: &Connection, record: &Record) -> rusqlite::Result<Result<Vec<RecordId>, IngestError>> {
+    let mut stmt = conn.prepare_cached("SELECT log FROM records WHERE id = ?1")?;
+    let mut log_of_id =
+        |id: &RecordId| -> rusqlite::Result<Option<String>> { stmt.query_row([&id.as_bytes()[..]], |r| r.get(0)).optional() };
+    let log = log_of(record);
+    // A record id covers the record's server and scope, so it belongs to
+    // exactly one log: a dep found elsewhere is a definite cross-log dep.
     let mut missing = Vec::new();
-    for dep in &blob.deps {
-        match log_of(dep)? {
+    for dep in record.deps() {
+        match log_of_id(dep)? {
             Some(dep_log) if dep_log == log => {}
-            Some(_) => return Ok(Append::Invalid(BlobError::DepInOtherLog)),
+            Some(_) => return Ok(Err(IngestError::DepInOtherLog)),
             None => missing.push(*dep),
         }
     }
-    if !missing.is_empty() {
-        return Ok(Append::MissingDeps(missing));
+    // Channel records name the control-log heads their author relied on for
+    // permission; those must be there before anyone can judge the record.
+    let control = log_name(record.server(), Scope::Control);
+    for dep in record.auth_deps() {
+        match log_of_id(dep)? {
+            Some(dep_log) if dep_log == control => {}
+            Some(_) => return Ok(Err(IngestError::AuthDepNotInControlLog)),
+            None => missing.push(*dep),
+        }
     }
-    tx.prepare_cached("INSERT INTO blobs (id, log, data) VALUES (?1, ?2, ?3)")?.execute(params![
-        &blob.id[..],
+    Ok(Ok(missing))
+}
+
+fn append_in(tx: &rusqlite::Transaction, record: &Record, auth: &dyn Authorizer) -> rusqlite::Result<Append> {
+    let id = record.id();
+    {
+        let mut stmt = tx.prepare_cached("SELECT 1 FROM records WHERE id = ?1")?;
+        if stmt.exists([&id.as_bytes()[..]])? {
+            return Ok(Append::Known);
+        }
+    }
+    match check_in(tx, record)? {
+        Err(err) => return Ok(Append::Invalid(err)),
+        Ok(missing) if !missing.is_empty() => return Ok(Append::MissingDeps(missing)),
+        Ok(_) => {}
+    }
+    // Judged only now, with everything the record relies on stored.
+    if auth.check(record) == Verdict::Reject {
+        return Ok(Append::Unauthorized);
+    }
+    let log = log_of(record);
+    tx.prepare_cached("INSERT INTO records (id, log, data) VALUES (?1, ?2, ?3)")?.execute(params![
+        &id.as_bytes()[..],
         log,
-        &blob.data
+        record.encode()
     ])?;
     let mut add_dep = tx.prepare_cached("INSERT OR IGNORE INTO deps (child, parent) VALUES (?1, ?2)")?;
     let mut drop_head = tx.prepare_cached("DELETE FROM heads WHERE log = ?1 AND id = ?2")?;
-    for dep in &blob.deps {
-        add_dep.execute([&blob.id[..], &dep[..]])?;
-        drop_head.execute(params![log, &dep[..]])?;
+    for dep in record.deps() {
+        add_dep.execute([&id.as_bytes()[..], &dep.as_bytes()[..]])?;
+        drop_head.execute(params![log, &dep.as_bytes()[..]])?;
     }
-    tx.prepare_cached("INSERT INTO heads (log, id) VALUES (?1, ?2)")?.execute(params![log, &blob.id[..]])?;
+    tx.prepare_cached("INSERT INTO heads (log, id) VALUES (?1, ?2)")?.execute(params![log, &id.as_bytes()[..]])?;
     Ok(Append::Added)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::distinct_ids;
-    use crate::{MAX_DATA_BYTES, MAX_DEPS};
+    use crate::testutil::{channel, genesis, message, message_chain, message_with_auth, post, server};
+    use crate::AcceptAll;
 
-    fn chain(store: &mut Store, log: &str, parent: &[Id], n: usize, tag: &str) -> Vec<Id> {
-        let mut deps = parent.to_vec();
-        let mut ids = Vec::new();
-        for i in 0..n {
-            let blob = Blob::new(log, deps, format!("{tag}{i}").into_bytes());
-            assert_eq!(store.append(log, &blob).unwrap(), Append::Added);
-            deps = vec![blob.id];
-            ids.push(blob.id);
-        }
-        ids
+    fn chan() -> String {
+        log_name(server(), Scope::Channel(channel()))
     }
 
     #[test]
-    fn rejects_blob_with_missing_deps() {
+    fn rejects_record_with_missing_deps() {
         let mut store = Store::in_memory().unwrap();
-        let a = Blob::new("l", vec![], b"a".to_vec());
-        let b = Blob::new("l", vec![a.id], b"b".to_vec());
-        assert_eq!(store.append("l", &b).unwrap(), Append::MissingDeps(vec![a.id]));
-        assert_eq!(store.append("l", &a).unwrap(), Append::Added);
-        assert_eq!(store.append("l", &a).unwrap(), Append::Known);
-        assert_eq!(store.append("l", &b).unwrap(), Append::Added);
-        assert_eq!(store.heads("l").unwrap(), vec![b.id]);
-        assert_eq!(store.get(&b.id).unwrap().unwrap(), b);
+        let a = message(0, &[], 0);
+        let b = message(1, &[a.id()], 0);
+        assert_eq!(store.append(&b, &AcceptAll).unwrap(), Append::MissingDeps(vec![a.id()]));
+        assert_eq!(store.append(&a, &AcceptAll).unwrap(), Append::Added);
+        assert_eq!(store.append(&a, &AcceptAll).unwrap(), Append::Known);
+        assert_eq!(store.append(&b, &AcceptAll).unwrap(), Append::Added);
+        assert_eq!(store.heads(&chan()).unwrap(), vec![b.id()]);
+        // What comes back is the canonical encoding, and decodes to the same record.
+        assert_eq!(store.get(&b.id()).unwrap().unwrap(), b.encode());
+        assert_eq!(store.get_record(&b.id()).unwrap().unwrap(), b);
     }
 
     #[test]
-    fn forged_blob_cannot_take_a_real_id() {
+    fn records_are_filed_under_the_log_they_signed() {
         let mut store = Store::in_memory().unwrap();
-        let real = Blob::new("l", vec![], b"real".to_vec());
-        let junk = Blob { id: real.id, deps: vec![], data: b"junk".to_vec() };
-        // The attacker's copy arrives first and is refused...
-        assert_eq!(store.append("l", &junk).unwrap(), Append::Invalid(BlobError::WrongId));
-        let (added, skipped) = store.append_all("l", [&junk]).unwrap();
-        assert!(added.is_empty() && skipped.len() == 1);
-        // ...so the real one is still accepted and served.
-        assert_eq!(store.append("l", &real).unwrap(), Append::Added);
-        assert_eq!(store.get(&real.id).unwrap().unwrap().data, b"real");
-        // A known id with forged content is refused, not reported as known.
-        assert_eq!(store.append("l", &junk).unwrap(), Append::Invalid(BlobError::WrongId));
-    }
-
-    #[test]
-    fn real_blob_cannot_be_planted_in_another_log() {
-        let mut store = Store::in_memory().unwrap();
-        let real = Blob::new("channel-a", vec![], b"hello".to_vec());
-        assert_eq!(store.append("channel-b", &real).unwrap(), Append::Invalid(BlobError::WrongId));
-        assert_eq!(store.append("channel-a", &real).unwrap(), Append::Added);
-        assert_eq!(store.count("channel-b").unwrap(), 0);
-    }
-
-    #[test]
-    fn stored_blobs_come_back_with_the_same_id() {
-        // The reviewer's repro: deps [b, a] used to be accepted, then served
-        // back as [a, b], which hashes to a different id on every peer.
-        let mut store = Store::in_memory().unwrap();
-        let a = Blob::new("l", vec![], b"a".to_vec());
-        let b = Blob::new("l", vec![], b"b".to_vec());
-        store.append_all("l", [&a, &b]).unwrap();
-        let (lo, hi) = if a.id < b.id { (a.id, b.id) } else { (b.id, a.id) };
-        let unsorted = Blob { id: Blob::content_id("l", &[hi, lo], b"c"), deps: vec![hi, lo], data: b"c".to_vec() };
-        assert_eq!(store.append("l", &unsorted).unwrap(), Append::Invalid(BlobError::NotCanonical));
-        let sorted = Blob::new("l", vec![hi, lo], b"c".to_vec());
-        assert_eq!(store.append("l", &sorted).unwrap(), Append::Added);
-        // Everything the store hands out verifies, by get and by pull.
-        assert_eq!(store.get(&sorted.id).unwrap().unwrap().verify("l"), Ok(()));
-        let (page, _) = store.missing_since("l", &[], 100, usize::MAX).unwrap();
-        for blob in &page {
-            assert_eq!(Blob::decode("l", &blob.encode()).as_ref(), Ok(blob));
-        }
+        let g = genesis();
+        store.append(&g, &AcceptAll).unwrap();
+        store.append(&post(1, &[g.id()]), &AcceptAll).unwrap();
+        store.append(&message(0, &[], 0), &AcceptAll).unwrap();
+        assert_eq!(store.count(&log_name(server(), Scope::Control)).unwrap(), 2);
+        assert_eq!(store.count(&chan()).unwrap(), 1);
     }
 
     #[test]
     fn deps_must_be_in_the_same_log() {
         let mut store = Store::in_memory().unwrap();
-        let other = Blob::new("b", vec![], b"in b".to_vec());
-        store.append("b", &other).unwrap();
-        let cross = Blob::new("a", vec![other.id], b"points into b".to_vec());
-        assert_eq!(store.append("a", &cross).unwrap(), Append::Invalid(BlobError::DepInOtherLog));
-        assert_eq!(store.count("a").unwrap(), 0);
-        // A dep that is nowhere yet is just missing.
-        let unknown = Blob::new("a", vec![[9; 32]], b"x".to_vec());
-        assert_eq!(store.append("a", &unknown).unwrap(), Append::MissingDeps(vec![[9; 32]]));
+        let g = genesis();
+        store.append(&g, &AcceptAll).unwrap();
+        // A channel message whose dep is a control record.
+        let cross = message(0, &[g.id()], 0);
+        assert_eq!(store.append(&cross, &AcceptAll).unwrap(), Append::Invalid(IngestError::DepInOtherLog));
+        assert_eq!(store.count(&chan()).unwrap(), 0);
     }
 
     #[test]
-    fn rejects_oversized_blobs() {
+    fn auth_deps_must_be_present_and_in_the_control_log() {
         let mut store = Store::in_memory().unwrap();
-        let big = Blob::new("l", vec![], vec![0; MAX_DATA_BYTES + 1]);
-        assert!(matches!(store.append("l", &big).unwrap(), Append::Invalid(BlobError::TooLarge(_))));
-        let many = Blob::new("l", distinct_ids(MAX_DEPS + 1), vec![]);
-        assert!(matches!(store.append("l", &many).unwrap(), Append::Invalid(BlobError::TooManyDeps(_))));
+        let g = genesis();
+        let other = message(0, &[], 0);
+        store.append(&other, &AcceptAll).unwrap();
+
+        // Missing control head: wait for it, like a missing dep.
+        let m = message_with_auth(1, &[], &[g.id()], 0);
+        assert_eq!(store.check(&m).unwrap(), Ok(vec![g.id()]));
+        assert_eq!(store.append(&m, &AcceptAll).unwrap(), Append::MissingDeps(vec![g.id()]));
+        store.append(&g, &AcceptAll).unwrap();
+        assert_eq!(store.append(&m, &AcceptAll).unwrap(), Append::Added);
+
+        // An auth_dep that is a channel record, not a control one.
+        let bad = message_with_auth(2, &[], &[other.id()], 0);
+        assert_eq!(store.append(&bad, &AcceptAll).unwrap(), Append::Invalid(IngestError::AuthDepNotInControlLog));
+    }
+
+    /// Refuses every record of one author, as authority would for a kicked
+    /// member or a non-member key.
+    struct RefuseAuthor(records::PublicKey);
+
+    impl Authorizer for RefuseAuthor {
+        fn check(&self, record: &Record) -> Verdict {
+            if record.author() == self.0 { Verdict::Reject } else { Verdict::Accept }
+        }
     }
 
     #[test]
-    fn corrupt_id_in_database_is_an_error_not_a_panic() {
+    fn unauthorized_records_are_not_stored() {
         let mut store = Store::in_memory().unwrap();
-        let a = Blob::new("l", vec![], b"a".to_vec());
-        store.append("l", &a).unwrap();
-        store.conn.execute("UPDATE heads SET id = x'0102'", []).unwrap();
-        store.conn.execute("UPDATE deps SET parent = x'0102'", []).unwrap();
-        assert!(store.heads("l").is_err());
-        assert!(store.have_markers("l").is_err());
+        let g = genesis();
+        let m = message(0, &[], 0);
+        let refuse = RefuseAuthor(m.author());
+        assert_eq!(store.append(&g, &refuse).unwrap(), Append::Added);
+        assert_eq!(store.append(&m, &refuse).unwrap(), Append::Unauthorized);
+        assert_eq!(store.append_all([&m], &refuse).unwrap(), vec![]);
+        assert!(!store.has(&m.id()).unwrap());
+        assert!(store.heads(&chan()).unwrap().is_empty());
+        // The authorizer is only asked once the context is there: a record
+        // with a missing dep is reported as missing, not judged.
+        let child = message(1, &[m.id()], 0);
+        assert_eq!(store.append(&child, &refuse).unwrap(), Append::MissingDeps(vec![m.id()]));
     }
 
     #[test]
     fn missing_since_sends_only_the_gap() {
         let mut store = Store::in_memory().unwrap();
-        let base = chain(&mut store, "l", &[], 100, "base");
+        let base = message_chain(100, 0);
+        store.append_all(&base, &AcceptAll).unwrap();
+        let tip = base[99].id();
         // Two concurrent branches; the peer has base + branch x, we have both.
-        let x = chain(&mut store, "l", &[base[99]], 10, "x");
-        let y = chain(&mut store, "l", &[base[99]], 7, "y");
-        let (missing, more) = store.missing_since("l", &[x[9]], 1000, usize::MAX).unwrap();
+        let x: Vec<Record> = (0..10).map(|i| message(1000 + i, &[tip], 0)).collect();
+        let y: Vec<Record> = (0..7).map(|i| message(2000 + i, &[tip], 0)).collect();
+        store.append_all(x.iter().chain(&y), &AcceptAll).unwrap();
+        let mut have: Vec<RecordId> = x.iter().map(Record::id).collect();
+        have.sort();
+        let (missing, more) = store.missing_since(&chan(), &have, 1000, usize::MAX).unwrap();
         assert!(!more);
-        assert_eq!(missing.iter().map(|b| b.id).collect::<Vec<_>>(), y);
+        assert_eq!(missing.iter().map(|s| s.id).collect::<Vec<_>>(), y.iter().map(Record::id).collect::<Vec<_>>());
 
         // A peer that only knows an old marker gets everything after it.
-        let (missing, _) = store.missing_since("l", &[base[49]], 1000, usize::MAX).unwrap();
+        let (missing, _) = store.missing_since(&chan(), &[base[49].id()], 1000, usize::MAX).unwrap();
         assert_eq!(missing.len(), 50 + 10 + 7);
 
-        // Paging.
-        let (page, more) = store.missing_since("l", &[], 30, usize::MAX).unwrap();
+        // Paging, and every served record decodes back to itself.
+        let (page, more) = store.missing_since(&chan(), &[], 30, usize::MAX).unwrap();
         assert!(more);
         assert_eq!(page.len(), 30);
+        for s in &page {
+            assert_eq!(Record::decode(&s.bytes).unwrap().id(), s.id);
+        }
     }
 
     #[test]
     fn pages_are_bounded_by_bytes() {
         let mut store = Store::in_memory().unwrap();
-        let mut deps = vec![];
-        for i in 0..20u8 {
-            let blob = Blob::new("l", deps, vec![i; 10_000]);
-            store.append("l", &blob).unwrap();
-            deps = vec![blob.id];
-        }
-        // 10,000 bytes of data + one 32-byte dep each: 5 fit in 60,000.
-        let (page, more) = store.missing_since("l", &[], 1000, 60_000).unwrap();
+        let chain = message_chain(20, 10_000);
+        store.append_all(&chain, &AcceptAll).unwrap();
+        let size = chain[1].encode().len();
+        let (page, more) = store.missing_since(&chan(), &[], 1000, 5 * size + size / 2).unwrap();
         assert!(more);
         assert_eq!(page.len(), 5);
-        // A single blob larger than the budget still goes out, alone.
-        let (page, more) = store.missing_since("l", &[], 1000, 1).unwrap();
+        // A single record larger than the budget still goes out, alone.
+        let (page, more) = store.missing_since(&chan(), &[], 1000, 1).unwrap();
         assert!(more);
         assert_eq!(page.len(), 1);
     }
@@ -413,42 +467,87 @@ mod tests {
     #[test]
     fn have_list_is_capped() {
         let mut store = Store::in_memory().unwrap();
-        let ids = chain(&mut store, "l", &[], 10, "c");
+        let chain = message_chain(10, 0);
+        store.append_all(&chain, &AcceptAll).unwrap();
         // Only the first MAX_HAVE ids count: the real marker, placed after a
         // flood of unknown ids, is ignored and the whole log is sent.
-        let mut have = vec![[0xee; 32]; MAX_HAVE];
-        have.push(ids[9]);
-        let (missing, _) = store.missing_since("l", &have, 1000, usize::MAX).unwrap();
+        let mut have = vec![RecordId::from_bytes([0xee; 32]); MAX_HAVE];
+        have.push(chain[9].id());
+        let (missing, _) = store.missing_since(&chan(), &have, 1000, usize::MAX).unwrap();
         assert_eq!(missing.len(), 10);
         // Many heads still produce at most MAX_HAVE markers.
         for i in 0..100 {
-            store.append("l", &Blob::new("l", vec![ids[9]], vec![i])).unwrap();
+            store.append(&message(100 + i, &[chain[9].id()], 0), &AcceptAll).unwrap();
         }
-        assert_eq!(store.heads("l").unwrap().len(), 100);
-        assert!(store.have_markers("l").unwrap().len() <= MAX_HAVE);
+        assert_eq!(store.heads(&chan()).unwrap().len(), 100);
+        assert!(store.have_markers(&chan()).unwrap().len() <= MAX_HAVE);
+    }
+
+    #[test]
+    fn corrupt_id_in_database_is_an_error_not_a_panic() {
+        let mut store = Store::in_memory().unwrap();
+        store.append(&message(0, &[], 0), &AcceptAll).unwrap();
+        store.conn.execute("UPDATE heads SET id = x'0102'", []).unwrap();
+        assert!(store.heads(&chan()).is_err());
+        assert!(store.have_markers(&chan()).is_err());
+        // Corrupt record bytes are not handed out as a record.
+        store.conn.execute("UPDATE records SET data = x'00'", []).unwrap();
+        assert_eq!(store.get_record(&message(0, &[], 0).id()).unwrap(), None);
+    }
+
+    #[test]
+    fn read_only_connection_serves_while_the_writer_writes() {
+        let dir = std::env::temp_dir().join(format!("sync-ro-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.db");
+        let _ = std::fs::remove_file(&path);
+        let mut writer = Store::open(&path).unwrap();
+        let reader = Store::open_read_only(&path).unwrap();
+        let chain = message_chain(5, 0);
+        writer.append_all(&chain[..3], &AcceptAll).unwrap();
+        assert_eq!(reader.missing_since(&chan(), &[], 100, usize::MAX).unwrap().0.len(), 3);
+        writer.append_all(&chain[3..], &AcceptAll).unwrap();
+        assert_eq!(reader.missing_since(&chan(), &[chain[2].id()], 100, usize::MAX).unwrap().0.len(), 2);
+        // It cannot write.
+        assert!(reader.conn.execute("DELETE FROM records", []).is_err());
+        drop((writer, reader));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn two_stores_converge_through_markers() {
         let mut a = Store::in_memory().unwrap();
         let mut b = Store::in_memory().unwrap();
-        let shared = chain(&mut a, "l", &[], 500, "s");
-        for id in &shared {
-            b.append("l", &a.get(id).unwrap().unwrap()).unwrap();
+        let shared = message_chain(500, 0);
+        a.append_all(&shared, &AcceptAll).unwrap();
+        b.append_all(&shared, &AcceptAll).unwrap();
+        let tip = shared[499].id();
+        let mut prev = tip;
+        for i in 0..300 {
+            let r = message(10_000 + i, &[prev], 0);
+            prev = r.id();
+            a.append(&r, &AcceptAll).unwrap();
         }
-        chain(&mut a, "l", &[shared[499]], 300, "a");
-        chain(&mut b, "l", &[shared[499]], 200, "b");
+        let mut prev = tip;
+        for i in 0..200 {
+            let r = message(20_000 + i, &[prev], 1);
+            prev = r.id();
+            b.append(&r, &AcceptAll).unwrap();
+        }
 
         // b pulls from a, sending markers; a doesn't know b's head but knows
-        // an older marker, so it must not resend the 500 shared blobs.
-        let (gap, _) = a.missing_since("l", &b.have_markers("l").unwrap(), 10_000, usize::MAX).unwrap();
+        // an older marker, so it must not resend the 500 shared records.
+        let (gap, _) = a.missing_since(&chan(), &b.have_markers(&chan()).unwrap(), 10_000, usize::MAX).unwrap();
         assert!(gap.len() < 300 + 500 / 2, "sent {}", gap.len());
-        b.append_all("l", &gap).unwrap();
-        let (gap, _) = b.missing_since("l", &a.have_markers("l").unwrap(), 10_000, usize::MAX).unwrap();
-        a.append_all("l", &gap).unwrap();
+        let decoded: Vec<Record> = gap.iter().map(|s| Record::decode(&s.bytes).unwrap()).collect();
+        b.append_all(&decoded, &AcceptAll).unwrap();
+        let (gap, _) = b.missing_since(&chan(), &a.have_markers(&chan()).unwrap(), 10_000, usize::MAX).unwrap();
+        let decoded: Vec<Record> = gap.iter().map(|s| Record::decode(&s.bytes).unwrap()).collect();
+        a.append_all(&decoded, &AcceptAll).unwrap();
 
-        assert_eq!(a.count("l").unwrap(), 1000);
-        assert_eq!(a.state_hash("l").unwrap(), b.state_hash("l").unwrap());
-        assert_eq!(a.heads("l").unwrap(), b.heads("l").unwrap());
+        assert_eq!(a.count(&chan()).unwrap(), 1000);
+        assert_eq!(a.state_hash(&chan()).unwrap(), b.state_hash(&chan()).unwrap());
+        assert_eq!(a.heads(&chan()).unwrap(), b.heads(&chan()).unwrap());
     }
+
 }

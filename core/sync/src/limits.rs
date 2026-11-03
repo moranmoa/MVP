@@ -1,19 +1,19 @@
-//! Bounded in-memory state that remote peers can make grow: pushed blobs
-//! waiting for their deps, and per-peer request rates.
+//! Bounded in-memory state that remote peers can make grow: pushed records
+//! waiting for their deps, and request rates.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
-use crate::{Blob, Id};
+use crate::{Record, RecordId};
 
-/// Pushed blobs waiting for a dep, keyed by that dep. Capped by count and by
-/// bytes, and entries expire: anything dropped here is fetched by the next
+/// Pushed records waiting for a dep, keyed by that dep. Capped by count and
+/// by bytes, and entries expire: anything dropped here is fetched by the next
 /// pull anyway, so this is only a shortcut.
 pub(crate) struct Pending {
-    by_dep: HashMap<Id, Vec<Waiting>>,
-    /// Ids of every parked blob: copies of one blob are kept once.
-    ids: HashSet<Id>,
+    by_dep: HashMap<RecordId, Vec<Waiting>>,
+    /// Ids of every parked record: copies of one record are kept once.
+    ids: HashSet<RecordId>,
     count: usize,
     bytes: usize,
     max_count: usize,
@@ -21,14 +21,10 @@ pub(crate) struct Pending {
 }
 
 pub(crate) struct Waiting {
-    pub log: String,
-    pub blob: Blob,
+    pub record: Record,
+    /// Encoded size plus bookkeeping, counted against `max_bytes`.
+    cost: usize,
     since: Instant,
-}
-
-fn cost(log: &str, blob: &Blob) -> usize {
-    // Data, deps, log name, plus the bookkeeping around them.
-    blob.data.len() + 32 * blob.deps.len() + log.len() + 128
 }
 
 impl Pending {
@@ -36,49 +32,54 @@ impl Pending {
         Self { by_dep: HashMap::new(), ids: HashSet::new(), count: 0, bytes: 0, max_count, max_bytes }
     }
 
-    /// Keeps `blob` until `missing` arrives. Returns false (and drops it) when
-    /// full. `since` is kept from the first time the blob was parked, so a
-    /// blob that keeps finding another missing dep still expires.
-    pub fn insert(&mut self, missing: Id, log: String, blob: Blob, since: Instant) -> bool {
-        if self.ids.contains(&blob.id) {
+    /// Keeps `record` until `missing` arrives. Returns false (and drops it)
+    /// when full.
+    pub fn insert(&mut self, missing: RecordId, record: Record, since: Instant) -> bool {
+        let cost = record.encode().len() + 128;
+        self.park(missing, Waiting { record, cost, since })
+    }
+
+    fn park(&mut self, missing: RecordId, waiting: Waiting) -> bool {
+        if self.ids.contains(&waiting.record.id()) {
             return true;
         }
-        let cost = cost(&log, &blob);
-        if self.count >= self.max_count || self.bytes + cost > self.max_bytes {
+        if self.count >= self.max_count || self.bytes + waiting.cost > self.max_bytes {
             return false;
         }
         self.count += 1;
-        self.bytes += cost;
-        self.ids.insert(blob.id);
-        self.by_dep.entry(missing).or_default().push(Waiting { log, blob, since });
+        self.bytes += waiting.cost;
+        self.ids.insert(waiting.record.id());
+        self.by_dep.entry(missing).or_default().push(waiting);
         true
     }
 
-    /// Removes and returns the blobs that were waiting for `dep`.
-    pub fn take(&mut self, dep: &Id) -> Vec<Waiting> {
+    /// Removes and returns the records that were waiting for `dep`.
+    pub fn take(&mut self, dep: &RecordId) -> Vec<Waiting> {
         let waiting = self.by_dep.remove(dep).unwrap_or_default();
         for w in &waiting {
             self.count -= 1;
-            self.bytes -= cost(&w.log, &w.blob);
-            self.ids.remove(&w.blob.id);
+            self.bytes -= w.cost;
+            self.ids.remove(&w.record.id());
         }
         waiting
     }
 
-    /// Puts back a blob from [`Pending::take`] that still lacks a dep.
-    pub fn reinsert(&mut self, missing: Id, waiting: Waiting) -> bool {
-        self.insert(missing, waiting.log, waiting.blob, waiting.since)
+    /// Puts back a record from [`Pending::take`] that still lacks a dep.
+    /// `since` is kept from the first time it was parked, so a record that
+    /// keeps finding another missing dep still expires.
+    pub fn reinsert(&mut self, missing: RecordId, waiting: Waiting) -> bool {
+        self.park(missing, waiting)
     }
 
     /// Drops everything parked before `now - ttl`.
     pub fn expire(&mut self, now: Instant, ttl: Duration) {
         let (mut count, mut bytes, mut ids) = (0, 0, HashSet::new());
         self.by_dep.retain(|_, waiting| {
-            waiting.retain(|w| now.duration_since(w.since) < ttl);
+            waiting.retain(|w| now.saturating_duration_since(w.since) < ttl);
             for w in waiting.iter() {
                 count += 1;
-                bytes += cost(&w.log, &w.blob);
-                ids.insert(w.blob.id);
+                bytes += w.cost;
+                ids.insert(w.record.id());
             }
             !waiting.is_empty()
         });
@@ -97,6 +98,7 @@ impl Pending {
         self.bytes
     }
 }
+
 
 /// Token bucket per key: `burst` requests at once, refilled at `per_sec`.
 ///
@@ -163,8 +165,12 @@ impl<K: Hash + Eq + Clone> RateLimiter<K> {
 mod tests {
     use super::*;
 
-    fn blob(i: u32, size: usize) -> Blob {
-        Blob::new("l", vec![], [i.to_le_bytes().to_vec(), vec![0; size]].concat())
+    fn dep(n: u8) -> RecordId {
+        RecordId::from_bytes([n; 32])
+    }
+
+    fn blob(i: u32, size: usize) -> Record {
+        crate::testutil::message(i as u64, &[], size)
     }
 
     #[test]
@@ -172,9 +178,9 @@ mod tests {
         let now = Instant::now();
         let mut pending = Pending::new(3, usize::MAX);
         for i in 0..3 {
-            assert!(pending.insert([1; 32], "l".into(), blob(i, 0), now));
+            assert!(pending.insert(dep(1), blob(i, 0), now));
         }
-        assert!(!pending.insert([2; 32], "l".into(), blob(9, 0), now));
+        assert!(!pending.insert(dep(2), blob(9, 0), now));
         assert_eq!(pending.len(), 3);
     }
 
@@ -183,14 +189,14 @@ mod tests {
         let now = Instant::now();
         let mut pending = Pending::new(2, usize::MAX);
         for _ in 0..5 {
-            assert!(pending.insert([1; 32], "l".into(), blob(0, 0), now));
+            assert!(pending.insert(dep(1), blob(0, 0), now));
         }
         assert_eq!(pending.len(), 1);
         // So a flood of copies doesn't crowd out a different blob.
-        assert!(pending.insert([1; 32], "l".into(), blob(1, 0), now));
+        assert!(pending.insert(dep(1), blob(1, 0), now));
         // Once taken, the same blob can be parked again.
-        assert_eq!(pending.take(&[1; 32]).len(), 2);
-        assert!(pending.insert([2; 32], "l".into(), blob(0, 0), now));
+        assert_eq!(pending.take(&dep(1)).len(), 2);
+        assert!(pending.insert(dep(2), blob(0, 0), now));
         assert_eq!(pending.len(), 1);
     }
 
@@ -198,8 +204,8 @@ mod tests {
     fn pending_is_capped_by_bytes() {
         let now = Instant::now();
         let mut pending = Pending::new(usize::MAX, 10_000);
-        assert!(pending.insert([1; 32], "l".into(), blob(0, 6_000), now));
-        assert!(!pending.insert([1; 32], "l".into(), blob(1, 6_000), now));
+        assert!(pending.insert(dep(1), blob(0, 6_000), now));
+        assert!(!pending.insert(dep(1), blob(1, 6_000), now));
         assert!(pending.bytes() <= 10_000);
     }
 
@@ -209,13 +215,13 @@ mod tests {
         // again under another dep used to bypass the cap.
         let now = Instant::now();
         let mut pending = Pending::new(2, usize::MAX);
-        assert!(pending.insert([1; 32], "l".into(), blob(0, 0), now));
-        assert!(pending.insert([1; 32], "l".into(), blob(1, 0), now));
-        let waiting = pending.take(&[1; 32]);
+        assert!(pending.insert(dep(1), blob(0, 0), now));
+        assert!(pending.insert(dep(1), blob(1, 0), now));
+        let waiting = pending.take(&dep(1));
         assert_eq!(pending.len(), 0);
         // Something else fills the space before they are parked again.
-        assert!(pending.insert([3; 32], "l".into(), blob(2, 0), now));
-        let results: Vec<bool> = waiting.into_iter().map(|w| pending.reinsert([2; 32], w)).collect();
+        assert!(pending.insert(dep(3), blob(2, 0), now));
+        let results: Vec<bool> = waiting.into_iter().map(|w| pending.reinsert(dep(2), w)).collect();
         assert_eq!(results, vec![true, false]);
         assert_eq!(pending.len(), 2);
     }
@@ -224,12 +230,12 @@ mod tests {
     fn pending_expires() {
         let start = Instant::now();
         let mut pending = Pending::new(10, usize::MAX);
-        pending.insert([1; 32], "l".into(), blob(0, 100), start);
-        pending.insert([2; 32], "l".into(), blob(1, 100), start + Duration::from_secs(50));
+        pending.insert(dep(1), blob(0, 100), start);
+        pending.insert(dep(2), blob(1, 100), start + Duration::from_secs(50));
         pending.expire(start + Duration::from_secs(70), Duration::from_secs(60));
         assert_eq!(pending.len(), 1);
-        assert!(pending.take(&[1; 32]).is_empty());
-        assert_eq!(pending.take(&[2; 32]).len(), 1);
+        assert!(pending.take(&dep(1)).is_empty());
+        assert_eq!(pending.take(&dep(2)).len(), 1);
         assert_eq!((pending.len(), pending.bytes()), (0, 0));
     }
 

@@ -3533,8 +3533,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "ed25519-dalek",
  "futures",
  "libp2p",
+ "rand_core 0.6.4",
+ "records",
  "rusqlite",
  "serde",
  "serde_bytes",
