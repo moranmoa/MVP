@@ -126,7 +126,7 @@
           "args": { "words": ["legal", "winner", "thank", "year", "wave", "sausage", "worth", "useful", "legal", "winner", "thank", "yellow"] },
           "expect": { "ok": { "id": "<string>", "recoveryChecked": true } }
         },
-        { "peer": "bob", "cmd": "getRecoveryWords", "expect": { "ok": ["legal", "winner", "thank", "year", "wave", "sausage", "worth", "useful", "legal", "winner", "thank", "yellow"] } }
+        { "peer": "bob", "cmd": "getRecoveryWords", "expect": { "error": { "code": "not-allowed" } } }
       ]
     },
     {

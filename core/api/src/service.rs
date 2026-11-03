@@ -37,7 +37,10 @@ struct Profile {
 }
 
 struct Me {
-    phrase: RecoveryPhrase,
+    /// Held only until the recovery check passes, so the UI can show and
+    /// check the words; dropped (zeroized) after. TODO(#31): with the app
+    /// lock, re-read from the vault after re-authentication instead.
+    phrase: Option<RecoveryPhrase>,
     identity: identity::Identity,
     profile: Profile,
 }
@@ -145,7 +148,8 @@ impl Core {
             };
             let me = inner.new_me(phrase, profile)?;
             events.push(progress(ProgressStep::Encryption, 85));
-            let words = me.phrase.words().iter().map(|w| (*w).to_owned()).collect();
+            let phrase = me.phrase.as_ref().ok_or(ErrorCode::Internal)?;
+            let words = phrase.words().iter().map(|w| (*w).to_owned()).collect();
             let identity = inner.identity_json(&me)?;
             inner.me = Some(me);
             events.push(progress(ProgressStep::Done, 100));
@@ -157,24 +161,31 @@ impl Core {
     pub fn check_recovery_words(&self, answers: BTreeMap<usize, String>) -> CoreResult<bool> {
         self.run(|inner, _, events| {
             let me = inner.me.as_ref().ok_or(ErrorCode::NotFound)?;
+            // Already passed: the phrase is gone (see `Me::phrase`).
+            let phrase = me.phrase.as_ref().ok_or(ErrorCode::NotAllowed)?;
             if answers.keys().any(|p| *p == 0) {
                 return Ok(false);
             }
             let answers: Vec<(usize, &str)> =
                 answers.iter().map(|(p, w)| (p - 1, w.as_str())).collect();
-            let ok =
-                inner.vault.confirm_recovery_check(&me.phrase, &answers).map_err(vault_error)?;
+            let ok = inner.vault.confirm_recovery_check(phrase, &answers).map_err(vault_error)?;
             if ok {
+                inner.me.as_mut().expect("checked above").phrase = None;
+                let me = inner.me.as_ref().expect("checked above");
                 events.push(Event::IdentityChanged(inner.identity_json(me)?));
             }
             Ok(ok)
         })
     }
 
+    /// Only before the recovery check passes: one XSS in the UI must not be
+    /// able to read the words any time later. TODO(#31): allowed again
+    /// after app-lock re-authentication.
     pub fn get_recovery_words(&self) -> CoreResult<Vec<String>> {
         let inner = self.lock();
         let me = inner.me.as_ref().ok_or(ErrorCode::NotFound)?;
-        Ok(me.phrase.words().iter().map(|w| (*w).to_owned()).collect())
+        let phrase = me.phrase.as_ref().ok_or(ErrorCode::NotAllowed)?;
+        Ok(phrase.words().iter().map(|w| (*w).to_owned()).collect())
     }
 
     pub fn restore_identity(&self, words: Vec<String>) -> CoreResult<Identity> {
@@ -195,6 +206,7 @@ impl Core {
 
     pub fn update_profile(&self, input: ProfileInput) -> CoreResult<Identity> {
         self.run(|inner, _, events| {
+            model::check_profile(&input)?;
             let me = inner.me.as_mut().ok_or(ErrorCode::NotFound)?;
             me.profile.display_name = input.display_name.trim().to_owned();
             me.profile.bio = input.bio;
@@ -290,8 +302,11 @@ impl Core {
         };
         let searching = JoinStatus::Searching { link: link.clone() };
         self.ports.events.emit(&Event::JoinStatus(searching.clone()));
+        // Fetch without the lock, so UI commands don't wait on the network.
+        let fetched: Vec<Record> =
+            self.ports.network.fetch(server).into_iter().filter(|r| r.server() == server).collect();
         self.run(|inner, ports, events| {
-            let status = inner.join(ports, server, &link, events)?;
+            let status = inner.join(ports, server, &link, fetched, events)?;
             events.push(Event::JoinStatus(status));
             Ok(searching)
         })
@@ -351,12 +366,14 @@ impl Core {
             // leaves no trace.
             // TODO(records B4): `Resolver::would_accept` instead.
             let log = inner.logs.get_mut(&server).expect("loaded above");
-            log.add(record.clone());
+            let joined = log.add(record.clone());
             if !log.accepted(&record.id()) {
                 inner.logs.remove(&server);
                 return Err(ErrorCode::NotAllowed.into());
             }
-            inner.db.put_record(&record)?;
+            for record in &joined {
+                inner.db.put_record(record)?;
+            }
             ports.network.publish(&record);
             let after = inner.view(server)?;
             events.push(Event::MembersChanged {
@@ -380,13 +397,26 @@ impl Core {
     /// network and reports what changed. TODO(sync): driven by the sync
     /// crate's push and pull instead of a command.
     pub fn sync_now(&self) -> CoreResult<()> {
-        self.run(|inner, ports, events| {
+        let servers = {
+            let inner = self.lock();
+            if inner.me.is_none() {
+                return Ok(());
+            }
+            inner.db.servers()?
+        };
+        // Fetch without the lock, so UI commands don't wait on the network.
+        let fetched: Vec<(ServerId, Vec<Record>)> =
+            servers.into_iter().map(|s| (s, self.ports.network.fetch(s))).collect();
+        self.run(|inner, _, events| {
             let Some(me) = inner.me.as_ref() else { return Ok(()) };
             let me = me.key();
-            for server in inner.db.servers()? {
+            for (server, records) in fetched {
+                if !inner.db.has_server(server)? {
+                    continue;
+                }
                 inner.load(server)?;
                 let mut changed = false;
-                for record in ports.network.fetch(server) {
+                for record in records {
                     if record.server() == server {
                         changed |= inner.store(server, record)?;
                     }
@@ -489,7 +519,18 @@ impl Inner {
         let identity = phrase.identity();
         let key = *identity.storage_key().expose_secret();
         self.db.save_profile(&key, &serde_json::to_vec(&profile).expect("plain struct"))?;
-        Ok(Me { phrase, identity, profile })
+        self.me_from(phrase, identity, profile)
+    }
+
+    /// Keeps the phrase only while the recovery check is still to do.
+    fn me_from(
+        &self,
+        phrase: RecoveryPhrase,
+        identity: identity::Identity,
+        profile: Profile,
+    ) -> CoreResult<Me> {
+        let checked = self.vault.recovery_check_done(&identity).map_err(vault_error)?;
+        Ok(Me { phrase: (!checked).then_some(phrase), identity, profile })
     }
 
     fn load_me(&self, phrase: RecoveryPhrase) -> CoreResult<Me> {
@@ -499,7 +540,7 @@ impl Inner {
             Some(json) => serde_json::from_slice(&json).map_err(|_| ErrorCode::Internal)?,
             None => Profile::default(),
         };
-        Ok(Me { phrase, identity, profile })
+        self.me_from(phrase, identity, profile)
     }
 
     fn identity_json(&self, me: &Me) -> CoreResult<Identity> {
@@ -541,14 +582,15 @@ impl Inner {
         ServerView::build(server, log).ok_or_else(|| ErrorCode::NotFound.into())
     }
 
-    /// Stores a record and adds it to the loaded log; false if already held.
+    /// Offers a record to the loaded log and stores whatever joined because
+    /// of it; false if nothing joined (a duplicate, or still waiting on deps).
     fn store(&mut self, server: ServerId, record: Record) -> CoreResult<bool> {
         let log = self.logs.get_mut(&server).ok_or(ErrorCode::Internal)?;
-        if !log.add(record.clone()) {
-            return Ok(false);
+        let joined = log.add(record);
+        for record in &joined {
+            self.db.put_record(record)?;
         }
-        self.db.put_record(&record)?;
-        Ok(true)
+        Ok(!joined.is_empty())
     }
 
     fn members_json(&self, view: &ServerView) -> CoreResult<Vec<Member>> {
@@ -579,6 +621,7 @@ impl Inner {
         ports: &Ports,
         server: ServerId,
         link: &str,
+        fetched: Vec<Record>,
         events: &mut Events,
     ) -> CoreResult<JoinStatus> {
         let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?;
@@ -587,8 +630,6 @@ impl Inner {
         if self.db.has_server(server)? {
             return Ok(JoinStatus::Joined { link, server_id: server_hex });
         }
-        let fetched: Vec<Record> =
-            ports.network.fetch(server).into_iter().filter(|r| r.server() == server).collect();
         if fetched.is_empty() {
             return Ok(JoinStatus::NobodyOnline { link });
         }

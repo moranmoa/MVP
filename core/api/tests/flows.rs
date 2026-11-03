@@ -269,6 +269,114 @@ fn hostile_server_records_are_refused() {
     }
 }
 
+/// A record whose deps never arrive is neither a head nor stored, so it
+/// can't freeze our own control actions (review of #18).
+#[test]
+fn an_orphan_does_not_block_control_actions() {
+    let world = World::new();
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let member = world.peer();
+    let member_id = sign_up(&member, "Member").id;
+    let server = owner.core.create_server("S", AgeRestriction::None).unwrap();
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+
+    // Orphans in the network before a join and after it.
+    let mallory = SigningKey::from_bytes(&[8; 32]);
+    let orphan = |seq: u64| {
+        authority::sign_control(
+            &mallory,
+            server_key,
+            seq,
+            vec![records::RecordId::from_bytes([seq as u8 + 1; 32])],
+            1,
+            &authority::Action::Post { text: "x".into() },
+        )
+        .unwrap()
+    };
+    world.network.publish(&orphan(0));
+    member.core.join_server(&server.invite_link).unwrap();
+    assert_eq!(member.core.list_servers().unwrap().len(), 1);
+    world.network.publish(&orphan(1));
+    owner.core.sync_now().unwrap();
+    assert_eq!(owner.core.list_members(&server.id).unwrap().len(), 2);
+
+    owner.core.grant_role(&server.id, &member_id, Role::Moderator).unwrap();
+    owner.core.kick_member(&server.id, &member_id).unwrap();
+    assert_eq!(owner.core.list_members(&server.id).unwrap().len(), 1);
+}
+
+/// The words leave the core only until the check passes, then never again,
+/// not even after a restart (security review of #18).
+#[test]
+fn recovery_words_only_until_the_check_passes() {
+    let world = World::new();
+    let secrets = Arc::new(MemoryStore::new());
+    let dir = std::env::temp_dir().join(format!("mvs-api-words-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("core.db");
+    let _ = std::fs::remove_file(&db);
+    let peer = world.peer_with(secrets.clone(), Some(db.clone()), Arc::new(PendingGroupKeys));
+
+    let created = peer.core.create_identity(adult()).unwrap();
+    assert_eq!(peer.core.get_recovery_words().unwrap(), created.words);
+    let wrong: BTreeMap<usize, String> = [(1, "zzzz".to_owned())].into();
+    assert!(!peer.core.check_recovery_words(wrong).unwrap());
+    assert_eq!(peer.core.get_recovery_words().unwrap(), created.words);
+
+    // Before the check, a restart still hands them out.
+    drop(peer);
+    let peer = world.peer_with(secrets.clone(), Some(db.clone()), Arc::new(PendingGroupKeys));
+    assert_eq!(peer.core.get_recovery_words().unwrap(), created.words);
+
+    let right: BTreeMap<usize, String> = [(2, created.words[1].clone())].into();
+    assert!(peer.core.check_recovery_words(right.clone()).unwrap());
+    assert_eq!(peer.core.get_recovery_words().unwrap_err().code, ErrorCode::NotAllowed);
+    assert_eq!(peer.core.check_recovery_words(right).unwrap_err().code, ErrorCode::NotAllowed);
+
+    drop(peer);
+    let peer = world.peer_with(secrets, Some(db), Arc::new(PendingGroupKeys));
+    assert!(peer.core.get_identity().unwrap().unwrap().recovery_checked);
+    assert_eq!(peer.core.get_recovery_words().unwrap_err().code, ErrorCode::NotAllowed);
+    drop(peer);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn profile_fields_are_capped() {
+    let world = World::new();
+    let peer = world.peer();
+    sign_up(&peer, "Me");
+    let input = |name: &str, bio: Option<String>, avatar: Option<&str>| ProfileInput {
+        display_name: name.into(),
+        bio,
+        avatar_data_url: avatar.map(String::from),
+    };
+    let ok = [
+        input("נועה", Some("שורה\nשורה".into()), Some("data:image/png;base64,iVBORw0KGgo=")),
+        input("x", None, Some("data:image/webp;base64,UklGRg==")),
+    ];
+    for profile in ok {
+        peer.core.update_profile(profile).unwrap();
+    }
+    let svg = "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=";
+    let bad = [
+        input("   ", None, None),
+        input(&"x".repeat(129), None, None),
+        input("x", Some("y".repeat(1501)), None),
+        input("x", Some("\n".repeat(9)), None),
+        input("x", None, Some(svg)),
+        input("x", None, Some("data:image/png,raw")),
+        input("x", None, Some("data:image/png;base64,<script>")),
+        input("x", None, Some("https://example.com/a.png")),
+        input("x", None, Some(&format!("data:image/png;base64,{}", "A".repeat(700_000)))),
+    ];
+    for profile in bad {
+        assert_eq!(peer.core.update_profile(profile).unwrap_err().code, ErrorCode::BadRequest);
+    }
+    assert_eq!(peer.core.get_identity().unwrap().unwrap().display_name, "x");
+}
+
 #[test]
 fn age_restricted_server_blocks_minors() {
     let world = World::new();
@@ -333,7 +441,8 @@ fn restore_and_identity_rules() {
     let words: Vec<String> = LEGAL.split(' ').map(String::from).collect();
     let restored = peer.core.restore_identity(words.clone()).unwrap();
     assert!(restored.recovery_checked);
-    assert_eq!(peer.core.get_recovery_words().unwrap(), words);
+    // Restoring passes the check, so the words are never handed out again.
+    assert_eq!(peer.core.get_recovery_words().unwrap_err().code, ErrorCode::NotAllowed);
     assert_eq!(peer.core.create_identity(adult()).unwrap_err().code, ErrorCode::NotAllowed);
     assert_eq!(peer.core.restore_identity(words).unwrap_err().code, ErrorCode::NotAllowed);
     // A restored identity may create a server straight away.

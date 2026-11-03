@@ -3,11 +3,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use authority::{Action, Resolver, State};
-use records::{ChannelId, Kind, PublicKey, Record, RecordId, Scope, ServerId};
+use authority::{Action, Inserted, Resolver, State};
+use records::{ChannelId, Kind, PublicKey, Record, RecordId, Scope, ServerId, MAX_DEPS};
 use serde::{Deserialize, Serialize};
 
-use crate::types::{AgeRestriction, Role};
+use crate::types::{AgeRestriction, ErrorCode, ProfileInput, Role};
 
 // BLAKE3 derive_key contexts. Frozen for the alpha.
 const DEFAULT_CHANNEL_CTX: &str = "mvs 2026-11 default channel id v1";
@@ -15,6 +15,8 @@ const SHORT_CODE_CTX: &str = "mvs 2026-11 short code v1";
 
 /// Join posts start with this, so ordinary posts are never read as joins.
 const JOIN_TAG: &str = "mvs/join/v1";
+// TODO(#46): not frozen. The link will carry the invite ID (ideally with a
+// secret), not only the server ID.
 pub(crate) const INVITE_PREFIX: &str = "mvs://join/";
 pub(crate) const MAX_NAME_CHARS: usize = 100;
 
@@ -62,6 +64,45 @@ pub(crate) fn parse_hex32(id: &str) -> Option<[u8; 32]> {
     hex::decode(id).ok()?.try_into().ok()
 }
 
+// Hard caps on what the UI may hand in. The UI cleans and clips for display
+// (ui/src/core/sanitize.ts: 32 graphemes, 300-char bio); these only stop
+// oversize or unsafe input from being stored and sent.
+const PROFILE_NAME_MAX_CHARS: usize = 128;
+const BIO_MAX_CHARS: usize = 1500;
+const BIO_MAX_LINES: usize = 8;
+/// Same as the UI's `AVATAR_DATA_URL_MAX`: about 512 KB of image.
+const AVATAR_DATA_URL_MAX: usize = 700_000;
+const AVATAR_TYPES: [&str; 4] = ["png", "jpeg", "webp", "gif"];
+
+/// `bad-request` unless the profile fits the caps above, and the avatar is
+/// a base64 `data:` URL of an allow-listed raster type (never SVG).
+pub(crate) fn check_profile(input: &ProfileInput) -> Result<(), ErrorCode> {
+    let name = input.display_name.trim();
+    let bio_ok = input.bio.as_deref().is_none_or(|bio| {
+        bio.chars().count() <= BIO_MAX_CHARS && bio.lines().count() <= BIO_MAX_LINES
+    });
+    let avatar_ok = input.avatar_data_url.as_deref().is_none_or(is_safe_avatar);
+    let ok =
+        !name.is_empty() && name.chars().count() <= PROFILE_NAME_MAX_CHARS && bio_ok && avatar_ok;
+    ok.then_some(()).ok_or(ErrorCode::BadRequest)
+}
+
+fn is_safe_avatar(url: &str) -> bool {
+    if url.len() > AVATAR_DATA_URL_MAX {
+        return false;
+    }
+    let Some((kind, data)) =
+        url.strip_prefix("data:image/").and_then(|rest| rest.split_once(";base64,"))
+    else {
+        return false;
+    };
+    let body = data.trim_end_matches('=');
+    AVATAR_TYPES.contains(&kind)
+        && !body.is_empty()
+        && data.len() - body.len() <= 2
+        && body.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
+}
+
 /// Server metadata in the genesis body, after the nonce that `records`
 /// checks against the server ID. `authority` doesn't read it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,35 +143,98 @@ fn parse_join(record: &Record) -> Option<String> {
 
 /// One server's records as held locally, with its resolver kept up to date
 /// (one `insert` per record, never a full re-resolve per action).
+///
+/// `records` holds only what joined the resolver's log, in join order: only
+/// those are stored, offered as heads or read for members. Records waiting
+/// on deps are mirrored in `pending`, which the resolver bounds: what it
+/// evicts is dropped here too (sync keeps its own pending buffer and
+/// redelivers).
 pub(crate) struct Log {
     pub records: Vec<Record>,
     pub resolver: Resolver,
-    ids: HashSet<RecordId>,
+    joined: HashSet<RecordId>,
+    pending: HashMap<RecordId, (Record, usize)>,
+    /// Missing dep -> pending records waiting on it.
+    waiting: HashMap<RecordId, Vec<RecordId>>,
 }
 
 impl Log {
     pub fn new(server: ServerId, records: impl IntoIterator<Item = Record>) -> Log {
-        let mut log =
-            Log { records: Vec::new(), resolver: Resolver::new(server), ids: HashSet::new() };
+        Log::with_resolver(Resolver::new(server), records)
+    }
+
+    fn with_resolver(resolver: Resolver, records: impl IntoIterator<Item = Record>) -> Log {
+        let mut log = Log {
+            records: Vec::new(),
+            resolver,
+            joined: HashSet::new(),
+            pending: HashMap::new(),
+            waiting: HashMap::new(),
+        };
         for record in records {
             log.add(record);
         }
         log
     }
 
-    /// Adds a record; false if already held.
-    pub fn add(&mut self, record: Record) -> bool {
-        if !self.ids.insert(record.id()) {
-            return false;
-        }
-        // Pending (deps missing) and evicted records stay in `records` and
-        // are re-offered to a fresh resolver on the next load.
+    /// Offers a record; returns the records that joined because of it (it,
+    /// and any pending ones it unblocked), for the caller to store.
+    pub fn add(&mut self, record: Record) -> Vec<Record> {
         // TODO(sync adapter, #46): rate-limit incoming joins per invite and
         // author before they get here. A join refused on a limited invite
         // makes authority re-resolve in full (a CPU lever).
-        let _ = self.resolver.insert(record.clone());
-        self.records.push(record);
-        true
+        let id = record.id();
+        match self.resolver.insert(record.clone()) {
+            Inserted::Ignored => Vec::new(),
+            Inserted::Pending { evicted } => {
+                if let Some(old) = evicted {
+                    self.forget(&old.id());
+                }
+                let missing: Vec<RecordId> =
+                    record.deps().iter().filter(|d| !self.joined.contains(*d)).copied().collect();
+                for dep in &missing {
+                    self.waiting.entry(*dep).or_default().push(id);
+                }
+                self.pending.insert(id, (record, missing.len()));
+                Vec::new()
+            }
+            Inserted::Joined => {
+                let mut out = Vec::new();
+                let mut ready = vec![record];
+                while let Some(record) = ready.pop() {
+                    let id = record.id();
+                    self.joined.insert(id);
+                    for waiter in self.waiting.remove(&id).unwrap_or_default() {
+                        let Some(entry) = self.pending.get_mut(&waiter) else { continue };
+                        entry.1 -= 1;
+                        if entry.1 == 0 {
+                            ready.push(self.pending.remove(&waiter).expect("just seen").0);
+                        }
+                    }
+                    self.records.push(record.clone());
+                    out.push(record);
+                }
+                out
+            }
+        }
+    }
+
+    /// Drops a pending record the resolver evicted.
+    fn forget(&mut self, id: &RecordId) {
+        let Some((record, _)) = self.pending.remove(id) else { return };
+        for dep in record.deps() {
+            if let Some(waiters) = self.waiting.get_mut(dep) {
+                waiters.retain(|w| w != id);
+                if waiters.is_empty() {
+                    self.waiting.remove(dep);
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn pending(&self) -> usize {
+        self.pending.len()
     }
 
     pub fn accepted(&self, id: &RecordId) -> bool {
@@ -205,13 +309,16 @@ impl<'a> ServerView<'a> {
         members
     }
 
-    /// Control records no other control record depends on.
+    /// Joined control records no other joined one depends on: the latest
+    /// [`MAX_DEPS`] in join order, so a record signed on them joins at once.
     pub fn heads(&self) -> Vec<RecordId> {
         let control: Vec<&Record> =
             self.records.iter().filter(|r| r.scope() == Scope::Control).collect();
         let referenced: BTreeSet<RecordId> =
             control.iter().flat_map(|r| r.deps().iter().copied()).collect();
-        control.iter().map(|r| r.id()).filter(|id| !referenced.contains(id)).collect()
+        let heads: Vec<RecordId> =
+            control.iter().map(|r| r.id()).filter(|id| !referenced.contains(id)).collect();
+        heads[heads.len().saturating_sub(MAX_DEPS)..].to_vec()
     }
 
     pub fn next_seq(&self, author: &PublicKey) -> u64 {
@@ -276,6 +383,86 @@ mod tests {
         assert_eq!(code.len(), 9);
         assert_eq!(&code[4..5], "-");
         assert!(code.bytes().all(|b| b == b'-' || CODE_ALPHABET.contains(&b)));
+    }
+
+    #[test]
+    fn log_keeps_only_joined_records_and_bounds_pending() {
+        let owner = records::SigningKey::from_bytes(&[1; 32]);
+        let genesis = authority::sign_genesis(&owner, [0; 16], 1, b"{}").unwrap();
+        let server = genesis.server();
+        let post = |seq: u64, deps: Vec<RecordId>| {
+            authority::sign_control(
+                &owner,
+                server,
+                seq,
+                deps,
+                1,
+                &Action::Post { text: "x".into() },
+            )
+            .unwrap()
+        };
+        let mut log =
+            Log::with_resolver(Resolver::with_pending_limit(server, 2), [genesis.clone()]);
+
+        // Three orphans, room for two: the oldest is dropped.
+        let orphans: Vec<Record> =
+            (1..=3).map(|i| post(i, vec![RecordId::from_bytes([i as u8; 32])])).collect();
+        for orphan in &orphans {
+            assert!(log.add(orphan.clone()).is_empty());
+        }
+        assert_eq!(log.pending(), 2);
+        assert_eq!(log.records.len(), 1);
+
+        // A record waiting on a pending one joins once that one does.
+        let parent = post(10, vec![genesis.id()]);
+        let child = post(11, vec![parent.id()]);
+        assert!(log.add(child.clone()).is_empty());
+        let joined: Vec<RecordId> = log.add(parent.clone()).iter().map(Record::id).collect();
+        assert_eq!(joined, [parent.id(), child.id()]);
+        assert_eq!(log.records.len(), 3);
+        assert!(log.add(child).is_empty(), "duplicate");
+    }
+
+    #[test]
+    fn heads_skip_pending_and_are_capped() {
+        let owner = records::SigningKey::from_bytes(&[2; 32]);
+        let genesis = authority::sign_genesis(&owner, [0; 16], 1, b"{}").unwrap();
+        let server = genesis.server();
+        let mut log = Log::new(server, [genesis.clone()]);
+        for seq in 1..=(MAX_DEPS as u64 + 5) {
+            let deps = vec![genesis.id()];
+            let record = authority::sign_control(
+                &owner,
+                server,
+                seq,
+                deps,
+                1,
+                &Action::Post { text: "x".into() },
+            )
+            .unwrap();
+            log.add(record);
+        }
+        let orphan = authority::sign_control(
+            &owner,
+            server,
+            999,
+            vec![RecordId::from_bytes([9; 32])],
+            1,
+            &Action::Post { text: "x".into() },
+        )
+        .unwrap();
+        log.add(orphan.clone());
+        let view = ServerView {
+            id: server,
+            genesis: GenesisBody { v: 1, name: "S".into(), age_restriction: AgeRestriction::None },
+            owner: genesis.author(),
+            state: log.resolver.state(),
+            records: &log.records,
+        };
+        let heads = view.heads();
+        assert_eq!(heads.len(), MAX_DEPS);
+        assert!(!heads.contains(&orphan.id()));
+        assert_eq!(heads.last(), log.records.last().map(Record::id).as_ref());
     }
 
     #[test]

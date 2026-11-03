@@ -32,8 +32,9 @@ own async layer.
 
 | Area | Commands | Backed by |
 | --- | --- | --- |
-| Identity | `getIdentity`, `createIdentity` (with progress events), `checkRecoveryWords`, `getRecoveryWords`, `restoreIdentity`, `updateProfile` | `identity::Vault` in the OS keychain; the profile is in SQLite, sealed with the identity's storage key |
+| Identity | `getIdentity`, `createIdentity` (with progress events), `checkRecoveryWords`, `getRecoveryWords` (only until the check passes, then `not-allowed` until the app lock, #31), `restoreIdentity`, `updateProfile` (length caps; the avatar must be a base64 PNG, JPEG, WebP or GIF `data:` URL) | `identity::Vault` in the OS keychain; the profile is in SQLite, sealed with the identity's storage key |
 | Servers | `createServer` (after the recovery check), `listServers`, `listChannels`, `listMembers`, `joinServer`, `cancelJoin` | Genesis plus join records (`records`); roles from one `authority::Resolver` per server, loaded once and fed record by record |
+| Records | — | Only records the resolver has joined are stored, used as heads (at most 64, the latest) or read for members. Records waiting on deps are held in memory, bounded by the resolver's pending limit; what it evicts is dropped, and sync redelivers it |
 | Moderation | `kickMember`, plus additions `grantRole` and `revokeRole` | `authority` rules. Dry run on the live resolver: a record it does not accept is refused (`not-allowed`), never stored or sent, and the log is rebuilt from the store. TODO(records B4): `Resolver::would_accept` |
 | App | storage usage and limit, `clearCache`, `exportDiagnostics` (counts only), `getAppInfo`, `setUpdateChannel`, `restartToUpdate`, `blockUser`, `markRead` | SQLite |
 | Not yet | `getMessageCount`, `getMessages`, `sendMessage`, `editMessage`, `deleteMessage`, `retryMessage` | Answer `not-implemented`. Next step, on top of `groupkeys` |
@@ -44,7 +45,7 @@ own async layer.
   followed by JSON `{v: 1, name, ageRestriction}`. The server ID is
   `records::ServerId::derive(owner, nonce)`, so `records` refuses a genesis
   that anyone but the owner signs for that ID.
-- **Invite link:** `mvs://join/<server id hex>`.
+- **Invite link (not frozen):** `mvs://join/<server id hex>` for now. TODO(#46): it will carry the invite ID, ideally with a secret.
 - **Default channel:** `"general"`, ID `derive_key("mvs 2026-11 default channel id v1", server id)`.
 - **Join:** a control-log `Post` whose text is `{"mvs":"join/v1","displayName":…}`.
   TODO(records): its own `Join` kind.

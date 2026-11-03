@@ -74,6 +74,8 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 | The mock is one person; `joinServer` adds a canned server | Multi-peer scenarios stay Rust-only until the mock simulates peers |
 | The mock lets only the owner kick | `authority`'s rule: moderators and up, against lower ranks. The mock should follow it |
 | `checkRecoveryWords({})` is `true` in the mock | The Rust core answers `false`; the mock should too |
+| The mock's `getRecoveryWords` answers at any time | The Rust core answers only until the check passes, then `not-allowed` (until the app lock, #31); the mock should too |
+| The mock accepts any `updateProfile` input | The Rust core refuses oversize fields and any avatar other than a base64 PNG, JPEG, WebP or GIF `data:` URL (`bad-request`) |
 | The mock has no `grantRole` / `revokeRole` | Add them to `CoreCommands` (proposed below) |
 
 ## Proposed contract additions (Rust has them; `api.ts` doesn't yet)
