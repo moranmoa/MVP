@@ -22,6 +22,9 @@ futures = "0.3"
 libp2p = { version = "0.54", features = [
     "tokio",
     "tcp",
+    # /wss to the relay behind Cloudflare: TLS by rustls with webpki roots
+    # (libp2p-websocket's client config), no native-tls.
+    "websocket",
     "dns",
     "noise",
     "yamux",
