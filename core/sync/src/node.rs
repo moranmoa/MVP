@@ -25,13 +25,13 @@ use anyhow::{bail, ensure, Context, Result};
 use futures::StreamExt;
 use libp2p::{
     connection_limits,
-    core::multiaddr::Protocol,
+    core::{multiaddr::Protocol, ConnectedPoint},
     gossipsub::{self, MaxCountSubscriptionFilter, MessageAcceptance, TopicHash, TopicSubscriptionFilter},
     identify, identity, kad, noise, ping, relay,
     request_response::{self, ProtocolSupport, ResponseChannel},
     swarm::{
         dial_opts::{DialOpts, PeerCondition},
-        NetworkBehaviour, SwarmEvent,
+        ConnectionId, NetworkBehaviour, SwarmEvent,
     },
     tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm, SwarmBuilder,
 };
@@ -46,6 +46,7 @@ use crate::{log_name, log_of, valid_log_name, Append, Authorizer, Record, Record
 
 const SYNC_PROTOCOL: StreamProtocol = StreamProtocol::new("/mvs/sync/0.2.0");
 const IDENTIFY_VERSION: &str = "/mvs/0.1.0";
+const KAD_PROTOCOL: StreamProtocol = StreamProtocol::new("/mvs/kad/1.0.0");
 /// Records per sync response page.
 const PAGE: usize = 2000;
 /// Record bytes per page. The CBOR codec drops responses over 10 MiB, so a
@@ -97,6 +98,15 @@ pub struct NodeConfig {
     /// Decides whether a record's author may write it. Called on the node's
     /// task inside a store transaction: it must not call back into the node.
     pub authorizer: Arc<dyn Authorizer>,
+    /// Where to listen; `/ip4/0.0.0.0/tcp/0` picks a free port.
+    pub listen: Multiaddr,
+    /// Peers to dial directly, without a peer ID (e.g. `/dns4/p2/tcp/4001`),
+    /// besides those found through the relay. Redialled while not connected.
+    pub bootstrap: Vec<Multiaddr>,
+    /// Whether non-global addresses (LAN, loopback) may be dialled to turn a
+    /// relayed connection into a direct one. Off for real users; on for a
+    /// LAN test setup like the Docker harness.
+    pub allow_lan: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -194,7 +204,10 @@ impl Node {
         };
 
         let mut swarm = build_swarm(key)?;
-        swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+        swarm.listen_on(config.listen.clone())?;
+        for addr in &config.bootstrap {
+            let _ = swarm.dial(DialOpts::unknown_peer_id().address(addr.clone()).build());
+        }
         swarm.behaviour_mut().kad.add_address(&relay_peer, config.relay.clone());
         swarm.dial(config.relay.clone())?;
 
@@ -223,6 +236,10 @@ impl Node {
             decoded,
             events: EventSink { tx: events, dropped: 0 },
             circuit_listening: false,
+            bootstrap: config.bootstrap.into_iter().map(|addr| (addr, None)).collect(),
+            allow_lan: config.allow_lan,
+            relayed: HashMap::new(),
+            direct: HashMap::new(),
         };
         for log in config.logs {
             task.open(log);
@@ -298,7 +315,10 @@ fn build_swarm(key: identity::Keypair) -> Result<Swarm<Behaviour>> {
         .with_relay_client(noise::Config::new, yamux::Config::default)?
         .with_behaviour(|key, relay_client| {
             let peer_id = key.public().to_peer_id();
-            let mut kad = kad::Behaviour::new(peer_id, kad::store::MemoryStore::new(peer_id));
+            // Our own protocol name, not the public IPFS DHT's `/ipfs/kad/1.0.0`
+            // (threat model R2); the relay speaks it too.
+            let kad_config = kad::Config::new(KAD_PROTOCOL);
+            let mut kad = kad::Behaviour::with_config(peer_id, kad::store::MemoryStore::new(peer_id), kad_config);
             // Server mode so peers can find each other through any peer, not
             // only through the bootstrap node. (GAP-6 moves this to client mode.)
             kad.set_mode(Some(kad::Mode::Server));
@@ -394,6 +414,14 @@ struct Task {
     decoded: mpsc::UnboundedSender<Decoded>,
     events: EventSink,
     circuit_listening: bool,
+    /// Bootstrap addresses and the peer each one turned out to be.
+    bootstrap: Vec<(Multiaddr, Option<PeerId>)>,
+    allow_lan: bool,
+    /// Open connections per peer, through the relay and direct. Requests
+    /// should not run over a relay circuit (it is capped at 128 KiB and
+    /// 2 minutes), so a relayed connection is closed once a direct one exists.
+    relayed: HashMap<PeerId, HashSet<ConnectionId>>,
+    direct: HashMap<PeerId, HashSet<ConnectionId>>,
 }
 
 /// What happened to one incoming record.
@@ -511,6 +539,26 @@ impl Task {
         } else {
             let _ = self.swarm.dial(self.relay_addr.clone());
         }
+        for (addr, peer) in self.bootstrap.clone() {
+            if peer.is_none_or(|p| !self.direct.contains_key(&p)) {
+                let _ = self.swarm.dial(DialOpts::unknown_peer_id().address(addr).build());
+            }
+        }
+    }
+
+    /// Dials a peer we only reach through the relay at the addresses it
+    /// listens on, so its traffic can move off the capped relay circuit.
+    fn try_direct(&mut self, peer: PeerId, listen_addrs: Vec<Multiaddr>) {
+        if self.direct.contains_key(&peer) {
+            return;
+        }
+        let addrs: Vec<Multiaddr> =
+            listen_addrs.into_iter().filter(|a| dialable(a, self.allow_lan)).collect();
+        if addrs.is_empty() {
+            return;
+        }
+        let opts = DialOpts::peer_id(peer).addresses(addrs).condition(PeerCondition::Always).build();
+        let _ = self.swarm.dial(opts);
     }
 
     fn pull_all(&mut self) {
@@ -537,7 +585,10 @@ impl Task {
 
     fn on_swarm_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
         match event {
-            SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+            SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, .. } => {
+                if peer_id != self.relay_peer {
+                    self.track_connection(peer_id, connection_id, &endpoint);
+                }
                 if peer_id == self.relay_peer {
                     let me = *self.swarm.local_peer_id();
                     self.swarm.behaviour_mut().kad.get_closest_peers(me);
@@ -551,7 +602,18 @@ impl Task {
                     }
                 }
             }
-            SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. } => {
+            SwarmEvent::ConnectionClosed { peer_id, connection_id, num_established, .. } => {
+                for conns in [&mut self.relayed, &mut self.direct] {
+                    if let Some(set) = conns.get_mut(&peer_id) {
+                        set.remove(&connection_id);
+                        if set.is_empty() {
+                            conns.remove(&peer_id);
+                        }
+                    }
+                }
+                if num_established > 0 {
+                    return;
+                }
                 if self.connected.remove(&peer_id) {
                     info!(%peer_id, "peer disconnected");
                     self.emit(NodeEvent::PeerDisconnected(peer_id));
@@ -572,8 +634,11 @@ impl Task {
                         }
                     }
                 } else {
-                    for addr in info.listen_addrs {
-                        self.swarm.behaviour_mut().kad.add_address(&peer_id, addr);
+                    for addr in &info.listen_addrs {
+                        self.swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
+                    }
+                    if self.relayed.contains_key(&peer_id) {
+                        self.try_direct(peer_id, info.listen_addrs);
                     }
                 }
             }
@@ -802,6 +867,72 @@ impl EventSink {
     }
 }
 
+impl Task {
+    /// Records a new connection, and keeps at most one kind per peer: a
+    /// direct connection replaces any relayed one.
+    fn track_connection(&mut self, peer: PeerId, id: ConnectionId, endpoint: &ConnectedPoint) {
+        if let ConnectedPoint::Dialer { address, .. } = endpoint {
+            for (addr, known) in &mut self.bootstrap {
+                if addr == address {
+                    *known = Some(peer);
+                }
+            }
+        }
+        if is_relayed(endpoint) {
+            if self.direct.contains_key(&peer) {
+                self.swarm.close_connection(id);
+            } else {
+                self.relayed.entry(peer).or_default().insert(id);
+            }
+        } else {
+            self.direct.entry(peer).or_default().insert(id);
+            for old in self.relayed.remove(&peer).unwrap_or_default() {
+                debug!(%peer, "direct connection replaces the relayed one");
+                self.swarm.close_connection(old);
+            }
+        }
+    }
+}
+
+fn is_relayed(endpoint: &ConnectedPoint) -> bool {
+    let has_circuit = |addr: &Multiaddr| addr.iter().any(|p| p == Protocol::P2pCircuit);
+    match endpoint {
+        ConnectedPoint::Dialer { address, .. } => has_circuit(address),
+        // An incoming relayed connection carries the circuit in the local
+        // (listening) address, not in the remote one.
+        ConnectedPoint::Listener { local_addr, send_back_addr } => has_circuit(local_addr) || has_circuit(send_back_addr),
+    }
+}
+
+/// Whether to dial `addr` to reach a peer directly: not a relay circuit, and
+/// a global address unless `allow_lan`. DNS names count as global.
+fn dialable(addr: &Multiaddr, allow_lan: bool) -> bool {
+    let mut global = true;
+    for p in addr.iter() {
+        match p {
+            Protocol::P2pCircuit => return false,
+            Protocol::Ip4(ip) => {
+                global = !(ip.is_private()
+                    || ip.is_loopback()
+                    || ip.is_link_local()
+                    || ip.is_unspecified()
+                    || ip.is_broadcast()
+                    || ip.is_documentation()
+                    || ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 64) // CGNAT 100.64/10
+            }
+            Protocol::Ip6(ip) => {
+                let seg = ip.segments()[0];
+                global = !(ip.is_loopback()
+                    || ip.is_unspecified()
+                    || (seg & 0xfe00) == 0xfc00 // unique local
+                    || (seg & 0xffc0) == 0xfe80) // link local
+            }
+            _ => {}
+        }
+    }
+    global || allow_lan
+}
+
 /// Why a pushed message isn't ingested: Ignore (not ours to judge) or Reject
 /// (invalid; not forwarded and, once scoring is on, held against the sender).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -976,6 +1107,32 @@ mod tests {
         forged[40] ^= 1;
         let page = [good.encode(), other_log.encode(), forged, vec![], vec![0; 100_000]].map(ByteBuf::from);
         assert_eq!(decode_page(&chan(), &page), vec![good]);
+    }
+
+    #[test]
+    fn only_global_addresses_are_dialled_unless_lan_is_allowed() {
+        let a = |s: &str| s.parse::<Multiaddr>().unwrap();
+        for global in ["/ip4/8.8.8.8/tcp/4001", "/dns4/relay.example/tcp/443", "/ip6/2001:4860::1/tcp/1"] {
+            assert!(dialable(&a(global), false), "{global}");
+        }
+        for local in [
+            "/ip4/10.1.2.3/tcp/4001",
+            "/ip4/192.168.1.5/tcp/1",
+            "/ip4/172.18.0.2/tcp/1",
+            "/ip4/127.0.0.1/tcp/1",
+            "/ip4/169.254.1.1/tcp/1",
+            "/ip4/100.64.0.1/tcp/1",
+            "/ip4/0.0.0.0/tcp/1",
+            "/ip6/::1/tcp/1",
+            "/ip6/fd00::1/tcp/1",
+            "/ip6/fe80::1/tcp/1",
+        ] {
+            assert!(!dialable(&a(local), false), "{local}");
+            assert!(dialable(&a(local), true), "{local} with LAN allowed");
+        }
+        // Never a relay circuit: that is what we are trying to get off.
+        let circuit = a("/ip4/8.8.8.8/tcp/4001/p2p/12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc/p2p-circuit");
+        assert!(!dialable(&circuit, true));
     }
 
     #[test]

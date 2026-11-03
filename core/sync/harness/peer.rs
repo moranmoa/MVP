@@ -139,6 +139,17 @@ async fn handle(peer: &Arc<Peer>, command: Command) -> Result<Value> {
                 logs: vec![peer.log.clone()],
                 // The harness measures sync, not permissions.
                 authorizer: Arc::new(AcceptAll),
+                listen: "/ip4/0.0.0.0/tcp/4001".parse()?,
+                // The other harness peers, directly on the Docker network: the
+                // relay only hands out global addresses, so without this the
+                // peers would only meet through capped relay circuits.
+                bootstrap: std::env::var("PEERS")
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|p| !p.is_empty() && *p != peer.name)
+                    .map(|p| format!("/dns4/{p}/tcp/4001").parse())
+                    .collect::<Result<_, _>>()?,
+                allow_lan: true,
             })
             .await?;
             let peer_id = started.peer_id();

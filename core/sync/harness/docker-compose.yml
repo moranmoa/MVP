@@ -9,6 +9,8 @@ x-peer: &peer
   networks: [infra_default]
   environment:
     RELAY: /dns4/relay/tcp/4001/p2p/12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc
+    # Dialled directly on this network (each peer skips its own name).
+    PEERS: p1,p2,p3,p4
     RUST_LOG: ${RUST_LOG:-info}
 
 services:

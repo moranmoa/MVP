@@ -61,6 +61,23 @@ Every record from a peer passes these checks, in order, before it is stored, for
 
 Gossip outcomes: stored → `Accept`; duplicate or still waiting for deps → `Ignore`; anything else → `Reject`.
 
+### Harness with signed records (2 runs, 2026-11-03)
+
+| Measure | Run 1 | Run 2 |
+|---|---|---|
+| 1,000 concurrent messages → identical state | 810 ms | 482 ms |
+| Live p95 delivery latency | 10.3 ms | 2.4 ms |
+| Catch-up of 10,000 missed messages | 1,208 ms | 1,356 ms |
+| Join → first messages | 263 ms | 314 ms |
+| Join → full history (11,600 messages) | 1,423 ms | 2,026 ms |
+
+Every target still passes. Catch-up takes about 1 s longer than with unsigned blobs, which is the cost of checking 10,000 Ed25519 signatures. That work runs on blocking threads, not on the network task.
+
+**Discovery.** The relay now publishes only global addresses (relay PR #30), so on the Docker network the peers would only meet through relay circuits, which are capped at 128 KiB and 2 minutes. The node therefore:
+- dials `bootstrap` peers directly (the harness passes `p1..p4`);
+- replaces a relayed connection with a direct one as soon as one exists;
+- upgrades from what identify reports. Non-global addresses are dialled only with `allow_lan`, which is on in the harness and off for real users.
+
 ## Limits on peer input (added after the spike)
 
 Everything a peer sends is untrusted. The node enforces these limits:
