@@ -125,7 +125,7 @@ fn two_users_chat_through_a_relay() {
     let mut old: Vec<Vec<u8>> = messages
         .iter()
         .filter(|r| r.kind() == Kind::Message)
-        .map(|r| r.body()[..64].to_vec())
+        .map(|r| r.body()[..r.body().len().min(64)].to_vec())
         .collect();
     assert_eq!(old.len(), 2);
     owner.core.edit_message(&sent.id, "edited").unwrap();
