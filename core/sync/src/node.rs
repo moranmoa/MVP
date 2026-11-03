@@ -261,6 +261,8 @@ enum Command {
     Presence { server: ServerId, reply: oneshot::Sender<PresenceState> },
     Peers { reply: oneshot::Sender<Vec<PeerId>> },
     ListenAddrs { reply: oneshot::Sender<Vec<Multiaddr>> },
+    #[cfg(test)]
+    Served { peer: PeerId, log: String, reply: oneshot::Sender<usize> },
     Prune { id: RecordId, reply: oneshot::Sender<Result<bool>> },
     Shutdown { reply: oneshot::Sender<()> },
 }
@@ -423,6 +425,8 @@ impl Node {
             own: HashSet::new(),
             acks: Acks::new(ACKS_PER_AUTHOR, MAX_ACK_AUTHORS, ACK_TTL),
             soon: HashSet::new(),
+            #[cfg(test)]
+            served: HashMap::new(),
             presence: Presence::default(),
             last_seen: HashMap::new(),
             reached: false,
@@ -505,6 +509,14 @@ impl Node {
 
     /// The addresses the node listens on right now (empty until the listener
     /// is up; a relay circuit shows once reserved).
+    /// Tests: how many entries our pull answers to `peer` for `log` carried.
+    #[cfg(test)]
+    async fn served(&self, peer: PeerId, log: &str) -> usize {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::Served { peer, log: log.into(), reply }).unwrap();
+        rx.await.unwrap()
+    }
+
     pub async fn listen_addrs(&self) -> Result<Vec<Multiaddr>> {
         let (reply, rx) = oneshot::channel();
         self.send(Command::ListenAddrs { reply })?;
@@ -690,7 +702,7 @@ impl ReadCheck {
 
 /// A finished answer: who asked, where to reply, the page, and the bytes
 /// reserved for it when the request came in.
-type Answer = (PeerId, ResponseChannel<SyncResponse>, SyncResponse, usize, Vec<RecordId>);
+type Answer = (PeerId, ResponseChannel<SyncResponse>, SyncResponse, usize, Vec<RecordId>, String);
 /// A pulled page after decoding: (peer, log), the records that verified
 /// and belong to the log, and whether the peer said there is more.
 type Decoded = ((PeerId, String), Vec<Incoming>, bool, Vec<RecordId>);
@@ -758,6 +770,9 @@ struct Task {
     acks: Acks<(ServerId, PublicKey)>,
     /// Logs to pull again shortly (to pick up acks after writing).
     soon: HashSet<String>,
+    /// Tests: entries served per (peer, log).
+    #[cfg(test)]
+    served: HashMap<(PeerId, String), usize>,
     /// Who is online, per server (M2).
     presence: Presence,
     last_seen: HashMap<ServerId, SystemTime>,
@@ -884,6 +899,10 @@ impl Task {
             }
             Command::Prune { id, reply } => {
                 let _ = reply.send(self.store.prune(&id, &*self.stub_gate).map_err(Into::into));
+            }
+            #[cfg(test)]
+            Command::Served { peer, log, reply } => {
+                let _ = reply.send(self.served.get(&(peer, log)).copied().unwrap_or(0));
             }
             Command::ListenAddrs { reply } => {
                 let _ = reply.send(self.swarm.listeners().cloned().collect());
@@ -1301,7 +1320,7 @@ impl Task {
         let answers = self.answers.clone();
         tokio::task::spawn_blocking(move || {
             let Ok(store) = store.lock() else {
-                let _ = answers.send((peer, channel, empty_response(), max_bytes, Vec::new()));
+                let _ = answers.send((peer, channel, empty_response(), max_bytes, Vec::new(), log));
                 return;
             };
             let (mut response, ids) = match gate {
@@ -1309,7 +1328,7 @@ impl Task {
                 _ => answer_with_ids(&store, &log, &request.have, max_bytes),
             };
             for_members_only(&mut response, ours, &acks, &store);
-            let _ = answers.send((peer, channel, response, max_bytes, ids));
+            let _ = answers.send((peer, channel, response, max_bytes, ids, log));
         });
     }
 
@@ -1339,7 +1358,11 @@ impl Task {
     /// Sends a finished answer, charges its size to the byte budgets, and
     /// reports our own records in it that leave this device for the first time.
     fn send_answer(&mut self, answer: Answer) {
-        let (peer, channel, response, reserved, ids) = answer;
+        let (peer, channel, response, reserved, ids, _log) = answer;
+        #[cfg(test)]
+        {
+            *self.served.entry((peer, _log)).or_default() += response.records.len();
+        }
         for id in ids {
             if self.unsent.remove(&id) {
                 self.emit(NodeEvent::Sent { id });
@@ -2360,6 +2383,12 @@ mod tests {
         // documented GAP-4b residual; it only got m1, which waits for m0.)
         let pulled: Vec<_> = stored.lock().unwrap().iter().filter(|(log, _, via)| *log == chan() && *via == Via::Pull).cloned().collect();
         assert!(pulled.is_empty(), "a bound non-member pulled a channel: {pulled:?}");
+        // And at the source: the owner's answers to the stranger carried
+        // control records but not one channel entry. So this checks the
+        // ReadGate path itself, not gossip.
+        assert!(owner.served(stranger.peer_id(), &log_name(server(), Scope::Control)).await >= 1);
+        assert_eq!(owner.served(stranger.peer_id(), &chan()).await, 0, "the owner served the channel to a non-member");
+        assert!(owner.served(member.peer_id(), &chan()).await >= 1);
         assert_eq!(counts(&stranger).await, (2, 0));
         assert_eq!(counts(&unbound).await, (0, 0), "a pull without a binding was answered");
         assert_eq!(counts(&outsider).await, (0, 0), "a wrong secret was answered");
