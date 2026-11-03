@@ -44,6 +44,13 @@ pub const MAX_VALIDITY_SECS: u64 = 30 * 86_400;
 /// behind cannot update until fixed; the app should say "check your clock".
 pub const MAX_CLOCK_SKEW_SECS: u64 = 86_400;
 
+/// Release notes: at most this many languages ...
+pub const MAX_NOTES_LANGUAGES: usize = 8;
+
+/// ... and this many UTF-8 bytes per language (about 2,000 Hebrew letters).
+/// Both together stay well inside MAX_MANIFEST_BYTES.
+pub const MAX_NOTES_BYTES: usize = 4096;
+
 /// What one release contains. Written by the release engineer, then signed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,6 +70,12 @@ pub struct ManifestBody {
     /// Versions that must never be installed or rolled back to.
     #[serde(default)]
     pub revoked: BTreeSet<Version>,
+    /// "What's new", by language tag (`he`, `en`, `pt-BR`): plain text the
+    /// app shows after the update. Signed with the rest of the body, so it
+    /// can be trusted as much as the version; the UI still renders it as text
+    /// only, never HTML or Markdown.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub notes: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,7 +92,31 @@ pub fn is_valid_name(s: &str) -> bool {
     (1..=32).contains(&s.len()) && s.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_'))
 }
 
+/// `ll`, `lll` or `ll-CC`: enough for the app's languages, nothing that
+/// could carry markup or a path.
+fn is_valid_lang(s: &str) -> bool {
+    let (base, region) = match s.split_once('-') {
+        Some((b, r)) => (b, Some(r)),
+        None => (s, None),
+    };
+    (2..=3).contains(&base.len())
+        && base.bytes().all(|b| b.is_ascii_lowercase())
+        && region.is_none_or(|r| r.len() == 2 && r.bytes().all(|b| b.is_ascii_uppercase()))
+}
+
+/// No control characters except newlines: notes are shown as plain text.
+fn is_plain_text(s: &str) -> bool {
+    !s.chars().any(|c| c.is_control() && c != '\n')
+}
+
 impl ManifestBody {
+    /// The notes to show for a UI language: the exact tag, then its base
+    /// language (`he-IL` → `he`), then English, then Hebrew.
+    pub fn notes_for(&self, lang: &str) -> Option<&str> {
+        let base = lang.split('-').next().unwrap_or(lang);
+        [lang, base, "en", "he"].into_iter().find_map(|l| self.notes.get(l)).map(String::as_str)
+    }
+
     /// Internal consistency checks, independent of time and client state.
     pub fn validate(&self) -> Result<(), Error> {
         let bad = |why: &str| Err(Error::Malformed(why.to_string()));
@@ -99,14 +136,21 @@ impl ManifestBody {
             return bad("no artifacts");
         }
         for (platform, a) in &self.artifacts {
-            let hex_ok = a.sha256.len() == 64
-                && a.sha256.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+            let hex_ok = a.sha256.len() == 64 && a.sha256.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
             if !is_valid_name(platform) || !hex_ok {
                 return Err(Error::Malformed(format!("bad artifact entry {platform:?}")));
             }
         }
         if self.revoked.contains(&self.version) {
             return bad("manifest revokes its own version");
+        }
+        if self.notes.len() > MAX_NOTES_LANGUAGES {
+            return bad("too many notes languages");
+        }
+        for (lang, text) in &self.notes {
+            if !is_valid_lang(lang) || text.is_empty() || text.len() > MAX_NOTES_BYTES || !is_plain_text(text) {
+                return Err(Error::Malformed(format!("bad notes entry {lang:?}")));
+            }
         }
         Ok(())
     }
@@ -198,8 +242,7 @@ impl SignedManifest {
     /// The body, parsed and validated but **not** signature-checked. For a
     /// co-signer to read before adding their signature; never for clients.
     pub fn body_unverified(&self) -> Result<ManifestBody, Error> {
-        let body: ManifestBody =
-            serde_json::from_str(&self.signed).map_err(|e| Error::Malformed(e.to_string()))?;
+        let body: ManifestBody = serde_json::from_str(&self.signed).map_err(|e| Error::Malformed(e.to_string()))?;
         body.validate()?;
         Ok(body)
     }
@@ -282,6 +325,7 @@ pub(crate) mod tests {
             expires_at: NOW + 7 * 86_400,
             artifacts,
             revoked: BTreeSet::new(),
+            notes: BTreeMap::new(),
         }
     }
 
@@ -311,10 +355,7 @@ pub(crate) mod tests {
     fn unsigned_manifest_is_rejected() {
         let k = key();
         let m = signed_by(&body("1.0.0"), &[]);
-        assert_eq!(
-            m.verify(&root(&[&k], 1), NOW),
-            Err(Error::InsufficientSignatures { valid: 0, required: 1 })
-        );
+        assert_eq!(m.verify(&root(&[&k], 1), NOW), Err(Error::InsufficientSignatures { valid: 0, required: 1 }));
     }
 
     #[test]
@@ -348,10 +389,8 @@ pub(crate) mod tests {
         let k = key();
         let mut m = signed_by(&body("1.0.0"), &[]);
         let raw = k.sign(m.signed.as_bytes());
-        m.signatures.push(SignatureEntry {
-            key: hex::encode(k.verifying_key().to_bytes()),
-            sig: hex::encode(raw.to_bytes()),
-        });
+        m.signatures
+            .push(SignatureEntry { key: hex::encode(k.verifying_key().to_bytes()), sig: hex::encode(raw.to_bytes()) });
         assert!(matches!(m.verify(&root(&[&k], 1), NOW), Err(Error::InsufficientSignatures { .. })));
     }
 
@@ -369,7 +408,7 @@ pub(crate) mod tests {
         let k = key();
         let mut m = signed_by(&body("1.0.0"), &[&k]);
         let filler = SignatureEntry { key: hex::encode(k.verifying_key().to_bytes()), sig: "00".repeat(64) };
-        m.signatures.extend(std::iter::repeat(filler).take(MAX_SIGNATURES));
+        m.signatures.extend(std::iter::repeat_n(filler, MAX_SIGNATURES));
         assert!(matches!(m.verify(&root(&[&k], 1), NOW), Err(Error::Malformed(_))));
     }
 
@@ -562,5 +601,57 @@ pub(crate) mod tests {
         assert!(signed_by(&b, &[&k]).verify(&r, NOW).is_ok());
         b.issued_at += 1;
         assert!(matches!(signed_by(&b, &[&k]).verify(&r, NOW), Err(Error::IssuedInFuture { .. })));
+    }
+
+    fn with_notes(pairs: &[(&str, &str)]) -> ManifestBody {
+        let mut b = body("1.2.0");
+        b.notes = pairs.iter().map(|(l, t)| (l.to_string(), t.to_string())).collect();
+        b
+    }
+
+    #[test]
+    fn signed_notes_round_trip_and_pick_a_language() {
+        let k = key();
+        let r = TrustRoot::single(k.verifying_key()).unwrap();
+        let b = with_notes(&[("he", "תיקוני באגים\nשיפורים"), ("en", "Bug fixes"), ("pt-BR", "Correções")]);
+        let v = signed_by(&b, &[&k]).verify(&r, NOW).unwrap();
+        assert_eq!(v.body().notes_for("he-IL"), Some("תיקוני באגים\nשיפורים"));
+        assert_eq!(v.body().notes_for("pt-BR"), Some("Correções"));
+        assert_eq!(v.body().notes_for("fr"), Some("Bug fixes"));
+        assert_eq!(with_notes(&[("he", "x")]).notes_for("fr"), Some("x"));
+        assert_eq!(body("1.2.0").notes_for("he"), None);
+    }
+
+    #[test]
+    fn notes_are_optional_and_omitted_when_empty() {
+        let json = serde_json::to_string(&body("1.2.0")).unwrap();
+        assert!(!json.contains("notes"));
+        let back: ManifestBody = serde_json::from_str(&json).unwrap();
+        assert!(back.notes.is_empty());
+    }
+
+    #[test]
+    fn bad_notes_are_refused() {
+        let long = "א".repeat(MAX_NOTES_BYTES / 2 + 1);
+        let many: Vec<(String, String)> =
+            (0..=MAX_NOTES_LANGUAGES).map(|i| (format!("a{}", (b'a' + i as u8) as char), "x".into())).collect();
+        let mut too_many = body("1.2.0");
+        too_many.notes = many.into_iter().collect();
+        for b in [
+            with_notes(&[("he", "")]),
+            with_notes(&[("he", &long)]),
+            with_notes(&[("he", "a\u{1b}[31mred")]),
+            with_notes(&[("he", "a\rb")]),
+            with_notes(&[("en", "a\u{85}b")]),
+            with_notes(&[("HE", "x")]),
+            with_notes(&[("he_IL", "x")]),
+            with_notes(&[("he-il", "x")]),
+            with_notes(&[("../x", "x")]),
+            with_notes(&[("<b>", "x")]),
+            too_many,
+        ] {
+            assert!(matches!(b.validate(), Err(Error::Malformed(_))), "{:?}", b.notes.keys());
+        }
+        assert!(with_notes(&[("he", &"א".repeat(MAX_NOTES_BYTES / 2))]).validate().is_ok());
     }
 }
