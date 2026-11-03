@@ -38,7 +38,7 @@ pub const VERSION: u8 = 1;
 
 /// Prefixed to the envelope before signing and hashing, so a record
 /// signature can never be replayed as a signature over some other message.
-const SIGNING_CONTEXT: &[u8] = b"mvp/record/v1\0";
+const SIGNING_CONTEXT: &[u8] = b"mvs/record/v1\0";
 
 /// Most heads a record may point at. A writer that sees more merges them.
 pub const MAX_DEPS: usize = 64;
@@ -116,7 +116,7 @@ id_type!(
 /// metadata.
 pub const GENESIS_NONCE_LEN: usize = 16;
 
-const SERVER_ID_CONTEXT: &[u8] = b"mvp/server-id/v1\0";
+const SERVER_ID_CONTEXT: &[u8] = b"mvs/server-id/v1\0";
 
 impl ServerId {
     /// The ID of the server whose genesis is written by `owner` with `nonce`
@@ -618,7 +618,7 @@ mod tests {
         assert_ne!(other_author.id(), a.id());
     }
 
-    const GOLDEN_ID: &str = "9b1348f27cdd00f618838d5dedfce1acc74ff47449cdde33a615da091f2a11d4";
+    const GOLDEN_ID: &str = "645946b1558de504af00d486f14bdfb4c0e47674f00964bd5a56bccb97a3d7aa";
 
     #[test]
     fn tampered_body_is_rejected() {

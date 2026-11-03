@@ -21,7 +21,7 @@
 //! between passes) so it can judge a new record the way the reference would,
 //! and falls back to a full re-resolve when the earlier passes matter.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use records::{Record, RecordId, Scope, ServerId};
 
@@ -46,23 +46,32 @@ enum Fallback {
 }
 
 /// What [`Resolver::insert`] did with a record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Inserted {
     /// It joined the log, along with any waiting records it unblocked.
     Joined,
-    /// Some of its deps haven't arrived; it waits for them.
-    Pending,
+    /// Some of its deps haven't arrived; it waits for them. If the pending
+    /// queue was full, the record that had waited longest made room and is
+    /// handed back: request its deps (or the record) again later.
+    Pending { evicted: Option<Box<Record>> },
     /// A duplicate, another server's record, or not a control-log record.
     Ignored,
-    /// Its deps are missing and the pending queue is full, so it wasn't
-    /// kept. Deliver it again once its deps have joined.
-    Dropped,
 }
 
 /// Default for how many records may wait on missing deps at once. Anyone can
 /// sign records that point at deps which will never arrive, so the queue is
-/// bounded: at most about 26 MB of control records.
+/// bounded (at most about 26 MB of control records), and when it is full the
+/// oldest waiting record is evicted: junk ages out instead of holding the
+/// queue.
 pub const MAX_PENDING: usize = 4096;
+
+/// A record waiting on deps.
+struct Waiting {
+    /// How many of its deps haven't joined.
+    missing: usize,
+    /// Arrival number, for evicting the oldest.
+    arrival: u64,
+}
 
 /// Holds one server's control log and its resolved state, updated as records
 /// arrive in any order.
@@ -73,10 +82,13 @@ pub struct Resolver {
     pending_limit: usize,
     /// Every control record received, whether or not its deps have arrived.
     known: HashMap<RecordId, Record>,
-    /// Records still waiting on deps: how many are missing.
-    missing: HashMap<RecordId, usize>,
+    /// Records still waiting on deps.
+    missing: HashMap<RecordId, Waiting>,
     /// Missing dep -> the records waiting on it.
     waiting: HashMap<RecordId, Vec<RecordId>>,
+    /// Waiting records by arrival, oldest first.
+    arrivals: BTreeMap<u64, RecordId>,
+    next_arrival: u64,
 
     /// Records that joined the log, in the reference's linear order.
     order: Vec<RecordId>,
@@ -108,14 +120,17 @@ impl Resolver {
         Self::with_pending_limit(server, MAX_PENDING)
     }
 
-    /// Like [`Self::new`], with room for `limit` records waiting on deps.
+    /// Like [`Self::new`], with room for `limit` (at least 1) records waiting
+    /// on deps.
     pub fn with_pending_limit(server: ServerId, limit: usize) -> Self {
         Resolver {
             server,
-            pending_limit: limit,
+            pending_limit: limit.max(1),
             known: HashMap::new(),
             missing: HashMap::new(),
             waiting: HashMap::new(),
+            arrivals: BTreeMap::new(),
+            next_arrival: 0,
             order: Vec::new(),
             pos: HashMap::new(),
             actions: HashMap::new(),
@@ -149,7 +164,8 @@ impl Resolver {
 
     /// Adds an arriving record. Duplicates, other servers' records and
     /// records outside the control log are ignored; records with missing
-    /// deps wait for them, up to the pending limit.
+    /// deps wait for them; when the pending queue is full, the oldest waiting
+    /// record is evicted and returned.
     pub fn insert(&mut self, record: Record) -> Inserted {
         let id = record.id();
         if record.server() != self.server
@@ -161,15 +177,17 @@ impl Resolver {
         let missing: Vec<RecordId> =
             record.deps().iter().filter(|dep| !self.pos.contains_key(*dep)).copied().collect();
         if !missing.is_empty() {
-            if self.missing.len() >= self.pending_limit {
-                return Inserted::Dropped;
-            }
+            let evicted =
+                if self.missing.len() >= self.pending_limit { self.evict_oldest() } else { None };
             for dep in &missing {
                 self.waiting.entry(*dep).or_default().push(id);
             }
-            self.missing.insert(id, missing.len());
+            let arrival = self.next_arrival;
+            self.next_arrival += 1;
+            self.arrivals.insert(arrival, id);
+            self.missing.insert(id, Waiting { missing: missing.len(), arrival });
             self.known.insert(id, record);
-            return Inserted::Pending;
+            return Inserted::Pending { evicted: evicted.map(Box::new) };
         }
         self.known.insert(id, record);
 
@@ -177,10 +195,12 @@ impl Resolver {
         while let Some(id) = ready.pop() {
             self.join(id);
             for waiter in self.waiting.remove(&id).unwrap_or_default() {
-                let count = self.missing.get_mut(&waiter).expect("waiter is pending");
-                *count -= 1;
-                if *count == 0 {
+                let entry = self.missing.get_mut(&waiter).expect("waiter is pending");
+                entry.missing -= 1;
+                if entry.missing == 0 {
+                    let arrival = entry.arrival;
                     self.missing.remove(&waiter);
+                    self.arrivals.remove(&arrival);
                     ready.push(waiter);
                 }
             }
@@ -189,6 +209,23 @@ impl Resolver {
             self.rebuild(reason);
         }
         Inserted::Joined
+    }
+
+    /// Forgets the record that has waited longest, so a flood of records
+    /// whose deps never arrive ages out instead of holding the queue.
+    fn evict_oldest(&mut self) -> Option<Record> {
+        let (_, id) = self.arrivals.pop_first()?;
+        self.missing.remove(&id);
+        let record = self.known.remove(&id).expect("waiting records are known");
+        for dep in record.deps() {
+            if let Some(waiters) = self.waiting.get_mut(dep) {
+                waiters.retain(|waiter| *waiter != id);
+                if waiters.is_empty() {
+                    self.waiting.remove(dep);
+                }
+            }
+        }
+        Some(record)
     }
 
     /// Puts a record whose deps have all joined into the log.

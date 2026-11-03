@@ -118,21 +118,23 @@ fn all_delivery_orders_converge() {
     );
 }
 
-/// Delivers `records` in order. Records dropped because the pending queue
-/// was full are delivered again afterwards, the way a peer re-requests what
-/// it couldn't keep. Returns how many redeliveries that took.
+/// Delivers `records` in order. Records evicted from the pending queue are
+/// delivered again afterwards, the way a peer re-requests what it couldn't
+/// keep. Returns how many redeliveries that took.
 fn apply_all(records: &[Record]) -> (Resolver, Duration, usize) {
     let mut resolver = Resolver::new(server());
     let start = Instant::now();
     let mut redelivered = 0;
-    let mut round: Vec<&Record> = records.iter().collect();
+    let mut round: Vec<Record> = records.to_vec();
     while !round.is_empty() {
-        let dropped: Vec<&Record> = round
-            .into_iter()
-            .filter(|record| resolver.insert((*record).clone()) == Inserted::Dropped)
-            .collect();
-        redelivered += dropped.len();
-        round = dropped;
+        let mut evicted = Vec::new();
+        for record in round {
+            if let Inserted::Pending { evicted: Some(record) } = resolver.insert(record) {
+                evicted.push(*record);
+            }
+        }
+        redelivered += evicted.len();
+        round = evicted;
     }
     (resolver, start.elapsed(), redelivered)
 }
@@ -173,7 +175,7 @@ fn incremental_vs_full_on_a_large_control_log() {
     let (resolver, total, redelivered) = apply_all(&shuffled);
     assert_eq!(resolver.state(), &expected);
     println!(
-        "incremental, random order: all {n} records in {total:?} ({}; {redelivered} redelivered after the pending queue filled)",
+        "incremental, random order: all {n} records in {total:?} ({}; {redelivered} redelivered after eviction from the full pending queue)",
         describe(resolver.stats())
     );
 }

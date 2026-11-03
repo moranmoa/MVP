@@ -17,7 +17,9 @@
 //! - A revoke voids the target's privileged actions that are concurrent with
 //!   it (not causal ancestors of it). A kick voids all of the target's
 //!   concurrent records. This blocks "backdating": signing new records whose
-//!   deps point at state from before the removal.
+//!   deps point at state from before the removal. When two kicks of the same
+//!   target are concurrent, only the first in linear order is accepted (the
+//!   target is already kicked by the second), so only its voids apply.
 //! - Ties between concurrent records are broken by the record ID.
 //!
 //! Records come from the `records` crate, so they are signed and their IDs are
@@ -102,7 +104,11 @@ impl Action {
             Kind::Grant => {
                 let (target, role) = body.split_at_checked(32)?;
                 let [role] = role else { return None };
-                Some(Action::Grant { target: key(target)?, role: Role::from_code(*role)? })
+                // Only moderator and admin can be granted: demoting is a
+                // revoke, and ownership comes from the genesis.
+                let role =
+                    Role::from_code(*role).filter(|r| *r > Role::Member && *r < Role::Owner)?;
+                Some(Action::Grant { target: key(target)?, role })
             }
             Kind::Revoke => Some(Action::Revoke { target: key(body)? }),
             Kind::Kick => Some(Action::Kick { target: key(body)? }),
@@ -466,11 +472,11 @@ impl<'a> Graph<'a> {
                 Action::Genesis => pass.genesis = Some(record.id()),
                 Action::Grant { .. } => {}
                 Action::Revoke { target } => {
-                    pass.voided.extend(self.concurrent_by(i, *target, true));
+                    pass.voided.extend(self.voids_of(i));
                     pass.revoke_targets.push(*target);
                 }
                 Action::Kick { target } => {
-                    pass.voided.extend(self.concurrent_by(i, *target, false));
+                    pass.voided.extend(self.voids_of(i));
                     pass.kick_targets.push(*target);
                 }
             }
@@ -482,8 +488,16 @@ impl<'a> Graph<'a> {
         pass
     }
 
-    /// Records by `target` that the removal at `removal` hadn't seen.
-    fn concurrent_by(&self, removal: usize, target: Actor, privileged_only: bool) -> Vec<usize> {
+    /// What the accepted removal at `removal` voids: the target's records it
+    /// hadn't seen (only privileged ones for a revoke). Cached per removal;
+    /// the target and kind are read from the record itself, so the cache key
+    /// says everything.
+    fn voids_of(&self, removal: usize) -> Vec<usize> {
+        let (target, privileged_only) = match &self.actions[removal] {
+            Some(Action::Revoke { target }) => (*target, true),
+            Some(Action::Kick { target }) => (*target, false),
+            _ => return Vec::new(),
+        };
         let mut voids = self.voids.borrow_mut();
         let voided = voids.entry(removal).or_insert_with(|| {
             // Ancestors come earlier in the linear order.

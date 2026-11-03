@@ -127,6 +127,11 @@ fn demoting_by_grant_is_refused_so_backdating_stays_blocked() {
     let state = both(&[g.clone(), moderator.clone(), admin.clone(), demote.clone(), lower.clone()]);
     assert!(!state.accepted.contains(&demote.id()));
     assert!(!state.accepted.contains(&lower.id()));
+    // A grant of Member or Owner doesn't even parse.
+    let owner = rec(0, 5, vec![admin.id()], Action::Grant { target: actor(1), role: Role::Owner });
+    assert_eq!(Action::from_record(&demote), None);
+    assert_eq!(Action::from_record(&owner), None);
+    assert!(Action::from_record(&lower).is_some());
     assert_eq!(state.role(actor(1)), Role::Moderator);
     assert_eq!(state.role(actor(2)), Role::Admin);
 
@@ -170,32 +175,65 @@ fn kicked_actors_cannot_act() {
     assert!(!state.accepted.contains(&regrant.id()));
 }
 
+/// A record by an outsider pointing at a dep that will never arrive.
+fn orphan(n: u8) -> Record {
+    rec(9, u64::from(n), vec![RecordId::from_bytes([n; 32])], Action::Post { text: "junk".into() })
+}
+
+fn evicted(inserted: Inserted) -> Option<RecordId> {
+    match inserted {
+        Inserted::Pending { evicted } => evicted.map(|r| r.id()),
+        other => panic!("expected Pending, got {other:?}"),
+    }
+}
+
 #[test]
 fn records_waiting_on_missing_deps_are_bounded() {
-    let g = genesis();
     let mut resolver = Resolver::with_pending_limit(server(), 3);
-    let orphan = |n: u8| {
-        rec(
-            5,
-            u64::from(n),
-            vec![RecordId::from_bytes([n; 32])],
-            Action::Post { text: "never".into() },
-        )
-    };
     for n in 0..3 {
-        assert_eq!(resolver.insert(orphan(n)), Inserted::Pending);
+        assert_eq!(evicted(resolver.insert(orphan(n))), None);
     }
-    assert_eq!(resolver.insert(orphan(3)), Inserted::Dropped);
+    // Full: the oldest waiting record makes room and is handed back.
+    assert_eq!(evicted(resolver.insert(orphan(3))), Some(orphan(0).id()));
+    assert_eq!(evicted(resolver.insert(orphan(4))), Some(orphan(1).id()));
     assert_eq!(resolver.pending(), 3);
+    // An evicted record is forgotten, so it can be delivered again.
+    assert_eq!(evicted(resolver.insert(orphan(0))), Some(orphan(2).id()));
+    assert_eq!(resolver.insert(orphan(0)), Inserted::Ignored);
+}
 
-    // While full, a record waiting on our genesis is dropped too; once the
-    // genesis joins, delivering it again works.
-    let post = rec(1, 0, vec![g.id()], Action::Post { text: "hi".into() });
-    assert_eq!(resolver.insert(post.clone()), Inserted::Dropped);
+#[test]
+fn a_full_pending_queue_recovers_for_genuine_traffic() {
+    let limit = 64;
+    let mut resolver = Resolver::with_pending_limit(server(), limit);
+    let g = genesis();
     assert_eq!(resolver.insert(g.clone()), Inserted::Joined);
-    assert_eq!(resolver.insert(post.clone()), Inserted::Joined);
-    assert_eq!(resolver.insert(post.clone()), Inserted::Ignored);
-    assert_eq!(resolver.state(), &resolve(server(), &[g, post]));
+    // An outsider fills the queue with records whose deps never arrive.
+    for n in 0..limit as u8 {
+        resolver.insert(orphan(n.wrapping_add(1)));
+    }
+    assert_eq!(resolver.pending(), limit);
+
+    // Genuine records then arrive children first, as gossip may deliver
+    // them. Each one evicts junk rather than being lost.
+    let mut chain = Vec::new();
+    let mut deps = vec![g.id()];
+    for seq in 1..=10 {
+        let post = rec(0, seq, deps, Action::Post { text: format!("#{seq}") });
+        deps = vec![post.id()];
+        chain.push(post);
+    }
+    for post in chain.iter().skip(1).rev() {
+        let junk = evicted(resolver.insert(post.clone())).expect("queue is full");
+        assert!(chain.iter().all(|p| p.id() != junk), "evicted a genuine record");
+    }
+    // The first one unblocks the whole chain.
+    assert_eq!(resolver.insert(chain[0].clone()), Inserted::Joined);
+    assert_eq!(resolver.pending(), limit - 9);
+    let mut all = vec![g];
+    all.extend(chain.iter().cloned());
+    assert_eq!(resolver.state(), &resolve(server(), &all));
+    assert_eq!(resolver.state().posts.len(), 10);
 }
 
 /// Hostile logs that used to cost quadratic time or memory.
