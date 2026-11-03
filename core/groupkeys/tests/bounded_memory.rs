@@ -39,7 +39,7 @@ fn bulk(rotator: u8, prev: Option<RecordId>, epoch: u64, parts: usize, seed: u64
     let mut ephemeral = [0; 32];
     ephemeral[..8].copy_from_slice(&seed.to_le_bytes());
     header.extend_from_slice(&ephemeral);
-    let id = rotation_id(pk(rotator), &header);
+    let id = rotation_id(SERVER, pk(rotator), &header);
     let parts = (0..parts)
         .map(|index| {
             let mut body = id.as_bytes().to_vec();

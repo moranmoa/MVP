@@ -83,7 +83,7 @@ fn part_header_is_strict() {
     }
 
     // The rotation ID must be the one the rotator and header give: a changed
-    // ID, a changed header byte, or another rotator all fail.
+    // ID, a changed header byte, another rotator or another server all fail.
     let mut id = body();
     id[0] ^= 1;
     assert_eq!(decode(&id), Err(Error::RotationIdMismatch));
@@ -94,12 +94,14 @@ fn part_header_is_strict() {
     ephemeral[H + 50] ^= 1;
     assert_eq!(decode(&ephemeral), Err(Error::RotationIdMismatch));
     assert_eq!(Rotation::decode(SERVER, pk(2), &body()), Err(Error::RotationIdMismatch));
+    let elsewhere = records::ServerId::from_bytes([1; 32]);
+    assert_eq!(Rotation::decode(elsewhere, pk(1), &body()), Err(Error::RotationIdMismatch));
 
     // A one-part body claiming to be part 1 of 2 decodes as a part but
     // doesn't assemble alone.
     let mut half = body();
     half[33] = 2;
-    assert!(Part::decode(pk(1), &half).is_ok());
+    assert!(Part::decode(SERVER, pk(1), &half).is_ok());
     assert_eq!(decode(&half), Err(Error::MissingParts));
 }
 
@@ -110,7 +112,7 @@ fn assembly_is_strict() {
     let (parts, _) =
         Rotation::create(SERVER, pk(1), CHANNEL, 0, None, &everyone, &mut rng(3)).unwrap();
     assert_eq!(parts.len(), 2);
-    let part = |n: usize| Part::decode(pk(1), &parts[n]).unwrap();
+    let part = |n: usize| Part::decode(SERVER, pk(1), &parts[n]).unwrap();
     assert!(Rotation::assemble(SERVER, vec![part(1), part(0)]).is_ok());
     assert_eq!(Rotation::assemble(SERVER, vec![part(0)]), Err(Error::MissingParts));
     assert_eq!(Rotation::assemble(SERVER, vec![]), Err(Error::MissingParts));
@@ -119,7 +121,7 @@ fn assembly_is_strict() {
     // A part of another rotation by the same rotator, made to claim index 1.
     let (other, _) =
         Rotation::create(SERVER, pk(1), CHANNEL, 0, None, &everyone, &mut rng(4)).unwrap();
-    let stranger = Part::decode(pk(1), &other[1]).unwrap();
+    let stranger = Part::decode(SERVER, pk(1), &other[1]).unwrap();
     assert_eq!(Rotation::assemble(SERVER, vec![part(0), stranger]), Err(Error::PartMismatch));
 }
 
@@ -139,5 +141,5 @@ fn v1_format_is_pinned() {
     assert_eq!(blake3::hash(&ciphertext).to_hex().as_str(), GOLDEN_MESSAGE);
 }
 
-const GOLDEN_ROTATION: &str = "2c967939a6e91a12f66a18316c51fed930660d9d79c78307d4aaae02fa1fe665";
-const GOLDEN_MESSAGE: &str = "03e92f185789ec9fd65c99631cdf6dc0332b32578575e7c22c8a140561732896";
+const GOLDEN_ROTATION: &str = "e143567f809185d7a5ebab65a330bc62d4dfbdd1f0a6ed1ea3f93b41aa26fdfc";
+const GOLDEN_MESSAGE: &str = "1fff2d5cffca2af4cf9d2513aadfc33c9f1243a1a92ea15f43432db21bda35c5";

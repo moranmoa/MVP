@@ -38,8 +38,13 @@
 //! ```
 //!
 //! rotation ID = BLAKE3 `derive_key("mvs/groupkeys v1 rotation id",
-//! rotator ‖ header)`. A part whose ID doesn't match is refused, so nobody but
-//! the rotator can add a part to a rotation.
+//! rotator ‖ server ‖ header)`. The header names only the channel, so the
+//! server is bound here. A part whose ID doesn't match is refused, so nobody
+//! but the rotator can add a part to a rotation.
+//!
+//! A rotator that retries sends the same signed records again. It must never
+//! re-sign a part: a second record for the same part is equivocation, and the
+//! whole rotation is refused.
 //!
 //! Message ciphertext (the encrypted body of a channel message record):
 //!
@@ -122,12 +127,15 @@ pub const fn rotation_body_len(recipients: usize) -> usize {
     parts_for(recipients) * (PART_HEADER_LEN + ROTATION_HEADER_LEN) + recipients * WRAP_LEN
 }
 
-/// The ID of the rotation `rotator` made with `header` (ver to ephemeral, as
-/// encoded). Every part carries it; `prev` and message key hints name it.
-/// Binding the rotator means nobody else's part can claim the rotation.
-pub fn rotation_id(rotator: PublicKey, header: &[u8]) -> RecordId {
-    let mut material = Vec::with_capacity(32 + header.len());
+/// The ID of the rotation `rotator` made in `server` with `header` (ver to
+/// ephemeral, as encoded). Every part carries it; `prev` and message key
+/// hints name it. Binding the rotator means nobody else's part can claim the
+/// rotation; binding the server (the header names only the channel) keeps IDs
+/// apart across servers.
+pub fn rotation_id(server: ServerId, rotator: PublicKey, header: &[u8]) -> RecordId {
+    let mut material = Vec::with_capacity(2 * 32 + header.len());
     material.extend_from_slice(rotator.as_bytes());
+    material.extend_from_slice(server.as_bytes());
     material.extend_from_slice(header);
     RecordId::from_bytes(blake3::derive_key(ROTATION_ID_KDF, &material))
 }
@@ -439,10 +447,10 @@ pub struct Part {
 }
 
 impl Part {
-    /// Parses a part body. `rotator` is the author of the signed record that
-    /// carried it. Refuses a part whose rotation ID isn't the one its
-    /// rotator and header give.
-    pub fn decode(rotator: PublicKey, body: &[u8]) -> Result<Part, Error> {
+    /// Parses a part body. `server` and `rotator` are the server and author of
+    /// the signed record that carried it. Refuses a part whose rotation ID
+    /// isn't the one its server, rotator and header give.
+    pub fn decode(server: ServerId, rotator: PublicKey, body: &[u8]) -> Result<Part, Error> {
         let mut reader = Reader { bytes: body };
         let rotation = RecordId::from_bytes(reader.array()?);
         let index = reader.u8()?;
@@ -466,7 +474,7 @@ impl Part {
         }
         let ephemeral = MontgomeryPoint(reader.array()?);
         let header = body[PART_HEADER_LEN..body.len() - reader.bytes.len()].to_vec();
-        if rotation_id(rotator, &header) != rotation {
+        if rotation_id(server, rotator, &header) != rotation {
             return Err(Error::RotationIdMismatch);
         }
         let count = usize::from(reader.u16()?);
@@ -583,7 +591,7 @@ impl Rotation {
             }
         }
         header.extend_from_slice(ephemeral.as_bytes());
-        let id = rotation_id(rotator, &header);
+        let id = rotation_id(server, rotator, &header);
         let chunks: Vec<_> = points.chunks(WRAPS_PER_PART).collect();
         // At most MAX_PARTS (32), checked through MAX_RECIPIENTS above.
         let count = chunks.len() as u8;
@@ -668,7 +676,7 @@ impl Rotation {
 
     /// Decodes a rotation that fits in one part.
     pub fn decode(server: ServerId, rotator: PublicKey, body: &[u8]) -> Result<Rotation, Error> {
-        Rotation::assemble(server, vec![Part::decode(rotator, body)?])
+        Rotation::assemble(server, vec![Part::decode(server, rotator, body)?])
     }
 
     pub fn id(&self) -> RecordId {

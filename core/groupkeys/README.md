@@ -107,15 +107,23 @@ rotation ID [32] | part u8 | parts u8            <- records' part header (34)
 ```
 
 `rotation ID = BLAKE3.derive_key("mvs/groupkeys v1 rotation id", rotator ||
-rotation header)`. `prev` and message key hints name it. A part whose ID
-doesn't match its author and header is refused at decode, so nobody but the
-rotator can add a part to a rotation, and a part lifted into someone else's
-record goes nowhere. A rotation is used only once every part is there, all
+server || rotation header)`. The rotation header names only the channel, so
+the server is bound here and IDs are unique across servers. `prev` and
+message key hints name the rotation ID. A part whose ID doesn't match its
+server, author and header is refused at decode, so nobody but the rotator can
+add a part to a rotation, and a part lifted into someone else's record or
+another server goes nowhere. A rotation is used only once every part is there, all
 from the same author with the same header, every part but the last holds
 exactly 203 wraps, and the recipients ascend across parts: the one way
 `create` splits them. Two different records for one part (or parts that
 disagree on the count) get the whole rotation **refused**: it can never be
 head, whatever authority says.
+
+**Retrying a rotation:** resend the same signed records, never re-sign a
+part. A part signed again almost always gets new record fields (`seq`,
+`deps`, `ts`) and so a new record ID: a second record for the same part,
+which is equivocation, and the rotation is refused. A rotator that lost its
+records starts a new rotation (new ephemeral key, new rotation ID) instead.
 
 Message ciphertext: `ver u8 | epoch u64 | key hint [8] | nonce [24] | sealed`.
 The key hint is the first 8 bytes of the rotation ID, used to pick the key

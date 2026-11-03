@@ -218,7 +218,7 @@ impl ChannelKeys {
         if self.part_of.contains_key(&record) {
             return Ok((Applied::Duplicate, Vec::new()));
         }
-        let part = Part::decode(rotator, body)?;
+        let part = Part::decode(self.server, rotator, body)?;
         if part.channel() != self.channel {
             return Err(Error::WrongChannel);
         }
