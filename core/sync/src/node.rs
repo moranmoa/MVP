@@ -25,7 +25,7 @@ use anyhow::{bail, ensure, Context, Result};
 use futures::StreamExt;
 use libp2p::{
     connection_limits,
-    core::{multiaddr::Protocol, ConnectedPoint},
+    core::{multiaddr::Protocol, transport::ListenerId, ConnectedPoint},
     gossipsub::{self, MaxCountSubscriptionFilter, MessageAcceptance, TopicHash, TopicSubscriptionFilter},
     identify, identity, kad, noise, ping, relay,
     request_response::{self, ProtocolSupport, ResponseChannel},
@@ -116,6 +116,10 @@ const MIN_PAGE_BUDGET: usize = 64 * 1024;
 /// [`BINDING_RENEW`] is left. Under [`access::MAX_BINDING_TTL`].
 const BINDING_TTL: Duration = Duration::from_secs(23 * 3600);
 const BINDING_RENEW: Duration = Duration::from_secs(3600);
+/// Waits between relay dials while it is down: reconnects within a minute
+/// of a relay restart (plus the discovery tick).
+const RELAY_BACKOFF_MIN: Duration = Duration::from_secs(1);
+const RELAY_BACKOFF_MAX: Duration = Duration::from_secs(30);
 
 pub struct NodeConfig {
     /// Bootstrap/relay node, ending in /p2p/<peer id>.
@@ -163,6 +167,9 @@ pub enum NodeEvent {
     Stored { log: String, record: Box<Record>, via: Via, at: SystemTime },
     PeerConnected(PeerId),
     PeerDisconnected(PeerId),
+    /// The relay accepted our reservation: peers behind NAT can reach us
+    /// through it now. Sent again after the relay restarts.
+    RelayReserved,
     /// The app fell behind and `dropped` events were lost. The records are
     /// all in the store: re-read the open logs from there.
     Lagged { dropped: u64 },
@@ -294,7 +301,9 @@ impl Node {
             answering: 0,
             decoded,
             events: EventSink { tx: events, dropped: 0 },
-            circuit_listening: false,
+            circuit: None,
+            relay_backoff: RELAY_BACKOFF_MIN,
+            relay_next_dial: Instant::now(),
             bootstrap: config.bootstrap.into_iter().map(|addr| (addr, None)).collect(),
             allow_lan: config.allow_lan,
             relayed: HashMap::new(),
@@ -568,7 +577,12 @@ struct Task {
     /// Pulled pages coming back from decoding on blocking threads.
     decoded: mpsc::UnboundedSender<Decoded>,
     events: EventSink,
-    circuit_listening: bool,
+    /// Our listener on the relay circuit; re-made after the relay restarts.
+    circuit: Option<ListenerId>,
+    /// Redialling the relay while it is down: the wait doubles up to
+    /// [`RELAY_BACKOFF_MAX`], and resets once connected.
+    relay_backoff: Duration,
+    relay_next_dial: Instant,
     /// Bootstrap addresses and the peer each one turned out to be.
     bootstrap: Vec<(Multiaddr, Option<PeerId>)>,
     allow_lan: bool,
@@ -741,15 +755,29 @@ impl Task {
 
     fn discover(&mut self) {
         if self.swarm.is_connected(&self.relay_peer) {
+            if self.circuit.is_none() {
+                self.listen_on_circuit();
+            }
             let me = *self.swarm.local_peer_id();
             self.swarm.behaviour_mut().kad.get_closest_peers(me);
-        } else {
+        } else if Instant::now() >= self.relay_next_dial {
+            debug!(backoff = ?self.relay_backoff, "dialling the relay");
             let _ = self.swarm.dial(self.relay_addr.clone());
+            self.relay_next_dial = Instant::now() + self.relay_backoff;
+            self.relay_backoff = (self.relay_backoff * 2).min(RELAY_BACKOFF_MAX);
         }
         for (addr, peer) in self.bootstrap.clone() {
             if peer.is_none_or(|p| !self.direct.contains_key(&p)) {
                 let _ = self.swarm.dial(DialOpts::unknown_peer_id().address(addr).build());
             }
+        }
+    }
+
+    fn listen_on_circuit(&mut self) {
+        let circuit = self.relay_addr.clone().with(Protocol::P2pCircuit);
+        match self.swarm.listen_on(circuit) {
+            Ok(id) => self.circuit = Some(id),
+            Err(err) => warn!(%err, "listening on relay circuit failed"),
         }
     }
 
@@ -840,6 +868,7 @@ impl Task {
                     self.track_connection(peer_id, connection_id, &endpoint);
                 }
                 if peer_id == self.relay_peer {
+                    self.relay_backoff = RELAY_BACKOFF_MIN;
                     let me = *self.swarm.local_peer_id();
                     self.swarm.behaviour_mut().kad.get_closest_peers(me);
                 } else if self.connected.insert(peer_id) {
@@ -865,6 +894,15 @@ impl Task {
                 if num_established > 0 {
                     return;
                 }
+                if peer_id == self.relay_peer {
+                    // The reservation went with the connection (e.g. the relay
+                    // restarted): ask for a new one once we're back.
+                    info!("relay connection lost");
+                    if let Some(id) = self.circuit.take() {
+                        self.swarm.remove_listener(id);
+                    }
+                    self.relay_next_dial = Instant::now() + self.relay_backoff;
+                }
                 if self.connected.remove(&peer_id) {
                     info!(%peer_id, "peer disconnected");
                     self.emit(NodeEvent::PeerDisconnected(peer_id));
@@ -878,12 +916,8 @@ impl Task {
                 if peer_id == self.relay_peer {
                     // Relay circuit as a fallback for peers that can't reach us
                     // directly (NAT). On a LAN the direct address wins.
-                    if !self.circuit_listening {
-                        self.circuit_listening = true;
-                        let circuit = self.relay_addr.clone().with(Protocol::P2pCircuit);
-                        if let Err(err) = self.swarm.listen_on(circuit) {
-                            warn!(%err, "listening on relay circuit failed");
-                        }
+                    if self.circuit.is_none() {
+                        self.listen_on_circuit();
                     }
                 } else {
                     // Only addresses we would dial ourselves go into our DHT
@@ -895,6 +929,21 @@ impl Task {
                         self.try_direct(peer_id, info.listen_addrs);
                     }
                 }
+            }
+            SwarmEvent::Behaviour(BehaviourEvent::RelayClient(relay::client::Event::ReservationReqAccepted { renewal, .. })) => {
+                if !renewal {
+                    // Reachable through the relay now: look for peers and catch
+                    // up at once rather than at the next timer tick.
+                    info!("relay reservation accepted");
+                    self.emit(NodeEvent::RelayReserved);
+                    let me = *self.swarm.local_peer_id();
+                    self.swarm.behaviour_mut().kad.get_closest_peers(me);
+                    self.pull_all();
+                }
+            }
+            SwarmEvent::ListenerClosed { listener_id, .. } if self.circuit == Some(listener_id) => {
+                // Reservation refused or lost: the next discovery tick asks again.
+                self.circuit = None;
             }
             SwarmEvent::Behaviour(BehaviourEvent::Kad(kad::Event::OutboundQueryProgressed {
                 result: kad::QueryResult::GetClosestPeers(Ok(ok)),
