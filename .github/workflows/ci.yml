@@ -113,6 +113,24 @@ jobs:
       - run: npm run build
       - run: npm test
 
+  # Electron gets security fixes only for its latest three majors: fail when
+  # desktop/ falls more than one major behind or sits on a patch that was
+  # superseded more than 8 weeks ago. Talks only to registry.npmjs.org.
+  # No-op until desktop/package-lock.json exists (B1-1).
+  electron-age:
+    name: electron version age
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+      - name: Check Electron age
+        if: hashFiles('desktop/package-lock.json') != ''
+        run: node .github/scripts/electron-age.mjs desktop/package-lock.json
+
   # B10: the qa/ smoke suite (onboarding -> send -> join by link) against a
   # production build of the UI with the mock core, as qa/compose.yaml runs it.
   # The image matches @playwright/test in qa/package-lock.json, pinned by digest.
