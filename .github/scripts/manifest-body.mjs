@@ -61,6 +61,9 @@ function readNotes(dir) {
     if (Buffer.byteLength(text) > MAX_NOTES_BYTES) fail(`notes: ${file} is over ${MAX_NOTES_BYTES} bytes`);
     // Same rule as core/updater: no control characters except newline.
     if (/[^\P{Cc}\n]/u.test(text)) fail(`notes: ${file} has control characters`);
+    // Nor bidi overrides/isolates, which can reorder what the user reads
+    // (LRM/RLM marks are fine).
+    if (/[‪-‮⁦-⁩]/u.test(text)) fail(`notes: ${file} has bidi override characters`);
     notes[lang] = text;
   }
   if (Object.keys(notes).length === 0) fail(`notes: no <lang>.txt in ${dir}`);
