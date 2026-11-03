@@ -1,4 +1,4 @@
-﻿//! Spike experiment 3: peers that receive the same records in any order must
+//! Spike experiment 3: peers that receive the same records in any order must
 //! end up with the same server state, whether they recompute from scratch
 //! ([`resolve`]) or apply records incrementally ([`Resolver`]).
 
@@ -11,10 +11,9 @@ use authority::{
     resolve, Action, ChannelId, Cut, Inserted, Record, RecordId, Resolver, Role, State, Stats,
 };
 use common::{actor, genesis, rec_ts, server};
-use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
-use rand::{Rng, SeedableRng};
+mod rng;
 use records::Kind;
+use rng::{SliceRandom, StdRng};
 
 const ACTORS: u8 = 5;
 const SCENARIOS: u64 = 10_000;
@@ -217,9 +216,10 @@ fn incremental_vs_full_on_a_large_control_log() {
     let (resolver, total, _) = apply_all(&written);
     assert_eq!(resolver.state(), &expected);
     // A live peer re-resolves only for the rare removal that voids
-    // applied records; main was at 5 on this log before membership.
+    // applied records. Measured: 8 on this log (tests/rng, seed 42); the
+    // bound is that + 2. Re-measure if the generator or the scenario change.
     assert!(
-        resolver.stats().rebuilds <= 15,
+        resolver.stats().rebuilds <= 10,
         "too many re-resolves: {}",
         describe(resolver.stats())
     );

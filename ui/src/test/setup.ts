@@ -1,5 +1,9 @@
-import { cleanup } from '@testing-library/react';
+import { cleanup, configure } from '@testing-library/react';
 import { afterEach } from 'vitest';
+
+// findBy*/waitFor wait up to 1 s by default; the whole app renders in some
+// tests, and with the test files running in parallel that can take longer.
+configure({ asyncUtilTimeout: 5000 });
 
 // jsdom has <dialog> but not its modal methods.
 if (typeof HTMLDialogElement !== 'undefined' && !HTMLDialogElement.prototype.showModal) {

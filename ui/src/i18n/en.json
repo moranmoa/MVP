@@ -256,5 +256,7 @@
   "members.close": "Close the member list",
   "chat.charCount": "{count, number} / {max, number}",
   "chat.tooLong": "This message is too long. You can send up to {max, number} characters.",
-  "chat.sendFailed": "The message wasn't sent, and your text is back in the box. You can try again."
+  "chat.sendFailed": "The message wasn't sent, and your text is back in the box. You can try again.",
+  "chat.cantWriteYet": "You can't write here yet: waiting for a moderator to renew the channel's encryption key. Your text is back in the box.",
+  "chat.notYet": "This isn't available yet. Your text is back in the box."
 }
