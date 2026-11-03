@@ -136,7 +136,7 @@ impl ChannelLog<'_> {
     }
 
     pub fn control(&self) -> ControlLog<'_> {
-        ControlLog { conn: self.conn, log: log_name(self.server, Scope::Control) }
+        ControlLog::new(self.conn, self.server)
     }
 }
 
@@ -149,9 +149,19 @@ pub struct Store {
 pub struct ControlLog<'a> {
     conn: &'a Connection,
     log: String,
+    server: ServerId,
 }
 
-impl ControlLog<'_> {
+impl<'a> ControlLog<'a> {
+    fn new(conn: &'a Connection, server: ServerId) -> Self {
+        ControlLog { conn, log: log_name(server, Scope::Control), server }
+    }
+
+    /// The server this control log belongs to.
+    pub fn server(&self) -> ServerId {
+        self.server
+    }
+
     /// Every stored control record of the server, decoded, in the order
     /// they were stored (a topological order).
     pub fn records(&self) -> rusqlite::Result<Vec<Record>> {
@@ -380,7 +390,7 @@ impl Store {
 
     /// Read access to a server's stored control log (for a [`crate::ReadGate`]).
     pub fn control_log(&self, server: crate::ServerId) -> ControlLog<'_> {
-        ControlLog { conn: &self.conn, log: log_name(server, Scope::Control) }
+        ControlLog::new(&self.conn, server)
     }
 
     /// Records of the log that nothing else in the log depends on.
@@ -539,7 +549,7 @@ fn append_in(tx: &rusqlite::Transaction, record: &Record, auth: &dyn Authorizer)
     // peer's set the same whatever the arrival order; authority decides what
     // they mean. Channel records are judged now, with their auth_deps stored.
     if record.scope() != Scope::Control {
-        let control = ControlLog { conn: tx, log: log_name(record.server(), Scope::Control) };
+        let control = ControlLog::new(tx, record.server());
         if auth.check(record, &control) == Verdict::Reject {
             return Ok(Append::Unauthorized);
         }
@@ -703,7 +713,8 @@ mod tests {
     struct Counting(std::sync::Mutex<Vec<u64>>);
 
     impl Authorizer for Counting {
-        fn check(&self, _: &Record, control: &ControlLog<'_>) -> Verdict {
+        fn check(&self, record: &Record, control: &ControlLog<'_>) -> Verdict {
+            assert_eq!(control.server(), record.server());
             let n = control.count().unwrap();
             assert_eq!(n as usize, control.records().unwrap().len());
             self.0.lock().unwrap().push(n);
@@ -715,6 +726,7 @@ mod tests {
     fn control_log_count_is_the_number_of_stored_control_records() {
         use records::Kind;
         let mut store = Store::in_memory().unwrap();
+        assert_eq!(store.control_log(server()).server(), server());
         let gate = Counting(Default::default());
         let g = genesis();
         store.append(&g, &gate).unwrap();
