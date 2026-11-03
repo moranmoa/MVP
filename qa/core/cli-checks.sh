@@ -9,7 +9,7 @@ set -u
 
 REPO=${REPO:-/repo}
 cd "$REPO/core"
-cargo build --release --locked -q -p updater -p spike-peer || exit 2
+CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4} cargo build --release --locked -q -p updater -p spike-peer || exit 2
 BIN=${CARGO_TARGET_DIR:-target}/release
 UP="$BIN/updater"
 SP="$BIN/spike-peer"

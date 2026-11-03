@@ -53,7 +53,7 @@ docker compose -f qa/compose.yaml down
 From the repository root, in PowerShell:
 
 ```
-docker run --rm -v "${PWD}:/repo" -v cargo-registry:/usr/local/cargo/registry -v qa-core-target:/target -e CARGO_TARGET_DIR=/target rust:1.90-bookworm bash /repo/qa/core/cli-checks.sh
+docker run --rm -v "${PWD}:/repo" -v cargo-registry:/usr/local/cargo/registry -v qa-core-target:/target -e CARGO_TARGET_DIR=/target -e CARGO_BUILD_JOBS=4 rust:1.90-bookworm bash /repo/qa/core/cli-checks.sh
 ```
 
 In Git Bash, prefix it with `MSYS_NO_PATHCONV=1` and use `"$(pwd -W):/repo"`.
