@@ -39,8 +39,8 @@ use crate::limits::{Pending, RateLimiter};
 use crate::store::MAX_HAVE;
 use crate::{valid_log_name, Append, Blob, Id, Store, MAX_DATA_BYTES, MAX_DEPS, MAX_ENCODED_BYTES};
 
-const SYNC_PROTOCOL: StreamProtocol = StreamProtocol::new("/descord-replacement/sync/0.1.0");
-const IDENTIFY_VERSION: &str = "/descord-replacement/0.1.0";
+const SYNC_PROTOCOL: StreamProtocol = StreamProtocol::new("/mvs/sync/0.1.0");
+const IDENTIFY_VERSION: &str = "/mvs/0.1.0";
 /// Blobs per sync response page.
 const PAGE: usize = 2000;
 /// Blob bytes (data + deps) per page. The CBOR codec drops responses over
@@ -56,12 +56,25 @@ const PENDING_TTL: Duration = Duration::from_secs(60);
 /// catch-up is 50 pages, so this costs an honest peer about 2 s at most.
 const PULL_BURST: u32 = 30;
 const PULL_RATE: u32 = 10;
+/// Inbound pulls from all peers together. PeerIds are free, so the per-peer
+/// limit alone doesn't bound the work: each pull walks the log's ancestry
+/// on the node's only task.
+const GLOBAL_PULL_BURST: u32 = 100;
+const GLOBAL_PULL_RATE: u32 = 50;
+/// Per-peer pull buckets remembered (also after disconnecting).
+const MAX_TRACKED_PEERS: usize = 4096;
+/// Node events waiting for the app; beyond this, new ones are dropped.
+const EVENT_BUFFER: usize = 65_536;
 /// Largest gossipsub frame: one encoded blob plus signature, key and topic.
 const MAX_GOSSIP_BYTES: usize = MAX_ENCODED_BYTES + 4 * 1024;
 /// Topics one remote peer may subscribe to, in total and per message.
 const MAX_PEER_TOPICS: usize = 1024;
 const MAX_TOPICS_PER_MESSAGE: usize = 128;
 const MAX_INCOMING_CONNECTIONS: u32 = 256;
+/// Peers hand us addresses to dial (Kademlia results, identify), so our own
+/// dialling is capped as well.
+const MAX_OUTGOING_CONNECTIONS: u32 = 128;
+const MAX_CONNECTIONS: u32 = 384;
 const MAX_PENDING_INCOMING: u32 = 64;
 /// A direct and a relayed connection to the same peer can briefly coexist.
 const MAX_CONNECTIONS_PER_PEER: u32 = 2;
@@ -151,7 +164,7 @@ pub struct Node {
 impl Node {
     /// Opens the store, starts networking and returns the handle plus a
     /// stream of events (blobs stored, peers connected).
-    pub async fn start(config: NodeConfig) -> Result<(Node, mpsc::UnboundedReceiver<NodeEvent>)> {
+    pub async fn start(config: NodeConfig) -> Result<(Node, mpsc::Receiver<NodeEvent>)> {
         for log in &config.logs {
             ensure!(valid_log_name(log), "invalid log name {log:?}");
         }
@@ -170,7 +183,7 @@ impl Node {
 
         let peer_id = *swarm.local_peer_id();
         let (commands, command_rx) = mpsc::unbounded_channel();
-        let (events, event_rx) = mpsc::unbounded_channel();
+        let (events, event_rx) = mpsc::channel(EVENT_BUFFER);
         let mut task = Task {
             swarm,
             store,
@@ -181,7 +194,8 @@ impl Node {
             inflight: HashMap::new(),
             again: HashSet::new(),
             pending: Pending::new(MAX_PENDING, MAX_PENDING_BYTES),
-            inbound_pulls: RateLimiter::new(PULL_BURST, PULL_RATE),
+            inbound_pulls: RateLimiter::new(PULL_BURST, PULL_RATE, MAX_TRACKED_PEERS),
+            all_inbound_pulls: RateLimiter::new(GLOBAL_PULL_BURST, GLOBAL_PULL_RATE, 1),
             events,
             circuit_listening: false,
         };
@@ -260,6 +274,17 @@ fn build_swarm(key: identity::Keypair) -> Result<Swarm<Behaviour>> {
                 // Forward a message only after we checked it (see `on_gossip`),
                 // so invalid blobs don't travel further through us.
                 .validate_messages()
+                // Dedup by content, not by (source, seqno): the same blob
+                // republished by another peer or with a new seqno is one message.
+                .message_id_fn(|m| {
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.update(m.topic.as_str().as_bytes());
+                    hasher.update(&[0]);
+                    hasher.update(&m.data);
+                    gossipsub::MessageId::from(hasher.finalize().as_bytes().to_vec())
+                })
+                // TODO: enable peer scoring so `MessageAcceptance::Reject`
+                // costs the sender something; today it only stops forwarding.
                 .build()
                 .map_err(|e| anyhow::anyhow!(e))?;
             let gossipsub = gossipsub::Behaviour::new_with_subscription_filter(
@@ -276,7 +301,9 @@ fn build_swarm(key: identity::Keypair) -> Result<Swarm<Behaviour>> {
             let limits = connection_limits::ConnectionLimits::default()
                 .with_max_established_incoming(Some(MAX_INCOMING_CONNECTIONS))
                 .with_max_pending_incoming(Some(MAX_PENDING_INCOMING))
-                .with_max_established_per_peer(Some(MAX_CONNECTIONS_PER_PEER));
+                .with_max_established_per_peer(Some(MAX_CONNECTIONS_PER_PEER))
+                .with_max_established_outgoing(Some(MAX_OUTGOING_CONNECTIONS))
+                .with_max_established(Some(MAX_CONNECTIONS));
             Ok(Behaviour {
                 relay_client,
                 identify: identify::Behaviour::new(identify::Config::new(
@@ -315,7 +342,8 @@ struct Task {
     /// Pushed blobs waiting for a dep.
     pending: Pending,
     inbound_pulls: RateLimiter<PeerId>,
-    events: mpsc::UnboundedSender<NodeEvent>,
+    all_inbound_pulls: RateLimiter<()>,
+    events: mpsc::Sender<NodeEvent>,
     circuit_listening: bool,
 }
 
@@ -404,7 +432,15 @@ impl Task {
     }
 
     fn emit_stored(&self, log: &str, blob: Blob, via: Via) {
-        let _ = self.events.send(NodeEvent::Stored { log: log.into(), blob, via, at: SystemTime::now() });
+        self.emit(NodeEvent::Stored { log: log.into(), blob, via, at: SystemTime::now() });
+    }
+
+    /// Hands an event to the app. If the app stops reading, events are
+    /// dropped rather than piling up; the blobs themselves are in the store.
+    fn emit(&self, event: NodeEvent) {
+        if let Err(mpsc::error::TrySendError::Full(_)) = self.events.try_send(event) {
+            debug!("event buffer full, dropping an event");
+        }
     }
 
     fn discover(&mut self) {
@@ -446,7 +482,7 @@ impl Task {
                     self.swarm.behaviour_mut().kad.get_closest_peers(me);
                 } else if self.connected.insert(peer_id) {
                     info!(%peer_id, address = %endpoint.get_remote_address(), "peer connected");
-                    let _ = self.events.send(NodeEvent::PeerConnected(peer_id));
+                    self.emit(NodeEvent::PeerConnected(peer_id));
                     for log in self.logs.clone() {
                         self.pull(peer_id, &log);
                     }
@@ -455,11 +491,10 @@ impl Task {
             SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. } => {
                 if self.connected.remove(&peer_id) {
                     info!(%peer_id, "peer disconnected");
-                    let _ = self.events.send(NodeEvent::PeerDisconnected(peer_id));
+                    self.emit(NodeEvent::PeerDisconnected(peer_id));
                 }
                 self.inflight.retain(|_, (p, _)| *p != peer_id);
                 self.again.retain(|(p, _)| *p != peer_id);
-                self.inbound_pulls.forget(&peer_id);
             }
             SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
                 if peer_id == self.relay_peer {
@@ -509,7 +544,8 @@ impl Task {
             SwarmEvent::Behaviour(BehaviourEvent::Sync(request_response::Event::Message { peer, message })) => {
                 match message {
                     request_response::Message::Request { request, channel, .. } => {
-                        if !self.inbound_pulls.allow(peer, Instant::now()) {
+                        let now = Instant::now();
+                        if !self.inbound_pulls.allow(peer, now) || !self.all_inbound_pulls.allow((), now) {
                             // Dropping the channel fails the request on their side.
                             debug!(%peer, "pull rate limit exceeded");
                             return;
@@ -576,7 +612,7 @@ impl Task {
                     let added: HashSet<Id> = added.into_iter().collect();
                     let now = SystemTime::now();
                     for blob in blobs.iter().filter(|b| added.contains(&b.id)) {
-                        let _ = self.events.send(NodeEvent::Stored {
+                        self.emit(NodeEvent::Stored {
                             log: log.clone(),
                             blob: blob.clone(),
                             via: Via::Pull,

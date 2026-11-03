@@ -48,6 +48,11 @@ pub enum BlobError {
     TooLarge(usize),
     /// The id isn't the hash of the blob's log, deps and data.
     WrongId,
+    /// Deps aren't strictly ascending (unsorted or repeated). Only one
+    /// encoding of a blob is valid, the one the store gives back.
+    NotCanonical,
+    /// A dep is stored under another log. Set by the store, not by decoding.
+    DepInOtherLog,
 }
 
 impl fmt::Display for BlobError {
@@ -57,6 +62,8 @@ impl fmt::Display for BlobError {
             BlobError::TooManyDeps(n) => write!(f, "{n} deps, limit is {MAX_DEPS}"),
             BlobError::TooLarge(n) => write!(f, "{n} bytes of data, limit is {MAX_DATA_BYTES}"),
             BlobError::WrongId => write!(f, "id does not match the content"),
+            BlobError::NotCanonical => write!(f, "deps are not strictly ascending"),
+            BlobError::DepInOtherLog => write!(f, "a dep belongs to another log"),
         }
     }
 }
@@ -69,9 +76,18 @@ pub fn valid_log_name(log: &str) -> bool {
     !log.is_empty() && log.len() <= MAX_LOG_NAME && log.bytes().all(|b| b.is_ascii_graphic())
 }
 
+/// Deps in their one valid order: strictly ascending bytes, so no repeats.
+/// Same rule as `records` (and the order SQLite sorts BLOBs in).
+fn is_canonical(deps: &[Id]) -> bool {
+    deps.windows(2).all(|w| w[0] < w[1])
+}
+
 impl Blob {
-    /// A blob of `log` on top of `deps`, with its content id.
-    pub fn new(log: &str, deps: Vec<Id>, data: Vec<u8>) -> Self {
+    /// A blob of `log` on top of `deps` (sorted and deduplicated here), with
+    /// its content id.
+    pub fn new(log: &str, mut deps: Vec<Id>, data: Vec<u8>) -> Self {
+        deps.sort_unstable();
+        deps.dedup();
         Self { id: Self::content_id(log, &deps, &data), deps, data }
     }
 
@@ -79,10 +95,15 @@ impl Blob {
     ///
     /// Hook for `core/records`: once blobs are real `records::Record`s, this
     /// becomes `Record::decode(data)?.id()` (which also checks the signature),
-    /// plus checks that the record's scope is `log` and its deps are `deps`.
+    /// plus:
+    /// - `log` must be derived from the record (`server` + `scope`), not taken
+    ///   from the caller, or a real record could be filed under another log;
+    /// - the record's deps must equal `deps` (both strictly ascending);
+    /// - cross-log `auth_deps` (control-log heads) go in a separate list that
+    ///   `append` requires to be present, never in `deps`, which stay same-log.
     pub fn content_id(log: &str, deps: &[Id], data: &[u8]) -> Id {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"mvp/sync-blob/v1\0");
+        hasher.update(b"mvs/sync-blob/v1\0");
         hasher.update(&(log.len() as u32).to_le_bytes());
         hasher.update(log.as_bytes());
         hasher.update(&(deps.len() as u32).to_le_bytes());
@@ -101,6 +122,9 @@ impl Blob {
         }
         if self.data.len() > MAX_DATA_BYTES {
             return Err(BlobError::TooLarge(self.data.len()));
+        }
+        if !is_canonical(&self.deps) {
+            return Err(BlobError::NotCanonical);
         }
         if Self::content_id(log, &self.deps, &self.data) != self.id {
             return Err(BlobError::WrongId);
@@ -134,13 +158,37 @@ impl Blob {
             return Err(BlobError::TooLarge(data.len()));
         }
         let deps: Vec<Id> = deps.chunks_exact(32).map(|c| c.try_into().expect("chunks are 32 bytes")).collect();
-        Ok(Self::new(log, deps, data.to_vec()))
+        // Rejected, not sorted: a blob has exactly one valid encoding.
+        if !is_canonical(&deps) {
+            return Err(BlobError::NotCanonical);
+        }
+        let data = data.to_vec();
+        Ok(Self { id: Self::content_id(log, &deps, &data), deps, data })
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// `n` different ids, in ascending order.
+    pub(crate) fn distinct_ids(n: usize) -> Vec<Id> {
+        (0..n as u32).map(|i| blake3::hash(&i.to_le_bytes()).into()).collect::<std::collections::BTreeSet<Id>>().into_iter().collect()
+    }
+
+    #[test]
+    fn deps_must_be_canonical() {
+        let (a, b) = (Blob::new("l", vec![], b"a".to_vec()).id, Blob::new("l", vec![], b"b".to_vec()).id);
+        let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+        // `new` sorts and deduplicates.
+        assert_eq!(Blob::new("l", vec![hi, lo, hi], b"x".to_vec()).deps, vec![lo, hi]);
+        // Anything else is refused, on the wire and in `verify`.
+        for deps in [vec![hi, lo], vec![lo, lo]] {
+            let blob = Blob { id: Blob::content_id("l", &deps, b"x"), deps, data: b"x".to_vec() };
+            assert_eq!(blob.verify("l"), Err(BlobError::NotCanonical));
+            assert_eq!(Blob::decode("l", &blob.encode()), Err(BlobError::NotCanonical));
+        }
+    }
 
     #[test]
     fn encode_roundtrip() {
@@ -171,14 +219,14 @@ mod tests {
         bytes.extend_from_slice(&[0; 64]);
         assert_eq!(Blob::decode("l", &bytes), Err(BlobError::TooManyDeps(u16::MAX as usize)));
 
-        let max = Blob::new("l", vec![[1; 32]; MAX_DEPS], vec![0; MAX_DATA_BYTES]);
+        let max = Blob::new("l", distinct_ids(MAX_DEPS), vec![0; MAX_DATA_BYTES]);
         assert_eq!(max.encode().len(), MAX_ENCODED_BYTES);
         assert!(Blob::decode("l", &max.encode()).is_ok());
 
         let big = Blob::new("l", vec![], vec![0; MAX_DATA_BYTES + 1]);
         assert_eq!(Blob::decode("l", &big.encode()), Err(BlobError::TooLarge(MAX_DATA_BYTES + 1)));
         assert_eq!(big.verify("l"), Err(BlobError::TooLarge(MAX_DATA_BYTES + 1)));
-        let many = Blob::new("l", vec![[1; 32]; MAX_DEPS + 1], vec![]);
+        let many = Blob::new("l", distinct_ids(MAX_DEPS + 1), vec![]);
         assert_eq!(many.verify("l"), Err(BlobError::TooManyDeps(MAX_DEPS + 1)));
     }
 

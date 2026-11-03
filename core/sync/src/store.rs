@@ -223,17 +223,23 @@ fn append_in(tx: &rusqlite::Transaction, log: &str, blob: &Blob) -> rusqlite::Re
     if let Err(err) = blob.verify(log) {
         return Ok(Append::Invalid(err));
     }
-    let exists = |id: &Id| -> rusqlite::Result<bool> {
-        let mut stmt = tx.prepare_cached("SELECT 1 FROM blobs WHERE id = ?1")?;
-        stmt.exists([&id[..]])
+    let log_of = |id: &Id| -> rusqlite::Result<Option<String>> {
+        let mut stmt = tx.prepare_cached("SELECT log FROM blobs WHERE id = ?1")?;
+        stmt.query_row([&id[..]], |r| r.get(0)).optional()
     };
-    if exists(&blob.id)? {
+    if log_of(&blob.id)?.is_some() {
         return Ok(Append::Known);
     }
+    // Deps stay inside the log: pulls only ever send blobs of one log, so a
+    // dep in another log would be unreachable for peers without that log
+    // open, and they would re-download the blob forever. An id belongs to
+    // exactly one log (the log is hashed into it), so this is definite.
     let mut missing = Vec::new();
     for dep in &blob.deps {
-        if !exists(dep)? {
-            missing.push(*dep);
+        match log_of(dep)? {
+            Some(dep_log) if dep_log == log => {}
+            Some(_) => return Ok(Append::Invalid(BlobError::DepInOtherLog)),
+            None => missing.push(*dep),
         }
     }
     if !missing.is_empty() {
@@ -257,6 +263,7 @@ fn append_in(tx: &rusqlite::Transaction, log: &str, blob: &Blob) -> rusqlite::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests::distinct_ids;
     use crate::{MAX_DATA_BYTES, MAX_DEPS};
 
     fn chain(store: &mut Store, log: &str, parent: &[Id], n: usize, tag: &str) -> Vec<Id> {
@@ -310,11 +317,45 @@ mod tests {
     }
 
     #[test]
+    fn stored_blobs_come_back_with_the_same_id() {
+        // The reviewer's repro: deps [b, a] used to be accepted, then served
+        // back as [a, b], which hashes to a different id on every peer.
+        let mut store = Store::in_memory().unwrap();
+        let a = Blob::new("l", vec![], b"a".to_vec());
+        let b = Blob::new("l", vec![], b"b".to_vec());
+        store.append_all("l", [&a, &b]).unwrap();
+        let (lo, hi) = if a.id < b.id { (a.id, b.id) } else { (b.id, a.id) };
+        let unsorted = Blob { id: Blob::content_id("l", &[hi, lo], b"c"), deps: vec![hi, lo], data: b"c".to_vec() };
+        assert_eq!(store.append("l", &unsorted).unwrap(), Append::Invalid(BlobError::NotCanonical));
+        let sorted = Blob::new("l", vec![hi, lo], b"c".to_vec());
+        assert_eq!(store.append("l", &sorted).unwrap(), Append::Added);
+        // Everything the store hands out verifies, by get and by pull.
+        assert_eq!(store.get(&sorted.id).unwrap().unwrap().verify("l"), Ok(()));
+        let (page, _) = store.missing_since("l", &[], 100, usize::MAX).unwrap();
+        for blob in &page {
+            assert_eq!(Blob::decode("l", &blob.encode()).as_ref(), Ok(blob));
+        }
+    }
+
+    #[test]
+    fn deps_must_be_in_the_same_log() {
+        let mut store = Store::in_memory().unwrap();
+        let other = Blob::new("b", vec![], b"in b".to_vec());
+        store.append("b", &other).unwrap();
+        let cross = Blob::new("a", vec![other.id], b"points into b".to_vec());
+        assert_eq!(store.append("a", &cross).unwrap(), Append::Invalid(BlobError::DepInOtherLog));
+        assert_eq!(store.count("a").unwrap(), 0);
+        // A dep that is nowhere yet is just missing.
+        let unknown = Blob::new("a", vec![[9; 32]], b"x".to_vec());
+        assert_eq!(store.append("a", &unknown).unwrap(), Append::MissingDeps(vec![[9; 32]]));
+    }
+
+    #[test]
     fn rejects_oversized_blobs() {
         let mut store = Store::in_memory().unwrap();
         let big = Blob::new("l", vec![], vec![0; MAX_DATA_BYTES + 1]);
         assert!(matches!(store.append("l", &big).unwrap(), Append::Invalid(BlobError::TooLarge(_))));
-        let many = Blob::new("l", vec![[1; 32]; MAX_DEPS + 1], vec![]);
+        let many = Blob::new("l", distinct_ids(MAX_DEPS + 1), vec![]);
         assert!(matches!(store.append("l", &many).unwrap(), Append::Invalid(BlobError::TooManyDeps(_))));
     }
 
