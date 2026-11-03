@@ -10,7 +10,8 @@ x-hardening: &hardening
       max-file: "5"
 
 services:
-  # Bootstrap (DHT) + circuit relay. Needed from the closed alpha.
+  # Bootstrap (DHT entry point) + circuit relay in one node: the bootstrap
+  # is this service. Needed from the closed alpha.
   relay:
     <<: *hardening
     build:
@@ -26,6 +27,13 @@ services:
       MAX_MEMORY_MB: ${MAX_MEMORY_MB:-200}
       # 1 only for test harnesses / LAN: private addresses into the DHT.
       ALLOW_PRIVATE_ADDRS: ${ALLOW_PRIVATE_ADDRS:-0}
+      # Circuit limits, raised from libp2p's 16 / 4 / 120 s / 128 KiB, which
+      # cut off relayed catch-up (README "Relay-only catch-up"). Empty in .env
+      # = libp2p's default.
+      MAX_CIRCUITS: ${MAX_CIRCUITS-256}
+      MAX_CIRCUITS_PER_PEER: ${MAX_CIRCUITS_PER_PEER-16}
+      MAX_CIRCUIT_SECS: ${MAX_CIRCUIT_SECS-3600}
+      MAX_CIRCUIT_BYTES: ${MAX_CIRCUIT_BYTES-268435456}
     ports:
       - "4001:4001/tcp"
       - "4001:4001/udp"
@@ -84,6 +92,19 @@ services:
         limits:
           cpus: "0.5"
           memory: 128M
+
+  # Update seeder: always-on peer serving signed update artifacts (B8).
+  # TODO(B8): not built yet; replace with the seeder image when it lands.
+  # A headless sync node is deliberately not run here: until sync pulls are
+  # gated on membership (GAP-4) it would serve every log to anyone.
+  seeder:
+    image: debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
+    profiles: ["seeder"]
+    command: ["sh", "-c", "echo 'seeder: not built yet (B8)' >&2; exit 1"]
+    restart: "no"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
 
   # TURN for voice and the Web client (phase 2). Start with: --profile voice
   coturn:

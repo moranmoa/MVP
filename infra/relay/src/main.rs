@@ -24,7 +24,7 @@ use libp2p::{
     multiaddr::Protocol,
     noise, ping, relay,
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, Multiaddr, StreamProtocol, SwarmBuilder,
+    tcp, yamux, Multiaddr, PeerId, StreamProtocol, SwarmBuilder,
 };
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -149,11 +149,23 @@ fn is_global_v6(ip: Ipv6Addr) -> bool {
         || first == 0x2001 && ip.segments()[1] == 0x0db8) // documentation
 }
 
+/// Unset or empty (compose passes `${VAR:-}`) means the default.
 fn env_num<T: std::str::FromStr>(name: &str, default: T) -> Result<T> {
     match env::var(name) {
-        Ok(value) => value.parse().ok().with_context(|| format!("{name} must be a number")),
-        Err(_) => Ok(default),
+        Ok(value) if !value.is_empty() => value.parse().ok().with_context(|| format!("{name} must be a number")),
+        _ => Ok(default),
     }
+}
+
+/// Circuit limits; each variable left unset keeps libp2p's default.
+fn relay_config() -> Result<relay::Config> {
+    let mut config = relay::Config::default();
+    config.max_circuits = env_num("MAX_CIRCUITS", config.max_circuits)?;
+    config.max_circuits_per_peer = env_num("MAX_CIRCUITS_PER_PEER", config.max_circuits_per_peer)?;
+    config.max_circuit_duration =
+        Duration::from_secs(env_num("MAX_CIRCUIT_SECS", config.max_circuit_duration.as_secs())?);
+    config.max_circuit_bytes = env_num("MAX_CIRCUIT_BYTES", config.max_circuit_bytes)?;
+    Ok(config)
 }
 
 fn healthcheck() -> ExitCode {
@@ -203,6 +215,14 @@ async fn run() -> Result<()> {
     let max_memory = env_num("MAX_MEMORY_MB", 200usize)? * 1024 * 1024;
     // Test harnesses and LAN setups have only private addresses; never set
     // this on the public relay (it would hand out clients' LAN addresses).
+    let relay_config = relay_config()?;
+    info!(
+        max_circuits = relay_config.max_circuits,
+        max_circuits_per_peer = relay_config.max_circuits_per_peer,
+        max_circuit_secs = relay_config.max_circuit_duration.as_secs(),
+        max_circuit_bytes = relay_config.max_circuit_bytes,
+        "circuit limits"
+    );
     let allow_private_addrs = env::var("ALLOW_PRIVATE_ADDRS").is_ok_and(|v| v == "1");
     if allow_private_addrs {
         warn!("ALLOW_PRIVATE_ADDRS=1: private addresses go into the DHT; for test/LAN use only");
@@ -228,7 +248,7 @@ async fn run() -> Result<()> {
             Behaviour {
                 limits: connection_limits::Behaviour::new(limits),
                 memory: memory_connection_limits::Behaviour::with_max_bytes(max_memory),
-                relay: relay::Behaviour::new(peer_id, relay::Config::default()),
+                relay: relay::Behaviour::new(peer_id, relay_config),
                 identify: identify::Behaviour::new(identify::Config::new(
                     PROTOCOL_VERSION.into(),
                     key.public(),
@@ -256,6 +276,10 @@ async fn run() -> Result<()> {
             Ok(addr) => swarm.add_external_address(addr),
             Err(err) => warn!(%addr, %err, "ignoring invalid EXTERNAL_ADDRS entry"),
         }
+    }
+    if swarm.external_addresses().next().is_none() {
+        // Reservations then carry no address and clients can't listen on a circuit.
+        warn!("EXTERNAL_ADDRS is empty: relayed connections will not work");
     }
 
     info!(peer_id = %swarm.local_peer_id(), "relay node started");
@@ -295,6 +319,17 @@ async fn run() -> Result<()> {
                 }
             }
             SwarmEvent::Behaviour(BehaviourEvent::Relay(event)) => {
+                if let relay::Event::ReservationReqAccepted { src_peer_id, .. } = &event {
+                    // The peer is now reachable through us. Identify ran before
+                    // the reservation existed, so without this the DHT would only
+                    // hold its direct addresses and a relay-only peer could not
+                    // be found.
+                    let relay_id = *swarm.local_peer_id();
+                    let addrs = circuit_addrs(swarm.external_addresses(), relay_id);
+                    for addr in addrs {
+                        swarm.behaviour_mut().kademlia.add_address(src_peer_id, addr);
+                    }
+                }
                 match &event {
                     relay::Event::ReservationReqAccepted { renewed: false, .. } => stats.reservations_accepted += 1,
                     relay::Event::ReservationReqDenied { .. } => stats.reservations_denied += 1,
@@ -317,9 +352,35 @@ async fn run() -> Result<()> {
     }
 }
 
+/// `<external>/p2p/<relay>/p2p-circuit` for each of our external addresses:
+/// where a peer holding a reservation with us can be dialed.
+fn circuit_addrs<'a>(external: impl Iterator<Item = &'a Multiaddr>, relay_id: PeerId) -> Vec<Multiaddr> {
+    external
+        .map(|addr| {
+            let addr = match addr.iter().last() {
+                Some(Protocol::P2p(_)) => addr.clone(),
+                _ => addr.clone().with(Protocol::P2p(relay_id)),
+            };
+            addr.with(Protocol::P2pCircuit)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn circuit_addresses_go_through_the_relay() {
+        let relay_id = PeerId::random();
+        let external: Vec<Multiaddr> = vec![
+            "/dns4/relay.example.org/tcp/4001".parse().unwrap(),
+            format!("/dns4/relay.example.org/tcp/443/wss/p2p/{relay_id}").parse().unwrap(),
+        ];
+        let addrs = circuit_addrs(external.iter(), relay_id);
+        assert_eq!(addrs[0].to_string(), format!("/dns4/relay.example.org/tcp/4001/p2p/{relay_id}/p2p-circuit"));
+        assert_eq!(addrs[1].to_string(), format!("/dns4/relay.example.org/tcp/443/wss/p2p/{relay_id}/p2p-circuit"));
+    }
 
     fn global(addr: &str) -> bool {
         is_global(&addr.parse().unwrap())
