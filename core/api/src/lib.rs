@@ -14,6 +14,7 @@ mod dispatch;
 mod model;
 mod ports;
 mod service;
+pub mod sidecar;
 pub mod types;
 
 pub use dispatch::NOT_YET;

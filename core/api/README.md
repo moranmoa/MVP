@@ -28,6 +28,27 @@ the core holds its lock, so a sink may call back into the core. The core is
 `Send + Sync`, and commands run synchronously, so a shell wraps them in its
 own async layer.
 
+## Sidecar: `mvs-core`
+
+The Electron shell (decision 7) runs the core as a child process:
+`mvs-core --data-dir <dir>`. The dir is created if missing and holds
+`core.db`; secrets stay in the OS keychain. A bad argument exits with 2.
+
+| | One JSON object per line, UTF-8, `\n`-terminated |
+| --- | --- |
+| stdin | `{ "id": <number or string>, "cmd", "args" }`, `id` chosen by the shell |
+| stdout, response | `{ "type": "response", "id", "ok" }` or `{ "type": "response", "id", "error": { "code", "positions"? } }` |
+| stdout, event | `{ "type": "event", "event", "payload" }` |
+| stderr | Logs: startup, counts, error kinds. Never words, keys or text |
+
+- Requests run one at a time, in order. A request's events are written
+  before its response.
+- A line that isn't a request (not JSON, no `cmd`, no number or string
+  `id`) gets a `bad-request` response, with `id` echoed when it could be
+  read and `null` otherwise. A line over 1 MiB (`sidecar::MAX_LINE`) is
+  dropped whole and answered the same way. Serving goes on in both cases.
+- When stdin closes, the process exits 0.
+
 ## What works
 
 | Area | Commands | Backed by |
@@ -90,3 +111,6 @@ Run from `core/`.
   - dispatcher errors;
   - diagnostics hold no secrets.
 - `tests/conformance.rs`: the shared JSON fixture. See `CONFORMANCE.md`.
+- `tests/sidecar.rs`: the line protocol in process (ids, events before
+  their response, malformed lines, the 1 MiB limit, end of input), and the
+  binary's usage error.
