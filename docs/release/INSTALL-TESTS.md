@@ -35,7 +35,9 @@ these lists. Paths are per user unless they start with `/` or `HKLM`.
 | --- | --- | --- |
 | Windows program folder | `%LOCALAPPDATA%\ShellSpikeTauri` | `%LOCALAPPDATA%\Programs\shell-spike-electron` |
 | Windows uninstall key | `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\ShellSpikeTauri` | `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\169df8e2-50f9-5fea-b18c-9805ad553a53` |
-| Other registry | none | `HKCU\Software\169df8e2-50f9-5fea-b18c-9805ad553a53` |
+| Other registry | `HKCU\Software\mvp` (found in CI) | `HKCU\Software\169df8e2-50f9-5fea-b18c-9805ad553a53` |
+| Other folders | none | `%LOCALAPPDATA%\shell-spike-electron-updater` (installer cache, found in CI); `%LOCALAPPDATA%\Programs` if it did not exist |
+| **Left behind by the Windows uninstaller** (CI prints these as `GAP`) | `HKCU\Software\mvp` | `%LOCALAPPDATA%\shell-spike-electron-updater`, an empty `%LOCALAPPDATA%\Programs` |
 | Windows shortcuts | Start menu + desktop `ShellSpikeTauri.lnk` | Start menu + desktop `ShellSpikeElectron.lnk` |
 | Linux `.deb` files | `/usr/bin/shell-spike-tauri`, `/usr/share/applications/ShellSpikeTauri.desktop` | `/opt/ShellSpikeElectron/`, `/usr/bin/shell-spike-electron`, `/usr/share/applications/shell-spike-electron.desktop` |
 | AppImage | nothing outside the file itself | same |
@@ -203,7 +205,8 @@ On a clean VM with a snapshot. Note "before" and "after" for every item in
 | Date | Where | Tauri | Electron | Notes |
 | --- | --- | --- | --- | --- |
 | 2026-11-03 | Linux checks, local (Docker Desktop, Debian 13 container), packages from dev-voice-shell's local build of PR #59 | all passed | all passed | Tauri's `.deb` has no conffiles, so after `apt remove` dpkg forgets it and `apt purge <pkg>` reports "unable to locate"; the test purges with `dpkg --purge` |
-| – | CI, Windows + Linux | pending first run | pending | – |
+| 2026-11-03 | CI (#69): Linux, Debian 13 container | all passed | all passed | packages built in CI; the Electron installer natively on windows-latest (wine fails in the runner's Docker) |
+| 2026-11-03 | CI (#69): Windows | in progress | in progress | first runs found the uninstaller leftovers above |
 
 What this told the shell decision (Electron was chosen, decision 7):
 
