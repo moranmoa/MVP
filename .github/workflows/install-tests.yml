@@ -1,0 +1,111 @@
+name: Install tests
+
+# T12: install / update / uninstall checks on the packaged shells, both
+# candidates (Tauri and Electron), Windows and Linux. Checklist and what each
+# step proves: docs/release/INSTALL-TESTS.md. QA's manual pass covers the
+# rest (qa/TEST_PLAN.md section 14).
+
+on:
+  pull_request:
+    paths:
+      - packaging/install-tests/**
+      - spikes/shell/**
+      - .github/workflows/install-tests.yml
+  workflow_dispatch:
+    inputs:
+      packages_ref:
+        description: Ref whose spikes/shell/build-packages.sh builds the packages (empty = this ref)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Until the shell spike (PR #59) is on main, packages come from its branch.
+  FALLBACK_PACKAGES_REF: claude/voice-shell-spike-7d5285
+
+jobs:
+  packages:
+    name: build packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.packages_ref }}
+      - name: Use the spike branch if this ref has no build script
+        id: src
+        run: |
+          if [ -f spikes/shell/build-packages.sh ]; then
+            echo "ref=" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=$FALLBACK_PACKAGES_REF" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.src.outputs.ref != ''
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          ref: ${{ steps.src.outputs.ref }}
+      - name: Build the six packages (Docker)
+        env:
+          CARGO_BUILD_JOBS: "4"
+        run: |
+          git log -1 --format='packages from %H'
+          bash spikes/shell/build-packages.sh "$RUNNER_TEMP/packages"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: packages
+          path: ${{ runner.temp }}/packages/shell-*
+          if-no-files-found: error
+          retention-days: 3
+
+  linux:
+    name: linux ${{ matrix.shell }}
+    needs: packages
+    runs-on: ubuntu-latest
+    # The packages are built on Debian 13 and need its glibc.
+    container: debian:trixie
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [tauri, electron]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          sparse-checkout: packaging/install-tests
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: packages
+          path: packages
+      - name: Install / uninstall checks
+        run: bash packaging/install-tests/linux.sh "${{ matrix.shell }}" packages
+
+  windows:
+    name: windows ${{ matrix.shell }}
+    needs: packages
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [tauri, electron]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          sparse-checkout: packaging/install-tests
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: packages
+          path: packages
+      - name: Install / uninstall checks
+        shell: pwsh
+        run: ./packaging/install-tests/windows.ps1 -Shell ${{ matrix.shell }} -Installer packages/shell-${{ matrix.shell }}-windows-x64-setup.exe
