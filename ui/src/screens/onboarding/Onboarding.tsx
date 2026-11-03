@@ -3,7 +3,7 @@ import { FormattedMessage, useIntl } from 'react-intl';
 import { ageOn, countryOptions, detectCountry, MIN_AGE, toBirthDate } from '../../app/age';
 import { useAppStore } from '../../app/App';
 import { useSettings } from '../../app/settings';
-import { useCore, useCoreEvent, type Identity, type Locale } from '../../core';
+import { isCoreError, useCore, useCoreEvent, type Identity, type Locale } from '../../core';
 import type { CoreEvents } from '../../core/api';
 import { useUserTextProps } from '../../app/textDir';
 import { safeImageSrc } from '../../core/sanitize';
@@ -435,11 +435,22 @@ function ProfileStep({ onDone }: { onDone: () => void }) {
   const bioProps = useUserTextProps(bio);
   const [avatar, setAvatar] = useState<string | undefined>(identity.avatarDataUrl);
   const [avatarError, setAvatarError] = useState(false);
+  const [nameError, setNameError] = useState(false);
   const intl = useIntl();
 
   const save = async (e: FormEvent) => {
     e.preventDefault();
-    if (name.trim()) await core.updateProfile({ displayName: name.trim(), bio: bio.trim() || undefined, avatarDataUrl: avatar });
+    try {
+      if (name.trim()) await core.updateProfile({ displayName: name.trim(), bio: bio.trim() || undefined, avatarDataUrl: avatar });
+    } catch (err) {
+      // B23: a name with bidi, control or zero-width characters is refused;
+      // stay here and say why instead of stripping them.
+      if (isCoreError(err) && err.code === 'bad-request') {
+        setNameError(true);
+        return;
+      }
+      throw err;
+    }
     onDone();
   };
 
@@ -488,8 +499,24 @@ function ProfileStep({ onDone }: { onDone: () => void }) {
         <span>
           <FormattedMessage id="onb.profile.name" />
         </span>
-        <input {...nameProps} value={name} maxLength={32} autoFocus onChange={(e) => setName(e.target.value)} />
+        <input
+          {...nameProps}
+          value={name}
+          maxLength={32}
+          autoFocus
+          aria-invalid={nameError || undefined}
+          aria-describedby={nameError ? 'profile-name-error' : undefined}
+          onChange={(e) => {
+            setName(e.target.value);
+            setNameError(false);
+          }}
+        />
       </label>
+      {nameError && (
+        <p className="error" id="profile-name-error" role="alert">
+          <FormattedMessage id="name.invalidChars" />
+        </p>
+      )}
       <label className="field">
         <span>
           <FormattedMessage id="onb.profile.bio" />

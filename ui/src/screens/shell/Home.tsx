@@ -66,7 +66,7 @@ export function CreateServerDialog({
   const [name, setName] = useState('');
   const nameProps = useUserTextProps(name);
   const [age, setAge] = useState<AgeRestriction | null>(null);
-  const [errors, setErrors] = useState<{ name?: boolean; age?: boolean }>({});
+  const [errors, setErrors] = useState<{ name?: boolean; nameChars?: boolean; age?: boolean }>({});
   const [created, setCreated] = useState<ServerSummary | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -91,6 +91,9 @@ export function CreateServerDialog({
       setCreated(await core.createServer({ name: name.trim(), ageRestriction: age! }));
     } catch (err) {
       if (isCoreError(err) && err.code === 'recovery-check-required') onNeedCheck();
+      // B23: the core refuses names with bidi, control or zero-width characters.
+      // Say so on the field; never strip them silently.
+      else if (isCoreError(err) && err.code === 'bad-request') setErrors({ nameChars: true });
     } finally {
       setBusy(false);
     }
@@ -152,14 +155,17 @@ export function CreateServerDialog({
               maxLength={48}
               autoFocus
               required
-              aria-invalid={errors.name || undefined}
-              aria-describedby={errors.name ? 'create-name-error' : undefined}
-              onChange={(e) => setName(e.target.value)}
+              aria-invalid={errors.name || errors.nameChars || undefined}
+              aria-describedby={errors.name || errors.nameChars ? 'create-name-error' : undefined}
+              onChange={(e) => {
+                setName(e.target.value);
+                if (errors.nameChars) setErrors({ ...errors, nameChars: false });
+              }}
             />
           </label>
-          {errors.name && (
+          {(errors.name || errors.nameChars) && (
             <p className="error" id="create-name-error" role="alert">
-              <FormattedMessage id="create.error.name" />
+              <FormattedMessage id={errors.nameChars ? 'name.invalidChars' : 'create.error.name'} />
             </p>
           )}
           <fieldset className="radio-group" aria-invalid={errors.age || undefined} aria-describedby="create-age-hint">
