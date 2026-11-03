@@ -112,8 +112,16 @@ Or with `gh` (PowerShell):
 gh variable set MVS_RELAY_ADDR --repo moranmoa/MVP --body "/dns4/<relay-domain>/tcp/443/wss/p2p/<relay peer id>"
 ```
 
-**Requires** `mvs-core` to dial WebSocket (libp2p `websocket` transport in
-`core/sync`). Until that's on main, a wss address doesn't connect.
+`mvs-core` dials wss through libp2p's `websocket` transport in `core/sync`
+(#114).
+
+### First pre-release: data may be reset
+
+The record format is v2 from this release on, and it may still change
+before the beta. The release notes and the quickstart tell testers that a
+later build may reset servers and messages, and that their identity comes
+back from the 12 words. If a later release does reset data, say so in its
+release notes **before** testers install it.
 
 Without the variable the build still succeeds, with a warning, but the app
 runs offline and testers can't reach each other. Only tag builds read the

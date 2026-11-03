@@ -15,8 +15,10 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  # Dry run: builds everything as version 0.0.0 and runs the publish checks,
-  # but publishes nothing (no job with write access runs).
+  # Dry run (pull requests, or by hand on any branch, e.g. main before a tag):
+  # builds everything as version 0.0.0 and runs the publish checks, but
+  # publishes nothing (no job with write access runs).
+  workflow_dispatch:
   pull_request:
     paths:
       - .github/workflows/release.yml
@@ -33,7 +35,7 @@ permissions:
 # A newer push to a pull request replaces its dry run.
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -57,7 +59,7 @@ jobs:
     steps:
       - id: version
         run: |
-          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+          if [ "$GITHUB_EVENT_NAME" != push ]; then
             echo "version=0.0.0" >> "$GITHUB_OUTPUT"; exit 0
           fi
           if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
@@ -271,6 +273,7 @@ jobs:
           How to install and get started (Hebrew):
           [docs/release/ALPHA-QUICKSTART.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/docs/release/ALPHA-QUICKSTART.md)
 
+          - **First pre-release:** the data format may still change (record format v2). Servers and messages made with this build may be reset by a later one. Your identity is safe as long as you keep your 12 recovery words.
           - The installers are **not code-signed**. Windows SmartScreen will warn: choose "More info" and then "Run anyway".
           - The \`.zip\`/\`.tar.gz\` files are the in-app updater payloads; you don't need them.
           - \`manifest-body.json\` is the **unsigned** updater manifest. The owner signs it offline and attaches \`manifest.json\`; until then, in-app updates are not offered.
@@ -296,9 +299,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   dry-run:
-    # Pull requests only: the same checks as publish, read-only, uploads nothing.
+    # Anything but a tag push: the same checks as publish, read-only, uploads nothing.
     name: release dry run
-    if: github.event_name == 'pull_request'
+    if: github.event_name != 'push'
     needs: [check, ui, desktop]
     runs-on: ubuntu-latest
     env:
