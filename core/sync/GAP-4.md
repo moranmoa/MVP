@@ -47,11 +47,15 @@ small change to `core/api` (secret in the link and the store, the binding
 callback, `MemberGate: ReadGate`), which I'd coordinate with whoever owns
 api.
 
-## Open questions
+## Decisions (tech lead, #96)
 
-1. A per-server secret in the link (above), or derive the handle from
-   something that is already there?
-2. Should pulls for channels exclude kicked members now (authority verdict
-   at serve time), or keep the monotone rule as asked?
-3. Is sealing gossip with the secret OK alongside GAP-5, or is a
-   per-subscription disconnect enough for the security lead?
+1. The per-server secret goes in the invite link.
+2. Kicked members are excluded at serve time: `ReadGate` (implemented in
+   api) uses the current authority state and is **not** monotone. That is
+   fine, because serving isn't storing. The storage gate stays monotone.
+3. Gossip is sealed with the secret. Secret rotation on kick is a separate
+   follow-up.
+
+This PR is core/sync only. The api side (the link, the store, the binding
+callback, `ReadGate`) goes to dev-identity. Building waits for the
+security lead's OK too.
