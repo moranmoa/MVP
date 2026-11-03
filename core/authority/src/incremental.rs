@@ -23,7 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use records::{Record, RecordId, Scope};
+use records::{Record, RecordId, Scope, ServerId};
 
 use crate::{apply, full_run, permitted, Action, Actor, Role, State, View, Write};
 
@@ -49,6 +49,8 @@ enum Fallback {
 /// arrive in any order.
 #[derive(Default)]
 pub struct Resolver {
+    /// The one server whose records this resolver accepts.
+    server: ServerId,
     /// Every control record received, whether or not its deps have arrived.
     known: HashMap<RecordId, Record>,
     /// Records still waiting on deps: how many are missing.
@@ -81,8 +83,8 @@ pub struct Resolver {
 }
 
 impl Resolver {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(server: ServerId) -> Self {
+        Self { server, ..Self::default() }
     }
 
     pub fn state(&self) -> &State {
@@ -93,11 +95,15 @@ impl Resolver {
         self.stats
     }
 
-    /// Adds an arriving record. Duplicates and records outside the control
-    /// log are ignored; records with missing deps wait for them.
+    /// Adds an arriving record. Duplicates, other servers' records and
+    /// records outside the control log are ignored; records with missing
+    /// deps wait for them.
     pub fn insert(&mut self, record: Record) {
         let id = record.id();
-        if record.scope() != Scope::Control || self.known.contains_key(&id) {
+        if record.server() != self.server
+            || record.scope() != Scope::Control
+            || self.known.contains_key(&id)
+        {
             return;
         }
         let mut missing = 0;
@@ -115,9 +121,7 @@ impl Resolver {
 
         let mut ready = vec![id];
         while let Some(id) = ready.pop() {
-            if !self.join(id) {
-                continue;
-            }
+            self.join(id);
             for waiter in self.waiting.remove(&id).unwrap_or_default() {
                 let count = self.missing.get_mut(&waiter).expect("waiter is pending");
                 *count -= 1;
@@ -132,13 +136,9 @@ impl Resolver {
         }
     }
 
-    /// Puts a record whose deps have all joined into the log. Returns false
-    /// if it can never join (its deps belong to another server).
-    fn join(&mut self, id: RecordId) -> bool {
+    /// Puts a record whose deps have all joined into the log.
+    fn join(&mut self, id: RecordId) {
         let record = &self.known[&id];
-        if record.deps().iter().any(|dep| self.known[dep].server() != record.server()) {
-            return false;
-        }
         let author = record.author();
         let action = Action::from_record(record);
         let at = self.insertion_point(record);

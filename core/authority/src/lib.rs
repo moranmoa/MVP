@@ -24,7 +24,8 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
 
-use records::{Draft, Kind, RecordError, Scope, ServerId, SigningKey};
+use records::{Draft, Kind, RecordError, Scope, SigningKey, GENESIS_NONCE_LEN};
+pub use records::ServerId;
 pub use records::{PublicKey, Record, RecordId};
 
 mod incremental;
@@ -72,7 +73,8 @@ impl Action {
     }
 
     /// Body encoding: target key (32 bytes), then the role byte for a grant;
-    /// UTF-8 text for a post. A genesis body is server metadata, not read here.
+    /// UTF-8 text for a post. A genesis body (nonce, then server metadata) is
+    /// not read here: write one with [`sign_genesis`].
     pub fn body(&self) -> Vec<u8> {
         match self {
             Action::Genesis => Vec::new(),
@@ -141,6 +143,29 @@ pub fn sign_control(
         ts,
         kind: action.kind(),
         body: action.body(),
+    }
+    .sign(key)
+}
+
+/// Creates a new server: signs its genesis with the owner's key. The server
+/// ID is derived from that key and `nonce` (pick a fresh random one per
+/// server), so nobody else can write a genesis for it.
+pub fn sign_genesis(
+    key: &SigningKey,
+    nonce: [u8; GENESIS_NONCE_LEN],
+    ts: u64,
+    metadata: &[u8],
+) -> Result<Record, RecordError> {
+    let owner = PublicKey::from_bytes(key.verifying_key().to_bytes());
+    Draft {
+        server: ServerId::derive(&owner, &nonce),
+        scope: Scope::Control,
+        seq: 0,
+        deps: Vec::new(),
+        auth_deps: Vec::new(),
+        ts,
+        kind: Kind::Genesis,
+        body: [&nonce[..], metadata].concat(),
     }
     .sign(key)
 }
@@ -260,9 +285,9 @@ fn apply(state: &mut State, record: &Record, action: &Action) -> Option<(Actor, 
 }
 
 /// Computes the server state from a set of control records. Records whose
-/// deps aren't all in the set are ignored.
-pub fn resolve(records: &[Record]) -> State {
-    full_run(records).state
+/// deps aren't all in the set, and records of any other server, are ignored.
+pub fn resolve(server: ServerId, records: &[Record]) -> State {
+    full_run(server, records).state
 }
 
 /// Everything the reference resolution learns on the way to the state. The
@@ -287,8 +312,8 @@ struct Run {
     genesis: Option<RecordId>,
 }
 
-fn full_run<'a>(records: impl IntoIterator<Item = &'a Record>) -> Run {
-    let by_id = complete_records(records);
+fn full_run<'a>(server: ServerId, records: impl IntoIterator<Item = &'a Record>) -> Run {
+    let by_id = complete_records(server, records);
     let order = linear_order(&by_id);
     let graph = Graph::new(&by_id, &order);
 
@@ -337,19 +362,21 @@ fn full_run<'a>(records: impl IntoIterator<Item = &'a Record>) -> Run {
     }
 }
 
-/// Keeps only control records whose whole dependency chain is present and
-/// belongs to the same server.
+/// Keeps only `server`'s control records whose whole dependency chain is
+/// present.
 fn complete_records<'a>(
+    server: ServerId,
     records: impl IntoIterator<Item = &'a Record>,
 ) -> HashMap<RecordId, &'a Record> {
-    let mut by_id: HashMap<RecordId, &Record> =
-        records.into_iter().filter(|r| r.scope() == Scope::Control).map(|r| (r.id(), r)).collect();
+    let mut by_id: HashMap<RecordId, &Record> = records
+        .into_iter()
+        .filter(|r| r.server() == server && r.scope() == Scope::Control)
+        .map(|r| (r.id(), r))
+        .collect();
     loop {
         let broken: Vec<RecordId> = by_id
             .values()
-            .filter(|r| {
-                r.deps().iter().any(|dep| by_id.get(dep).is_none_or(|d| d.server() != r.server()))
-            })
+            .filter(|r| r.deps().iter().any(|dep| !by_id.contains_key(dep)))
             .map(|r| r.id())
             .collect();
         if broken.is_empty() {

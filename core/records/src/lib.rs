@@ -103,12 +103,32 @@ id_type!(
 );
 id_type!(
     /// Identifies a server; every record of the server carries it.
+    /// Derived from the owner's key and a nonce (see [`ServerId::derive`]),
+    /// so only the owner can write a genesis that matches it.
     ServerId
 );
 id_type!(
     /// Identifies a channel within a server.
     ChannelId
 );
+
+/// A genesis body starts with this many random bytes; the rest is server
+/// metadata.
+pub const GENESIS_NONCE_LEN: usize = 16;
+
+const SERVER_ID_CONTEXT: &[u8] = b"mvp/server-id/v1\0";
+
+impl ServerId {
+    /// The ID of the server whose genesis is written by `owner` with `nonce`
+    /// at the start of its body. A new server picks a fresh random nonce.
+    pub fn derive(owner: &PublicKey, nonce: &[u8; GENESIS_NONCE_LEN]) -> ServerId {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(SERVER_ID_CONTEXT);
+        hasher.update(&owner.0);
+        hasher.update(nonce);
+        ServerId(*hasher.finalize().as_bytes())
+    }
+}
 
 /// Which log a record belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -190,6 +210,10 @@ pub enum RecordError {
     NotCanonical,
     /// Control-log records rely on their own deps; auth_deps must be empty.
     AuthDepsInControlScope,
+    /// A genesis must have no deps.
+    GenesisWithDeps,
+    /// The genesis author and nonce don't hash to the record's server ID.
+    GenesisServerMismatch,
     BadAuthorKey,
     BadSignature,
 }
@@ -220,6 +244,10 @@ impl fmt::Display for RecordError {
                 write!(f, "control-log records can't carry auth_deps")
             }
             RecordError::BadAuthorKey => write!(f, "author is not a valid Ed25519 key"),
+            RecordError::GenesisWithDeps => write!(f, "a genesis can't have deps"),
+            RecordError::GenesisServerMismatch => {
+                write!(f, "genesis author and nonce don't match the server ID")
+            }
             RecordError::BadSignature => write!(f, "signature does not verify"),
         }
     }
@@ -289,6 +317,15 @@ impl Fields {
         }
         if self.scope == Scope::Control && !self.auth_deps.is_empty() {
             return Err(RecordError::AuthDepsInControlScope);
+        }
+        if self.kind == Kind::Genesis {
+            if !self.deps.is_empty() {
+                return Err(RecordError::GenesisWithDeps);
+            }
+            let nonce = self.body.first_chunk::<GENESIS_NONCE_LEN>();
+            if nonce.is_none_or(|nonce| ServerId::derive(&self.author, nonce) != self.server) {
+                return Err(RecordError::GenesisServerMismatch);
+            }
         }
         if self.deps.len() > MAX_DEPS {
             return Err(RecordError::TooManyDeps(self.deps.len()));
@@ -695,5 +732,54 @@ mod tests {
         .unwrap();
         assert_eq!(record.encode().len(), MAX_RECORD_BYTES);
         assert_eq!(Record::decode(&record.encode()).unwrap(), record);
+    }
+
+    fn genesis_draft(owner: &SigningKey, nonce: [u8; GENESIS_NONCE_LEN]) -> Draft {
+        let owner_key = PublicKey(owner.verifying_key().to_bytes());
+        Draft {
+            server: ServerId::derive(&owner_key, &nonce),
+            deps: vec![],
+            kind: Kind::Genesis,
+            body: [&nonce[..], b"server name"].concat(),
+            ..draft()
+        }
+    }
+
+    #[test]
+    fn genesis_by_the_owner_round_trips() {
+        let record = genesis_draft(&key(1), [7; GENESIS_NONCE_LEN]).sign(&key(1)).unwrap();
+        assert_eq!(Record::decode(&record.encode()).unwrap(), record);
+    }
+
+    #[test]
+    fn nobody_else_can_write_a_genesis_for_the_server() {
+        // Same server ID and nonce, signed by an attacker's key.
+        let forged = genesis_draft(&key(1), [7; GENESIS_NONCE_LEN]);
+        assert_eq!(forged.sign(&key(2)), Err(RecordError::GenesisServerMismatch));
+
+        // The attacker's own genesis with a different nonce names another server.
+        let mut other_nonce = genesis_draft(&key(1), [7; GENESIS_NONCE_LEN]);
+        other_nonce.body[0] ^= 1;
+        assert_eq!(other_nonce.sign(&key(1)), Err(RecordError::GenesisServerMismatch));
+    }
+
+    #[test]
+    fn forged_genesis_bytes_are_rejected_on_decode() {
+        // A genuine genesis for the attacker's own server, then the server
+        // field rewritten to the victim's: decode must refuse it before the
+        // signature is even checked.
+        let victim = genesis_draft(&key(1), [7; GENESIS_NONCE_LEN]).sign(&key(1)).unwrap();
+        let mine = genesis_draft(&key(2), [7; GENESIS_NONCE_LEN]).sign(&key(2)).unwrap();
+        let mut bytes = mine.encode();
+        bytes[1..1 + ID_LEN].copy_from_slice(victim.server().as_bytes());
+        assert_eq!(Record::decode(&bytes), Err(RecordError::GenesisServerMismatch));
+    }
+
+    #[test]
+    fn genesis_needs_a_nonce_and_no_deps() {
+        let short = Draft { body: vec![0; GENESIS_NONCE_LEN - 1], ..genesis_draft(&key(1), [0; 16]) };
+        assert_eq!(short.sign(&key(1)), Err(RecordError::GenesisServerMismatch));
+        let with_deps = Draft { deps: vec![RecordId::from_bytes([1; 32])], ..genesis_draft(&key(1), [0; 16]) };
+        assert_eq!(with_deps.sign(&key(1)), Err(RecordError::GenesisWithDeps));
     }
 }
