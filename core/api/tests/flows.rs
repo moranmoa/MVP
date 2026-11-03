@@ -597,3 +597,64 @@ fn diagnostics_hold_no_secrets() {
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
+
+/// Encrypted chat in process (the relay version is tests/two_peers.rs).
+#[test]
+fn members_chat_through_the_group_cipher() {
+    use api::crypto::GroupKeysCipher;
+    use groupkeys::MemberSecret;
+    use identity::RecoveryPhrase;
+
+    let world = World::new();
+    let open = |words: &str, name: &str| {
+        let phrase = RecoveryPhrase::parse(words).unwrap();
+        let secret = Arc::new(MemberSecret::new(phrase.identity().signing_key()));
+        let peer = world.peer_with(
+            Arc::new(MemoryStore::new()),
+            None,
+            Arc::new(GroupKeysCipher::new(secret)),
+        );
+        peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        peer.core.update_profile(profile).unwrap();
+        peer
+    };
+    let owner = open(
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        "Owner",
+    );
+    let guest = open(LEGAL, "Guest");
+    let server = owner.core.create_server("Chat", AgeRestriction::None).unwrap();
+    guest.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+
+    // No key yet, and a plain member can't make one.
+    guest.core.sync_now().unwrap();
+    assert_eq!(guest.core.send_message(&channel, "first?", None).unwrap_err().code, ErrorCode::NotAllowed);
+    // Bad input, and replies (not yet).
+    assert_eq!(owner.core.send_message(&channel, "  ", None).unwrap_err().code, ErrorCode::BadRequest);
+    assert_eq!(
+        owner.core.send_message(&channel, "x", Some("ab")).unwrap_err().code,
+        ErrorCode::NotImplemented
+    );
+    assert_eq!(owner.core.get_message_count("nope").unwrap_err().code, ErrorCode::NotFound);
+
+    owner.events.take();
+    let sent = owner.core.send_message(&channel, "שלום", None).unwrap();
+    assert_eq!((sent.index, sent.send_state), (0, Some(SendState::Sent)));
+    assert_eq!(names(&owner.events.take()), ["message.added"]);
+
+    guest.core.sync_now().unwrap();
+    let got = guest.core.get_messages(&channel, 0, 10).unwrap();
+    assert_eq!(got.messages.len(), 1);
+    assert_eq!((got.messages[0].body.as_str(), got.messages[0].send_state), ("שלום", None));
+    guest.core.send_message(&channel, "hi", None).unwrap();
+
+    owner.core.sync_now().unwrap();
+    let bodies: Vec<String> =
+        owner.core.get_messages(&channel, 0, 10).unwrap().messages.into_iter().map(|m| m.body).collect();
+    assert_eq!(bodies, ["שלום", "hi"]);
+    let page = owner.core.get_messages(&channel, 1, 99).unwrap();
+    assert_eq!((page.start, page.messages.len(), page.messages[0].index), (1, 1, 1));
+}

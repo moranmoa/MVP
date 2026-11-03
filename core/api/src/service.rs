@@ -10,9 +10,9 @@ use rand_core::{OsRng, RngCore};
 use records::{ChannelId, Draft, Kind, PublicKey, Record, RecordId, Scope, ServerId};
 use serde::{Deserialize, Serialize};
 
+use crate::chat;
 use crate::db::Db;
 use crate::model::{self, GenesisBody, Log, ServerView};
-use crate::chat;
 use crate::ports::{CipherError, CipherOutcome, GroupCipher, Ports, SharedSecrets};
 use crate::types::*;
 
@@ -501,8 +501,7 @@ impl Core {
             chat::sync_cipher(cipher, server, log);
             let sealed = match cipher.encrypt(server, channel, body.as_bytes()) {
                 Err(CipherError::NoKey | CipherError::RotationRequired) if may_rotate => {
-                    let parts =
-                        cipher.rotate(server, channel, &members).map_err(cipher_error)?;
+                    let parts = cipher.rotate(server, channel, &members).map_err(cipher_error)?;
                     // All parts or none, each signed once (see `GroupCipher::rotate`).
                     let seq = chat::channel_seq(log, channel, &key);
                     let deps = chat::channel_deps(log, channel);
@@ -558,7 +557,12 @@ impl Core {
     }
 
     /// Messages `start..end` (0-based, end exclusive) of the channel.
-    pub fn get_messages(&self, channel_id: &str, start: usize, end: usize) -> CoreResult<MessageRange> {
+    pub fn get_messages(
+        &self,
+        channel_id: &str,
+        start: usize,
+        end: usize,
+    ) -> CoreResult<MessageRange> {
         let mut inner = self.lock();
         let (server, channel) = inner.find_channel(channel_id)?;
         let me = inner.me.as_ref().map(Me::key);
@@ -570,7 +574,13 @@ impl Core {
             .enumerate()
             .map(|(i, s)| {
                 let mine = Some(s.record.author()) == me;
-                message_json(&s.record, &s.text, start + i, channel, mine.then_some(SendState::Sent))
+                message_json(
+                    &s.record,
+                    &s.text,
+                    start + i,
+                    channel,
+                    mine.then_some(SendState::Sent),
+                )
             })
             .collect();
         Ok(MessageRange { channel_id: channel_id.to_owned(), start, messages })
@@ -701,9 +711,8 @@ impl Inner {
     /// The server of my default channel `channel_id`; `not-found` for any
     /// other. Loads the server.
     fn find_channel(&mut self, channel_id: &str) -> CoreResult<(ServerId, ChannelId)> {
-        let channel = model::parse_hex32(channel_id)
-            .map(ChannelId::from_bytes)
-            .ok_or(ErrorCode::NotFound)?;
+        let channel =
+            model::parse_hex32(channel_id).map(ChannelId::from_bytes).ok_or(ErrorCode::NotFound)?;
         for server in self.db.servers()? {
             if model::default_channel(server) == channel {
                 self.load(server)?;

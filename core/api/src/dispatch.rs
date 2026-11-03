@@ -129,11 +129,7 @@ fn ok<T: serde::Serialize>(value: CoreResult<T>) -> CoreResult<Value> {
 
 /// Every command in `CoreCommands`, plus the Rust additions. Commands from
 /// the contract this core doesn't do yet answer `not-implemented`.
-pub const NOT_YET: &[&str] = &[
-    "editMessage",
-    "deleteMessage",
-    "retryMessage",
-];
+pub const NOT_YET: &[&str] = &["editMessage", "deleteMessage", "retryMessage"];
 
 impl Core {
     /// Takes a request JSON text, returns the response JSON text.
@@ -173,9 +169,7 @@ impl Core {
 
             "listServers" => ok(self.list_servers()),
             "listChannels" => ok(self.list_channels(&args::<ServerArg>(raw)?.server_id)),
-            "getMessageCount" => {
-                ok(self.get_message_count(&args::<ChannelIdArg>(raw)?.channel_id))
-            }
+            "getMessageCount" => ok(self.get_message_count(&args::<ChannelIdArg>(raw)?.channel_id)),
             "getMessages" => {
                 let a: RangeArg = args(raw)?;
                 ok(self.get_messages(&a.channel_id, a.start, a.end))

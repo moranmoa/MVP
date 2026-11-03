@@ -18,9 +18,11 @@ use records::{Kind, Scope};
 
 /// BIP-39 test vectors, so the test knows each identity's key and can unlock
 /// its cipher. TODO: once `GroupCipher` has unlock/lock, the core does it.
-const OWNER: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+const OWNER: &str =
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 const GUEST: &str = "legal winner thank year wave sausage worth useful legal winner thank yellow";
-const STRANGER: &str = "letter advice cage absurd amount doctor acoustic avoid letter advice cage above";
+const STRANGER: &str =
+    "letter advice cage absurd amount doctor acoustic avoid letter advice cage above";
 
 struct Peer {
     core: Core,
@@ -106,13 +108,20 @@ fn two_users_chat_through_a_relay() {
         owner.core.sync_now().unwrap();
         owner.core.get_message_count(&channel).unwrap() == 2
     });
-    let bodies: Vec<String> =
-        owner.core.get_messages(&channel, 0, 10).unwrap().messages.into_iter().map(|m| m.body).collect();
+    let bodies: Vec<String> = owner
+        .core
+        .get_messages(&channel, 0, 10)
+        .unwrap()
+        .messages
+        .into_iter()
+        .map(|m| m.body)
+        .collect();
     assert_eq!(bodies, ["שלום, מה נשמע?", "hi!"]);
 
     // The stranger holds the same records (the log is public to sync) but
     // was never in a rotation: nothing opens.
-    let server_id = records::ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let server_id =
+        records::ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
     let mut held = Vec::new();
     eventually("the stranger to hold both messages", || {
         held = stranger.net.fetch(server_id);
