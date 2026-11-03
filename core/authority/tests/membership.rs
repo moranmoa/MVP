@@ -183,12 +183,19 @@ fn a_revoke_voids_every_join_it_had_not_seen() {
     let g = genesis();
     let link = invite(0, 1, vec![g.id()], 0, 0);
     let seen = join(1, 0, &link);
-    let revoke = rec(0, 2, vec![link.id(), seen.id()], Action::RevokeInvite { invite: link.id() });
     // Joins racing the revoke lose whichever side of it the linear order
-    // puts them, and so do their posts.
+    // puts them, and so do their posts. The revoke's seq is picked so the
+    // racers fall on both sides of its ID.
     let racers: Vec<Record> = (2..8).map(|n| join(n, 0, &link)).collect();
-    assert!(racers.iter().any(|r| r.id() < revoke.id()));
-    assert!(racers.iter().any(|r| r.id() > revoke.id()));
+    let revoke = (2..)
+        .map(|seq| {
+            rec(0, seq, vec![link.id(), seen.id()], Action::RevokeInvite { invite: link.id() })
+        })
+        .find(|revoke| {
+            racers.iter().any(|r| r.id() < revoke.id())
+                && racers.iter().any(|r| r.id() > revoke.id())
+        })
+        .expect("some seq splits the racers");
     let post = rec(2, 1, vec![racers[0].id()], Action::Post { text: "hi".into() });
     let late = rec(8, 0, vec![revoke.id(), link.id()], Action::Join { invite: link.id() });
 

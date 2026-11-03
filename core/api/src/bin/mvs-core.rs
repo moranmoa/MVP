@@ -8,6 +8,7 @@
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use api::sidecar::{self, Lines};
@@ -46,23 +47,30 @@ fn main() -> ExitCode {
         eprintln!("mvs-core: can't prepare the data dir: {e}");
         return ExitCode::FAILURE;
     }
-    let network: Arc<dyn Network> = match args.relay {
-        None => Arc::new(LoopbackNetwork::new()),
+    let sync: Option<Arc<SyncNetwork>> = match args.relay {
+        None => None,
         Some(relay) => {
-            let Ok(relay) = relay.parse() else {
-                eprintln!("mvs-core: --relay is not a multiaddr");
-                return ExitCode::from(2);
+            let relay = match api::syncnet::relay_addr(&relay) {
+                Ok(relay) => relay,
+                Err(why) => {
+                    eprintln!("mvs-core: --relay {why}");
+                    return ExitCode::from(2);
+                }
             };
             // TODO(#64): a start failure (the node.key ACL) as a notice
             // the UI shows, not only this log line and an exit.
             match SyncNetwork::start(relay, &dir.join("sync"), Arc::new(MemberGate::new())) {
-                Ok(net) => Arc::new(net),
+                Ok(net) => Some(Arc::new(net)),
                 Err(e) => {
                     eprintln!("mvs-core: sync didn't start: {e}");
                     return ExitCode::FAILURE;
                 }
             }
         }
+    };
+    let network: Arc<dyn Network> = match &sync {
+        Some(net) => net.clone(),
+        None => Arc::new(LoopbackNetwork::new()),
     };
     let out = Lines::new(io::stdout());
     let ports = Ports {
@@ -85,7 +93,22 @@ fn main() -> ExitCode {
         }
     };
     eprintln!("mvs-core: ready");
-    match sidecar::serve(&core, io::stdin().lock(), &out) {
+    // With a network, a background sync beside the request loop; it stops
+    // and is joined when stdin closes.
+    let stop = AtomicBool::new(false);
+    let served = std::thread::scope(|scope| {
+        if let Some(hints) = sync.as_ref().and_then(|net| net.take_hints()) {
+            let (core, stop) = (&core, &stop);
+            scope.spawn(move || core.run_sync_loop(&hints, stop));
+        }
+        let served = sidecar::serve(&core, io::stdin().lock(), &out);
+        stop.store(true, Ordering::SeqCst);
+        if let Some(net) = &sync {
+            net.wake();
+        }
+        served
+    });
+    match served {
         Ok(n) => {
             eprintln!("mvs-core: stdin closed after {n} requests");
             ExitCode::SUCCESS

@@ -28,6 +28,14 @@
 //! record of a removed author, when channel records of its channel arrive (a
 //! missing cut head or a new witness can change its verdict).
 //!
+//! Pruned stubs (B6-p): once a delete or edit replaced a message or an
+//! edit, peers may keep only its stub ([`Stub`]: every field but the body).
+//! [`check_stub`] judges one like its full record, but only once a held,
+//! accepted delete or edit replaced it; until then it is pending on its own
+//! ID, and the caller fetches the full record, so a peer can't censor
+//! messages by serving stubs. A stub never counts as a witness. Records
+//! that name a stub (an edit or delete of a pruned message) find it held.
+//!
 //! Message text is encrypted on the wire, so its length can't be read here:
 //! the caller checks the plaintext with [`message_text_ok`] after decrypting.
 //!
@@ -36,7 +44,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use records::{Kind, Record, RecordId, Scope};
+use records::{Kind, PublicKey, Record, RecordId, Scope, ServerId, Stub};
 
 use crate::{Action, Actor, Cut, Resolver, Role, View};
 
@@ -59,10 +67,82 @@ pub fn message_text_ok(text: &str) -> bool {
 pub trait ChannelGraph {
     /// Whether `ancestor` is `of`, or one of `of`'s ancestors through deps.
     fn is_ancestor(&self, ancestor: RecordId, of: RecordId) -> bool;
-    /// A channel record the store holds.
+    /// A channel record the store holds in full.
     fn record(&self, id: RecordId) -> Option<Record>;
+    /// A channel record the store holds, in full or as a pruned stub (B6-p).
+    /// A store that keeps stubs overrides this; by default only full records
+    /// are held.
+    fn entry(&self, id: RecordId) -> Option<Entry> {
+        self.record(id).map(Entry::Full)
+    }
     /// The held records that list `id` in their deps.
     fn children(&self, id: RecordId) -> Vec<RecordId>;
+}
+
+/// A held channel record: in full, or pruned to a stub after a delete or
+/// edit replaced it (B6-p).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Entry {
+    Full(Record),
+    Pruned(Stub),
+}
+
+impl Entry {
+    pub fn id(&self) -> RecordId {
+        match self {
+            Entry::Full(record) => record.id(),
+            Entry::Pruned(stub) => stub.id(),
+        }
+    }
+
+    pub fn server(&self) -> ServerId {
+        match self {
+            Entry::Full(record) => record.server(),
+            Entry::Pruned(stub) => stub.server(),
+        }
+    }
+
+    pub fn scope(&self) -> Scope {
+        match self {
+            Entry::Full(record) => record.scope(),
+            Entry::Pruned(stub) => stub.scope(),
+        }
+    }
+
+    pub fn author(&self) -> PublicKey {
+        match self {
+            Entry::Full(record) => record.author(),
+            Entry::Pruned(stub) => stub.author(),
+        }
+    }
+
+    pub fn kind(&self) -> Kind {
+        match self {
+            Entry::Full(record) => record.kind(),
+            Entry::Pruned(stub) => stub.kind(),
+        }
+    }
+
+    pub fn deps(&self) -> &[RecordId] {
+        match self {
+            Entry::Full(record) => record.deps(),
+            Entry::Pruned(stub) => stub.deps(),
+        }
+    }
+
+    pub fn auth_deps(&self) -> &[RecordId] {
+        match self {
+            Entry::Full(record) => record.auth_deps(),
+            Entry::Pruned(stub) => stub.auth_deps(),
+        }
+    }
+
+    fn full(&self) -> Option<&Record> {
+        match self {
+            Entry::Full(record) => Some(record),
+            Entry::Pruned(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,7 +195,7 @@ pub enum Void {
 /// A voiding rule: given the target's concurrent channel record, whether it
 /// is privileged, and the removal, decide. `cx` answers questions about the
 /// channel, witnesses included.
-pub type VoidRule = fn(&Record, bool, &Removal<'_>, &mut Context<'_>) -> Void;
+pub type VoidRule = fn(&Entry, bool, &Removal<'_>, &mut Context<'_>) -> Void;
 
 /// An accepted kick or revoke, as a [`VoidRule`] sees it.
 pub struct Removal<'a> {
@@ -145,8 +225,9 @@ impl Context<'_> {
     /// Whether a record of another author that descends from `record`, and
     /// is concurrent with `removal` (none of its `auth_deps` has seen it), is
     /// accepted. A record built on `record` after the removal is known
-    /// doesn't count, so a colluder can't revive a backdated record.
-    pub fn witnessed(&mut self, record: &Record, removal: &Removal<'_>) -> bool {
+    /// doesn't count, so a colluder can't revive a backdated record. A
+    /// pruned stub is never a witness: what it said can't be checked.
+    pub fn witnessed(&mut self, record: &Entry, removal: &Removal<'_>) -> bool {
         if self.depth >= MAX_WITNESS_DEPTH {
             self.truncated = true;
             return false;
@@ -157,8 +238,9 @@ impl Context<'_> {
             if !seen.insert(id) {
                 continue;
             }
-            let Some(next) = self.graph.record(id) else { continue };
-            if next.author() != record.author()
+            let Some(next) = self.graph.entry(id) else { continue };
+            if matches!(next, Entry::Full(_))
+                && next.author() != record.author()
                 && !self.resolver.is_control_ancestor(removal.id, next.auth_deps())
             {
                 self.depth += 1;
@@ -173,7 +255,7 @@ impl Context<'_> {
         false
     }
 
-    fn judge(&mut self, record: &Record) -> Verdict {
+    fn judge(&mut self, record: &Entry) -> Verdict {
         if let Some(verdict) = self.memo.get(&record.id()) {
             return verdict.clone();
         }
@@ -186,10 +268,52 @@ impl Context<'_> {
         verdict
     }
 
-    fn check(&mut self, record: &Record) -> Verdict {
+    /// Whether a held, accepted delete or edit replaced the pruned `stub`:
+    /// one naming it, for a message; for an edit, one naming the message it
+    /// edited (among its deps, by the same author), since edits and deletes
+    /// only ever name messages.
+    fn replaced(&mut self, stub: &Entry) -> bool {
+        let named = match stub.kind() {
+            Kind::Message => vec![stub.id()],
+            Kind::MessageEdit => stub
+                .deps()
+                .iter()
+                .copied()
+                .filter(|dep| {
+                    self.graph.entry(*dep).is_some_and(|message| {
+                        message.kind() == Kind::Message && message.author() == stub.author()
+                    })
+                })
+                .collect(),
+            _ => return false,
+        };
+        named.into_iter().any(|message| {
+            self.graph.children(message).into_iter().any(|id| {
+                let Some(Entry::Full(tombstone)) = self.graph.entry(id) else { return false };
+                let kind = tombstone.kind();
+                // A newer edit replaces an older one; a delete replaces both.
+                let replaces = kind == Kind::MessageDelete
+                    || (kind == Kind::MessageEdit
+                        && (stub.kind() == Kind::Message
+                            || self.graph.is_ancestor(stub.id(), tombstone.id())));
+                replaces
+                    && target_of(&tombstone, kind) == Some(message)
+                    && tombstone.id() != stub.id()
+                    && self.judge(&Entry::Full(tombstone)) == Verdict::Accept
+            })
+        })
+    }
+
+    fn check(&mut self, record: &Entry) -> Verdict {
         let resolver = self.resolver;
         if record.server() != resolver.server() || !matches!(record.scope(), Scope::Channel(_)) {
             return Verdict::Refused(Refusal::NotThisServersChannel);
+        }
+        // A stub stands in for its record only once something accepted
+        // replaced it; otherwise the full record is fetched, so a peer can't
+        // censor messages by serving stubs.
+        if matches!(record, Entry::Pruned(_)) && !self.replaced(record) {
+            return Verdict::Pending { missing: vec![record.id()] };
         }
         if record.auth_deps().is_empty() {
             return Verdict::Refused(Refusal::NoAuthDeps);
@@ -204,19 +328,22 @@ impl Context<'_> {
             return Verdict::Refused(Refusal::NotAMember);
         }
 
-        let privileged = match record.kind() {
-            Kind::Message => false,
-            Kind::KeyRotation => {
+        let privileged = match (record.kind(), record.full()) {
+            (Kind::Message, _) => false,
+            // A pruned edit: its target went with the body. Something
+            // accepted replaced it, and an edit is its author's own.
+            (Kind::MessageEdit, None) => false,
+            (Kind::KeyRotation, _) => {
                 if !may_rotate(&view, author) {
                     return Verdict::Refused(Refusal::NotAllowed);
                 }
                 true
             }
-            kind @ (Kind::MessageEdit | Kind::MessageDelete) => {
-                let Some(target) = target_of(record, kind) else {
+            (kind @ (Kind::MessageEdit | Kind::MessageDelete), Some(full)) => {
+                let Some(target) = target_of(full, kind) else {
                     return Verdict::Refused(Refusal::BadTarget);
                 };
-                let Some(target) = self.graph.record(target) else {
+                let Some(target) = self.graph.entry(target) else {
                     return Verdict::Pending { missing: vec![target] };
                 };
                 if target.kind() != Kind::Message || target.scope() != record.scope() {
@@ -275,7 +402,7 @@ impl Context<'_> {
 /// cut names for its channel isn't held, the verdict is pending rather than
 /// void. A fake head can't hold back records a held head or a witness keeps.
 pub fn witness(
-    record: &Record,
+    record: &Entry,
     privileged: bool,
     removal: &Removal<'_>,
     cx: &mut Context<'_>,
@@ -298,7 +425,7 @@ pub fn witness(
         return Void::Keep;
     }
     let missing: Vec<RecordId> =
-        heads.iter().copied().filter(|head| cx.graph().record(*head).is_none()).collect();
+        heads.iter().copied().filter(|head| cx.graph().entry(*head).is_none()).collect();
     if missing.is_empty() {
         Void::Void
     } else {
@@ -310,7 +437,7 @@ pub fn witness(
 /// a kick hides the target's other concurrent records instead of voiding
 /// them.
 pub fn privileged_only(
-    _: &Record,
+    _: &Entry,
     privileged: bool,
     removal: &Removal<'_>,
     _: &mut Context<'_>,
@@ -341,9 +468,25 @@ pub fn check_channel_with<G: ChannelGraph>(
     graph: &G,
     rule: VoidRule,
 ) -> Verdict {
+    check_entry(resolver, &Entry::Full(record.clone()), graph, rule)
+}
+
+/// Judges a pruned stub with the default rule: like its full record, once a
+/// held, accepted delete or edit replaced it; `Pending` on its own ID until
+/// then, meaning fetch the full record.
+pub fn check_stub<G: ChannelGraph>(resolver: &Resolver, stub: &Stub, graph: &G) -> Verdict {
+    check_entry(resolver, &Entry::Pruned(stub.clone()), graph, witness)
+}
+
+fn check_entry<G: ChannelGraph>(
+    resolver: &Resolver,
+    entry: &Entry,
+    graph: &G,
+    rule: VoidRule,
+) -> Verdict {
     let mut cx =
         Context { resolver, graph, rule, memo: HashMap::new(), depth: 0, truncated: false };
-    cx.judge(record)
+    cx.judge(entry)
 }
 
 /// The record an edit or delete names: the first 32 bytes of the body (the
