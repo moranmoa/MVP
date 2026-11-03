@@ -14,6 +14,8 @@ pub enum Error {
     InsufficientSignatures { valid: usize, required: usize },
     /// `now` is at or past the manifest's `expires_at`.
     Expired { expires_at: u64, now: u64 },
+    /// `issued_at` is further ahead of `now` than the clock-skew allowance.
+    IssuedInFuture { issued_at: u64, now: u64 },
     /// The manifest is for another update channel.
     WrongChannel { expected: String, found: String },
     /// The manifest is older than one this client already accepted (replay).
@@ -34,6 +36,12 @@ pub enum Error {
     PreviouslyFailed(Version),
     /// A health report arrived with no trial boot in progress.
     NoTrial,
+    /// A root rotation skipped or repeated a version.
+    RootVersion { expected: u64, found: u64 },
+    /// The artifact was verified for another platform.
+    WrongPlatform { expected: String, found: String },
+    /// A persisted state file is inconsistent (corrupted or tampered with).
+    InvalidState(String),
     Io(String),
 }
 
@@ -47,6 +55,9 @@ impl fmt::Display for Error {
             }
             Error::Expired { expires_at, now } => {
                 write!(f, "manifest expired at {expires_at} (now {now})")
+            }
+            Error::IssuedInFuture { issued_at, now } => {
+                write!(f, "manifest issued at {issued_at}, more than a day after now ({now}); check the clock")
             }
             Error::WrongChannel { expected, found } => {
                 write!(f, "manifest is for channel {found:?}, client is on {expected:?}")
@@ -68,6 +79,13 @@ impl fmt::Display for Error {
             }
             Error::PreviouslyFailed(v) => write!(f, "version {v} already failed its health check"),
             Error::NoTrial => write!(f, "no trial boot in progress"),
+            Error::RootVersion { expected, found } => {
+                write!(f, "root update has version {found}, expected {expected}")
+            }
+            Error::WrongPlatform { expected, found } => {
+                write!(f, "artifact is for platform {found:?}, this install is {expected:?}")
+            }
+            Error::InvalidState(why) => write!(f, "invalid persisted state: {why}"),
             Error::Io(why) => write!(f, "i/o error: {why}"),
         }
     }

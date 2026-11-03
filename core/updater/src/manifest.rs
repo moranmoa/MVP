@@ -1,4 +1,4 @@
-//! The signed release manifest and its trust root.
+//! The signed release manifest.
 //!
 //! Wire format (JSON):
 //!
@@ -12,21 +12,37 @@
 //! body is only parsed after enough signatures check out.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 
-use ed25519_dalek::{Signature as EdSignature, Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature as EdSignature, Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Version};
+use crate::root::parse_public_key;
+use crate::{Error, TrustRoot, Version};
 
 /// The only body format this code understands.
 pub const FORMAT: u32 = 1;
 
 /// Prepended to the body before signing, so a root key's signature on a
 /// manifest can never be mistaken for a signature on anything else.
-pub const SIGNING_CONTEXT: &[u8] = b"p2p-chat/update-manifest/v1\0";
+pub const SIGNING_CONTEXT: &[u8] = b"mvs/update-manifest/v1\0";
 
 /// Peers hand us manifests; refuse anything absurdly large before parsing.
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
+
+/// More signature entries than any honest root needs (3 keys today). Caps
+/// the Ed25519 work a hostile peer can make us do per manifest.
+pub const MAX_SIGNATURES: usize = 8;
+
+/// Longest allowed gap between `issued_at` and `expires_at`. A manifest
+/// that stayed valid for years would defeat freeze protection (QA-14).
+pub const MAX_VALIDITY_SECS: u64 = 30 * 86_400;
+
+/// How far `issued_at` may be ahead of the local clock (QA-15). Accepting a
+/// manifest "issued" far in the future would push the client's time floor
+/// ahead and make every honest manifest look expired. Clocks more than a day
+/// behind cannot update until fixed; the app should say "check your clock".
+pub const MAX_CLOCK_SKEW_SECS: u64 = 86_400;
 
 /// What one release contains. Written by the release engineer, then signed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,7 +52,8 @@ pub struct ManifestBody {
     /// Update channel, e.g. `stable` or `beta`.
     pub channel: String,
     pub version: Version,
-    /// Unix seconds. Informational, but must precede `expires_at`.
+    /// Unix seconds. Clients use the highest `issued_at` they have accepted
+    /// as a lower bound on the current time (see `ClientPolicy`).
     pub issued_at: u64,
     /// Unix seconds. Clients refuse the manifest from this moment on, so an
     /// attacker cannot freeze a user on an old release by replaying it.
@@ -56,6 +73,12 @@ pub struct Artifact {
     pub size: u64,
 }
 
+/// Channel and platform names end up in file names and log lines, so they
+/// are restricted to a boring alphabet.
+pub fn is_valid_name(s: &str) -> bool {
+    (1..=32).contains(&s.len()) && s.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_'))
+}
+
 impl ManifestBody {
     /// Internal consistency checks, independent of time and client state.
     pub fn validate(&self) -> Result<(), Error> {
@@ -63,11 +86,14 @@ impl ManifestBody {
         if self.format != FORMAT {
             return Err(Error::Malformed(format!("unsupported format {}", self.format)));
         }
-        if self.channel.is_empty() {
-            return bad("empty channel");
+        if !is_valid_name(&self.channel) {
+            return bad("bad channel name");
         }
         if self.expires_at <= self.issued_at {
             return bad("expires_at must be after issued_at");
+        }
+        if self.expires_at - self.issued_at > MAX_VALIDITY_SECS {
+            return bad("validity period longer than MAX_VALIDITY_SECS");
         }
         if self.artifacts.is_empty() {
             return bad("no artifacts");
@@ -75,7 +101,7 @@ impl ManifestBody {
         for (platform, a) in &self.artifacts {
             let hex_ok = a.sha256.len() == 64
                 && a.sha256.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-            if platform.is_empty() || !hex_ok {
+            if !is_valid_name(platform) || !hex_ok {
                 return Err(Error::Malformed(format!("bad artifact entry {platform:?}")));
             }
         }
@@ -86,85 +112,62 @@ impl ManifestBody {
     }
 }
 
-/// The set of root public keys baked into the app, plus how many of them
-/// must sign. Closed alpha: one key, threshold 1. From the open alpha on:
-/// three hardware keys, threshold 2.
-#[derive(Clone, Debug)]
-pub struct TrustRoot {
-    keys: Vec<VerifyingKey>,
-    threshold: usize,
-}
-
-/// On-disk / embedded form of a [`TrustRoot`].
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TrustRootFile {
-    pub threshold: usize,
-    /// Hex Ed25519 public keys.
-    pub keys: Vec<String>,
-}
-
-impl TrustRoot {
-    pub fn new(keys: Vec<VerifyingKey>, threshold: usize) -> Result<Self, Error> {
-        let bad = |why: &str| Err(Error::InvalidTrustRoot(why.to_string()));
-        if threshold == 0 {
-            return bad("threshold must be at least 1");
-        }
-        if threshold > keys.len() {
-            return bad("threshold is larger than the number of keys");
-        }
-        let distinct: BTreeSet<[u8; 32]> = keys.iter().map(|k| k.to_bytes()).collect();
-        if distinct.len() != keys.len() {
-            return bad("duplicate key");
-        }
-        if keys.iter().any(|k| k.is_weak()) {
-            return bad("weak key");
-        }
-        Ok(TrustRoot { keys, threshold })
-    }
-
-    /// The closed-alpha configuration.
-    pub fn single(key: VerifyingKey) -> Result<Self, Error> {
-        TrustRoot::new(vec![key], 1)
-    }
-
-    pub fn from_file(file: &TrustRootFile) -> Result<Self, Error> {
-        let keys = file
-            .keys
-            .iter()
-            .map(|h| parse_public_key(h).ok_or_else(|| Error::InvalidTrustRoot(format!("bad key {h:?}"))))
-            .collect::<Result<Vec<_>, _>>()?;
-        TrustRoot::new(keys, file.threshold)
-    }
-
-    pub fn to_file(&self) -> TrustRootFile {
-        TrustRootFile {
-            threshold: self.threshold,
-            keys: self.keys.iter().map(|k| hex::encode(k.to_bytes())).collect(),
-        }
-    }
-
-    pub fn threshold(&self) -> usize {
-        self.threshold
-    }
-
-    fn index_of(&self, key: &VerifyingKey) -> Option<usize> {
-        self.keys.iter().position(|k| k == key)
-    }
-}
-
-pub fn parse_public_key(hex_key: &str) -> Option<VerifyingKey> {
-    let bytes: [u8; 32] = hex::decode(hex_key).ok()?.try_into().ok()?;
-    VerifyingKey::from_bytes(&bytes).ok()
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignatureEntry {
     /// Hex public key of the signer.
     pub key: String,
-    /// Hex Ed25519 signature over `SIGNING_CONTEXT || signed`.
+    /// Hex Ed25519 signature over `context || signed`.
     pub sig: String,
+}
+
+fn signing_message(context: &[u8], signed: &str) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(context.len() + signed.len());
+    msg.extend_from_slice(context);
+    msg.extend_from_slice(signed.as_bytes());
+    msg
+}
+
+/// Adds or replaces `key`'s signature over `context || signed`.
+pub(crate) fn add_signature(context: &[u8], signed: &str, sigs: &mut Vec<SignatureEntry>, key: &SigningKey) {
+    let sig = key.sign(&signing_message(context, signed));
+    let key_hex = hex::encode(key.verifying_key().to_bytes());
+    sigs.retain(|s| s.key != key_hex);
+    sigs.push(SignatureEntry { key: key_hex, sig: hex::encode(sig.to_bytes()) });
+}
+
+/// How many distinct keys of `root` validly signed. Entries by unknown keys,
+/// malformed entries and repeats never count and never cause an error;
+/// only an oversized list does.
+pub(crate) fn valid_signers(
+    context: &[u8],
+    signed: &str,
+    sigs: &[SignatureEntry],
+    root: &TrustRoot,
+) -> Result<usize, Error> {
+    if sigs.len() > MAX_SIGNATURES {
+        return Err(Error::Malformed(format!("more than {MAX_SIGNATURES} signatures")));
+    }
+    let msg = signing_message(context, signed);
+    let mut signers = BTreeSet::new();
+    // Each trusted key gets one verification per envelope, valid or not, so
+    // the Ed25519 work is bounded by the root's key count, not by how many
+    // entries a peer stuffed in. Our tooling writes one signature per key.
+    let mut tried = BTreeSet::new();
+    for entry in sigs {
+        let Some(key) = parse_public_key(&entry.key) else { continue };
+        let Some(index) = root.index_of(&key) else { continue };
+        if !tried.insert(index) {
+            continue;
+        }
+        let Some(sig) = hex::decode(&entry.sig).ok().and_then(|b| EdSignature::from_slice(&b).ok()) else {
+            continue;
+        };
+        if key.verify_strict(&msg, &sig).is_ok() {
+            signers.insert(index);
+        }
+    }
+    Ok(signers.len())
 }
 
 /// A manifest as it travels: body bytes plus detached signatures.
@@ -174,13 +177,6 @@ pub struct SignatureEntry {
 pub struct SignedManifest {
     pub signed: String,
     pub signatures: Vec<SignatureEntry>,
-}
-
-fn signing_message(signed: &str) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(SIGNING_CONTEXT.len() + signed.len());
-    msg.extend_from_slice(SIGNING_CONTEXT);
-    msg.extend_from_slice(signed.as_bytes());
-    msg
 }
 
 impl SignedManifest {
@@ -196,10 +192,16 @@ impl SignedManifest {
     /// their own machine, for the 2-of-3 setup. Re-signing with the same key
     /// replaces that key's previous signature.
     pub fn sign(&mut self, key: &SigningKey) {
-        let sig = key.sign(&signing_message(&self.signed));
-        let key_hex = hex::encode(key.verifying_key().to_bytes());
-        self.signatures.retain(|s| s.key != key_hex);
-        self.signatures.push(SignatureEntry { key: key_hex, sig: hex::encode(sig.to_bytes()) });
+        add_signature(SIGNING_CONTEXT, &self.signed, &mut self.signatures, key);
+    }
+
+    /// The body, parsed and validated but **not** signature-checked. For a
+    /// co-signer to read before adding their signature; never for clients.
+    pub fn body_unverified(&self) -> Result<ManifestBody, Error> {
+        let body: ManifestBody =
+            serde_json::from_str(&self.signed).map_err(|e| Error::Malformed(e.to_string()))?;
+        body.validate()?;
+        Ok(body)
     }
 
     pub fn from_json(bytes: &[u8]) -> Result<Self, Error> {
@@ -209,35 +211,30 @@ impl SignedManifest {
         serde_json::from_slice(bytes).map_err(|e| Error::Malformed(e.to_string()))
     }
 
+    /// Reads at most `MAX_MANIFEST_BYTES + 1` bytes, so a peer streaming an
+    /// endless manifest cannot exhaust memory.
+    pub fn from_reader<R: Read>(reader: R) -> Result<Self, Error> {
+        let mut buf = Vec::new();
+        reader.take(MAX_MANIFEST_BYTES as u64 + 1).read_to_end(&mut buf)?;
+        SignedManifest::from_json(&buf)
+    }
+
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("manifest always serialises")
     }
 
     /// Checks signatures, then format, then expiry. `now` is Unix seconds.
-    ///
-    /// Signatures by keys outside the trust root, malformed entries and
-    /// repeated signatures by one key are ignored: they never count toward
-    /// the threshold, and never make an otherwise valid manifest fail.
+    /// Clients should go through `ClientPolicy::accept` afterwards, which
+    /// also enforces expiry against the signed time floor.
     pub fn verify(&self, root: &TrustRoot, now: u64) -> Result<VerifiedManifest, Error> {
-        let msg = signing_message(&self.signed);
-        let mut signers = BTreeSet::new();
-        for entry in &self.signatures {
-            let Some(key) = parse_public_key(&entry.key) else { continue };
-            let Some(index) = root.index_of(&key) else { continue };
-            let Some(sig) = hex::decode(&entry.sig).ok().and_then(|b| EdSignature::from_slice(&b).ok()) else {
-                continue;
-            };
-            if key.verify_strict(&msg, &sig).is_ok() {
-                signers.insert(index);
-            }
+        let valid = valid_signers(SIGNING_CONTEXT, &self.signed, &self.signatures, root)?;
+        if valid < root.threshold() {
+            return Err(Error::InsufficientSignatures { valid, required: root.threshold() });
         }
-        if signers.len() < root.threshold {
-            return Err(Error::InsufficientSignatures { valid: signers.len(), required: root.threshold });
+        let body = self.body_unverified()?;
+        if body.issued_at > now.saturating_add(MAX_CLOCK_SKEW_SECS) {
+            return Err(Error::IssuedInFuture { issued_at: body.issued_at, now });
         }
-
-        let body: ManifestBody =
-            serde_json::from_str(&self.signed).map_err(|e| Error::Malformed(e.to_string()))?;
-        body.validate()?;
         if now >= body.expires_at {
             return Err(Error::Expired { expires_at: body.expires_at, now });
         }
@@ -367,6 +364,15 @@ pub(crate) mod tests {
         assert!(m.verify(&root(&[&k], 1), NOW).is_ok());
     }
 
+    #[test]
+    fn too_many_signature_entries_are_refused() {
+        let k = key();
+        let mut m = signed_by(&body("1.0.0"), &[&k]);
+        let filler = SignatureEntry { key: hex::encode(k.verifying_key().to_bytes()), sig: "00".repeat(64) };
+        m.signatures.extend(std::iter::repeat(filler).take(MAX_SIGNATURES));
+        assert!(matches!(m.verify(&root(&[&k], 1), NOW), Err(Error::Malformed(_))));
+    }
+
     // --- 2-of-3 threshold (open alpha onward) ---
 
     #[test]
@@ -415,25 +421,6 @@ pub(crate) mod tests {
         assert_eq!(m.verify(&r, NOW), Err(Error::InsufficientSignatures { valid: 1, required: 2 }));
     }
 
-    #[test]
-    fn trust_root_rejects_bad_configurations() {
-        let (a, b) = (key(), key());
-        let ka = a.verifying_key();
-        assert!(TrustRoot::new(vec![ka], 0).is_err());
-        assert!(TrustRoot::new(vec![ka], 2).is_err());
-        assert!(TrustRoot::new(vec![ka, ka], 1).is_err());
-        assert!(TrustRoot::new(vec![], 1).is_err());
-        assert!(TrustRoot::new(vec![ka, b.verifying_key()], 2).is_ok());
-    }
-
-    #[test]
-    fn trust_root_file_round_trips() {
-        let (a, b, c) = (key(), key(), key());
-        let r = root(&[&a, &b, &c], 2);
-        let back = TrustRoot::from_file(&r.to_file()).unwrap();
-        assert!(signed_by(&body("1.0.0"), &[&a, &c]).verify(&back, NOW).is_ok());
-    }
-
     // --- expiry ---
 
     #[test]
@@ -473,6 +460,28 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn validity_period_is_capped() {
+        let mut b = body("1.0.0");
+        b.expires_at = b.issued_at + MAX_VALIDITY_SECS;
+        assert!(SignedManifest::new(&b).is_ok());
+        b.expires_at += 1;
+        assert!(SignedManifest::new(&b).is_err());
+    }
+
+    #[test]
+    fn path_like_names_are_rejected() {
+        for bad in ["../../evil", "win\\x", "Linux", "", "a/b", "x".repeat(33).as_str(), "nul\0"] {
+            let mut b = body("1.0.0");
+            let entry = b.artifacts.remove("linux-x86_64").unwrap();
+            b.artifacts.insert(bad.to_string(), entry);
+            assert!(SignedManifest::new(&b).is_err(), "platform {bad:?}");
+            let mut b = body("1.0.0");
+            b.channel = bad.to_string();
+            assert!(SignedManifest::new(&b).is_err(), "channel {bad:?}");
+        }
+    }
+
+    #[test]
     fn signed_but_invalid_body_is_still_rejected_by_clients() {
         // A buggy signing tool must not be able to push an inconsistent body.
         let k = key();
@@ -505,5 +514,53 @@ pub(crate) mod tests {
     fn oversized_input_is_refused_before_parsing() {
         let big = vec![b' '; MAX_MANIFEST_BYTES + 1];
         assert!(matches!(SignedManifest::from_json(&big), Err(Error::Malformed(_))));
+        // An endless stream is cut off after MAX_MANIFEST_BYTES + 1 bytes.
+        assert!(matches!(SignedManifest::from_reader(std::io::repeat(b' ')), Err(Error::Malformed(_))));
+    }
+
+    #[test]
+    fn deeply_nested_json_is_refused_not_a_stack_overflow() {
+        let deep = format!("{}{}", "[".repeat(10_000), "]".repeat(10_000));
+        assert!(SignedManifest::from_json(deep.as_bytes()).is_err());
+        let k = key();
+        let mut m = SignedManifest { signed: deep, signatures: vec![] };
+        m.sign(&k);
+        assert!(matches!(m.verify(&root(&[&k], 1), NOW), Err(Error::Malformed(_))));
+    }
+
+    // --- QA-14 / QA-15 ---
+
+    #[test]
+    fn qa14_manifest_that_never_expires_is_refused() {
+        let mut b = body("1.0.0");
+        b.expires_at = u64::MAX;
+        assert!(matches!(SignedManifest::new(&b), Err(Error::Malformed(_))));
+        // Even if some other tool signs it, clients refuse it.
+        let k = key();
+        let mut m = SignedManifest { signed: serde_json::to_string(&b).unwrap(), signatures: vec![] };
+        m.sign(&k);
+        assert!(matches!(m.verify(&root(&[&k], 1), NOW), Err(Error::Malformed(_))));
+        // 30 days is the limit.
+        b.expires_at = b.issued_at + 30 * 86_400;
+        assert!(SignedManifest::new(&b).is_ok());
+    }
+
+    #[test]
+    fn qa15_manifest_issued_far_in_the_future_is_refused() {
+        let k = key();
+        let r = root(&[&k], 1);
+        let mut b = body("1.0.0");
+        b.issued_at = NOW + 365 * 86_400;
+        b.expires_at = b.issued_at + 7 * 86_400;
+        assert_eq!(
+            signed_by(&b, &[&k]).verify(&r, NOW),
+            Err(Error::IssuedInFuture { issued_at: b.issued_at, now: NOW })
+        );
+        // Within the allowance (a clock a few hours behind) it still works.
+        b.issued_at = NOW + MAX_CLOCK_SKEW_SECS;
+        b.expires_at = b.issued_at + 7 * 86_400;
+        assert!(signed_by(&b, &[&k]).verify(&r, NOW).is_ok());
+        b.issued_at += 1;
+        assert!(matches!(signed_by(&b, &[&k]).verify(&r, NOW), Err(Error::IssuedInFuture { .. })));
     }
 }
