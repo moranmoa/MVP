@@ -15,6 +15,7 @@ import { _electron as electron } from 'playwright-core';
 const require = createRequire(import.meta.url);
 const ELECTRON = require('electron');
 const FAKE_CORE = fileURLToPath(new URL('./fake-core.js', import.meta.url));
+const FIXTURE_UI = fileURLToPath(new URL('./fixtures/link-ui', import.meta.url));
 const A = `mvs://join/${'a'.repeat(64)}/${'b'.repeat(64)}/${'e'.repeat(64)}`;
 const B = `mvs://join/${'c'.repeat(64)}/${'d'.repeat(64)}/${'f'.repeat(64)}`;
 const env = { ...process.env, MVS_CORE_PATH: FAKE_CORE };
@@ -39,16 +40,13 @@ const launchSecond = async (arg) => {
 };
 
 before(async () => {
+  // A stand-in UI (test/fixtures/link-ui) that subscribes a second after load,
+  // like a UI that mounts late, and records every link.open. The real UI has
+  // its own listener, which would race the test for the first link.
   // Upper case and a trailing slash: the shell must canonicalise.
-  app = await electron.launch({ args: ['.', '--', `${A.toUpperCase()}/`], env });
-  // The UI itself subscribes to link.open (it opens the join dialog), so the
-  // test listens from document start too, next to it.
-  await app.context().addInitScript(() => {
-    window.__links = [];
-    window.mvs?.onEvent((name, payload) => name === 'link.open' && window.__links.push(payload));
-  });
+  app = await electron.launch({ args: ['.', '--', `${A.toUpperCase()}/`], env: { ...env, MVS_UI_DIR: FIXTURE_UI } });
   page = await app.firstWindow();
-  await page.waitForFunction(() => Array.isArray(window.__links));
+  await page.waitForFunction(() => window.__subscribed === true);
   log = join(await app.evaluate(({ app: a }) => a.getPath('userData')), 'core', 'commands.log');
 });
 
