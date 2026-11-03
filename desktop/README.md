@@ -100,6 +100,12 @@ and the recovery words never appear in the main process's stdout or stderr.
 MSYS_NO_PATHCONV=1 docker run --rm -v "$PWD/..":/repo -v desktop_node_modules:/repo/desktop/node_modules -w /repo/desktop node:22.23.4-bookworm sh -c "npm ci && npx electron-builder --linux dir && node --test test/fuses.test.mjs"
 ```
 
+`publish: null`: electron-builder never uploads anything by itself; releases go
+through our own release workflow and signed updater.
+
+ASAR integrity is enforced only on Windows and macOS. On Linux the fuse is set
+but Electron does not check the archive, so there it protects nothing.
+
 `test/fuses.test.mjs` reads the fuses back from the packaged binary, checks
 the asar-only layout, and runs the binary with `ELECTRON_RUN_AS_NODE=1` and a
 hostile `NODE_OPTIONS` to see both ignored. The core's data folder

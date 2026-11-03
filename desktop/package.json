@@ -29,6 +29,7 @@
     "appId": "dev.mvs.app",
     "productName": "MVS",
     "executableName": "mvs",
+    "publish": null,
     "asar": true,
     "files": [
       "src/**",
