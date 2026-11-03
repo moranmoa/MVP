@@ -79,3 +79,31 @@ docker compose run --rm real-core
 `test/real-core.test.mjs`: createIdentity → getRecoveryWords (same words) →
 checkRecoveryWords → getRecoveryWords refused → createServer → listServers,
 and the recovery words never appear in the main process's stdout or stderr.
+
+## Packaging (B1-3)
+
+`electron-builder` 26.17.0 with `mvs-core` (from `.core/`) and `ui/dist` in
+`resources/`, the app code only in `app.asar`, and `build/fuses.js` as the
+`afterPack` hook. The fuses:
+
+| Fuse | Value |
+| --- | --- |
+| RunAsNode | off |
+| EnableNodeOptionsEnvironmentVariable | off |
+| EnableNodeCliInspectArguments | off |
+| OnlyLoadAppFromAsar | on |
+| EnableEmbeddedAsarIntegrityValidation | on (enforced on Windows and macOS) |
+| EnableCookieEncryption | on |
+| GrantFileProtocolExtraPrivileges | off |
+
+```bash
+MSYS_NO_PATHCONV=1 docker run --rm -v "$PWD/..":/repo -v desktop_node_modules:/repo/desktop/node_modules -w /repo/desktop node:22.23.4-bookworm sh -c "npm ci && npx electron-builder --linux dir && node --test test/fuses.test.mjs"
+```
+
+`test/fuses.test.mjs` reads the fuses back from the packaged binary, checks
+the asar-only layout, and runs the binary with `ELECTRON_RUN_AS_NODE=1` and a
+hostile `NODE_OPTIONS` to see both ignored. The core's data folder
+(`<userData>/core`) is created `0700`.
+
+Still to come: the NSIS keep/delete-data page, the `mvs://` handler (strict
+parse, `joinServer` argument only), and the release.yml plug-in point.
