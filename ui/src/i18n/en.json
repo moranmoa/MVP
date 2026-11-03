@@ -145,9 +145,9 @@
   "presence.online": "Online",
   "presence.offline": "Offline",
 
-  "chat.messages": "Messages in \u2068#{channel}\u2069",
-  "chat.empty": "This is the start of \u2068#{channel}\u2069. Write the first message.",
-  "chat.composer": "Message \u2068#{channel}\u2069",
+  "chat.messages": "Messages in #\u2068{channel}\u2069",
+  "chat.empty": "This is the start of #\u2068{channel}\u2069. Write the first message.",
+  "chat.composer": "Message #\u2068{channel}\u2069",
   "chat.send": "Send",
   "chat.replyingTo": "Replying to \u2068{name}\u2069",
   "chat.cancelReply": "Cancel reply",

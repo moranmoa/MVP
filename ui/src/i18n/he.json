@@ -145,9 +145,9 @@
   "presence.online": "אונליין",
   "presence.offline": "אופליין",
 
-  "chat.messages": "הודעות ב-\u2068#{channel}\u2069",
-  "chat.empty": "זו תחילת הערוץ \u2068#{channel}\u2069. אפשר לכתוב את ההודעה הראשונה.",
-  "chat.composer": "כתיבה ב-\u2068#{channel}\u2069",
+  "chat.messages": "הודעות ב-#\u2068{channel}\u2069",
+  "chat.empty": "זו תחילת הערוץ #\u2068{channel}\u2069. אפשר לכתוב את ההודעה הראשונה.",
+  "chat.composer": "כתיבה ב-#\u2068{channel}\u2069",
   "chat.send": "שליחה",
   "chat.replyingTo": "תגובה ל-\u2068{name}\u2069",
   "chat.cancelReply": "ביטול התגובה",
