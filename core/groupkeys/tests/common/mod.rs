@@ -63,6 +63,15 @@ pub fn rotate(view: &ChannelKeys, rotator: u8, members: &BTreeSet<PublicKey>, se
     sign(rotator, body)
 }
 
+/// Applies a rotation that `authority` accepts, as every rotation in the
+/// scenario tests is.
 pub fn apply(view: &mut ChannelKeys, rotation: &Signed) -> Applied {
+    let applied = store(view, rotation);
+    view.accept(rotation.id);
+    applied
+}
+
+/// Applies a rotation `authority` hasn't accepted (yet).
+pub fn store(view: &mut ChannelKeys, rotation: &Signed) -> Applied {
     view.apply(rotation.id, rotation.author, &rotation.body).unwrap()
 }

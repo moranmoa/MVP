@@ -10,11 +10,15 @@ central order); this is the per-epoch wrapped-key design from the spec.
 `records` is used for types only (`PublicKey`, `RecordId`, `ServerId`,
 `ChannelId`, and `Kind` to read size limits). The caller puts a rotation body
 into a signed record, applies **every** well-formed rotation record of the
-channel with `ChannelKeys::apply`, and passes the ones `authority` doesn't
-accept (never permitted, or voided later by a concurrent revoke or kick) to
-`set_voided` whenever that set changes. A voided rotation is never the head,
-but its key stays for reading. The result depends only on the two sets, not
-on the order rotations and verdicts arrive in.
+channel with `ChannelKeys::apply`, and passes the ones `authority` **accepts**
+to `set_accepted` whenever that set changes (for the integration:
+`authority::State::accepted` intersected with this channel's rotation
+records). **Deny by default:** a rotation authority hasn't ruled on (not
+processed yet, pending on missing records, or a kind it doesn't know) can never
+be the head, so nobody sends under it. Rotations that aren't accepted keep
+their keys for reading; a message opened under one comes back with
+`accepted: false`, and the caller must show it as untrusted. The result depends
+only on the two sets, not on the order rotations and verdicts arrive in.
 
 All domain-separation and KDF strings start with `mvs/`.
 
@@ -24,13 +28,13 @@ All domain-separation and KDF strings start with `mvs/`.
 | --- | --- |
 | `ChannelKeys::new(server, channel, my_identity)` | One member's view of one channel |
 | `apply(record_id, author, body)` | Take in a rotation (idempotent, any order). Returns whether we got a key |
-| `set_voided(ids)` | The rotations `authority` rejects; recomputes the head |
-| `head()` | The rotation new messages use: linked, not voided, highest epoch, lowest ID |
+| `set_accepted(ids)`, `accept(id)` | The rotations `authority` accepts (allow-list); recomputes the head |
+| `head()` | The rotation new messages use: linked, accepted, highest epoch, lowest ID |
 | `rotation_need(members)` | `Initial`, `Required { removed }`, `Add { missing }` or `None` |
 | `rotate(rotator, members, rng)` | Body for the next rotation (epoch = head + 1, prev = head) |
 | `encrypt(members, plaintext, rng)` | Seal under the head key. Refuses with `RotationRequired` while a removed member still holds it |
 | `decrypt(author, ciphertext)` | Open with whichever epoch key the header names |
-| `decrypt_with_rotation(author, ciphertext)` | The same, and says which rotation and epoch opened it, so the caller can flag a message sent under a superseded or voided key |
+| `decrypt_with_rotation(author, ciphertext)` | The same, and says which rotation and epoch opened it and whether it is accepted, so the caller can flag a message sent under a superseded or non-accepted key |
 | `Rotation::create / decode / unwrap_key`, `seal / open` | The lower layer, for other callers and tests |
 
 ## Crypto, and why
@@ -128,13 +132,13 @@ rotations in `Message` envelopes for now.
   goes on, and they read once a rotation includes them.
 - **Concurrent rotations resolve deterministically.** A rotation is *linked*
   if it is epoch 0, or its `prev` is linked and exactly one epoch below. The
-  head is the linked, non-voided rotation with the highest epoch, and between
+  head is the linked, accepted rotation with the highest epoch, and between
   rotations of the same epoch the **lowest record ID** wins, the tie-break
-  `authority` uses. This depends only on the rotations held and the voided
-  set, so every peer converges (tested over every delivery order, with verdicts
-  arriving before or after the rotations). A voided rotation still links the
+  `authority` uses. This depends only on the rotations held and the accepted
+  set, so every peer converges (tested over every order of rotations and
+  acceptances). A rotation that is not accepted still links the
   rotations built on it: linking only checks the epoch counter, and a later
-  rotation's key is fresh, so it owes nothing to the voided one. If the winner was made before its author
+  rotation's key is fresh, so it owes nothing to it. If the winner was made before its author
   saw a concurrent kick, the kicked member is still in it, so `Required` fires
   and one more rotation settles it. The losing rotation's key is kept, so
   anything sent under it stays readable to its recipients.
@@ -240,6 +244,14 @@ ready to paste into the log, is in
   keeps sending under the old key, which the kicked member can still read.
   This window is inherent in a system without a central server.
 
+**Known gaps (tracked):**
+- Non-accepted and orphan rotations are kept without a bound, so memory can
+  grow (GAP-8, issue #19).
+- Every `ChannelKeys` holds its own copy of the identity signing key (issue
+  #20).
+- The integration has to label messages opened under a non-accepted rotation
+  as untrusted (issue #21).
+
 **Forward secrecy limits:**
 - No forward secrecy within an epoch: one leaked epoch key exposes every
   message of that epoch, past and future, until the next rotation.
@@ -270,8 +282,11 @@ member can't read history; size limits. `tests/properties.rs` (proptest):
 wrap/unwrap round trip for random member sets, a tampered rotation never yields
 a different key, channel round trip, and any byte flip in a sealed message is
 rejected.
-`tests/format_and_voiding.rs`: a rotation that `authority` voids stops being
-head in every order of rotations and verdicts; rotations built on a voided one
-still link; voided keys still read and say so; strict decoding (huge count,
-count mismatch, prev tag, version, duplicate or unsorted recipients); and the
-v1 formats pinned with a fixed RNG.
+`tests/acceptance_head.rs`: the security review's PoC as a regression test (a
+non-member's rotation wrapped for exactly the members never becomes head until
+`authority` accepts it); no head while nothing is accepted; the same head in
+every order of rotations and acceptances, also when authority withdraws an
+acceptance; rotations built on a non-accepted one still link; non-accepted keys
+still read, flagged `accepted: false`. `tests/format.rs`: strict decoding (huge
+count, count mismatch, prev tag, version, duplicate or unsorted recipients) and
+the v1 formats pinned with a fixed RNG.

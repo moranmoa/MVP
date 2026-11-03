@@ -1,23 +1,29 @@
 //! One member's view of one channel's epochs.
 //!
 //! Rules, all decided by the set of rotations held and the set `authority`
-//! voids, never by the order either arrived in:
+//! accepts, never by the order either arrived in:
 //! - Every well-formed rotation of the channel is stored, whether or not its
-//!   author may rotate. `authority` has the final say, and it can change its
-//!   mind (a revoke voids a moderator's concurrent records), so the caller
-//!   reports the rotations it doesn't accept with [`ChannelKeys::set_voided`]
-//!   whenever that set changes.
+//!   author may rotate. Only `authority` decides who may rotate, and it can
+//!   change its mind (a revoke voids a moderator's concurrent records), so the
+//!   caller passes the rotations it currently **accepts** with
+//!   [`ChannelKeys::set_accepted`] whenever that set changes. Deny by
+//!   default: a rotation authority hasn't ruled on yet (not processed,
+//!   pending on missing records, or a kind it doesn't know) is never sent
+//!   with.
 //! - A rotation is *linked* when it is epoch 0, or its `prev` is linked and
 //!   one epoch below it. A rotation whose `prev` hasn't arrived yet waits.
-//!   Linking only checks the epoch counter, so a voided rotation still links
-//!   the rotations built on it: their keys are fresh and owe nothing to it.
-//! - The head (the key to send with) is the linked, non-voided rotation with
+//!   Linking only checks the epoch counter, so a rotation that isn't accepted
+//!   still links the rotations built on it: their keys are fresh and owe
+//!   nothing to it.
+//! - The head (the key to send with) is the linked, accepted rotation with
 //!   the highest epoch; between rotations of that epoch the lowest record ID
 //!   wins, the same tie-break `authority` uses.
-//! - Keys of every rotation we were a recipient of are kept, voided or not,
+//! - Keys of every rotation we were a recipient of are kept, accepted or not,
 //!   so messages from any epoch we belonged to stay readable. [`Decrypted`]
-//!   says which rotation opened a message, for policy above this crate. A
-//!   member who was offline through several rotations just applies them all.
+//!   says which rotation opened a message and whether it is accepted; the
+//!   caller must label a message opened under a non-accepted rotation as
+//!   untrusted. A member who was offline through several rotations just
+//!   applies them all.
 //! - If the head's recipients include someone no longer in the channel (a
 //!   kick, or a revoke that took away access), sending is refused until a
 //!   moderator rotates.
@@ -69,6 +75,9 @@ pub struct Decrypted {
     pub plaintext: Vec<u8>,
     pub rotation: RecordId,
     pub epoch: u64,
+    /// Whether `authority` accepts that rotation. If not, the message was
+    /// sealed under a key nobody authorised: show it as untrusted.
+    pub accepted: bool,
 }
 
 pub struct ChannelKeys {
@@ -80,8 +89,8 @@ pub struct ChannelKeys {
     linked: BTreeSet<RecordId>,
     /// Rotations whose `prev` isn't linked yet, by that `prev`.
     waiting: HashMap<RecordId, Vec<RecordId>>,
-    /// Rotations `authority` doesn't accept.
-    voided: HashSet<RecordId>,
+    /// Rotations `authority` accepts. Only these can be head.
+    accepted: HashSet<RecordId>,
     head: Option<RecordId>,
 }
 
@@ -95,7 +104,7 @@ impl ChannelKeys {
             keys: HashMap::new(),
             linked: BTreeSet::new(),
             waiting: HashMap::new(),
-            voided: HashSet::new(),
+            accepted: HashSet::new(),
             head: None,
         }
     }
@@ -105,9 +114,9 @@ impl ChannelKeys {
     }
 
     /// Takes in a rotation from a signed record: its ID, author and body.
-    /// Apply every rotation record of the channel, authorized or not, and
-    /// report the ones `authority` rejects with [`Self::set_voided`].
-    /// Idempotent, and order doesn't matter.
+    /// Apply every rotation record of the channel, authorized or not; it can
+    /// only become head once [`Self::set_accepted`] or [`Self::accept`] says
+    /// `authority` accepts it. Idempotent, and order doesn't matter.
     pub fn apply(
         &mut self,
         id: RecordId,
@@ -134,13 +143,14 @@ impl ChannelKeys {
         Ok(applied)
     }
 
-    /// Replaces the set of rotations `authority` doesn't accept: never
-    /// permitted, or voided later (say the rotator was revoked concurrently).
-    /// Call it whenever that set changes. A voided rotation can't be the head
-    /// but keeps its key for reading. IDs we don't hold are remembered too, so
-    /// the order of `apply` and `set_voided` doesn't matter.
-    pub fn set_voided(&mut self, voided: impl IntoIterator<Item = RecordId>) {
-        self.voided = voided.into_iter().collect();
+    /// Replaces the set of rotations `authority` accepts (for the integration:
+    /// `authority::State::accepted` intersected with this channel's rotation
+    /// records). Call it whenever that set changes, including when authority
+    /// voids a rotation it accepted before. Only accepted rotations can be
+    /// head; the others keep their keys for reading. IDs we don't hold yet are
+    /// remembered, so the order of `apply` and `set_accepted` doesn't matter.
+    pub fn set_accepted(&mut self, accepted: impl IntoIterator<Item = RecordId>) {
+        self.accepted = accepted.into_iter().collect();
         self.head = None;
         let linked: Vec<RecordId> = self.linked.iter().copied().collect();
         for id in linked {
@@ -148,12 +158,20 @@ impl ChannelKeys {
         }
     }
 
-    pub fn is_voided(&self, id: &RecordId) -> bool {
-        self.voided.contains(id)
+    /// Adds one rotation to the accepted set, for a caller that learns
+    /// acceptances one at a time. Withdrawing one needs [`Self::set_accepted`].
+    pub fn accept(&mut self, id: RecordId) {
+        if self.accepted.insert(id) && self.linked.contains(&id) {
+            self.consider_head(id);
+        }
+    }
+
+    pub fn is_accepted(&self, id: &RecordId) -> bool {
+        self.accepted.contains(id)
     }
 
     fn consider_head(&mut self, id: RecordId) {
-        if self.voided.contains(&id) {
+        if !self.accepted.contains(&id) {
             return;
         }
         let rotation = &self.rotations[&id];
@@ -271,7 +289,8 @@ impl ChannelKeys {
     }
 
     /// Like [`Self::decrypt`], and also says which rotation's key opened it,
-    /// so the caller can flag a message sent under a superseded or voided key.
+    /// and whether `authority` accepts that rotation, so the caller can flag
+    /// a message sent under a superseded or non-accepted key.
     pub fn decrypt_with_rotation(
         &self,
         author: PublicKey,
@@ -300,6 +319,7 @@ impl ChannelKeys {
                     plaintext,
                     rotation: rotation.id(),
                     epoch: rotation.epoch(),
+                    accepted: self.accepted.contains(&rotation.id()),
                 });
             }
         }
