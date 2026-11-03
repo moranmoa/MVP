@@ -11,6 +11,10 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# MIT. Reads the update payload (Windows .zip): deflate only, pure Rust
+# (flate2 with miniz_oxide); no encryption or other codecs.
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 # MIT OR Apache-2.0. Sets the secret key file's ACL through its handle.
 [target.'cfg(windows)'.dependencies]
@@ -20,3 +24,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
 ] }
+
+# MIT OR Apache-2.0. O_NOFOLLOW for unpacked files (already in the tree).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
