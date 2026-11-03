@@ -3,7 +3,7 @@ mod common;
 use std::collections::BTreeSet;
 
 use common::*;
-use groupkeys::{open, seal, Applied, EpochKey, Rotation};
+use groupkeys::{open, seal, Applied, EpochKey, MemberSecret, Rotation};
 use proptest::prelude::*;
 use records::{PublicKey, SigningKey};
 
@@ -37,10 +37,10 @@ proptest! {
         let rotation = Rotation::decode(signed.id, SERVER, signed.author, &signed.body).unwrap();
         prop_assert_eq!(rotation.recipients().copied().collect::<BTreeSet<_>>(), recipients);
         for (secret, _) in &people {
-            prop_assert_eq!(*rotation.unwrap_key(secret).unwrap().as_bytes(), *key.as_bytes());
+            prop_assert_eq!(*rotation.unwrap_key(&MemberSecret::new(secret)).unwrap().as_bytes(), *key.as_bytes());
         }
         let (outsider, _) = identity(outsider);
-        prop_assert!(rotation.unwrap_key(&outsider).is_err());
+        prop_assert!(rotation.unwrap_key(&MemberSecret::new(&outsider)).is_err());
     }
 
     /// A rotation body with any one byte changed never hands anyone a
@@ -61,7 +61,7 @@ proptest! {
         if let Ok(rotation) = Rotation::decode(groupkeys_id(&body), SERVER, pk(1), &body) {
             let mut opened = 0;
             for (secret, _) in &people {
-                if let Ok(got) = rotation.unwrap_key(secret) {
+                if let Ok(got) = rotation.unwrap_key(&MemberSecret::new(secret)) {
                     prop_assert_eq!(*got.as_bytes(), *key.as_bytes());
                     opened += 1;
                 }

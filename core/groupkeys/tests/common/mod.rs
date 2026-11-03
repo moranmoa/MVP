@@ -2,7 +2,9 @@
 
 use std::collections::BTreeSet;
 
-use groupkeys::{Applied, ChannelKeys};
+use std::sync::Arc;
+
+use groupkeys::{Applied, ChannelKeys, MemberSecret};
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use records::{ChannelId, Draft, Kind, PublicKey, Record, RecordId, Scope, ServerId, SigningKey};
@@ -12,6 +14,11 @@ pub const CHANNEL: ChannelId = ChannelId::from_bytes([0xc4; 32]);
 
 pub fn key(n: u8) -> SigningKey {
     SigningKey::from_bytes(&[n; 32])
+}
+
+/// The X25519 secret of key `n`, as a client shares it between channels.
+pub fn secret(n: u8) -> Arc<MemberSecret> {
+    Arc::new(MemberSecret::new(&key(n)))
 }
 
 pub fn pk(n: u8) -> PublicKey {
@@ -27,7 +34,7 @@ pub fn rng(seed: u64) -> ChaCha20Rng {
 }
 
 pub fn peer(n: u8) -> ChannelKeys {
-    ChannelKeys::new(SERVER, CHANNEL, key(n))
+    ChannelKeys::new(SERVER, CHANNEL, secret(n))
 }
 
 /// A rotation as it travels: the body of a signed channel record.
@@ -73,5 +80,5 @@ pub fn apply(view: &mut ChannelKeys, rotation: &Signed) -> Applied {
 
 /// Applies a rotation `authority` hasn't accepted (yet).
 pub fn store(view: &mut ChannelKeys, rotation: &Signed) -> Applied {
-    view.apply(rotation.id, rotation.author, &rotation.body).unwrap()
+    view.apply(rotation.id, rotation.author, &rotation.body).unwrap().0
 }

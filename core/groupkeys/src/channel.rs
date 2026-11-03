@@ -27,15 +27,27 @@
 //! - If the head's recipients include someone no longer in the channel (a
 //!   kick, or a revoke that took away access), sending is refused until a
 //!   moderator rotates.
+//! - Memory is bounded. Anyone can sign rotation records, so a rotation that
+//!   `authority` has never accepted and that no linked rotation builds on is
+//!   *on probation*: when more than the limit ([`MAX_UNACCEPTED`] by
+//!   default) are, the oldest by arrival is dropped, key and all, and its ID
+//!   returned so sync can fetch it again if it turns out to matter. Every
+//!   rotation authority ever accepted, and every ancestor of a linked one, is
+//!   kept.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
-use ed25519_dalek::SigningKey;
 use rand_core::{CryptoRng, RngCore};
 use records::{ChannelId, PublicKey, RecordId, ServerId};
 
-use crate::{open, seal, EpochKey, Error, MessageHeader, Rotation};
+use crate::{open, seal, EpochKey, Error, MemberSecret, MessageHeader, Rotation};
+
+/// How many rotations a channel holds on probation (never accepted, nothing
+/// linked builds on them) before the oldest is dropped. At the 16 KiB record
+/// limit that is at most 1 MiB per channel.
+pub const MAX_UNACCEPTED: usize = 64;
 
 /// What [`ChannelKeys::apply`] did with a rotation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,7 +95,7 @@ pub struct Decrypted {
 pub struct ChannelKeys {
     server: ServerId,
     channel: ChannelId,
-    me: SigningKey,
+    me: Arc<MemberSecret>,
     rotations: HashMap<RecordId, Rotation>,
     keys: HashMap<RecordId, EpochKey>,
     linked: BTreeSet<RecordId>,
@@ -91,11 +103,32 @@ pub struct ChannelKeys {
     waiting: HashMap<RecordId, Vec<RecordId>>,
     /// Rotations `authority` accepts. Only these can be head.
     accepted: HashSet<RecordId>,
+    /// Rotations `authority` has accepted at some point. Never on probation.
+    ever_accepted: HashSet<RecordId>,
+    /// How many linked rotations build on each rotation.
+    children: HashMap<RecordId, usize>,
+    /// Arrival number of each held rotation.
+    arrival: HashMap<RecordId, u64>,
+    next_arrival: u64,
+    /// Rotations on probation, oldest first.
+    probation: BTreeSet<(u64, RecordId)>,
+    probation_limit: usize,
     head: Option<RecordId>,
 }
 
 impl ChannelKeys {
-    pub fn new(server: ServerId, channel: ChannelId, me: SigningKey) -> ChannelKeys {
+    /// `me` is shared by every channel of the client; see [`MemberSecret`].
+    pub fn new(server: ServerId, channel: ChannelId, me: Arc<MemberSecret>) -> ChannelKeys {
+        Self::with_limit(server, channel, me, MAX_UNACCEPTED)
+    }
+
+    /// Like [`Self::new`], with at most `limit` rotations on probation.
+    pub fn with_limit(
+        server: ServerId,
+        channel: ChannelId,
+        me: Arc<MemberSecret>,
+        limit: usize,
+    ) -> ChannelKeys {
         ChannelKeys {
             server,
             channel,
@@ -105,26 +138,38 @@ impl ChannelKeys {
             linked: BTreeSet::new(),
             waiting: HashMap::new(),
             accepted: HashSet::new(),
+            ever_accepted: HashSet::new(),
+            children: HashMap::new(),
+            arrival: HashMap::new(),
+            next_arrival: 0,
+            probation: BTreeSet::new(),
+            probation_limit: limit.max(1),
             head: None,
         }
     }
 
     fn my_key(&self) -> PublicKey {
-        PublicKey::from_bytes(self.me.verifying_key().to_bytes())
+        self.me.public()
     }
 
     /// Takes in a rotation from a signed record: its ID, author and body.
     /// Apply every rotation record of the channel, authorized or not; it can
     /// only become head once [`Self::set_accepted`] or [`Self::accept`] says
-    /// `authority` accepts it. Idempotent, and order doesn't matter.
+    /// `authority` accepts it. Idempotent, and order doesn't matter as long
+    /// as nothing is evicted.
+    ///
+    /// Also returns the rotations dropped from probation to make room (see
+    /// the module docs). The new rotation is never one of them. If a dropped
+    /// one is needed later (a rotation built on it waits, or authority
+    /// accepts it), sync should deliver it again.
     pub fn apply(
         &mut self,
         id: RecordId,
         rotator: PublicKey,
         body: &[u8],
-    ) -> Result<Applied, Error> {
+    ) -> Result<(Applied, Vec<RecordId>), Error> {
         if self.rotations.contains_key(&id) {
-            return Ok(Applied::Duplicate);
+            return Ok((Applied::Duplicate, Vec::new()));
         }
         let rotation = Rotation::decode(id, self.server, rotator, body)?;
         if rotation.channel() != self.channel {
@@ -139,8 +184,63 @@ impl ChannelKeys {
             Err(_) => Applied::WrapInvalid,
         };
         self.rotations.insert(id, rotation);
+        self.arrival.insert(id, self.next_arrival);
+        self.next_arrival += 1;
+        self.update_probation(id);
         self.link(id);
-        Ok(applied)
+        let mut evicted = Vec::new();
+        while self.probation.len() > self.probation_limit {
+            let (_, oldest) = self.probation.pop_first().expect("over the limit");
+            self.evict(oldest);
+            evicted.push(oldest);
+        }
+        Ok((applied, evicted))
+    }
+
+    /// How many rotations are on probation now.
+    pub fn on_probation(&self) -> usize {
+        self.probation.len()
+    }
+
+    /// How many rotations are held, linked or not.
+    pub fn held(&self) -> usize {
+        self.rotations.len()
+    }
+
+    /// Puts `id` on probation or takes it off, by the current state.
+    fn update_probation(&mut self, id: RecordId) {
+        let Some(arrival) = self.arrival.get(&id).copied() else {
+            return;
+        };
+        let has_children = self.children.get(&id).is_some_and(|count| *count > 0);
+        if self.ever_accepted.contains(&id) || has_children {
+            self.probation.remove(&(arrival, id));
+        } else {
+            self.probation.insert((arrival, id));
+        }
+    }
+
+    /// Drops a rotation on probation. Nothing linked builds on it and it was
+    /// never accepted, so it isn't head and the head doesn't change.
+    fn evict(&mut self, id: RecordId) {
+        let rotation = self.rotations.remove(&id).expect("evicting a held rotation");
+        self.keys.remove(&id);
+        self.arrival.remove(&id);
+        self.children.remove(&id);
+        let Some(prev) = rotation.prev() else {
+            self.linked.remove(&id);
+            return;
+        };
+        if self.linked.remove(&id) {
+            let count = self.children.get_mut(&prev).expect("a linked rotation's prev counts it");
+            *count -= 1;
+            self.update_probation(prev);
+        } else if let Some(waiters) = self.waiting.get_mut(&prev) {
+            waiters.retain(|waiter| *waiter != id);
+            if waiters.is_empty() {
+                self.waiting.remove(&prev);
+            }
+        }
     }
 
     /// Replaces the set of rotations `authority` accepts (for the integration:
@@ -151,6 +251,13 @@ impl ChannelKeys {
     /// remembered, so the order of `apply` and `set_accepted` doesn't matter.
     pub fn set_accepted(&mut self, accepted: impl IntoIterator<Item = RecordId>) {
         self.accepted = accepted.into_iter().collect();
+        for id in &self.accepted {
+            if self.ever_accepted.insert(*id) {
+                if let Some(arrival) = self.arrival.get(id) {
+                    self.probation.remove(&(*arrival, *id));
+                }
+            }
+        }
         self.head = None;
         let linked: Vec<RecordId> = self.linked.iter().copied().collect();
         for id in linked {
@@ -161,6 +268,9 @@ impl ChannelKeys {
     /// Adds one rotation to the accepted set, for a caller that learns
     /// acceptances one at a time. Withdrawing one needs [`Self::set_accepted`].
     pub fn accept(&mut self, id: RecordId) {
+        if self.ever_accepted.insert(id) {
+            self.update_probation(id);
+        }
         if self.accepted.insert(id) && self.linked.contains(&id) {
             self.consider_head(id);
         }
@@ -202,6 +312,10 @@ impl ChannelKeys {
                 continue;
             }
             self.linked.insert(id);
+            if let Some(prev) = self.rotations[&id].prev() {
+                *self.children.entry(prev).or_default() += 1;
+                self.update_probation(prev);
+            }
             self.consider_head(id);
             stack.extend(self.waiting.remove(&id).unwrap_or_default());
         }

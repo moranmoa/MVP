@@ -64,7 +64,7 @@ fn kicked_member_cannot_read_the_next_epoch() {
     // Trying the key Mallory does hold, in the new epoch's context, fails too.
     let first_key = Rotation::decode(first.id, SERVER, first.author, &first.body)
         .unwrap()
-        .unwrap_key(&key(3))
+        .unwrap_key(&secret(3))
         .unwrap();
     let ctx = owner.head().unwrap().message_context(pk(2));
     assert_eq!(open(&first_key, &ctx, &new), Err(Error::DecryptFailed));
@@ -100,7 +100,7 @@ fn tampered_ciphertext_ad_or_epoch_is_rejected() {
     epoch[1] = 1;
     assert_eq!(bob.decrypt(pk(1), &epoch), Err(Error::NoKey));
     let rotation = bob.head().unwrap().clone();
-    let key = rotation.unwrap_key(&key(2)).unwrap();
+    let key = rotation.unwrap_key(&secret(2)).unwrap();
     let mut ctx = rotation.message_context(pk(1));
     assert_eq!(open(&key, &ctx, &ciphertext).unwrap(), b"hello");
     ctx.epoch = 1;
@@ -117,7 +117,7 @@ fn tampered_ciphertext_ad_or_epoch_is_rejected() {
 #[test]
 fn rotation_for_another_channel_is_refused() {
     let everyone = members(&[1, 2]);
-    let elsewhere = ChannelKeys::new(SERVER, ChannelId::from_bytes([7; 32]), key(1));
+    let elsewhere = ChannelKeys::new(SERVER, ChannelId::from_bytes([7; 32]), secret(1));
     let foreign = rotate(&elsewhere, 1, &everyone, 1);
     let mut here = peer(2);
     assert_eq!(here.apply(foreign.id, foreign.author, &foreign.body), Err(Error::WrongChannel));
@@ -170,7 +170,7 @@ fn concurrent_rotations_converge() {
         loser_view.head().unwrap().recipients().copied().collect();
     let author = loser.author;
     let mut author_view =
-        ChannelKeys::new(SERVER, CHANNEL, key(if author == pk(1) { 1 } else { 2 }));
+        ChannelKeys::new(SERVER, CHANNEL, secret(if author == pk(1) { 1 } else { 2 }));
     apply(&mut author_view, &first);
     apply(&mut author_view, loser);
     let on_loser =
@@ -260,7 +260,7 @@ fn author_must_have_held_the_epoch_key() {
     // Member 3 isn't a recipient of the head, yet posts under it (say a
     // recipient leaked the key): rejected even though it would open.
     let rotation = owner.head().unwrap().clone();
-    let epoch_key = rotation.unwrap_key(&key(1)).unwrap();
+    let epoch_key = rotation.unwrap_key(&secret(1)).unwrap();
     let forged = seal(&epoch_key, &rotation.message_context(pk(3)), b"hi", &mut rng(2)).unwrap();
     assert_eq!(owner.decrypt(pk(3), &forged), Err(Error::AuthorNotRecipient));
 }

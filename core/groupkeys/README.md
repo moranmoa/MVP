@@ -26,8 +26,9 @@ All domain-separation and KDF strings start with `mvs/`.
 
 | Item | What it does |
 | --- | --- |
-| `ChannelKeys::new(server, channel, my_identity)` | One member's view of one channel |
-| `apply(record_id, author, body)` | Take in a rotation (idempotent, any order). Returns whether we got a key |
+| `MemberSecret::new(&identity)` | The X25519 secret of the identity, derived once and shared by `Arc` with every channel |
+| `ChannelKeys::new(server, channel, secret)`, `with_limit(.., limit)` | One member's view of one channel; `limit` caps rotations on probation (default `MAX_UNACCEPTED`) |
+| `apply(record_id, author, body)` | Take in a rotation (idempotent, any order). Returns whether we got a key, and the IDs evicted from probation to make room |
 | `set_accepted(ids)`, `accept(id)` | The rotations `authority` accepts (allow-list); recomputes the head |
 | `head()` | The rotation new messages use: linked, accepted, highest epoch, lowest ID |
 | `rotation_need(members)` | `Initial`, `Required { removed }`, `Add { missing }` or `None` |
@@ -244,11 +245,22 @@ ready to paste into the log, is in
   keeps sending under the old key, which the kicked member can still read.
   This window is inherent in a system without a central server.
 
+- **Memory (GAP-8, fixed in #19).** Anyone can sign rotation records, so a
+  rotation `authority` has never accepted and that no linked rotation builds
+  on is on probation. Past `MAX_UNACCEPTED` (64, so at most 1 MiB per channel
+  at 16 KiB a record) the oldest by arrival is dropped with its key, and
+  `apply` returns its ID so sync can fetch it again. Rotations authority ever
+  accepted, and ancestors of linked rotations, are never dropped. The cost: a
+  flood can push out an honest rotation that is still waiting for its prev or
+  its verdict, and only redelivery brings it back (the same trade as PR #7's
+  pending queue). There is no wall clock in this crate, so "age" is arrival
+  order.
+- **The identity secret (fixed in #20).** `ChannelKeys` holds no
+  `SigningKey`. A client derives one `MemberSecret` (the X25519 scalar,
+  zeroized on drop) from its identity and shares it with every channel by
+  `Arc`.
+
 **Known gaps (tracked):**
-- Non-accepted and orphan rotations are kept without a bound, so memory can
-  grow (GAP-8, issue #19).
-- Every `ChannelKeys` holds its own copy of the identity signing key (issue
-  #20).
 - The integration has to label messages opened under a non-accepted rotation
   as untrusted (issue #21).
 
@@ -289,4 +301,8 @@ every order of rotations and acceptances, also when authority withdraws an
 acceptance; rotations built on a non-accepted one still link; non-accepted keys
 still read, flagged `accepted: false`. `tests/format.rs`: strict decoding (huge
 count, count mismatch, prev tag, version, duplicate or unsorted recipients) and
-the v1 formats pinned with a fixed RNG.
+the v1 formats pinned with a fixed RNG. `tests/bounded_memory.rs` (#19): a
+flood of 400 unaccepted rotations of every shape keeps memory at the cap while
+the accepted chain still works; an evicted waiting rotation is returned and
+links on redelivery; accepted rotations, even waiting ones, are never evicted;
+a parent with a linked child stays until the child goes.
