@@ -458,7 +458,7 @@ test.describe('layout', () => {
     expect(await pageOverflow(page)).toBeLessThanOrEqual(0);
   });
 
-  test('QA-12 at 200% the chat column keeps a readable width (1366×768)', async ({ page }) => {
+  test('QA-12 at 200% + 24 px (1366×768) the side panels collapse and the chat stays readable', async ({ page }) => {
     bug('QA-12');
     await page.setViewportSize({ width: 1366, height: 768 });
     await page.addInitScript(() => localStorage.setItem('mvp.settings.v1', JSON.stringify({ uiScale: 2, fontSize: 24 })));
@@ -468,6 +468,10 @@ test.describe('layout', () => {
     test.info().annotations.push({ type: 'measure', description: `chat column ${Math.round(width)} px` });
     // ~25 characters of 24px text; less than that wraps every word.
     expect(width).toBeGreaterThanOrEqual(400);
+    // Effective width ~683 px: the member list collapses below ~900 px and the channel list
+    // moves to a drawer below ~700 px, as on the phone layout (product lead, PR #50 review).
+    await expect(page.locator('aside.members')).toBeHidden();
+    await expect(page.locator('aside.sidebar')).toBeHidden();
   });
 
   test('theme, language and scale change instantly (< 200 ms) without reload', async ({ page }) => {
