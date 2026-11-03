@@ -140,6 +140,9 @@ pub enum CipherOutcome {
 /// identity.signing_key())`) at unlock and share it across every
 /// `ChannelKeys::new(server, channel, secret)`. `apply()` returns
 /// `(Applied, Vec<RecordId>)`: hand the evicted IDs to sync to re-request.
+/// GAP-8: a rotation that authority accepts after `ChannelKeys` evicted it
+/// is fetched again (the evicted list can hold the rotation just applied),
+/// and `ChannelKeys` exist only for channels authority knows.
 pub trait GroupCipher: Send + Sync {
     fn membership_changed(&self, server: ServerId, members: &BTreeSet<PublicKey>) -> CipherOutcome;
 }
