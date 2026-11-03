@@ -2314,7 +2314,21 @@ mod tests {
             node
         };
         let member = peer("member", key(1), secret.clone()).await;
-        let stranger = peer("stranger", key(2), secret.clone()).await;
+        // The stranger's stored records, with how they came (pull or push).
+        let (stranger, mut events) =
+            test_node_events("stranger", None, Some(port), Access { binder: key(2), read_gate: None, stub_gate: None })
+                .await;
+        stranger.open_server(server(), secret.clone()).unwrap();
+        stranger.open_channel(server(), channel()).await.unwrap();
+        let stored = Arc::new(Mutex::new(Vec::<(String, RecordId, Via)>::new()));
+        let log_events = stored.clone();
+        tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                if let NodeEvent::Stored { log, record, via, .. } = event {
+                    log_events.lock().unwrap().push((log, record.id(), via));
+                }
+            }
+        });
         let unbound = peer("unbound", None, secret.clone()).await;
         let outsider = peer("outsider", key(1), ServerSecret::from_bytes([8; 32])).await;
         let by_name = test_node("by-name", None, Some(port), Access::default()).await;
@@ -2330,9 +2344,23 @@ mod tests {
         let first = message(0, &[], 0);
         owner.append(message(1, &[first.id()], 0)).await.unwrap();
         eventually(&member, (1, 2), 20).await;
-        // Past another anti-entropy round: the rest still have nothing more.
-        tokio::time::sleep(ANTI_ENTROPY + Duration::from_secs(1)).await;
-        assert_eq!(counts(&stranger).await, (1, 0), "a bound non-member pulled a channel");
+        // A control record written after all that: once the stranger has it,
+        // its later pulls (control and channel alike) have been answered. No
+        // fixed sleep; the stranger's own progress is the clock.
+        let later = crate::testutil::post(1, &[genesis().id()]);
+        owner.append(later.clone()).await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !stored.lock().unwrap().iter().any(|(_, id, _)| *id == later.id()) {
+            assert!(Instant::now() < deadline, "the stranger stopped syncing its control log");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        tokio::time::sleep(ANTI_ENTROPY).await; // one more full round of pulls
+        // The security property: no channel record ever reached the bound
+        // non-member *by pull*. (Sealed gossip to a secret holder is the
+        // documented GAP-4b residual; it only got m1, which waits for m0.)
+        let pulled: Vec<_> = stored.lock().unwrap().iter().filter(|(log, _, via)| *log == chan() && *via == Via::Pull).cloned().collect();
+        assert!(pulled.is_empty(), "a bound non-member pulled a channel: {pulled:?}");
+        assert_eq!(counts(&stranger).await, (2, 0));
         assert_eq!(counts(&unbound).await, (0, 0), "a pull without a binding was answered");
         assert_eq!(counts(&outsider).await, (0, 0), "a wrong secret was answered");
         assert_eq!(counts(&by_name).await, (0, 0), "a sealed log was served by its plain name");
