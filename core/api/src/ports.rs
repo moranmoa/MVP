@@ -97,6 +97,20 @@ pub trait Network: Send + Sync {
     /// Every record of `server` that reachable peers hold. Empty when nobody
     /// is online.
     fn fetch(&self, server: ServerId) -> Vec<Record>;
+
+    /// GAP-4: the identity key for peer bindings, from unlock to lock.
+    fn unlock(&self, key: &records::SigningKey) {
+        let _ = key;
+    }
+
+    fn lock(&self) {}
+
+    /// GAP-4: sync `server` members-only, with its secret, and these
+    /// channels (the ones authority knows). Called at load and whenever
+    /// the channels change; opening again is harmless.
+    fn open_server(&self, server: ServerId, secret: &[u8; 32], channels: &BTreeSet<records::ChannelId>) {
+        let _ = (server, secret, channels);
+    }
 }
 
 /// All cores sharing one instance see each other's records instantly.
