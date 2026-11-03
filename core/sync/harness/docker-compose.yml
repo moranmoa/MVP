@@ -1,0 +1,40 @@
+# Spike experiment 2 harness: 4 sync peers + a coordinator on the relay's
+# network (infra_default). Build the binaries first; see run.sh.
+name: sync-harness
+
+x-peer: &peer
+  image: debian:bookworm-slim
+  volumes:
+    - ./dist:/app:ro
+  networks: [infra_default]
+  environment:
+    RELAY: /dns4/relay/tcp/4001/p2p/12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc
+    RUST_LOG: ${RUST_LOG:-info}
+
+services:
+  p1:
+    <<: *peer
+    command: ["/app/sync-peer", "p1"]
+  p2:
+    <<: *peer
+    command: ["/app/sync-peer", "p2"]
+  p3:
+    <<: *peer
+    command: ["/app/sync-peer", "p3"]
+  # Joins with an empty store at the end of the run.
+  p4:
+    <<: *peer
+    command: ["/app/sync-peer", "p4"]
+  harness:
+    image: debian:bookworm-slim
+    volumes:
+      - ./dist:/app
+    networks: [infra_default]
+    environment:
+      OUT_DIR: /app
+    command: ["/app/sync-harness", "p1:7000,p2:7000,p3:7000", "p4:7000"]
+    depends_on: [p1, p2, p3, p4]
+
+networks:
+  infra_default:
+    external: true

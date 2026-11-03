@@ -1,0 +1,40 @@
+[package]
+name = "sync"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "sync-peer"
+path = "harness/peer.rs"
+
+[[bin]]
+name = "sync-harness"
+path = "harness/coordinator.rs"
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+futures = "0.3"
+libp2p = { version = "0.54", features = [
+    "tokio",
+    "tcp",
+    "dns",
+    "noise",
+    "yamux",
+    "relay",
+    "identify",
+    "ping",
+    "kad",
+    "gossipsub",
+    "request-response",
+    "cbor",
+    "macros",
+] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net", "io-util", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -6,6 +6,7 @@
 | `authority` | Deterministic resolution of a server's control log: roles, revoke, kick, and voiding of concurrent "backdated" actions. `resolve` recomputes from scratch (the reference); `Resolver` applies arriving records incrementally |
 | `spike-peer` | Spike experiment 1: connects two peers through the relay, then tries a direct hole-punched connection. Tester instructions (Hebrew): `spike-peer/TESTING.md` |
 | `updater` | Spike experiment 7: signed update chain. Release manifest with 1-of-1 or 2-of-3 Ed25519 root signatures, expiry, no-downgrade and revocation rules, artifact hash check, and a rollback state machine. CLI: `keygen`, `make-root`, `hash`, `sign-manifest`, `verify` |
+| `sync` | Spike experiment 2: SQLite store of content-addressed blobs + libp2p sync (pull by have-markers, gossipsub push). Harness: `bash sync/harness/run.sh`; results in `sync/RESULTS.md` |
 
 ## Running the tests
 
