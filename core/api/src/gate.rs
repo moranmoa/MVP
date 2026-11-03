@@ -165,7 +165,10 @@ mod tests {
         );
 
         // A cached reject holds while the control log is unchanged...
-        assert_eq!(gate.cache.lock().unwrap().rejected.get(&(server, member_key(&member))), Some(&3));
+        assert_eq!(
+            gate.cache.lock().unwrap().rejected.get(&(server, member_key(&member))),
+            Some(&3)
+        );
         assert_eq!(
             store.append(&message(server, &member, 1), &gate).unwrap(),
             Append::Unauthorized

@@ -24,7 +24,8 @@ struct Peer {
 fn peer(name: &str, relay: &str) -> Peer {
     let dir = std::env::temp_dir().join(format!("mvs-two-peers-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let net = SyncNetwork::start(relay.parse().unwrap(), &dir, Arc::new(MemberGate::new())).unwrap();
+    let net =
+        SyncNetwork::start(relay.parse().unwrap(), &dir, Arc::new(MemberGate::new())).unwrap();
     let core = Core::open(
         Config { db_path: Some(dir.join("core.db")), app_version: "test".into() },
         Ports {
@@ -40,8 +41,11 @@ fn peer(name: &str, relay: &str) -> Peer {
 }
 
 fn sign_up(peer: &Peer, name: &str) {
-    let input =
-        NewIdentityInput { locale: Locale::He, country: "IL".into(), birth_date: "1990-05-01".into() };
+    let input = NewIdentityInput {
+        locale: Locale::He,
+        country: "IL".into(),
+        birth_date: "1990-05-01".into(),
+    };
     let words = peer.core.create_identity(input).unwrap().words;
     let positions = peer.core.get_recovery_challenge().unwrap().positions;
     let answers: BTreeMap<usize, String> =
