@@ -1339,3 +1339,99 @@ fn deletes_and_edits_prune_old_bodies_from_the_db() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// #110, #116, #151: the owner's removed list and undoKick; 18+ channels
+/// only for members whose age claim says 18+; names with bidi or zero-width
+/// characters refused.
+#[test]
+fn removed_members_age_claims_and_clean_names() {
+    let world = World::new();
+    let born = |peer: &Peer, birth: &str, name: &str| -> String {
+        let input =
+            NewIdentityInput { locale: Locale::En, country: "IL".into(), birth_date: birth.into() };
+        let words = peer.core.create_identity(input).unwrap().words;
+        let positions = peer.core.get_recovery_challenge().unwrap().positions;
+        let answers: BTreeMap<usize, String> =
+            positions.iter().map(|p| (*p, words[p - 1].clone())).collect();
+        assert!(peer.core.check_recovery_words(answers).unwrap().ok);
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        peer.core.update_profile(profile).unwrap().id
+    };
+    let owner = world.peer();
+    owner.core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
+    let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None };
+    owner.core.update_profile(profile).unwrap();
+    let adult = world.peer();
+    let adult_id = born(&adult, "1990-05-01", "Adult");
+    let minor = world.peer();
+    born(&minor, "2014-01-01", "Minor");
+
+    // B23: names others see are clean.
+    let bidi = ProfileInput { display_name: "a\u{202E}b".into(), bio: None, avatar_data_url: None };
+    assert_eq!(adult.core.update_profile(bidi).unwrap_err().code, ErrorCode::BadRequest);
+    assert_eq!(
+        owner.core.create_server("x\u{200B}y", AgeRestriction::None).unwrap_err().code,
+        ErrorCode::BadRequest
+    );
+
+    let server = owner.core.create_server("Ages", AgeRestriction::None).unwrap();
+    for peer in [&adult, &minor] {
+        peer.core.join_server(&server.invite_link).unwrap();
+    }
+    // An 18+ channel by the owner.
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let mut deps: Vec<_> = world
+        .network
+        .fetch(server_key)
+        .iter()
+        .filter(|r| r.scope() == Scope::Control)
+        .map(|r| r.id())
+        .collect();
+    deps.sort();
+    let key = identity::RecoveryPhrase::parse(OWNER_WORDS).unwrap().identity();
+    let night = records::ChannelId::from_bytes([0x18; 32]);
+    let create =
+        authority::Action::ChannelCreate { channel: night, adult: true, name: "night".into() };
+    let record =
+        authority::sign_control(key.signing_key(), server_key, 20, deps, 9, &create).unwrap();
+    world.network.publish(&record);
+    for peer in [&owner, &adult, &minor] {
+        peer.core.sync_now().unwrap();
+    }
+    let names = |peer: &Peer| -> Vec<String> {
+        let mut n: Vec<String> =
+            peer.core.list_channels(&server.id).unwrap().into_iter().map(|c| c.name).collect();
+        n.sort();
+        n
+    };
+    assert_eq!(names(&adult), ["general", "night"]);
+    assert_eq!(names(&minor), ["general"]);
+    assert_eq!(
+        minor.core.get_message_count(&hex::encode([0x18; 32])).unwrap_err().code,
+        ErrorCode::NotFound
+    );
+
+    // Kick, the owner's removed list, undo, join again.
+    owner.core.kick_member(&server.id, &adult_id).unwrap();
+    let removed = owner.core.list_removed_members(&server.id).unwrap();
+    assert_eq!(removed.len(), 1);
+    assert_eq!(
+        (removed[0].id.as_str(), removed[0].display_name.as_str()),
+        (adult_id.as_str(), "Adult")
+    );
+    assert!(removed[0].removed_at > 0);
+    assert_eq!(
+        minor.core.list_removed_members(&server.id).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+    assert_eq!(
+        minor.core.undo_kick(&server.id, &adult_id).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+    adult.core.sync_now().unwrap();
+    assert!(adult.core.list_servers().unwrap().is_empty());
+    owner.core.undo_kick(&server.id, &adult_id).unwrap();
+    assert!(owner.core.list_removed_members(&server.id).unwrap().is_empty());
+    adult.core.join_server(&server.invite_link).unwrap();
+    assert_eq!(adult.core.list_servers().unwrap().len(), 1);
+}

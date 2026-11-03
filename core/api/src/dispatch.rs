@@ -211,6 +211,13 @@ impl Core {
                 let a: ServerUserArgs = args(raw)?;
                 ok(self.kick_member(&a.server_id, &a.user_id))
             }
+            "undoKick" => {
+                let a: ServerUserArgs = args(raw)?;
+                ok(self.undo_kick(&a.server_id, &a.user_id))
+            }
+            "listRemovedMembers" => {
+                ok(self.list_removed_members(&args::<ServerArg>(raw)?.server_id))
+            }
 
             "getStorageUsage" => ok(self.get_storage_usage()),
             "setStorageLimit" => ok(self.set_storage_limit(args::<BytesArg>(raw)?.bytes)),
