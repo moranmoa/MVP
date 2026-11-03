@@ -305,9 +305,80 @@ impl<K: Hash + Eq + Clone> RateLimiter<K> {
     }
 }
 
+/// Receipt acks waiting for their author (B6): ids of records we stored,
+/// per (server, author), until that author pulls from us. Bounded per author
+/// and in authors, and entries expire; a lost ack only leaves the author's
+/// tick at "sent".
+pub(crate) struct Acks<K> {
+    by_author: HashMap<K, VecDeque<(RecordId, Instant)>>,
+    per_author: usize,
+    max_authors: usize,
+    ttl: Duration,
+}
+
+impl<K: Hash + Eq + Clone> Acks<K> {
+    pub fn new(per_author: usize, max_authors: usize, ttl: Duration) -> Self {
+        Acks { by_author: HashMap::new(), per_author, max_authors, ttl }
+    }
+
+    pub fn insert(&mut self, author: K, id: RecordId, now: Instant) {
+        if !self.by_author.contains_key(&author) && self.by_author.len() >= self.max_authors {
+            self.by_author.retain(|_, q| q.back().is_some_and(|(_, t)| now.duration_since(*t) < self.ttl));
+            if self.by_author.len() >= self.max_authors {
+                return;
+            }
+        }
+        let queue = self.by_author.entry(author).or_default();
+        if queue.iter().any(|(known, _)| *known == id) {
+            return;
+        }
+        if queue.len() >= self.per_author {
+            queue.pop_front();
+        }
+        queue.push_back((id, now));
+    }
+
+    /// Up to `max` unexpired ids for `author`, oldest first; they are removed.
+    pub fn take(&mut self, author: &K, max: usize, now: Instant) -> Vec<RecordId> {
+        let Some(queue) = self.by_author.get_mut(author) else { return Vec::new() };
+        queue.retain(|(_, t)| now.duration_since(*t) < self.ttl);
+        let out = queue.drain(..max.min(queue.len())).map(|(id, _)| id).collect();
+        if queue.is_empty() {
+            self.by_author.remove(author);
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acks_are_capped_per_answer_per_author_and_in_time() {
+        let now = Instant::now();
+        let mut acks = Acks::new(300, 2, Duration::from_secs(600));
+        for i in 0..400u32 {
+            let mut id = [0; 32];
+            id[..4].copy_from_slice(&i.to_le_bytes());
+            acks.insert("alice", RecordId::from_bytes(id), now);
+        }
+        acks.insert("alice", dep(1), now);
+        acks.insert("alice", dep(1), now); // once
+        // 300 kept per author (the oldest dropped); 256 per answer, the rest next time.
+        assert_eq!(acks.take(&"alice", 256, now).len(), 256);
+        assert_eq!(acks.take(&"alice", 256, now).len(), 300 - 256);
+        assert!(acks.take(&"alice", 256, now).is_empty());
+        // Only the author's own acks, and only while fresh.
+        acks.insert("bob", dep(2), now);
+        assert!(acks.take(&"carol", 256, now).is_empty());
+        assert!(acks.take(&"bob", 256, now + Duration::from_secs(601)).is_empty());
+        // A bounded number of authors.
+        acks.insert("a", dep(3), now);
+        acks.insert("b", dep(4), now);
+        acks.insert("c", dep(5), now);
+        assert!(acks.take(&"c", 256, now).is_empty());
+    }
 
     fn dep(n: u8) -> RecordId {
         RecordId::from_bytes([n; 32])

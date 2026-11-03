@@ -24,6 +24,7 @@ const STRANGER: &str =
 
 struct Peer {
     core: Core,
+    events: Arc<CollectingSink>,
     net: Arc<SyncNetwork>,
     cipher: Arc<GroupKeysCipher>,
     _dir: std::path::PathBuf,
@@ -35,6 +36,7 @@ fn peer(name: &str, words: &str, relay: &str) -> Peer {
     let net = Arc::new(
         SyncNetwork::start(relay.parse().unwrap(), &dir, Arc::new(MemberGate::new())).unwrap(),
     );
+    let events = Arc::new(CollectingSink::new());
     // Locked: the core unlocks it when the identity is restored.
     let cipher = Arc::new(GroupKeysCipher::locked());
     let core = Core::open(
@@ -42,7 +44,7 @@ fn peer(name: &str, words: &str, relay: &str) -> Peer {
         Ports {
             secrets: Arc::new(MemoryStore::new()),
             network: net.clone(),
-            events: Arc::new(CollectingSink::new()),
+            events: events.clone(),
             clock: Arc::new(SystemClock),
             cipher: cipher.clone(),
         },
@@ -51,7 +53,7 @@ fn peer(name: &str, words: &str, relay: &str) -> Peer {
     core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
     let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
     core.update_profile(profile).unwrap();
-    Peer { core, net, cipher, _dir: dir }
+    Peer { core, events, net, cipher, _dir: dir }
 }
 
 fn eventually(what: &str, mut ok: impl FnMut() -> bool) {
@@ -136,4 +138,62 @@ fn two_users_chat_through_a_relay() {
         assert!(stranger.cipher.decrypt(server_id, ch, message.author(), message.body()).is_err());
     }
     eprintln!("the stranger can't read: done");
+}
+
+/// The app's background sync (`Core::run_sync_loop`, as mvs-core runs it):
+/// the guest gets the owner's message, with `message.added`, and nobody
+/// calls `sync_now`.
+#[test]
+#[ignore = "needs a relay: set RELAY and run with --ignored"]
+fn the_background_sync_delivers_without_sync_now() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let Ok(relay) = std::env::var("RELAY") else {
+        eprintln!("RELAY not set; skipped");
+        return;
+    };
+    let owner = peer("LoopOwner", OWNER, &relay);
+    let guest = peer("LoopGuest", GUEST, &relay);
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        for p in [&owner, &guest] {
+            let hints = p.net.take_hints().expect("hints");
+            let stop = &stop;
+            scope.spawn(move || p.core.run_sync_loop(&hints, stop));
+        }
+
+        let server = owner.core.create_server("Loop", AgeRestriction::None).unwrap();
+        eventually("the guest to join", || {
+            guest.core.join_server(&server.invite_link).unwrap();
+            guest.core.list_servers().unwrap().iter().any(|s| s.id == server.id)
+        });
+        eventually("the owner's loop to see the guest", || {
+            owner.core.list_members(&server.id).unwrap().len() == 2
+        });
+        let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+        guest.events.take();
+        let sent = owner.core.send_message(&channel, "no sync_now here", None).unwrap();
+        eventually("the guest's loop to bring the message", || {
+            guest.core.get_message_count(&channel).unwrap_or(0) == 1
+        });
+        let added: Vec<_> = guest
+            .events
+            .take()
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::MessageAdded(m) => Some(m),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(added.len(), 1, "one message.added: {added:?}");
+        assert_eq!(
+            (added[0].id.as_str(), added[0].body.as_str()),
+            (sent.id.as_str(), "no sync_now here")
+        );
+
+        stop.store(true, Ordering::SeqCst);
+        owner.net.wake();
+        guest.net.wake();
+    });
+    eprintln!("background sync: done");
 }
