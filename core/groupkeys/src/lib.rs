@@ -18,27 +18,40 @@
 //!   derived from the epoch key. The associated data binds server, channel,
 //!   epoch, rotation and author.
 //!
-//! Rotation body (all integers little-endian), carried as the body of a
-//! signed record whose author is the rotator:
+//! A rotation is split into 1 to 32 parts, each the body of its own signed
+//! `KeyRotation` record whose author is the rotator. Part body (all integers
+//! little-endian):
 //!
 //! ```text
-//! ver        u8         must be VERSION
-//! channel    [u8; 32]
+//! rotation   [u8; 32]   rotation ID (records' part header, 34 bytes in all)
+//! part       u8         index, < parts
+//! parts      u8         1..=32
+//! ver        u8         must be VERSION        \
+//! channel    [u8; 32]                           |
 //! epoch      u64        0 for the first rotation of a channel
-//! prev       u8 tag     0 = none (epoch 0 only), 1 = followed by the RecordId
-//!                       of the rotation this one replaces (its epoch + 1)
-//! ephemeral  [u8; 32]   X25519 public key
-//! count      u16        at least 1
+//! prev       u8 tag     0 = none (epoch 0 only), 1 = followed by the
+//!                       rotation ID this one replaces (its epoch + 1)
+//! ephemeral  [u8; 32]   X25519 public key      / header: identical in every part
+//! count      u16        1..=WRAPS_PER_PART; every part but the last is full
 //! wraps      count * (recipient [u8; 32] Ed25519 key, wrapped [u8; 48]),
-//!            recipients strictly ascending
+//!            recipients strictly ascending, also across parts
 //! ```
+//!
+//! rotation ID = BLAKE3 `derive_key("mvs/groupkeys v1 rotation id",
+//! rotator ‖ server ‖ header)`. The header names only the channel, so the
+//! server is bound here. A part whose ID doesn't match is refused, so nobody
+//! but the rotator can add a part to a rotation.
+//!
+//! A rotator that retries sends the same signed records again. It must never
+//! re-sign a part: a second record for the same part is equivocation, and the
+//! whole rotation is refused.
 //!
 //! Message ciphertext (the encrypted body of a channel message record):
 //!
 //! ```text
 //! ver        u8
 //! epoch      u64
-//! key hint   [u8; 8]    first 8 bytes of the rotation's RecordId
+//! key hint   [u8; 8]    first 8 bytes of the rotation ID
 //! nonce      [u8; 24]
 //! sealed     plaintext + 16-byte Poly1305 tag
 //! ```
@@ -54,7 +67,9 @@ use records::{ChannelId, Kind, PublicKey, RecordId, ServerId};
 use zeroize::Zeroizing;
 
 mod channel;
-pub use channel::{Applied, ChannelKeys, Decrypted, RotationNeed, MAX_UNACCEPTED};
+pub use channel::{
+    Applied, ChannelKeys, Decrypted, RotationNeed, MAX_UNACCEPTED, MAX_UNACCEPTED_BYTES,
+};
 
 /// Format version of rotation bodies and message ciphertexts.
 pub const VERSION: u8 = 1;
@@ -78,23 +93,51 @@ pub const MAX_MESSAGE_PLAINTEXT: usize = MESSAGE_MAX_BODY - MESSAGE_OVERHEAD;
 /// the two equal.
 const MESSAGE_MAX_BODY: usize = 16 * 1024;
 
-/// Most recipients a single rotation body can name.
-pub const MAX_RECIPIENTS: usize = u16::MAX as usize;
+/// Bytes `records` puts before every key rotation part: rotation ID, part
+/// index, part count.
+pub const PART_HEADER_LEN: usize = records::ROTATION_HEADER_LEN;
+/// `records::Kind::KeyRotation.max_body()`, which isn't a const fn. A test
+/// keeps the two equal.
+const PART_MAX_BODY: usize = 16 * 1024;
+/// Most parts one rotation is split into.
+pub const MAX_PARTS: usize = records::MAX_ROTATION_PARTS as usize;
+/// Wraps per part. Every part but the last carries exactly this many.
+pub const WRAPS_PER_PART: usize =
+    (PART_MAX_BODY - PART_HEADER_LEN - ROTATION_HEADER_LEN) / WRAP_LEN;
+/// Most recipients one rotation can name: every part full.
+pub const MAX_RECIPIENTS: usize = MAX_PARTS * WRAPS_PER_PART;
+/// The most a complete rotation can take, all parts together.
+pub const MAX_ROTATION_BYTES: usize = MAX_PARTS * PART_MAX_BODY;
 
 // Domain separation strings. Never reuse one for another purpose.
 const WRAP_AD: &[u8] = b"mvs/groupkeys/wrap/v1\0";
 const WRAP_KDF: &str = "mvs/groupkeys v1 2026-11 wrap key";
 const MESSAGE_AD: &[u8] = b"mvs/groupkeys/message/v1\0";
 const MESSAGE_KDF: &str = "mvs/groupkeys v1 2026-11 message key";
+const ROTATION_ID_KDF: &str = "mvs/groupkeys v1 rotation id";
 
-/// Size of a rotation body with `recipients` wraps (and a `prev`).
-pub const fn rotation_body_len(recipients: usize) -> usize {
-    ROTATION_HEADER_LEN + recipients * WRAP_LEN
+/// How many parts a rotation for `recipients` members takes.
+pub const fn parts_for(recipients: usize) -> usize {
+    recipients.div_ceil(WRAPS_PER_PART)
 }
 
-/// Most recipients one rotation can carry within `max_body` bytes.
-pub const fn recipients_within(max_body: usize) -> usize {
-    (max_body - ROTATION_HEADER_LEN) / WRAP_LEN
+/// Bytes of all part bodies of a rotation with `recipients` wraps (and a
+/// `prev`).
+pub const fn rotation_body_len(recipients: usize) -> usize {
+    parts_for(recipients) * (PART_HEADER_LEN + ROTATION_HEADER_LEN) + recipients * WRAP_LEN
+}
+
+/// The ID of the rotation `rotator` made in `server` with `header` (ver to
+/// ephemeral, as encoded). Every part carries it; `prev` and message key
+/// hints name it. Binding the rotator means nobody else's part can claim the
+/// rotation; binding the server (the header names only the channel) keeps IDs
+/// apart across servers.
+pub fn rotation_id(server: ServerId, rotator: PublicKey, header: &[u8]) -> RecordId {
+    let mut material = Vec::with_capacity(2 * 32 + header.len());
+    material.extend_from_slice(rotator.as_bytes());
+    material.extend_from_slice(server.as_bytes());
+    material.extend_from_slice(header);
+    RecordId::from_bytes(blake3::derive_key(ROTATION_ID_KDF, &material))
 }
 
 /// The body limit of a records kind; checks the copy above stays in sync.
@@ -120,6 +163,16 @@ pub enum Error {
     TooManyRecipients(usize),
     /// A recipient key isn't a usable Ed25519 point.
     BadMemberKey(PublicKey),
+    /// A part header out of range: no parts, too many, or index past the
+    /// count.
+    BadPart,
+    /// A part's rotation ID isn't the one its rotator and header give.
+    RotationIdMismatch,
+    /// Not every part of the rotation is there.
+    MissingParts,
+    /// Parts that claim one rotation but don't fit together (index, count,
+    /// rotator or header differ).
+    PartMismatch,
     /// The ephemeral key gives an all-zero shared secret (small order).
     BadEphemeralKey,
     /// The sealed epoch key for us didn't open.
@@ -158,6 +211,10 @@ impl fmt::Display for Error {
                 write!(f, "{n} recipients, limit is {MAX_RECIPIENTS}")
             }
             Error::BadMemberKey(key) => write!(f, "{key:?} is not a usable member key"),
+            Error::BadPart => write!(f, "rotation part header out of range"),
+            Error::RotationIdMismatch => write!(f, "rotation ID does not match rotator and header"),
+            Error::MissingParts => write!(f, "rotation is missing parts"),
+            Error::PartMismatch => write!(f, "rotation parts do not fit together"),
             Error::BadEphemeralKey => write!(f, "ephemeral key has small order"),
             Error::UnwrapFailed => write!(f, "our wrapped key does not open"),
             Error::NoKey => write!(f, "no key for this epoch"),
@@ -371,8 +428,107 @@ pub fn open(key: &EpochKey, ctx: &MessageContext, ciphertext: &[u8]) -> Result<V
         .map_err(|_| Error::DecryptFailed)
 }
 
-/// A decoded rotation. Holding one means its body is well-formed; whether
-/// its author may rotate is the caller's (authority's) call.
+/// One part of a rotation, decoded from the body of one signed
+/// `KeyRotation` record. It names its rotation, but holding one says
+/// nothing about the other parts; see [`Rotation::assemble`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Part {
+    rotation: RecordId,
+    index: u8,
+    parts: u8,
+    rotator: PublicKey,
+    channel: ChannelId,
+    epoch: u64,
+    prev: Option<RecordId>,
+    ephemeral: MontgomeryPoint,
+    /// ver..ephemeral, exactly as encoded. The same in every part.
+    header: Vec<u8>,
+    wraps: Vec<(PublicKey, [u8; WRAPPED_KEY_LEN])>,
+}
+
+impl Part {
+    /// Parses a part body. `server` and `rotator` are the server and author of
+    /// the signed record that carried it. Refuses a part whose rotation ID
+    /// isn't the one its server, rotator and header give.
+    pub fn decode(server: ServerId, rotator: PublicKey, body: &[u8]) -> Result<Part, Error> {
+        let mut reader = Reader { bytes: body };
+        let rotation = RecordId::from_bytes(reader.array()?);
+        let index = reader.u8()?;
+        let parts = reader.u8()?;
+        if parts == 0 || usize::from(parts) > MAX_PARTS || index >= parts {
+            return Err(Error::BadPart);
+        }
+        let ver = reader.u8()?;
+        if ver != VERSION {
+            return Err(Error::UnsupportedVersion(ver));
+        }
+        let channel = ChannelId::from_bytes(reader.array()?);
+        let epoch = reader.u64()?;
+        let prev = match reader.u8()? {
+            0 => None,
+            1 => Some(RecordId::from_bytes(reader.array()?)),
+            _ => return Err(Error::BadEpochLink),
+        };
+        if (epoch == 0) != prev.is_none() {
+            return Err(Error::BadEpochLink);
+        }
+        let ephemeral = MontgomeryPoint(reader.array()?);
+        let header = body[PART_HEADER_LEN..body.len() - reader.bytes.len()].to_vec();
+        if rotation_id(server, rotator, &header) != rotation {
+            return Err(Error::RotationIdMismatch);
+        }
+        let count = usize::from(reader.u16()?);
+        if count == 0 {
+            return Err(Error::NoRecipients);
+        }
+        if count > WRAPS_PER_PART {
+            return Err(Error::TooManyRecipients(count));
+        }
+        // Check the count against the bytes actually there before allocating.
+        let wraps_len = count * WRAP_LEN;
+        if reader.bytes.len() < wraps_len {
+            return Err(Error::Truncated);
+        }
+        if reader.bytes.len() > wraps_len {
+            return Err(Error::TrailingBytes);
+        }
+        let mut wraps: Vec<(PublicKey, [u8; WRAPPED_KEY_LEN])> = Vec::with_capacity(count);
+        for _ in 0..count {
+            let recipient = PublicKey::from_bytes(reader.array()?);
+            if wraps.last().is_some_and(|(last, _)| *last >= recipient) {
+                return Err(Error::NotCanonical);
+            }
+            wraps.push((recipient, reader.array()?));
+        }
+        Ok(Part { rotation, index, parts, rotator, channel, epoch, prev, ephemeral, header, wraps })
+    }
+
+    /// The rotation this part belongs to.
+    pub fn rotation(&self) -> RecordId {
+        self.rotation
+    }
+
+    pub fn index(&self) -> u8 {
+        self.index
+    }
+
+    /// How many parts the rotation has.
+    pub fn parts(&self) -> u8 {
+        self.parts
+    }
+
+    pub fn channel(&self) -> ChannelId {
+        self.channel
+    }
+
+    pub fn prev(&self) -> Option<RecordId> {
+        self.prev
+    }
+}
+
+/// A complete rotation: every part, assembled. Holding one means its parts
+/// are well-formed and fit together; whether its author may rotate is the
+/// caller's (authority's) call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rotation {
     id: RecordId,
@@ -388,9 +544,10 @@ pub struct Rotation {
 }
 
 impl Rotation {
-    /// Builds a rotation body: a fresh epoch key wrapped for each of
-    /// `recipients`. Returns the body (to be signed by `rotator` in a record)
-    /// and the new key.
+    /// Builds a rotation: a fresh epoch key wrapped for each of
+    /// `recipients`, split into as few parts as fit. Returns the part bodies
+    /// in order (each to be signed by `rotator` in its own `KeyRotation`
+    /// record) and the new key.
     pub fn create<'a>(
         server: ServerId,
         rotator: PublicKey,
@@ -399,7 +556,7 @@ impl Rotation {
         prev: Option<RecordId>,
         recipients: impl IntoIterator<Item = &'a PublicKey>,
         rng: &mut (impl RngCore + CryptoRng),
-    ) -> Result<(Vec<u8>, EpochKey), Error> {
+    ) -> Result<(Vec<Vec<u8>>, EpochKey), Error> {
         if (epoch == 0) != prev.is_none() {
             return Err(Error::BadEpochLink);
         }
@@ -422,83 +579,104 @@ impl Rotation {
         rng.fill_bytes(ephemeral_secret.as_mut());
         let ephemeral = MontgomeryPoint::mul_base_clamped(*ephemeral_secret);
 
-        let mut body = Vec::with_capacity(rotation_body_len(recipients.len()));
-        body.push(VERSION);
-        body.extend_from_slice(channel.as_bytes());
-        body.extend_from_slice(&epoch.to_le_bytes());
+        let mut header = Vec::with_capacity(ROTATION_HEADER_LEN);
+        header.push(VERSION);
+        header.extend_from_slice(channel.as_bytes());
+        header.extend_from_slice(&epoch.to_le_bytes());
         match prev {
-            None => body.push(0),
+            None => header.push(0),
             Some(prev) => {
-                body.push(1);
-                body.extend_from_slice(prev.as_bytes());
+                header.push(1);
+                header.extend_from_slice(prev.as_bytes());
             }
         }
-        body.extend_from_slice(ephemeral.as_bytes());
-        let header_len = body.len();
-        body.extend_from_slice(&(recipients.len() as u16).to_le_bytes());
-        for (recipient, point) in points {
-            // A valid, non-weak Ed25519 key never maps to a small-order point.
-            let shared =
-                diffie_hellman(point, &ephemeral_secret).ok_or(Error::BadMemberKey(recipient))?;
-            let ad = wrap_ad(server, rotator, &body[..header_len], recipient);
-            let cipher = wrap_cipher(&shared, &ephemeral, &point, &ad);
-            let sealed = cipher
-                .encrypt(&XNonce::default(), Payload { msg: key.as_bytes(), aad: &ad })
-                .expect("sealing 32 bytes can't fail");
-            body.extend_from_slice(recipient.as_bytes());
-            body.extend_from_slice(&sealed);
+        header.extend_from_slice(ephemeral.as_bytes());
+        let id = rotation_id(server, rotator, &header);
+        let chunks: Vec<_> = points.chunks(WRAPS_PER_PART).collect();
+        // At most MAX_PARTS (32), checked through MAX_RECIPIENTS above.
+        let count = chunks.len() as u8;
+        let mut parts = Vec::with_capacity(chunks.len());
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            let mut body =
+                Vec::with_capacity(PART_HEADER_LEN + ROTATION_HEADER_LEN + chunk.len() * WRAP_LEN);
+            body.extend_from_slice(id.as_bytes());
+            body.push(index as u8);
+            body.push(count);
+            body.extend_from_slice(&header);
+            body.extend_from_slice(&(chunk.len() as u16).to_le_bytes());
+            for (recipient, point) in chunk {
+                // A valid, non-weak Ed25519 key never maps to a small-order
+                // point.
+                let shared = diffie_hellman(*point, &ephemeral_secret)
+                    .ok_or(Error::BadMemberKey(*recipient))?;
+                let ad = wrap_ad(server, rotator, &header, *recipient);
+                let cipher = wrap_cipher(&shared, &ephemeral, point, &ad);
+                let sealed = cipher
+                    .encrypt(&XNonce::default(), Payload { msg: key.as_bytes(), aad: &ad })
+                    .expect("sealing 32 bytes can't fail");
+                body.extend_from_slice(recipient.as_bytes());
+                body.extend_from_slice(&sealed);
+            }
+            parts.push(body);
         }
-        Ok((body, key))
+        Ok((parts, key))
     }
 
-    /// Parses a rotation body. `id`, `server` and `rotator` come from the
-    /// signed record that carried it (its ID, server and author).
-    pub fn decode(
-        id: RecordId,
-        server: ServerId,
-        rotator: PublicKey,
-        body: &[u8],
-    ) -> Result<Rotation, Error> {
-        let mut reader = Reader { bytes: body };
-        let ver = reader.u8()?;
-        if ver != VERSION {
-            return Err(Error::UnsupportedVersion(ver));
-        }
-        let channel = ChannelId::from_bytes(reader.array()?);
-        let epoch = reader.u64()?;
-        let prev = match reader.u8()? {
-            0 => None,
-            1 => Some(RecordId::from_bytes(reader.array()?)),
-            _ => return Err(Error::BadEpochLink),
+    /// Puts a rotation together from all its parts, in any order. Refuses
+    /// unless there is exactly one part per index, every part names the same
+    /// rotation, rotator and header, every part but the last is full, and
+    /// the recipients ascend across parts: the one way [`Self::create`]
+    /// splits them.
+    pub fn assemble(server: ServerId, mut parts: Vec<Part>) -> Result<Rotation, Error> {
+        parts.sort_by_key(|part| part.index);
+        let Some(first) = parts.first() else {
+            return Err(Error::MissingParts);
         };
-        if (epoch == 0) != prev.is_none() {
-            return Err(Error::BadEpochLink);
+        if parts.len() != usize::from(first.parts) {
+            return Err(Error::MissingParts);
         }
-        let ephemeral = MontgomeryPoint(reader.array()?);
-        let header = body[..body.len() - reader.bytes.len()].to_vec();
-        let count = usize::from(reader.u16()?);
-        if count == 0 {
-            return Err(Error::NoRecipients);
-        }
-        // Check the count against the bytes actually there before allocating
-        // for it: a 108-byte body must not reserve room for 65,535 wraps.
-        let wraps_len = count * WRAP_LEN;
-        if reader.bytes.len() < wraps_len {
-            return Err(Error::Truncated);
-        }
-        if reader.bytes.len() > wraps_len {
-            return Err(Error::TrailingBytes);
-        }
-        let mut wraps: Vec<(PublicKey, [u8; WRAPPED_KEY_LEN])> = Vec::with_capacity(count);
-        for _ in 0..count {
-            let recipient = PublicKey::from_bytes(reader.array()?);
-            if wraps.last().is_some_and(|(last, _)| *last >= recipient) {
+        let last = parts.len() - 1;
+        for (index, part) in parts.iter().enumerate() {
+            if usize::from(part.index) != index
+                || part.parts != first.parts
+                || part.rotation != first.rotation
+                || part.rotator != first.rotator
+                || part.header != first.header
+            {
+                return Err(Error::PartMismatch);
+            }
+            if index < last && part.wraps.len() != WRAPS_PER_PART {
                 return Err(Error::NotCanonical);
             }
-            wraps.push((recipient, reader.array()?));
         }
-        debug_assert!(reader.bytes.is_empty(), "length checked above");
-        Ok(Rotation { id, server, rotator, channel, epoch, prev, ephemeral, header, wraps })
+        let Part { rotation, rotator, channel, epoch, prev, ephemeral, ref header, .. } = *first;
+        let header = header.clone();
+        let mut wraps: Vec<(PublicKey, [u8; WRAPPED_KEY_LEN])> =
+            Vec::with_capacity(parts.iter().map(|part| part.wraps.len()).sum());
+        for part in parts {
+            if let (Some((last, _)), Some((next, _))) = (wraps.last(), part.wraps.first()) {
+                if last >= next {
+                    return Err(Error::NotCanonical);
+                }
+            }
+            wraps.extend(part.wraps);
+        }
+        Ok(Rotation {
+            id: rotation,
+            server,
+            rotator,
+            channel,
+            epoch,
+            prev,
+            ephemeral,
+            header,
+            wraps,
+        })
+    }
+
+    /// Decodes a rotation that fits in one part.
+    pub fn decode(server: ServerId, rotator: PublicKey, body: &[u8]) -> Result<Rotation, Error> {
+        Rotation::assemble(server, vec![Part::decode(server, rotator, body)?])
     }
 
     pub fn id(&self) -> RecordId {
@@ -653,7 +831,12 @@ mod tests {
         assert_eq!(MESSAGE_OVERHEAD, 57);
         assert_eq!(WRAP_LEN, 80);
         assert_eq!(ROTATION_HEADER_LEN, 108);
-        assert_eq!(recipients_within(Kind::Message.max_body()), 203);
-        assert_eq!(rotation_body_len(500), 40_108);
+        assert_eq!(PART_MAX_BODY, Kind::KeyRotation.max_body());
+        assert_eq!(PART_HEADER_LEN, 34);
+        assert_eq!(WRAPS_PER_PART, 203);
+        assert_eq!(MAX_RECIPIENTS, 6_496);
+        assert_eq!(parts_for(500), 3);
+        assert_eq!(rotation_body_len(500), 40_426);
+        assert_eq!(MAX_ROTATION_BYTES, 512 * 1024);
     }
 }
