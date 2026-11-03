@@ -125,6 +125,9 @@ impl Log {
         }
         // Pending (deps missing) and evicted records stay in `records` and
         // are re-offered to a fresh resolver on the next load.
+        // TODO(sync adapter, #46): rate-limit incoming joins per invite and
+        // author before they get here. A join refused on a limited invite
+        // makes authority re-resolve in full (a CPU lever).
         let _ = self.resolver.insert(record.clone());
         self.records.push(record);
         true
