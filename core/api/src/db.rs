@@ -8,6 +8,7 @@ use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rand_core::{OsRng, RngCore};
 use records::{PublicKey, Record, ServerId};
 use rusqlite::{params, Connection, OptionalExtension};
+use zeroize::Zeroizing;
 
 use crate::types::{CoreError, ErrorCode};
 
@@ -25,6 +26,11 @@ CREATE TABLE IF NOT EXISTS blocked (user BLOB PRIMARY KEY);
 
 const PROFILE_KEY: &str = "profile";
 const PROFILE_AD: &[u8] = b"mvs/api/profile/v1";
+const SECRET_AD: &[u8] = b"mvs/api/server-secret/v1";
+
+fn secret_key(server: ServerId) -> String {
+    format!("server-secret/{}", hex::encode(server.as_bytes()))
+}
 const NONCE_LEN: usize = 24;
 
 pub(crate) struct Db {
@@ -86,6 +92,44 @@ impl Db {
             .decrypt(XNonce::from_slice(nonce), Payload { msg: sealed, aad: PROFILE_AD })
             .map(Some)
             .map_err(internal)
+    }
+
+    /// A server's sync secret (GAP-4), sealed like the profile under the
+    /// storage key, bound to the server by the AD. A bearer credential: it
+    /// never leaves this table except into an invite link the user copies.
+    pub fn save_server_secret(
+        &self,
+        key: &[u8; 32],
+        server: ServerId,
+        secret: &[u8; 32],
+    ) -> Result<(), CoreError> {
+        let mut nonce = [0u8; NONCE_LEN];
+        OsRng.fill_bytes(&mut nonce);
+        let aad = [SECRET_AD, server.as_bytes().as_slice()].concat();
+        let sealed = XChaCha20Poly1305::new(key.into())
+            .encrypt(XNonce::from_slice(&nonce), Payload { msg: secret, aad: &aad })
+            .map_err(internal)?;
+        self.set(&secret_key(server), &[nonce.as_slice(), &sealed].concat())
+    }
+
+    pub fn load_server_secret(
+        &self,
+        key: &[u8; 32],
+        server: ServerId,
+    ) -> Result<Option<Zeroizing<[u8; 32]>>, CoreError> {
+        let Some(blob) = self.get(&secret_key(server))? else { return Ok(None) };
+        if blob.len() < NONCE_LEN {
+            return Err(internal("short secret"));
+        }
+        let (nonce, sealed) = blob.split_at(NONCE_LEN);
+        let aad = [SECRET_AD, server.as_bytes().as_slice()].concat();
+        let plain = Zeroizing::new(
+            XChaCha20Poly1305::new(key.into())
+                .decrypt(XNonce::from_slice(nonce), Payload { msg: sealed, aad: &aad })
+                .map_err(internal)?,
+        );
+        let secret: [u8; 32] = plain.as_slice().try_into().map_err(|_| internal("secret size"))?;
+        Ok(Some(Zeroizing::new(secret)))
     }
 
     pub fn put_record(&self, record: &Record) -> Result<(), CoreError> {

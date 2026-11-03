@@ -216,7 +216,12 @@ fn a_genesis_must_belong_to_its_server_id() {
 
     let joiner = world.peer();
     sign_up(&joiner, "Joiner");
-    let link = format!("mvs://join/{}/{}", hex::encode(forged_id.as_bytes()), "00".repeat(32));
+    let link = format!(
+        "mvs://join/{}/{}/{}",
+        hex::encode(forged_id.as_bytes()),
+        "00".repeat(32),
+        "00".repeat(32)
+    );
     joiner.core.join_server(&link).unwrap();
     assert!(matches!(
         joiner.events.take().last(),
@@ -227,7 +232,12 @@ fn a_genesis_must_belong_to_its_server_id() {
     // Unknown server, and a link that isn't one.
     joiner
         .core
-        .join_server(&format!("mvs://join/{}/{}", "ab".repeat(32), "00".repeat(32)))
+        .join_server(&format!(
+            "mvs://join/{}/{}/{}",
+            "ab".repeat(32),
+            "00".repeat(32),
+            "00".repeat(32)
+        ))
         .unwrap();
     assert!(matches!(
         joiner.events.take().last(),
@@ -252,8 +262,12 @@ fn hostile_server_records_are_refused() {
         let genesis =
             authority::sign_genesis(&mallory, [metadata.len() as u8; 16], 1, metadata).unwrap();
         world.network.publish(&genesis);
-        let link =
-            format!("mvs://join/{}/{}", hex::encode(genesis.server().as_bytes()), "00".repeat(32));
+        let link = format!(
+            "mvs://join/{}/{}/{}",
+            hex::encode(genesis.server().as_bytes()),
+            "00".repeat(32),
+            "00".repeat(32)
+        );
         joiner.core.join_server(&link).unwrap();
         assert!(matches!(
             joiner.events.take().last(),
@@ -285,7 +299,7 @@ fn hostile_server_records_are_refused() {
     // A real server with an invite ID it never issued: the join is refused,
     // nothing is stored or sent.
     let sent = world.network.fetch(server_key).len();
-    let bogus = format!("mvs://join/{}/{}", server.id, "11".repeat(32));
+    let bogus = format!("mvs://join/{}/{}/{}", server.id, "11".repeat(32), "00".repeat(32));
     joiner.core.join_server(&bogus).unwrap();
     assert!(matches!(
         joiner.events.take().last(),
@@ -1196,4 +1210,35 @@ fn general_is_named_in_the_creators_language() {
     // The English speaker joins the Hebrew server: the stored name stays.
     english.core.join_server(&he_server.invite_link).unwrap();
     assert_eq!(english.core.list_channels(&he_server.id).unwrap()[0].name, "כללי");
+}
+
+/// GAP-4: each server's sync secret is in its invite link, stored sealed
+/// (never in the clear in the database), and the same after a restart.
+#[test]
+fn the_server_secret_is_sealed_and_kept() {
+    let world = World::new();
+    let secrets = Arc::new(MemoryStore::new());
+    let dir = std::env::temp_dir().join(format!("mvs-api-secret-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("core.db");
+    let _ = std::fs::remove_file(&db);
+    let peer = world.peer_with(secrets.clone(), Some(db.clone()), Arc::new(PendingGroupKeys));
+    sign_up(&peer, "Owner");
+    let server = peer.core.create_server("Secret", AgeRestriction::None).unwrap();
+    let parts: Vec<&str> =
+        server.invite_link.trim_start_matches("mvs://join/").split('/').collect();
+    assert_eq!(parts.len(), 3, "server, invite, secret");
+    let secret = hex::decode(parts[2]).unwrap();
+    assert_eq!(secret.len(), 32);
+    drop(peer);
+
+    let bytes = std::fs::read(&db).unwrap();
+    assert!(!contains(&bytes, &secret), "the secret is in the db in the clear");
+    assert!(!contains(&bytes, parts[2].as_bytes()), "the secret's hex is in the db");
+
+    let peer = world.peer_with(secrets, Some(db), Arc::new(PendingGroupKeys));
+    let again = peer.core.list_servers().unwrap().remove(0);
+    assert_eq!(again.invite_link, server.invite_link);
+    drop(peer);
+    let _ = std::fs::remove_dir_all(&dir);
 }
