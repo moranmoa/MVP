@@ -46,22 +46,26 @@ struct State {
     members: HashMap<ServerId, BTreeSet<PublicKey>>,
     /// Each server's accepted `KeyRotation` records, from authority.
     accepted: HashMap<ServerId, BTreeSet<RecordId>>,
-    /// Each server's channels, from authority. Keys exist only for these:
-    /// anyone can name a channel in a record, and each `ChannelKeys` may
-    /// hold up to 2 MiB on probation (GAP-8).
-    known: HashMap<ServerId, BTreeSet<ChannelId>>,
 }
 
+/// Most channels per server that hold keys. Anyone can name a channel in a
+/// record and each `ChannelKeys` may hold up to 2 MiB on probation (GAP-8),
+/// so this backstops the caller's duty to pass only channels authority knows.
+pub const MAX_CHANNELS_PER_SERVER: usize = 256;
+
 impl State {
-    /// The keys of a channel authority knows; `Rejected` for any other,
-    /// without creating anything.
+    /// A channel's keys. Past [`MAX_CHANNELS_PER_SERVER`] a new channel is
+    /// `Rejected` without creating anything; existing ones keep working.
     fn channel(
         &mut self,
         server: ServerId,
         channel: ChannelId,
     ) -> Result<&mut ChannelKeys, CipherError> {
         let secret = self.secret.clone().ok_or(CipherError::Unavailable)?;
-        if !self.known.get(&server).is_some_and(|channels| channels.contains(&channel)) {
+        if !self.channels.contains_key(&(server, channel))
+            && self.channels.keys().filter(|(at, _)| *at == server).count()
+                >= MAX_CHANNELS_PER_SERVER
+        {
             return Err(CipherError::Rejected);
         }
         let accepted = self.accepted.get(&server);
@@ -142,7 +146,7 @@ impl GroupCipher for GroupKeysCipher {
     ) -> Result<Vec<u8>, CipherError> {
         let mut state = self.state();
         let members = state.members.get(&server).cloned().unwrap_or_default();
-        // A channel authority doesn't know has no key to send with.
+        // A channel past the cap has no key to send with.
         let keys = state.channel(server, channel).map_err(|error| match error {
             CipherError::Rejected => CipherError::NoKey,
             other => other,
@@ -177,10 +181,12 @@ impl GroupCipher for GroupKeysCipher {
         Ok(evicted)
     }
 
-    fn set_channels(&self, server: ServerId, channels: &BTreeSet<ChannelId>) {
-        let mut state = self.state();
-        state.channels.retain(|(at, channel), _| *at != server || channels.contains(channel));
-        state.known.insert(server, channels.clone());
+    fn unlock(&self, secret: Arc<MemberSecret>) {
+        GroupKeysCipher::unlock(self, secret);
+    }
+
+    fn lock(&self) {
+        GroupKeysCipher::lock(self);
     }
 
     fn set_accepted(&self, server: ServerId, accepted: &BTreeSet<RecordId>) {

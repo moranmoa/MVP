@@ -21,9 +21,7 @@ fn pk(n: u8) -> PublicKey {
 }
 
 fn cipher(n: u8) -> GroupKeysCipher {
-    let cipher = GroupKeysCipher::new(Arc::new(MemberSecret::new(&key(n))));
-    cipher.set_channels(SERVER, &BTreeSet::from([CHANNEL]));
-    cipher
+    GroupKeysCipher::new(Arc::new(MemberSecret::new(&key(n))))
 }
 
 fn members(ns: &[u8]) -> BTreeSet<PublicKey> {
@@ -163,7 +161,6 @@ fn only_key_rotation_records_are_taken_in() {
 #[test]
 fn locked_until_unlocked_and_lock_drops_everything() {
     let alice = GroupKeysCipher::locked();
-    alice.set_channels(SERVER, &BTreeSet::from([CHANNEL]));
     let everyone = members(&[1, 2]);
     alice.membership_changed(SERVER, &everyone);
     assert_eq!(alice.rotate(SERVER, CHANNEL, &everyone), Err(CipherError::Unavailable));
@@ -191,43 +188,7 @@ fn debug_never_prints_the_secret() {
 }
 
 #[test]
-fn unknown_channels_create_no_state() {
-    let (alice, bob) = (cipher(1), cipher(2));
-    let everyone = members(&[1, 2]);
-    bob.membership_changed(SERVER, &everyone);
-    // A member names 1,000 channels authority doesn't know.
-    for n in 0..1_000u32 {
-        let mut id = [0; 32];
-        id[..4].copy_from_slice(&n.to_le_bytes());
-        let channel = ChannelId::from_bytes(id);
-        let (parts, _) =
-            Rotation::create(SERVER, pk(1), channel, 0, None, &everyone, &mut OsRng).unwrap();
-        let record = Draft {
-            server: SERVER,
-            scope: Scope::Channel(channel),
-            seq: 0,
-            deps: vec![],
-            auth_deps: vec![],
-            ts: 0,
-            kind: Kind::KeyRotation,
-            body: parts.into_iter().next().unwrap(),
-        }
-        .sign(&key(1))
-        .unwrap();
-        assert_eq!(bob.apply_rotation(&record), Err(CipherError::Rejected));
-        assert!(bob.decrypt(SERVER, channel, pk(1), b"x").is_err());
-        assert_eq!(bob.encrypt(SERVER, channel, b"x"), Err(CipherError::NoKey));
-        assert_eq!(bob.rotate(SERVER, channel, &everyone), Err(CipherError::Rejected));
-    }
-    assert_eq!(bob.channels_held(), 0);
-    // Another server's channels aren't known either.
-    let other = ServerId::from_bytes([1; 32]);
-    assert_eq!(alice.encrypt(other, CHANNEL, b"x"), Err(CipherError::NoKey));
-    assert_eq!(alice.channels_held(), 0);
-}
-
-#[test]
-fn a_channel_authority_drops_loses_its_keys() {
+fn channels_per_server_are_capped_and_the_real_one_keeps_working() {
     let (alice, bob) = (cipher(1), cipher(2));
     let everyone = members(&[1, 2]);
     let mut accepted = BTreeSet::new();
@@ -236,13 +197,36 @@ fn a_channel_authority_drops_loses_its_keys() {
     }
     let parts = alice.rotate(SERVER, CHANNEL, &everyone).unwrap();
     deliver(&[&alice, &bob], &sign(1, parts), &mut accepted);
-    let body = alice.encrypt(SERVER, CHANNEL, b"x").unwrap();
-    assert_eq!(bob.channels_held(), 1);
 
-    bob.set_channels(SERVER, &BTreeSet::new());
-    assert_eq!(bob.channels_held(), 0);
-    assert!(bob.decrypt(SERVER, CHANNEL, pk(1), &body).is_err());
-    // Known again: a fresh, empty view; the rotations must be applied again.
-    bob.set_channels(SERVER, &BTreeSet::from([CHANNEL]));
-    assert_eq!(bob.decrypt(SERVER, CHANNEL, pk(1), &body), Err(CipherError::NoKey));
+    // A member names 1,000 made-up channels.
+    for n in 0..1_000u32 {
+        let mut id = [0; 32];
+        id[..4].copy_from_slice(&n.to_le_bytes());
+        let channel = ChannelId::from_bytes(id);
+        let _ = bob.decrypt(SERVER, channel, pk(1), b"x");
+        assert!(bob.channels_held() <= super::MAX_CHANNELS_PER_SERVER);
+    }
+    assert_eq!(bob.channels_held(), super::MAX_CHANNELS_PER_SERVER);
+    let past = ChannelId::from_bytes([0xff; 32]);
+    assert_eq!(bob.encrypt(SERVER, past, b"x"), Err(CipherError::NoKey));
+    assert_eq!(bob.rotate(SERVER, past, &everyone), Err(CipherError::Rejected));
+    assert_eq!(bob.channels_held(), super::MAX_CHANNELS_PER_SERVER);
+
+    // The real channel was there first and still works.
+    let body = alice.encrypt(SERVER, CHANNEL, b"still here").unwrap();
+    assert_eq!(bob.decrypt(SERVER, CHANNEL, pk(1), &body).unwrap().plaintext, b"still here");
+    // Another server has its own budget.
+    let other = ServerId::from_bytes([1; 32]);
+    assert!(bob.rotate(other, CHANNEL, &everyone).is_ok());
+}
+
+#[test]
+fn service_can_lock_and_unlock_through_the_trait() {
+    let cipher: Arc<dyn GroupCipher> = Arc::new(GroupKeysCipher::locked());
+    let everyone = members(&[1, 2]);
+    assert_eq!(cipher.rotate(SERVER, CHANNEL, &everyone), Err(CipherError::Unavailable));
+    cipher.unlock(Arc::new(MemberSecret::new(&key(1))));
+    assert!(cipher.rotate(SERVER, CHANNEL, &everyone).is_ok());
+    cipher.lock();
+    assert_eq!(cipher.rotate(SERVER, CHANNEL, &everyone), Err(CipherError::Unavailable));
 }
