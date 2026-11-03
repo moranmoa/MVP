@@ -1,0 +1,7 @@
+# Headless Chromium participant: Playwright's image + tc for netem.
+FROM mcr.microsoft.com/playwright:v1.56.1-noble
+RUN apt-get update && apt-get install -y --no-install-recommends iproute2 && rm -rf /var/lib/apt/lists/*
+WORKDIR /bench
+RUN npm init -y >/dev/null && npm install --no-audit --no-fund playwright-core@1.56.1
+COPY chromium-peer.mjs .
+CMD ["node", "chromium-peer.mjs"]

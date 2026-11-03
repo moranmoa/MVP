@@ -1,0 +1,13 @@
+{
+  "name": "voice-spike-signal",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "ws": "8.18.3"
+  }
+}
