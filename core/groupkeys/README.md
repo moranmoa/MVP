@@ -245,16 +245,17 @@ ready to paste into the log, is in
   keeps sending under the old key, which the kicked member can still read.
   This window is inherent in a system without a central server.
 
-- **Memory (GAP-8, fixed in #19).** Anyone can sign rotation records, so a
-  rotation `authority` has never accepted and that no linked rotation builds
-  on is on probation. Past `MAX_UNACCEPTED` (64, so at most 1 MiB per channel
-  at 16 KiB a record) the oldest by arrival is dropped with its key, and
-  `apply` returns its ID so sync can fetch it again. Rotations authority ever
-  accepted, and ancestors of linked rotations, are never dropped. The cost: a
-  flood can push out an honest rotation that is still waiting for its prev or
-  its verdict, and only redelivery brings it back (the same trade as PR #7's
-  pending queue). There is no wall clock in this crate, so "age" is arrival
-  order.
+- **Memory (GAP-8, fixed in #19).** Anyone can sign rotation records, so only
+  rotations `authority` has accepted at some point, and their ancestors, are
+  protected. Every other held rotation is on probation; building on a rotation
+  doesn't protect it, so a chain of junk can't shield itself. Past
+  `MAX_UNACCEPTED` (64, so at most 1 MiB per channel at 16 KiB a record) the
+  oldest by arrival is dropped together with every held rotation built on it,
+  keys and all, and `apply` returns their IDs so sync can fetch them again.
+  The cost: a flood can push out an honest rotation that is still waiting for
+  its prev or its verdict, and only redelivery brings it back (the same trade
+  as PR #7's pending queue). There is no wall clock in this crate, so "age" is
+  arrival order.
 - **The identity secret (fixed in #20).** `ChannelKeys` holds no
   `SigningKey`. A client derives one `MemberSecret` (the X25519 scalar,
   zeroized on drop) from its identity and shares it with every channel by
@@ -305,4 +306,6 @@ the v1 formats pinned with a fixed RNG. `tests/bounded_memory.rs` (#19): a
 flood of 400 unaccepted rotations of every shape keeps memory at the cap while
 the accepted chain still works; an evicted waiting rotation is returned and
 links on redelivery; accepted rotations, even waiting ones, are never evicted;
-a parent with a linked child stays until the child goes.
+ancestors of an accepted rotation are kept, and an unaccepted parent goes with
+its child; a chain of 1,000 junk rotations built on the head stays at the cap
+and the head never changes.

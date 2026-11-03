@@ -105,7 +105,7 @@ fn accepted_rotations_are_never_evicted_even_while_waiting() {
 }
 
 #[test]
-fn a_rotation_something_builds_on_is_kept_until_its_child_goes() {
+fn ancestors_of_accepted_rotations_are_kept() {
     // Moderator 2's rotation was never accepted, but moderator 3 rotated on
     // top of it and that one is: the parent must stay for the chain.
     let everyone = members(&[1, 2, 3]);
@@ -116,31 +116,63 @@ fn a_rotation_something_builds_on_is_kept_until_its_child_goes() {
     apply(&mut source, &unaccepted);
     let on_top = rotate(&source, 3, &everyone, 3);
 
-    let mut bob = ChannelKeys::with_limit(SERVER, CHANNEL, secret(2), 1);
+    // Room for both while authority's verdict on `on_top` is on its way.
+    let mut bob = ChannelKeys::with_limit(SERVER, CHANNEL, secret(2), 2);
     apply(&mut bob, &first);
     store(&mut bob, &unaccepted);
     apply(&mut bob, &on_top);
     assert_eq!(bob.on_probation(), 0);
     for seed in 10..20 {
-        let rotation = junk(None, 0, &everyone, seed);
-        let evicted = push(&mut bob, &rotation);
+        let evicted = push(&mut bob, &junk(None, 0, &everyone, seed));
         assert!(!evicted.contains(&unaccepted.id));
     }
     assert!(bob.has_key(&unaccepted.id));
     assert_eq!(bob.head().unwrap().id(), on_top.id);
 
-    // An unaccepted leaf on an unaccepted parent: when the leaf is evicted,
-    // the parent goes back on probation and can go too.
+    // The same, but authority's verdict on `on_top` comes before either
+    // rotation: `unaccepted` is protected as soon as `on_top` arrives.
+    let mut dave = ChannelKeys::with_limit(SERVER, CHANNEL, secret(2), 1);
+    apply(&mut dave, &first);
+    dave.accept(on_top.id);
+    store(&mut dave, &unaccepted);
+    store(&mut dave, &on_top);
+    assert_eq!(dave.on_probation(), 0);
+
+    // Neither accepted: evicting the parent takes the child with it.
     let mut carol = ChannelKeys::with_limit(SERVER, CHANNEL, secret(3), 2);
     apply(&mut carol, &first);
     store(&mut carol, &unaccepted);
     store(&mut carol, &on_top);
-    assert_eq!(carol.on_probation(), 1);
-    let mut gone = Vec::new();
-    for seed in 20..24 {
-        let rotation = junk(None, 0, &everyone, seed);
-        gone.extend(push(&mut carol, &rotation));
-    }
-    assert_eq!(&gone[..2], &[on_top.id, unaccepted.id]);
+    assert_eq!(carol.on_probation(), 2);
+    let evicted = push(&mut carol, &junk(None, 0, &everyone, 20));
+    assert_eq!(evicted, vec![unaccepted.id, on_top.id]);
     assert_eq!(carol.head().unwrap().id(), first.id);
+}
+
+#[test]
+fn a_chain_of_junk_on_the_head_stays_bounded() {
+    // Security review of #51: each junk rotation builds on the previous one,
+    // starting from the accepted head. Building on something mustn't protect
+    // it, or the chain grows without limit.
+    let everyone = members(&[1, 2]);
+    let mut bob = peer(2);
+    let first = rotate(&bob, 1, &everyone, 1);
+    apply(&mut bob, &first);
+
+    let mut tip = first.id;
+    let mut epoch = 0;
+    let mut evicted = 0;
+    for seed in 0..1_000u64 {
+        // The attacker keeps building on what it sent, whether or not we
+        // still hold it.
+        epoch += 1;
+        let rotation = junk(Some(tip), epoch, &everyone, 1_000 + seed);
+        tip = rotation.id;
+        evicted += push(&mut bob, &rotation).len();
+        assert!(bob.on_probation() <= MAX_UNACCEPTED);
+        assert!(bob.held() <= 1 + MAX_UNACCEPTED);
+        assert_eq!(bob.head().unwrap().id(), first.id);
+    }
+    assert_eq!(evicted + bob.held(), 1_001);
+    assert_eq!(bob.held() - bob.on_probation(), 1);
 }
