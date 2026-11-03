@@ -45,19 +45,19 @@ runs the real core (otherwise core commands answer `core-unavailable`);
 
 | Rule | Where | Test |
 | --- | --- | --- |
-| The page gets only  and , never  |  | e2e |
-| Main answers only our top frame on  () |   | e2e (indirect) |
-| Allow-list =  in ui/src/core/api.ts, same parameter names; core-only commands (, , ) unreachable; prototype names refused |  | unit (parses api.ts) + e2e |
-| Positional args mapped to named args; extra args, non-arrays, cycles refused; requests over 1 MiB never sent |  | unit + e2e |
-|  spawned by absolute path, , minimal env (no , , ...), stdio only,  |  | unit (spawn spy, env seen by the fake core) |
-| stdout never logged (words); stderr logged, lines truncated |  | unit |
-| Lines from the core over 16 MiB kill and restart it; crashes fail pending requests () and restart with backoff |  | unit |
-| Timeout per request (30 s; 120 s for key generation and OS auth) answers , for the UI's busy state |  | unit |
-| Errors reach the page as  only |  | unit |
-| Single instance; packaged builds quit on  /  /  and have  |  | – (packaged, B1-3) |
+| The page gets only `window.mvs.invoke(cmd, args)` and `window.mvs.onEvent(cb)`, never `ipcRenderer` | `src/preload.js` | e2e |
+| Main answers only our top frame on `app://mvs` (`event.senderFrame`) | `main.js` `serveCoreIpc` | e2e (indirect) |
+| Allow-list = `CoreCommands` in ui/src/core/api.ts, same parameter names; core-only commands (`grantRole`, `revokeRole`, `syncNow`) unreachable; prototype names refused | `src/commands.js` | unit (parses api.ts) + e2e |
+| Positional args mapped to named args; extra args, non-arrays and cycles refused; requests over 1 MiB never sent | `toRequest` | unit + e2e |
+| `mvs-core` spawned by absolute path, `shell: false`, minimal env (no `NODE_OPTIONS`, `LD_PRELOAD`, ...), stdio only, `--data-dir <userData>/core` | `src/sidecar.js` | unit (spawn spy, env seen by the fake core) |
+| stdout never logged (it carries the words); stderr logged, lines truncated | `sidecar.js` | unit |
+| A line from the core over 16 MiB kills and restarts it; a crash fails pending requests (`core-restarted`) and restarts with backoff | `sidecar.js` | unit |
+| Timeout per request (30 s; 120 s for key generation and OS auth) answers `timeout`, for the UI's busy state | `sidecar.js` | unit |
+| Errors reach the page as `{ code, positions? }` only | `sanitizeError` | unit |
+| Single instance; packaged builds quit on `--inspect`, `--remote-debugging-*` or `--js-flags` and have `devTools: false` | `main.js` | – (packaged, B1-3) |
 
-Tests use , which speaks the sidecar's line protocol
+Tests use `test/fake-core.js`, which speaks the sidecar's line protocol
 (core/api README) and misbehaves on cue. The keychain stays in the core
-process; the shell never touches keys (no ).
+process; the shell never touches keys (no `safeStorage`).
 
 The microphone permission is decided with voice (phase 2).
