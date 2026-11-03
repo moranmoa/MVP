@@ -824,7 +824,11 @@ fn a_kick_re_keys_the_channel() {
         "Carol",
         carol_cipher.clone(),
     );
-    let dan = open("zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong", "Dan", Arc::new(GroupKeysCipher::locked()));
+    let dan = open(
+        "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong",
+        "Dan",
+        Arc::new(GroupKeysCipher::locked()),
+    );
     // A moderator whose build has no group encryption: its kick re-keys nothing.
     let moderator = world.peer();
     let moderator_id = sign_up(&moderator, "Mod").id;
@@ -866,7 +870,9 @@ fn a_kick_re_keys_the_channel() {
     let after_record =
         held.iter().find(|r| hex::encode(r.id().as_bytes()) == after.id).expect("published");
     let Scope::Channel(ch) = after_record.scope() else { panic!("a channel record") };
-    assert!(carol_cipher.decrypt(server_key, ch, after_record.author(), after_record.body()).is_err());
+    assert!(carol_cipher
+        .decrypt(server_key, ch, after_record.author(), after_record.body())
+        .is_err());
     carol.core.sync_now().unwrap();
     assert!(carol.core.list_servers().unwrap().is_empty());
 
@@ -888,7 +894,13 @@ fn a_kick_re_keys_the_channel() {
     guest.core.sync_now().unwrap();
     guest.core.send_message(&channel, "back", None).unwrap();
     owner.core.sync_now().unwrap();
-    let bodies: Vec<String> =
-        owner.core.get_messages(&channel, 0, 10).unwrap().messages.into_iter().map(|m| m.body).collect();
+    let bodies: Vec<String> = owner
+        .core
+        .get_messages(&channel, 0, 10)
+        .unwrap()
+        .messages
+        .into_iter()
+        .map(|m| m.body)
+        .collect();
     assert_eq!(bodies, ["before", "after", "still here", "back"]);
 }
