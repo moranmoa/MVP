@@ -4,9 +4,10 @@ import { useAppStore } from '../../app/App';
 import { FONT_MAX, FONT_MIN, SCALE_MAX, SCALE_MIN, useSettings, type Theme } from '../../app/settings';
 import { useStore } from '../../app/store';
 import { useCore, type AppInfo, type StorageUsage } from '../../core';
-import { Avatar, Code, Dialog, Name } from '../../components/common';
+import { Avatar, Code, Dialog, Name, RICH } from '../../components/common';
 import { CheckIcon, ShieldIcon } from '../../components/icons';
 import { LOCALES } from '../../i18n';
+import { textDir, useUiDir } from '../../app/textDir';
 
 type Section = 'account' | 'language' | 'appearance' | 'storage' | 'diagnostics' | 'about';
 const SECTIONS: Section[] = ['account', 'language', 'appearance', 'storage', 'diagnostics', 'about'];
@@ -126,6 +127,7 @@ function LanguageSection() {
 function AppearanceSection() {
   const { settings, update } = useSettings();
   const intl = useIntl();
+  const uiDir = useUiDir();
   const themes: Theme[] = ['system', 'light', 'dark'];
   return (
     <div className="stack">
@@ -177,7 +179,7 @@ function AppearanceSection() {
         />
       </label>
       <p className="muted small">
-        <FormattedMessage id="settings.zoomHint" />
+        <FormattedMessage id="settings.zoomHint" values={RICH} />
       </p>
       <div>
         <button type="button" className="secondary small" onClick={() => update({ uiScale: 1, fontSize: 15 })}>
@@ -201,7 +203,7 @@ function AppearanceSection() {
                   <Code value={n === 1 ? 'K7QM-2XPA' : 'R4TD-9HWE'} />
                   <time>{intl.formatTime(new Date(2026, 10, 3, 21, n * 2), { hour: '2-digit', minute: '2-digit' })}</time>
                 </div>
-                <p className="msg-body" dir="auto">
+                <p className="msg-body user-text" dir={textDir(intl.formatMessage({ id: `settings.preview.sample${n}` }), uiDir)}>
                   <FormattedMessage id={`settings.preview.sample${n}`} />
                 </p>
               </div>
@@ -215,14 +217,17 @@ function AppearanceSection() {
 
 function Bytes({ value }: { value: number }) {
   const gb = value >= GB;
+  // Sizes read "451 MB" in every language (U4).
   return (
-    <FormattedNumber
-      value={gb ? value / GB : value / 1024 ** 2}
-      style="unit"
-      unit={gb ? 'gigabyte' : 'megabyte'}
-      unitDisplay="short"
-      maximumFractionDigits={gb ? 1 : 0}
-    />
+    <bdi dir="ltr">
+      <FormattedNumber
+        value={gb ? value / GB : value / 1024 ** 2}
+        style="unit"
+        unit={gb ? 'gigabyte' : 'megabyte'}
+        unitDisplay="short"
+        maximumFractionDigits={gb ? 1 : 0}
+      />
+    </bdi>
   );
 }
 

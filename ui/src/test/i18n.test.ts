@@ -26,7 +26,31 @@ describe('message catalogs', () => {
     for (const [locale, messages] of Object.entries(catalogs)) {
       for (const [id, text] of Object.entries(messages)) {
         const fmt = new IntlMessageFormat(text, locale);
-        expect(() => fmt.format({ count: 2, n: 3, name: 'x', channel: 'c', step: 1, total: 7, size: 15, positions: '1', age: '18', code: 'AB', version: '1', used: '1', limit: '2' }), `${locale}:${id}`).not.toThrow();
+        expect(() => fmt.format({ count: 2, n: 3, name: 'x', channel: 'c', step: 1, total: 7, size: 15, positions: '1', age: '18', code: 'AB', version: '1', used: '1', limit: '2', kbd: (c: unknown) => c }), `${locale}:${id}`).not.toThrow();
+      }
+    }
+  });
+
+  // B17 / UX-03: user data inside a sentence is isolated (FSI … PDI), so an
+  // English channel name cannot reorder a Hebrew sentence, or the reverse.
+  it('isolates names, codes and sizes inside sentences', () => {
+    const FSI = String.fromCharCode(0x2068);
+    const PDI = String.fromCharCode(0x2069);
+    // Exactly FSI {x} PDI, with nothing else (not even a channel's #) inside the isolate.
+    const isolated = new RegExp(`${FSI}{(channel|name|code|version|used|limit)}${PDI}`, 'g');
+    for (const [locale, messages] of Object.entries(catalogs)) {
+      for (const [id, text] of Object.entries(messages)) {
+        const bare = text.replace(isolated, '').match(/{(channel|name|code|version|used|limit)}/);
+        expect(bare, `${locale}:${id}`).toBeNull();
+      }
+    }
+  });
+
+  it('shows keyboard shortcuts as <kbd>, never as bare text', () => {
+    for (const [locale, messages] of Object.entries(catalogs)) {
+      for (const [id, text] of Object.entries(messages)) {
+        const bare = text.replace(/<kbd>.*?<\/kbd>/g, '').match(/\b(Ctrl|Alt|Shift)\+|\bEsc\b/);
+        expect(bare, `${locale}:${id}`).toBeNull();
       }
     }
   });

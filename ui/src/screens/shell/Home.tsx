@@ -5,6 +5,7 @@ import { useStore } from '../../app/store';
 import { isCoreError, useCore, useCoreEvent, type AgeRestriction, type Id, type JoinStatus, type ServerSummary } from '../../core';
 import { Code, Dialog } from '../../components/common';
 import { LinkIcon, PlusIcon, ShieldIcon, WifiOffIcon } from '../../components/icons';
+import { useUserTextProps } from '../../app/textDir';
 import { LINK_MAX } from '../../core/sanitize';
 
 export function Home({ hasServers, onCreate, onJoin }: { hasServers: boolean; onCreate: () => void; onJoin: () => void }) {
@@ -63,6 +64,7 @@ export function CreateServerDialog({
   const store = useAppStore();
   const checked = useStore(store, (s) => s.identity?.recoveryChecked ?? false);
   const [name, setName] = useState('');
+  const nameProps = useUserTextProps(name);
   const [age, setAge] = useState<AgeRestriction | null>(null);
   const [errors, setErrors] = useState<{ name?: boolean; age?: boolean }>({});
   const [created, setCreated] = useState<ServerSummary | null>(null);
@@ -145,7 +147,7 @@ export function CreateServerDialog({
               <FormattedMessage id="create.name" />
             </span>
             <input
-              dir="auto"
+              {...nameProps}
               value={name}
               maxLength={48}
               autoFocus

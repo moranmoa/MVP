@@ -3,8 +3,9 @@ import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import { useCore, type Member, type Message, type ServerSummary } from '../../core';
-import { Dialog, Name } from '../../components/common';
+import { Dialog, Name, RICH } from '../../components/common';
 import { BackIcon, CloseIcon, EditIcon, HashIcon, ReplyIcon, SendIcon, UsersIcon, WifiOffIcon } from '../../components/icons';
+import { useUserTextProps } from '../../app/textDir';
 import { BODY_MAX } from '../../core/sanitize';
 import { MessageList } from './MessageList';
 
@@ -188,6 +189,8 @@ function Composer({
 }) {
   const intl = useIntl();
   const [text, setText] = useState('');
+  // Empty: the interface direction (cursor and placeholder on the right in Hebrew).
+  const textProps = useUserTextProps(text);
   const draft = useRef('');
   const ref = useRef<HTMLTextAreaElement>(null);
 
@@ -235,7 +238,7 @@ function Composer({
           </span>
           {editing && (
             <span className="muted small">
-              <FormattedMessage id="chat.editHint" />
+              <FormattedMessage id="chat.editHint" values={RICH} />
             </span>
           )}
           <span className="spacer" />
@@ -258,7 +261,7 @@ function Composer({
       >
         <textarea
           ref={ref}
-          dir="auto"
+          {...textProps}
           maxLength={BODY_MAX}
           rows={1}
           value={text}

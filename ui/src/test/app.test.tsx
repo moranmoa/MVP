@@ -48,7 +48,7 @@ describe('app', () => {
   it('sends a message from the composer', async () => {
     const core = new MockCore({ demo: true, speed: 0 });
     render(<App core={core} initialSettings={en} />);
-    const box = await screen.findByRole('textbox', { name: /Message #/ });
+    const box = await screen.findByRole('textbox', { name: /^Message / });
     fireEvent.change(box, { target: { value: 'hello from the test' } });
     await act(async () => {
       fireEvent.keyDown(box, { key: 'Enter' });
