@@ -178,12 +178,15 @@ jobs:
           npm ci --no-audit --no-fund
           npm version "$VERSION" --no-git-tag-version --allow-same-version
           case "${{ matrix.platform }}" in
-            windows-*) npx electron-builder --win nsis zip --x64 --publish never ;;
-            linux-*) npx electron-builder --linux AppImage deb tar.gz --x64 --publish never ;;
+            windows-*) npx electron-builder --win nsis --x64 --publish never ;;
+            linux-*) npx electron-builder --linux AppImage deb --x64 --publish never ;;
           esac
 
-      # Release names. The zip / tar.gz is the updater payload: its name
-      # mvs-<version>-<platform>.zip|.tar.gz is how manifest-body.mjs finds it.
+      # Release names. The updater payload is the unpacked app folder
+      # (win-unpacked / linux-unpacked, contents at the archive root) with no
+      # installer and no mvs-launcher, which the updater keeps outside the app.
+      # Its name mvs-<version>-<platform>.zip|.tar.gz is how manifest-body.mjs
+      # finds it.
       - name: Collect
         run: |
           one() { # the expanded glob -> its single match, or fail
@@ -196,11 +199,11 @@ jobs:
           case "${{ matrix.platform }}" in
             windows-*)
               cp "$(one desktop/dist/*Setup*.exe)" "out/${base}-setup.exe"
-              cp "$(one desktop/dist/*.zip)" "out/${base}.zip" ;;
+              (cd desktop/dist/win-unpacked && 7z a -tzip "../../../out/${base}.zip" . -xr'!mvs-launcher*' > /dev/null) ;;
             linux-*)
               cp "$(one desktop/dist/*.AppImage)" "out/${base}.AppImage"
               cp "$(one desktop/dist/*.deb)" "out/${base}.deb"
-              cp "$(one desktop/dist/*.tar.gz)" "out/${base}.tar.gz" ;;
+              tar -czf "out/${base}.tar.gz" -C desktop/dist/linux-unpacked --exclude='mvs-launcher*' . ;;
           esac
           ls -l out
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

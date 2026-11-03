@@ -208,6 +208,22 @@ PowerShell on your normal (online) PC, in the repo:
 
    It stays marked as a pre-release. Send the link to testers.
 
+6. **Point the updater at it.** Installed apps look for the signed manifest
+   at a fixed address per channel: the release with tag `update-alpha`
+   (`https://github.com/moranmoa/MVP/releases/download/update-alpha/manifest.json`,
+   with the root-rotation files `root-*.json` next to it). Create it once,
+   then replace its manifest on every release:
+
+   ```powershell
+   # once:
+   gh release create update-alpha --repo moranmoa/MVP --prerelease --title "Update channel: alpha" --notes "Signed update manifest for the alpha channel. Not an installer."
+   # every release (and every keep-alive re-sign):
+   gh release upload update-alpha manifest.json --clobber --repo moranmoa/MVP
+   ```
+
+   The updater payload (`mvs-X.Y.Z-<platform>.zip|.tar.gz`) is the unpacked
+   app folder, without the installer and without `mvs-launcher` (B8).
+
 ## Keeping a release alive
 
 A manifest expires (at most 30 days, 14 by default). Clients refuse it after
