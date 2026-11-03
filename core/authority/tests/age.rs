@@ -4,13 +4,12 @@
 //! orders and requires them to agree.
 
 mod common;
+mod rng;
 
 use authority::{resolve, Action, Record, Resolver, State};
 use common::{actor, founded, key, rec, server};
-use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
-use rand::SeedableRng;
 use records::{Draft, Kind, Scope};
+use rng::{SliceRandom, StdRng};
 
 const ORDERS: u64 = 200;
 
