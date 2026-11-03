@@ -140,6 +140,41 @@ fn restrict(_dir: &Path) -> io::Result<()> {
     Err(io::Error::other("don't know how to restrict a directory on this platform"))
 }
 
+/// Runs on the Windows CI job: the ACL path for real, on a new dir, again
+/// on the same dir, and inherited by a file created inside (as `core.db`).
+#[cfg(all(test, windows))]
+mod windows_tests {
+    fn entries(path: &std::path::Path) -> Vec<String> {
+        let system32 =
+            std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        let out =
+            std::process::Command::new(system32.join("icacls.exe")).arg(path).output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| l.contains(":("))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn dir_and_its_files_get_one_owner_entry() {
+        let base = std::env::temp_dir().join(format!("mvs-datadir-{}", std::process::id()));
+        let dir = base.join("data");
+        super::prepare(&dir).unwrap();
+        super::prepare(&dir).unwrap();
+        let on_dir = entries(&dir);
+        assert_eq!(on_dir.len(), 1, "{on_dir:?}");
+        assert!(on_dir[0].contains("(OI)(CI)(F)"), "{on_dir:?}");
+        let file = dir.join("core.db");
+        std::fs::write(&file, b"x").unwrap();
+        let on_file = entries(&file);
+        assert_eq!(on_file.len(), 1, "{on_file:?}");
+        assert!(on_file[0].contains("(I)(F)"), "inherited full control: {on_file:?}");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
