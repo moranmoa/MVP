@@ -113,6 +113,40 @@ jobs:
       - run: npm run build
       - run: npm test
 
+  # B10: the qa/ smoke suite (onboarding -> send -> join by link) against a
+  # production build of the UI with the mock core, as qa/compose.yaml runs it.
+  # The image matches @playwright/test in qa/package-lock.json, pinned by digest.
+  qa-smoke:
+    name: qa smoke (playwright)
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright:v1.56.1-noble@sha256:f1e7e01021efd65dd1a2c56064be399f3e4de00fd021ac561325f2bfbb2b837a
+      options: --ipc=host
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Licence policy (qa lockfile)
+        run: node .github/scripts/npm-licenses.mjs qa/package-lock.json
+      - name: Build and serve the UI
+        working-directory: ui
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npx vite build --outDir /tmp/qa-dist --emptyOutDir --logLevel warn
+          nohup npx vite preview --outDir /tmp/qa-dist --host 127.0.0.1 --port 5173 --strictPort > /tmp/preview.log 2>&1 &
+          for i in $(seq 1 60); do
+            node -e "fetch('http://localhost:5173/').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))" && exit 0
+            sleep 1
+          done
+          cat /tmp/preview.log
+          exit 1
+      - name: Smoke suite
+        working-directory: qa
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npx playwright test --project=smoke
+
   relay-image:
     name: relay image build
     runs-on: ubuntu-latest
