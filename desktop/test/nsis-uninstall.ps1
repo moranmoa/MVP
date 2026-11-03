@@ -1,6 +1,8 @@
 # Windows installer / uninstaller check (B1-3, T12). Installs per user,
 # launches once (that registers mvs://), then:
-#   1. silent uninstall           -> local data kept, mvs:// gone
+#   0. install again (an update)  -> nothing deleted
+#   1. silent uninstall           -> local data kept, mvs:// gone, no installer
+#                                    cache, no empty %LOCALAPPDATA%\Programs (#94)
 #   2. reinstall, /S /DELETEDATA  -> local data deleted
 # and in both cases a marker in Windows Credential Manager is untouched.
 #
@@ -11,6 +13,12 @@ $ErrorActionPreference = 'Stop'
 $data = Join-Path $env:APPDATA 'MVS'
 $dir = Join-Path $env:LOCALAPPDATA 'Programs\MVS'
 $cred = 'mvs-uninstall-test-marker'
+# electron-builder's installer cache, named after package.json "name".
+$updater = Join-Path $env:LOCALAPPDATA 'mvs-desktop-updater'
+$programs = Join-Path $env:LOCALAPPDATA 'Programs'
+# If Programs already holds other software, it must survive; if not, the
+# uninstaller must leave no empty Programs folder behind.
+$programsExisted = (Test-Path $programs) -and @(Get-ChildItem $programs -Force | Where-Object { $_.Name -ne 'MVS' }).Count -gt 0
 $fail = @()
 function Check([bool] $ok, [string] $what) { if ($ok) { "ok   $what" } else { "FAIL $what"; $script:fail += $what } }
 
@@ -40,16 +48,30 @@ New-Item -ItemType Directory -Force "$data\core" | Out-Null
 Set-Content "$data\core\marker.txt" 'keep me'
 Check (-not (Test-Path 'HKLM:\Software\Classes\mvs')) 'nothing registered machine-wide'
 
+# An update: the installer again over the installed app. The old uninstaller
+# runs in update mode and must delete nothing.
+Install
+Check (Test-Path "$dir\mvs.exe") 'update: the program is still there'
+Check (Test-Path "$data\core\marker.txt") 'update: the local data is kept'
+
 Uninstall @()
 Check (-not (Test-Path "$dir\mvs.exe")) 'silent uninstall removes the program'
 Check (Test-Path "$data\core\marker.txt") 'silent uninstall keeps the local data'
 Check (-not (Test-Path 'HKCU:\Software\Classes\mvs')) 'mvs:// registration removed'
 Check ([bool](cmdkey /list:$cred | Select-String $cred)) 'Credential Manager entry untouched'
+Check (-not (Test-Path $updater)) 'installer cache (<package>-updater) removed (#94)'
+Check (-not (Test-Path $dir)) 'program folder removed'
+if ($programsExisted) {
+  Check (Test-Path $programs) '%LOCALAPPDATA%\Programs kept: it held other programs before'
+} else {
+  Check (-not (Test-Path $programs)) 'empty %LOCALAPPDATA%\Programs removed (#94)'
+}
 
 Install
 Uninstall @('/DELETEDATA')
 Check (-not (Test-Path $data)) '/DELETEDATA deletes the local data'
 Check ([bool](cmdkey /list:$cred | Select-String $cred)) 'Credential Manager entry still untouched'
+Check (-not (Test-Path $updater)) 'installer cache removed again'
 
 cmdkey /delete:$cred | Out-Null
 if (Test-Path $data) { Remove-Item $data -Recurse -Force -Confirm:$false }
