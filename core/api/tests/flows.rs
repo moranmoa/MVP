@@ -220,6 +220,56 @@ fn a_genesis_must_belong_to_its_server_id() {
 }
 
 #[test]
+fn hostile_server_records_are_refused() {
+    let world = World::new();
+    let joiner = world.peer();
+    sign_up(&joiner, "Joiner");
+    let mallory = SigningKey::from_bytes(&[6; 32]);
+
+    // A real genesis whose metadata isn't ours: garbage, wrong version, huge seq.
+    for metadata in [&b"\xff\xfe"[..], br#"{"v":2,"name":"x","ageRestriction":"none"}"#, b""] {
+        let genesis =
+            authority::sign_genesis(&mallory, [metadata.len() as u8; 16], 1, metadata).unwrap();
+        world.network.publish(&genesis);
+        let link = format!("mvs://join/{}", hex::encode(genesis.server().as_bytes()));
+        joiner.core.join_server(&link).unwrap();
+        assert!(matches!(
+            joiner.events.take().last(),
+            Some(Event::JoinStatus(JoinStatus::Invalid { .. }))
+        ));
+    }
+
+    // A stranger's post with the largest seq and a body that isn't a join:
+    // stored, harmless, and not a member.
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let server = owner.core.create_server("S", AgeRestriction::None).unwrap();
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let heads: Vec<_> = world.network.fetch(server_key).iter().map(|r| r.id()).collect();
+    let me = SigningKey::from_bytes(&[7; 32]);
+    let post = authority::sign_control(
+        &me,
+        server_key,
+        u64::MAX,
+        heads,
+        1,
+        &authority::Action::Post { text: "{not json".into() },
+    )
+    .unwrap();
+    world.network.publish(&post);
+    owner.core.sync_now().unwrap();
+    assert_eq!(owner.core.list_members(&server.id).unwrap().len(), 1);
+
+    // Names: empty and too long are refused.
+    for name in ["   ".to_owned(), "x".repeat(101)] {
+        assert_eq!(
+            owner.core.create_server(&name, AgeRestriction::None).unwrap_err().code,
+            ErrorCode::BadRequest
+        );
+    }
+}
+
+#[test]
 fn age_restricted_server_blocks_minors() {
     let world = World::new();
     let owner = world.peer();

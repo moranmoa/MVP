@@ -129,7 +129,9 @@ pub enum CipherOutcome {
 /// TODO(groupkeys, PR #9): adapter over `groupkeys::ChannelKeys`: rotate on
 /// kick, wrap for members, encrypt and decrypt channel messages. Messages
 /// aren't implemented in this core yet, so nothing is encrypted or sent in
-/// the clear today.
+/// the clear today. When they are: a decrypted message whose
+/// `Decrypted.accepted` is false is shown as untrusted, never as a normal
+/// message (issue #21). Feed `set_voided` from authority (GAP-5).
 pub trait GroupCipher: Send + Sync {
     fn membership_changed(&self, server: ServerId, members: &BTreeSet<PublicKey>) -> CipherOutcome;
 }

@@ -215,7 +215,7 @@ impl<'a> ServerView<'a> {
         self.records
             .iter()
             .filter(|r| r.author() == *author)
-            .map(|r| r.seq() + 1)
+            .map(|r| r.seq().saturating_add(1))
             .max()
             .unwrap_or(0)
     }
