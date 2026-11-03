@@ -333,6 +333,9 @@ pub enum ProgressStep {
 #[serde(rename_all = "kebab-case")]
 pub enum NoticeKind {
     EncryptionRenewed,
+    /// Rust addition: removed members still hold a channel key and only a
+    /// moderator can renew it; the channel can't be written to until then.
+    RekeyWaiting,
 }
 
 /// `CoreEvents` in api.ts, as `{ "event": name, "payload": ... }`.
