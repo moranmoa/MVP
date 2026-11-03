@@ -13,7 +13,7 @@
 //! (unless they are listed again), so nobody trusts both sets forever.
 //! New releases embed the latest root, so fresh installs start there.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -142,16 +142,30 @@ impl TrustRoot {
     /// signed can only mean a current-root key leaked. The walk then stops
     /// before that version and reports it in [`RootChain::fork_at`]; the app
     /// should raise a compromise alarm rather than pick one.
+    ///
+    /// Nothing is dropped by position, so no number of bad entries can push
+    /// the real one out. Cost: each entry is parsed once; signatures are
+    /// checked only for entries that are for the next version, are not
+    /// duplicates, and name at least one current-root key, and then at most
+    /// once per current-root key (see `valid_signers`). The total input size
+    /// is bounded by the transport, as for manifests.
     pub fn update_chain(&self, updates: &[SignedRoot]) -> RootChain {
-        let updates = &updates[..updates.len().min(MAX_ROOT_UPDATES)];
+        // Parse each distinct entry once; junk becomes `None`.
+        let mut seen = HashSet::new();
+        let entries: Vec<(Option<u64>, &SignedRoot)> = updates
+            .iter()
+            .filter(|u| seen.insert(*u))
+            .map(|u| (u.body().ok().map(|b| b.version), u))
+            .collect();
+
         let mut root = self.clone();
         let mut fork_at = None;
-        loop {
-            let Some(target) = root.version.checked_add(1) else { break };
+        while let Some(target) = root.version.checked_add(1) {
+            let current_keys: HashSet<String> = root.keys.iter().map(|k| hex::encode(k.to_bytes())).collect();
             let mut next: Option<TrustRoot> = None;
-            for u in updates {
-                // Cheap version check first; signatures only for candidates.
-                if u.body().map(|b| b.version) != Ok(target) {
+            for &(version, u) in &entries {
+                // Cheap filters first; signatures only for what is left.
+                if version != Some(target) || !u.signatures.iter().any(|s| current_keys.contains(&s.key)) {
                     continue;
                 }
                 let Ok(candidate) = root.rotate(u) else { continue };
@@ -166,14 +180,10 @@ impl TrustRoot {
                 _ => break,
             }
         }
-        let skipped = updates.iter().filter(|u| u.body().map_or(true, |b| b.version > root.version)).count();
+        let skipped = entries.iter().filter(|(v, _)| v.map_or(true, |v| v > root.version)).count();
         RootChain { root, skipped, fork_at }
     }
 }
-
-/// At most this many root updates are looked at per call, capping the
-/// signature work a peer can cause. Rotations are rare; 32 is plenty.
-pub const MAX_ROOT_UPDATES: usize = 32;
 
 /// The outcome of [`TrustRoot::update_chain`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -194,7 +204,7 @@ pub fn parse_public_key(hex_key: &str) -> Option<VerifyingKey> {
 }
 
 /// A signed root rotation. Same envelope as a manifest, different domain.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedRoot {
     pub signed: String,
@@ -404,20 +414,73 @@ mod tests {
     }
 
     #[test]
-    fn number_of_updates_looked_at_is_capped() {
-        let (_, v1, r2, _) = alpha_to_v2();
-        let junk = SignedRoot { signed: "x".into(), signatures: vec![] };
-        let mut updates = vec![junk; MAX_ROOT_UPDATES];
-        updates.push(r2);
-        assert_eq!(v1.update_chain(&updates).root.version(), 1, "entries past the cap are not read");
-    }
-
-    #[test]
     fn version_overflow_is_an_error_not_a_panic() {
         let k = key();
         let top = TrustRoot::with_version(u64::MAX, vec![k.verifying_key()], 1).unwrap();
         let r = rotation(&file(u64::MAX, &[&k], 1), &[&k]);
         assert!(matches!(top.rotate(&r), Err(Error::RootVersion { .. })));
         assert_eq!(top.update_chain(&[r]).root.version(), u64::MAX);
+    }
+
+    // Second review of #8 (R4): no number of bad entries may push the real
+    // rotation out, and filtering must keep the work small.
+
+    #[test]
+    fn a_thousand_junk_entries_before_the_real_one_do_not_block_rotation() {
+        let (_, v1, r2, _) = alpha_to_v2();
+        let mut updates: Vec<SignedRoot> =
+            (0..1000).map(|i| SignedRoot { signed: format!("junk {i}"), signatures: vec![] }).collect();
+        updates.push(r2);
+        let out = v1.update_chain(&updates);
+        assert_eq!((out.root.version(), out.fork_at), (2, None));
+        assert_eq!(out.skipped, 1000);
+    }
+
+    #[test]
+    fn a_thousand_forged_v2_entries_do_not_block_rotation_and_stay_cheap() {
+        let (alpha, v1, r2, _) = alpha_to_v2();
+        let alpha_hex = hex::encode(alpha.verifying_key().to_bytes());
+        let mut updates: Vec<SignedRoot> = (0..1000)
+            .map(|i| {
+                let attacker = key();
+                let mut forged = rotation(&file(2, &[&attacker], 1), &[&attacker]);
+                // Worst case for the filters: half of them claim the current
+                // key, with up to MAX_SIGNATURES garbage signatures each.
+                if i % 2 == 0 {
+                    for n in 0..crate::MAX_SIGNATURES - 1 {
+                        forged.signatures.push(SignatureEntry { key: alpha_hex.clone(), sig: format!("{n:02x}").repeat(64) });
+                    }
+                }
+                forged
+            })
+            .collect();
+        updates.push(r2);
+        let started = std::time::Instant::now();
+        let out = v1.update_chain(&updates);
+        let took = started.elapsed();
+        assert_eq!((out.root.version(), out.fork_at), (2, None));
+        // ~500 Ed25519 verifications at most (one per entry naming the key).
+        assert!(took < std::time::Duration::from_secs(5), "took {took:?}");
+    }
+
+    #[test]
+    fn identical_entries_are_checked_once() {
+        let (_, v1, r2, _) = alpha_to_v2();
+        let out = v1.update_chain(&vec![r2; 1000]);
+        assert_eq!((out.root.version(), out.skipped, out.fork_at), (2, 0, None));
+    }
+
+    #[test]
+    fn a_bad_signature_listed_first_for_a_key_does_not_cost_more_than_one_try() {
+        // Each trusted key gets one verification per envelope.
+        let (alpha, v1, r2, _) = alpha_to_v2();
+        let mut stuffed = r2.clone();
+        let real = stuffed.signatures.clone();
+        stuffed.signatures = vec![SignatureEntry { key: hex::encode(alpha.verifying_key().to_bytes()), sig: "00".repeat(64) }];
+        stuffed.signatures.extend(real);
+        // That copy is spoiled (alpha's one try was the bad signature), but
+        // the clean copy from another peer still gets through.
+        assert!(v1.rotate(&stuffed).is_err());
+        assert_eq!(v1.update_chain(&[stuffed, r2]).root.version(), 2);
     }
 }

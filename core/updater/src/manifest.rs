@@ -112,7 +112,7 @@ impl ManifestBody {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignatureEntry {
     /// Hex public key of the signer.
@@ -150,10 +150,14 @@ pub(crate) fn valid_signers(
     }
     let msg = signing_message(context, signed);
     let mut signers = BTreeSet::new();
+    // Each trusted key gets one verification per envelope, valid or not, so
+    // the Ed25519 work is bounded by the root's key count, not by how many
+    // entries a peer stuffed in. Our tooling writes one signature per key.
+    let mut tried = BTreeSet::new();
     for entry in sigs {
         let Some(key) = parse_public_key(&entry.key) else { continue };
         let Some(index) = root.index_of(&key) else { continue };
-        if signers.contains(&index) {
+        if !tried.insert(index) {
             continue;
         }
         let Some(sig) = hex::decode(&entry.sig).ok().and_then(|b| EdSignature::from_slice(&b).ok()) else {

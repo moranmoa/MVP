@@ -34,7 +34,7 @@ pub use manifest::{
 };
 pub use policy::{Baseline, ClientPolicy, Decision, Freshness};
 pub use rollback::{Boot, Committed, InstallState, Trial, MAX_ATTEMPTS};
-pub use root::{parse_public_key, RootChain, SignedRoot, TrustRoot, TrustRootFile, MAX_ROOT_UPDATES, ROOT_SIGNING_CONTEXT};
+pub use root::{parse_public_key, RootChain, SignedRoot, TrustRoot, TrustRootFile, ROOT_SIGNING_CONTEXT};
 pub use version::{ParseVersionError, Version};
 
 pub use ed25519_dalek::{SigningKey, VerifyingKey};
