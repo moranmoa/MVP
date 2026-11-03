@@ -40,6 +40,10 @@ struct Profile {
     avatar_data_url: Option<String>,
     country: String,
     birth_date: String,
+    /// The UI language at sign-up; names what this identity creates
+    /// (#general). Older profiles and restored identities have none: English.
+    #[serde(default)]
+    locale: Option<Locale>,
 }
 
 /// Kept in the store so a restart neither resets the count nor offers new
@@ -182,6 +186,7 @@ impl Core {
             let profile = Profile {
                 country: input.country,
                 birth_date: input.birth_date,
+                locale: Some(input.locale),
                 ..Profile::default()
             };
             let me = inner.new_me(phrase, profile)?;
@@ -363,7 +368,7 @@ impl Core {
                 ports.clock.now_ms(),
                 &serde_json::to_vec(&body).expect("plain struct"),
                 model::default_channel(server),
-                model::GENERAL,
+                model::general_name(me.profile.locale),
             )
             .map_err(|_| ErrorCode::BadRequest)?;
             debug_assert_eq!(genesis.server(), server);

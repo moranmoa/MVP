@@ -98,7 +98,8 @@ fn create_identity_server_grant_kick() {
     let server = owner.core.create_server("Team", AgeRestriction::None).unwrap();
     assert_eq!(server.owner_id, created.identity.id);
     assert!(server.invite_link.starts_with("mvs://join/"));
-    assert_eq!(owner.core.list_channels(&server.id).unwrap()[0].name, "general");
+    // Named in the creator's language (Hebrew here), as stored (UX-04).
+    assert_eq!(owner.core.list_channels(&server.id).unwrap()[0].name, "כללי");
 
     let alice_id = sign_up(&alice, "Alice").id;
     let bob_id = sign_up(&bob, "Bob").id;
@@ -1166,4 +1167,33 @@ fn channels_come_from_channel_create_records() {
         guest.core.get_message_count(&hex::encode([0x52; 32])).unwrap_err().code,
         ErrorCode::NotFound
     );
+}
+
+/// #general is named in the creator's language when created, and keeps that
+/// name for everyone after, whatever their own language.
+#[test]
+fn general_is_named_in_the_creators_language() {
+    let world = World::new();
+    let make = |locale: Locale| {
+        let peer = world.peer();
+        let input =
+            NewIdentityInput { locale, country: "IL".into(), birth_date: "1990-05-01".into() };
+        let words = peer.core.create_identity(input).unwrap().words;
+        let positions = peer.core.get_recovery_challenge().unwrap().positions;
+        let answers: BTreeMap<usize, String> =
+            positions.iter().map(|p| (*p, words[p - 1].clone())).collect();
+        assert!(peer.core.check_recovery_words(answers).unwrap().ok);
+        let profile = ProfileInput { display_name: "X".into(), bio: None, avatar_data_url: None };
+        peer.core.update_profile(profile).unwrap();
+        peer
+    };
+    let hebrew = make(Locale::He);
+    let english = make(Locale::En);
+    let he_server = hebrew.core.create_server("א", AgeRestriction::None).unwrap();
+    let en_server = english.core.create_server("A", AgeRestriction::None).unwrap();
+    assert_eq!(hebrew.core.list_channels(&he_server.id).unwrap()[0].name, "כללי");
+    assert_eq!(english.core.list_channels(&en_server.id).unwrap()[0].name, "general");
+    // The English speaker joins the Hebrew server: the stored name stays.
+    english.core.join_server(&he_server.invite_link).unwrap();
+    assert_eq!(english.core.list_channels(&he_server.id).unwrap()[0].name, "כללי");
 }
