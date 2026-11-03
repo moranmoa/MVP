@@ -149,13 +149,30 @@ pub enum Kind {
     Kick = 4,
     /// A text post in the control log (announcements; used by the spike).
     Post = 5,
+    /// A signed invite with an expiry and a use limit. Its record ID is what
+    /// an invite link carries.
+    Invite = 11,
+    /// Withdraws an invite, naming its record ID.
+    RevokeInvite = 12,
+    /// The author joins the server through an invite, which it names and
+    /// depends on.
+    Join = 13,
     /// A chat message in a channel.
     Message = 16,
 }
 
 impl Kind {
-    const ALL: [Kind; 6] =
-        [Kind::Genesis, Kind::Grant, Kind::Revoke, Kind::Kick, Kind::Post, Kind::Message];
+    const ALL: [Kind; 9] = [
+        Kind::Genesis,
+        Kind::Grant,
+        Kind::Revoke,
+        Kind::Kick,
+        Kind::Post,
+        Kind::Invite,
+        Kind::RevokeInvite,
+        Kind::Join,
+        Kind::Message,
+    ];
 
     const LARGEST_BODY: usize = 16 * 1024;
 
@@ -175,6 +192,9 @@ impl Kind {
             Kind::Genesis => 2 * 1024,
             // Target key plus a role byte, with room for future fields.
             Kind::Grant | Kind::Revoke | Kind::Kick => 128,
+            // Expiry and use limit, or an invite's record ID, with room for
+            // future fields.
+            Kind::Invite | Kind::RevokeInvite | Kind::Join => 128,
             Kind::Post => 4 * 1024,
             Kind::Message => Kind::LARGEST_BODY,
         }
@@ -716,6 +736,23 @@ mod tests {
         let auth_deps_in_control =
             Draft { auth_deps: vec![RecordId::from_bytes([5; 32])], ..draft() };
         assert_eq!(auth_deps_in_control.sign(&key(1)), Err(RecordError::AuthDepsInControlScope));
+    }
+
+    #[test]
+    fn membership_kinds_are_small_control_records() {
+        for kind in [Kind::Invite, Kind::RevokeInvite, Kind::Join] {
+            assert_eq!(Kind::from_code(kind.code()), Some(kind));
+            let max = kind.max_body();
+            let at_limit = Draft { kind, body: vec![0; max], ..draft() }.sign(&key(1)).unwrap();
+            assert_eq!(Record::decode(&at_limit.encode()).unwrap(), at_limit);
+            assert_eq!(
+                Draft { kind, body: vec![0; max + 1], ..draft() }.sign(&key(1)),
+                Err(RecordError::BodyTooLarge { kind, len: max + 1, max })
+            );
+            let in_channel =
+                Draft { scope: Scope::Channel(ChannelId::from_bytes([4; 32])), kind, ..draft() };
+            assert_eq!(in_channel.sign(&key(1)), Err(RecordError::KindNotAllowedInScope(kind)));
+        }
     }
 
     #[test]
