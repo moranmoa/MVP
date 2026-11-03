@@ -166,6 +166,11 @@ jobs:
             if (relay && (!relay.startsWith("/") || /\s/.test(relay) || relay.length > 512)) {
               console.error("::error::MVS_RELAY_ADDR is not a multiaddr"); process.exit(1);
             }
+            // The relay must be pinned by its peer ID: without /p2p/<id>, Noise
+            // would accept whoever answers at that address (behind Cloudflare).
+            if (relay && !/\/p2p\/[1-9A-HJ-NP-Za-km-z]{46,60}$/.test(relay)) {
+              console.error("::error::MVS_RELAY_ADDR must end in /p2p/<relay peer id>"); process.exit(1);
+            }
             require("fs").writeFileSync("desktop/build/mvs-config.json", JSON.stringify(relay ? { relay } : {}));
             console.log(relay ? "relay configured" : "::warning::no relay address in this build: the app will run offline");
           '

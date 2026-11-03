@@ -98,7 +98,7 @@ domain, so it lives in a **repository variable**, never in git:
 2. Name `MVS_RELAY_ADDR`, value the relay's **wss** address with its peer ID:
    `/dns4/<relay-domain>/tcp/443/wss/p2p/<relay peer id>`. The peer ID is in
    `docker compose logs relay` ("relay node started peer_id=..."); see
-   `infra/README.md`.
+   `infra/README.md`. The address **must end in `/p2p/<relay peer id>`**: the build refuses it otherwise, because without the ID the app would trust whatever answers at that address.
 
    Why wss and not `/tcp/4001`: the domain's DNS record is proxied by
    Cloudflare, which forwards only HTTP(S) and WebSocket on 443, so port 4001
