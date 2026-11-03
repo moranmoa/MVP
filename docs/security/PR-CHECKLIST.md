@@ -11,6 +11,8 @@ trusted until it has been decoded, verified and authorised.**
 
 ## 1. Every PR
 
+- [ ] Changes to another owner's paths go through that owner (`docs/BOARD.md`,
+      File ownership).
 - [ ] No secrets, IPs, hostnames, `.env` files, keys or real recovery words in
       code, tests, fixtures, logs or screenshots. Test keys are generated or
       fixed-seed and named as such.
@@ -57,7 +59,8 @@ trusted until it has been decoded, verified and authorised.**
       several orders and gets the same result.
 - [ ] Anything decided from `ServerId` checks it against the genesis.
 - [ ] Key rotation: rotator authorised, recipients ⊆ current members, removed
-      members excluded, `set_voided` fed from authority (GAP-5).
+      members excluded, `set_accepted` fed from authority: an allow-list, so an
+      unknown or pending rotation is never used to send (GAP-5).
 
 ## 4. Network and sync (`core/sync`, `infra/relay`)
 

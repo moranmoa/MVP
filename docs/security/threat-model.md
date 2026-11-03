@@ -120,7 +120,7 @@ Trust boundaries:
 | F3 | Store → gossip forward (`on_gossip` → `Accept`) | Forward only records that passed F2 *and* authority (otherwise we amplify junk) | **GAP-1.** `on_gossip` accepts anything that `Blob::decode`s |
 | F4 | Control record → `authority::Resolver` | Signature already verified (type guarantees it), server matches genesis, permission rules | authority ✔ (PR #7 binds servers to their genesis) |
 | F5 | Channel record → "is this message allowed?" | `auth_deps` resolve to control state where author is a non-kicked **member**, and a later kick voids it | **GAP-2, GAP-3.** No code reads `auth_deps` |
-| F6 | Rotation record → groupkeys `apply` / `set_voided` | Rotator may rotate (authority), rotation's recipients ⊆ members | **GAP-5.** No `Kind::KeyRotation`; "who may rotate" left to the caller; no caller |
+| F6 | Rotation record → groupkeys `apply` / `set_accepted` | Rotator may rotate (authority), rotation's recipients ⊆ members; **default deny**: a rotation authority hasn't accepted is never head (PR #9 review: the `set_voided` version was fail-open) | **GAP-5.** No `Kind::KeyRotation`; "who may rotate" left to the caller; no caller |
 | F7 | Members set → `groupkeys::rotation_need` / `encrypt` | Member set comes from authority | **GAP-3.** authority has no member set (only roles and kicks) |
 | F8 | Message plaintext → `encrypt` → record body | Body is ciphertext for every `Message` | **GAP-5.** Not wired; bodies are plaintext today |
 | F9 | Core → UI | Sanitize names/text/colours/images; never pass keys | UI `guardCore` (PR #10) ✔ for text; Tauri IPC surface not built yet |
@@ -155,7 +155,7 @@ Legend: ✔ mitigated (where) · ◐ partly · **GAP-n** see the prioritised lis
 | Grant themself a role | ✔ `permitted()` requires `author_role > role` |
 | Fake timestamps to reorder chat | ◐ authority never uses `ts`. UI displays `ts` as given: **GAP-18** |
 | Disk exhaustion: many valid records, huge DAG fan-out | ◐ size limits per record (records), dep limits, pending caps and pull rate limits (sync, PR #5). **GAP-8**: no per-log / per-author quota |
-| CPU: records that force full re-resolution | ◐ incremental resolver with `MAX_PENDING` (authority, PR #7). Watch in perf tests |
+| CPU: records that force full re-resolution | ◐ incremental resolver with `MAX_PENDING` (authority, PR #7). Watch in perf tests. IDs ground to sort early make each incremental insert O(n) (`Vec::insert` + re-indexing): CPU only, noted in PR #7 |
 | Unicode lookalike names, bidi overrides, zalgo, huge avatars | ✔ `guardCore` sanitize (UI, PR #10) |
 | XSS / script via message text | ✔ React escaping + CSP meta (UI, PR #10). Recheck when Tauri IPC lands: **GAP-17** |
 | Leak plaintext / epoch keys to outsiders | Not preventable (groupkeys README). Accepted |
@@ -168,6 +168,7 @@ Legend: ✔ mitigated (where) · ◐ partly · **GAP-n** see the prioritised lis
 | Kick or revoke someone of equal/higher rank | ✔ rank checks in `permitted()` |
 | Backdate a kick after being demoted | ✔ revoke voids the target's concurrent privileged records (authority) |
 | Mass-kick everyone below them | ◐ Allowed by design; owner can revoke them and their concurrent kicks are voided only if concurrent. **GAP-14**: no rate limit, no moderation log yet (spec stage 3) |
+| **Choose what a kick voids**: sign a kick with stale deps (or, with GAP-2, a stale channel cut) to erase the target's recent history, posts and messages included | **GAP-2** design note below: voiding limited to records nobody else built on. Needs a spec decision before formats freeze (also listed unresolved in PR #7) |
 | Wrap the epoch key for an outsider | ◐ groupkeys can't stop it; integration must refuse rotations whose recipients aren't members (**GAP-5**) |
 | Rotation with deliberately broken wraps (lock someone out) | ◐ Detected and attributable (`Applied::WrapInvalid`, groupkeys); UI must surface it. **GAP-5** |
 | Spam rotations (each up to 16 KiB to every member) | **GAP-8/14** |
@@ -191,6 +192,8 @@ Legend: ✔ mitigated (where) · ◐ partly · **GAP-n** see the prioritised lis
 | --- | --- |
 | Unlimited identities | **GAP-13**: spec's identity proof-of-work isn't built; nothing costs anything |
 | Flood a server with posts | **GAP-3/8/13**: no membership, no quota, no per-author rate limit at accept time (spec says spam rules are local per peer: not built) |
+| Squat a peer's 256 incoming connection slots with free peer IDs (idle timeout 1 h, no per-IP cap) | **GAP-19** |
+| Pull amplification: a ~100-byte request gets up to a 4 MiB page, 50 pulls/s across all peers, so up to ~200 MiB/s of upload from a home connection | **GAP-19** (GAP-4 removes strangers; a byte budget is still needed against members) |
 | Eclipse a peer in the DHT (surround it with attacker nodes so it only syncs with them) | ◐ Content can't be forged, only withheld; the relay is a fixed bootstrap with a pinned peer ID. **GAP-6** (custom DHT protocol; no IPFS DHT bleed) |
 | Ban evasion | Spec answer: invite-only / join approval mode, harder PoW. **GAP-3/13** |
 
@@ -308,30 +311,83 @@ client bootstrap addresses, WebSocket on localhost by default.
 ## GAPs, prioritised
 
 **P0 = must fix before the closed alpha. P1 = before the open alpha. P2 = later.**
-Owner is the crate or area that should do the work. A new crate for the glue
-layer (called `core/node` here: it owns the pipeline sync → records → authority
-→ groupkeys → UI) is proposed because several P0s have no natural home today.
+Owner is the crate or area that should do the work. The glue layer is `core/api` (board item T1, dev-identity): the one crate that owns the
+pipeline sync → records → authority → groupkeys → UI. Owners below are the Tech
+Lead's assignments (review of PR #15).
 
 | ID | Pri | Gap | Concrete task | Owner |
 | --- | --- | --- | --- | --- |
-| GAP-1 | **P0** | Sync stores, serves and gossips blobs without verifying they're records | Build the `content_id` hook from `core/sync/src/lib.rs`: `Record::decode` at ingest, derive the log name from `(server, scope)`, require blob deps = record deps, cross-log `auth_deps` kept separately; `on_gossip` returns `Accept` only after decode (and, once GAP-2/3 land, after authorisation); dedupe message ciphertexts. Test: a peer pushing junk bytes, or a real record under another log name, never gets it stored or forwarded | sync + new `core/node` |
-| GAP-2 | **P0** | Nothing checks channel messages: `auth_deps` unread; kicked users can post; backdating via stale `auth_deps` | Add `authority::check_channel(record, &Resolver) -> Verdict`: accept iff every `auth_deps` entry is a known control record, and the author is a non-kicked member in the state at those heads. **Backdating needs a format decision now:** a kick should name the kicker's channel heads (a small "cut" in the kick body, ≤16 ids like `auth_deps`), and every message of the target not an ancestor of that cut is voided, like control-log voiding. Without it, a kicked user can always sign messages pointing at old heads. Decide before formats freeze | authority + records |
-| GAP-3 | **P0** | No membership: any key that knows a server ID is a `Member`; control `Post` allowed from non-members; groupkeys has no member set | Add `Kind::Invite` (signed, expiry, max uses, revocable: spec "invite link is a signed record with expiry, not the key itself") and `Kind::Join` (references an invite). `State` gets `members`; `role_of` returns Member only for joined, non-kicked keys; `Post` and channel posting require membership; `members` feeds `groupkeys::rotation_need`/`encrypt` | records + authority |
-| GAP-4 | **P0** | Sync answers any peer for any log; topic names reveal servers | Bind libp2p peer ID to identity at connect (identity key signs `mvs/peer-binding/v1 ‖ peer_id ‖ expiry`, exchanged in a small request-response protocol); answer pulls and accept gossip for a server's logs only from bound identities that are members (bootstrap exception: a joiner presenting a valid invite gets the control log only). Topic = `BLAKE3(mvs/topic/v1 ‖ server secret from the invite ‖ scope)` instead of the raw log name | sync + `core/node` |
-| GAP-5 | **P0** | Encryption isn't wired: `Message` bodies plaintext, no rotation record kind, nobody decides who may rotate. The UI already tells users kicks re-encrypt (screenshot 26) | Add `Kind::KeyRotation` (channel scope, 16 KiB, shards per groupkeys decision B); `authority::may_rotate` (moderator+, per groupkeys README); integration feeds `apply`/`set_voided`, refuses rotations whose recipients aren't members, encrypts every `Message`, flags `WrapInvalid` in the UI | records + authority + groupkeys + `core/node` |
-| GAP-6 | **P0** (partial) / P1 | Every user's IP (LAN included) is published in the DHT and enumerable via the relay; IPFS-default DHT protocol | **P0:** clients in `kad::Mode::Client`; filter non-global addresses on relay and clients; custom `/mvs/kad/1.0.0`; gossipsub `MessageAuthenticity::Anonymous` (records are already signed); tell testers in the alpha invite that members can see their IP. **P1:** "relay only" mode (spec): no direct listen addresses published, connect only through circuits, default on for servers in the public index | sync (network) + relay |
-| GAP-7 | **P0** | Relay on the owner's PC logs who talks to whom forever | R5: relay events at `debug`, log rotation; document what's kept | devops (infra) |
-| GAP-8 | P1 | No storage quotas: valid records from any author fill disks | Per-log and per-author byte quotas in the store; store only records that pass authorisation (GAP-2/3), park the rest briefly; rotation records rate-limited per author | sync + `core/node` |
-| GAP-9 | P1 (R7 is P0) | Relay hardening | R3, R4, R6, R8, R9, R10; **R7 (lockfile, `--locked`, digests) before closed alpha** since the relay ships first; second bootstrap node before open alpha | devops (infra) |
+| GAP-1 | **P0** | Sync stores, serves and gossips blobs without verifying they're records | Build the `content_id` hook from `core/sync/src/lib.rs`: `Record::decode` at ingest, derive the log name from `(server, scope)`, require blob deps = record deps, cross-log `auth_deps` kept separately; `on_gossip` returns `Accept` only after decode (and, once GAP-2/3 land, after authorisation); dedupe message ciphertexts. Test: a peer pushing junk bytes, or a real record under another log name, never gets it stored or forwarded | dev-sync (B4-sync) + `core/api` (T1) |
+| GAP-2 | **P0** | Nothing checks channel messages: `auth_deps` unread; kicked users can post; backdating via stale `auth_deps` | Add `authority::check_channel(record, &Resolver) -> Verdict`: accept iff every `auth_deps` entry is a known control record, and the author is a non-kicked member in the state at those heads. **Backdating needs a format decision now:** a kick should name the kicker's channel heads (a small "cut" in the kick body, ≤16 ids like `auth_deps`), and every message of the target not an ancestor of that cut is voided, like control-log voiding. Without it, a kicked user can always sign messages pointing at old heads. A stale cut lets a moderator erase history, so the cut needs the bound in [the GAP-2 design note](#gap-2-design-note-bounding-what-a-kick-voids). Decide before formats freeze | B4 (records/authority) |
+| GAP-3 | **P0** | No membership: any key that knows a server ID is a `Member`; control `Post` allowed from non-members; groupkeys has no member set | Add `Kind::Invite` (signed, expiry, max uses, revocable: spec "invite link is a signed record with expiry, not the key itself") and `Kind::Join` (references an invite). `State` gets `members`; `role_of` returns Member only for joined, non-kicked keys; `Post` and channel posting require membership; `members` feeds `groupkeys::rotation_need`/`encrypt` | B4 (records/authority) |
+| GAP-4 | **P0** | Sync answers any peer for any log; topic names reveal servers | Bind libp2p peer ID to identity at connect (identity key signs `mvs/peer-binding/v1 ‖ peer_id ‖ expiry`, exchanged in a small request-response protocol); answer pulls and accept gossip for a server's logs only from bound identities that are members (bootstrap exception: a joiner presenting a valid invite gets the control log only). Topic = `BLAKE3(mvs/topic/v1 ‖ server secret from the invite ‖ scope)` instead of the raw log name | dev-sync |
+| GAP-5 | **P0** | Encryption isn't wired: `Message` bodies plaintext, no rotation record kind, nobody decides who may rotate. The UI already tells users kicks re-encrypt (screenshot 26) | Add `Kind::KeyRotation` (channel scope, 16 KiB, shards per groupkeys decision B); `authority::may_rotate` (moderator+, per groupkeys README); integration feeds `apply` and `set_accepted` (allow-list from `authority::State::accepted`; unknown or pending = deny), refuses rotations whose recipients aren't members, encrypts every `Message`, flags `WrapInvalid` in the UI | B4 (kind, `may_rotate`) + dev-crypto (`core/api/src/crypto`, after the T1 skeleton) |
+| GAP-6 | **P0** (partial) / P1 | Every user's IP (LAN included) is published in the DHT and enumerable via the relay; IPFS-default DHT protocol | **P0:** clients in `kad::Mode::Client`; filter non-global addresses on relay and clients; custom `/mvs/kad/1.0.0`; gossipsub `MessageAuthenticity::Anonymous` (records are already signed); tell testers in the alpha invite that members can see their IP. **P1:** "relay only" mode (spec): no direct listen addresses published, connect only through circuits, default on for servers in the public index | dev-sync (clients) + devops (relay, T4a) |
+| GAP-7 | ✔ PR #17 (once merged) | Relay on the owner's PC logs who talks to whom forever | R5: relay events at `debug`, log rotation; document what's kept. Done in #17: per-connection lines at `debug`, a counts-only `stats` line, json-file rotation 5×10 MB, no Caddy access log | devops (infra) |
+| GAP-8 | P1 | No storage quotas: valid records from any author fill disks | Per-log and per-author byte quotas in the store; store only records that pass authorisation (GAP-2/3), park the rest briefly; rotation records rate-limited per author | sync + `core/api` |
+| GAP-9 | **P0** (T4a) / P1 | Relay hardening | **P0, before the closed alpha (T4a):** R7 (lockfile, `--locked`, digests), R3, R6, R1–R2, R10. P1: R4, R9; a second bootstrap node before the open alpha. R8 is done in PR #17 (read-only root, `cap_drop`, limits) | devops (infra) |
 | GAP-10 | P1 | No key-compromise recovery: no identity revocation/successor, no ownership transfer | `Kind::OwnerTransfer` signed by the owner (and by a pre-registered recovery key, spec "admin recovery code"), plus a user-level "key moved" statement signed by old and new keys; servers treat the old key as kicked. Device keys (identity already reserves `device/ed25519/n`) at stage 3 | identity + authority + records |
 | GAP-11 | P1 | Stolen device: optional app lock; SQLite store and peer key unencrypted | Encrypt the store with the already-derived `local-storage/key` (SQLCipher-compatible or per-row AEAD); prompt to set the app lock on first server join; peer key created 0600 / owner-only ACL (reuse updater's Windows ACL code, `core/updater` PR #8 finding 15) | identity + sync |
 | GAP-12 | P1 | Single update key (closed alpha, accepted); seeder not built; latest root must be embedded per release | 2-of-3 on hardware tokens before open alpha (plan in `core/updater/SECURITY.md`); release checklist item "embed latest root"; code signing before public beta (spec) | updater + devops |
-| GAP-13 | P1 | Sybil/spam: identity proof-of-work (spec) and local spam rules not built | PoW stamp bound to the identity key, checked at `Join`; per-author rate limits at accept time (local, per spec); invite-only / approval modes | identity + authority + `core/node` |
+| GAP-13 | P1 | Sybil/spam: identity proof-of-work (spec) and local spam rules not built | PoW stamp bound to the identity key, checked at `Join`; per-author rate limits at accept time (local, per spec); invite-only / approval modes | identity + authority + `core/api` |
 | GAP-14 | P2 | Malicious moderator: no rate limits, no moderation log | Moderation log (spec stage 3); local limit on kicks/rotations per moderator per hour with owner alert | authority + UI |
 | GAP-15 | P2 | Metadata: control log and rotation recipient lists in clear to anyone with sync access | After GAP-4, residual to members only. Later: encrypt control-log bodies to members, pad messages, blind recipient keys in rotations | authority + groupkeys |
 | GAP-16 | P1 (before `--profile voice`) | TURN SSRF into owner's LAN; empty secret fallback | T1, T2 | devops (infra) |
-| GAP-17 | **P0** when Tauri glue lands | Core↔UI IPC surface not defined | Minimal Tauri capabilities; no command returns words/keys except the one-time words screen; external links open via the OS with confirmation; keep CSP without `unsafe-eval` | UI + `core/node` |
-| GAP-18 | P2 | UI shows author-claimed `ts` | Order by DAG; mark messages whose `ts` is far from receive time | UI + `core/node` |
+| GAP-17 | **P0** when Tauri glue lands | Core↔UI IPC surface not defined | Minimal Tauri capabilities; no command returns words/keys except the one-time words screen; external links open via the OS with confirmation; keep CSP without `unsafe-eval` | dev-voice-shell (B1) + dev-identity |
+| GAP-18 | P2 | UI shows author-claimed `ts` | Order by DAG; mark messages whose `ts` is far from receive time | UI + `core/api` |
+| GAP-19 | P1 | Sync resource abuse that the limits in PR #5 don't cover: incoming connection slots squatted with free peer IDs (256 slots, idle timeout 1 h, no per-IP cap); pull amplification (~100 B request → up to 4 MiB page, 50 pulls/s globally) | Per-IP connection cap (e.g. 8) and a shorter idle timeout for peers that share no open log; a global and per-peer **byte** budget for pull responses (e.g. 8 MiB/s total), not just a request count | dev-sync |
+| GAP-20 | **P0** before the first `v*` tag | Release workflow (PR #17): the core build jobs hold `contents: write` while running every dependency's build script, and restore a `rust-cache`. A malicious crate or a poisoned cache could swap release assets, which the owner then signs offline, trusting `SHA256SUMS` from the same run | Build jobs `contents: read`, hand artifacts on with `actions/upload-artifact`, and upload from one small job that runs no third-party code; no cache in release builds. Later: a second, independent build to compare hashes before signing (reproducible builds) | devops |
+
+### GAP-2 design note: bounding what a kick voids
+
+**Problem.** To stop backdating, a kick voids the target's records that it
+doesn't cover (today: control records concurrent with the kick; with GAP-2:
+channel messages that aren't ancestors of the kick's channel cut). The kicker
+chooses the deps and the cut, so a malicious moderator can choose them **stale**
+on purpose and erase days of the target's history. The order-independent rules
+can't tell an honest kick that missed a few messages from an abusive one.
+Timestamps can't decide either, because they're forgeable.
+
+**Proposed bound: witnessed records survive.** A target's record R is voided by
+kick K only if both:
+
+1. R is not an ancestor of K's deps (control) or of K's cut (channel), as today; **and**
+2. no **witness** exists: an accepted record by another author (not the
+   target) that has R as an ancestor through its deps.
+
+If another member's message builds on R, R existed before that member wrote,
+and the rest of the channel has seen it. A stale cut can't erase it. In an
+active channel nearly everything gets witnessed within seconds, so an abusive
+kick can only erase the target's last unwitnessed messages. Those are also
+the ones an honest kick legitimately races with.
+
+Details:
+
+- **Witnesses are found by a fixpoint**, the same as authority's voiding loop. A
+  witness that is itself voided (say its author was kicked concurrently) stops
+  counting, so repeat until nothing changes. The result still depends only on
+  the record set.
+- **Scope: non-privileged records only** (posts and channel messages). For the
+  target's privileged records (grants, revokes, kicks, rotations), keep
+  today's rule. Otherwise a colluding ordinary member could witness a
+  backdated kick and keep it alive.
+- **Residual risk.** A colluding non-kicked member can witness a kicked user's
+  backdated messages and keep them visible. That member could already
+  repost the content under their own key, so nothing new is lost. Moderators
+  can delete individual messages (spec MVP item).
+- **Transparency.** Each kick shows how many of the target's records it
+  voided. The moderation log (GAP-14) records the cut, so the owner can see
+  and reverse an abusive kick by revoking the moderator.
+- **Cost.** The incremental resolver keeps an "ancestor-of-another-author"
+  flag for each target record. That's a reverse-reachability walk only when a
+  kick arrives, and it's bounded by the target's unwitnessed tail.
+
+The cut stays ≤16 channel heads, as in the GAP-2 row. The format change is
+only that the kick body carries the cut. Witnessing needs no format change,
+so the bound can be tuned later without breaking records. **Owner decision
+needed:** accept this rule, or the simpler option the Tech Lead suggested,
+where a kick voids only privileged records and older messages are hidden
+from view rather than voided.
 
 ### Accepted risks (documented, not gaps)
 
@@ -344,6 +400,10 @@ layer (called `core/node` here: it owns the pipeline sync → records → author
   readable by the kicked member (groupkeys README).
 - No forward secrecy within an epoch; a stolen identity reads every epoch it was
   in.
+- `seq` in records is unused: there's no equivocation detection (an author
+  signing two different records with the same `seq`). Harmless today, since
+  nothing relies on `seq`. Revisit with GAP-14 if per-author ordering or
+  rate limiting starts to use it.
 
 ## How to keep this current
 
