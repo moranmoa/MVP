@@ -991,9 +991,13 @@ fn edit_delete_and_retry_messages() {
     assert_eq!((got[1].index, got[1].body.as_str(), got[1].deleted), (1, "", Some(true)));
     assert_eq!(got[0].body, "one");
 
-    // Retry: my own message, the same record again; nobody else's.
-    guest.core.retry_message(&two.id).unwrap();
-    assert_eq!(world.network.fetch(server_key).len(), before + 1, "nothing new was signed");
+    // Retry: my own message, the same record again; nobody else's; and
+    // not a deleted one, pruned to its stub (B6-p), with nothing to send.
+    assert_eq!(guest.core.retry_message(&two.id).unwrap_err().code, ErrorCode::NotAllowed);
+    let three = guest.core.send_message(&channel, "three", None).unwrap();
+    let held = world.network.fetch(server_key).len();
+    guest.core.retry_message(&three.id).unwrap();
+    assert_eq!(world.network.fetch(server_key).len(), held, "the same record, nothing new signed");
     assert_eq!(guest.core.retry_message(&one.id).unwrap_err().code, ErrorCode::NotAllowed);
     assert_eq!(guest.core.retry_message("nope").unwrap_err().code, ErrorCode::NotFound);
 }
@@ -1240,5 +1244,98 @@ fn the_server_secret_is_sealed_and_kept() {
     let again = peer.core.list_servers().unwrap().remove(0);
     assert_eq!(again.invite_link, server.invite_link);
     drop(peer);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// B6-p (the product lead's acceptance): after a delete or an edit, the
+/// databases hold no ciphertext and no plaintext of the original or older
+/// versions; what's shown is unchanged (edited text, tombstone).
+#[test]
+fn deletes_and_edits_prune_old_bodies_from_the_db() {
+    use api::crypto::GroupKeysCipher;
+
+    let world = World::new();
+    let dir = std::env::temp_dir().join(format!("mvs-api-b6p-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let open = |words: &str, name: &str| {
+        let db = dir.join(format!("{name}.db"));
+        let cipher = Arc::new(GroupKeysCipher::locked());
+        let peer = world.peer_with(Arc::new(MemoryStore::new()), Some(db.clone()), cipher);
+        peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        peer.core.update_profile(profile).unwrap();
+        (peer, db)
+    };
+    let (owner, owner_db) = open(OWNER_WORDS, "owner");
+    let (guest, guest_db) = open(LEGAL, "guest");
+    let server = owner.core.create_server("Prune", AgeRestriction::None).unwrap();
+    guest.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let body_of = |id: &str| -> Vec<u8> {
+        world
+            .network
+            .fetch(server_key)
+            .into_iter()
+            .find(|r| hex::encode(r.id().as_bytes()) == id)
+            .expect("published")
+            .body()
+            .to_vec()
+    };
+    // Bodies to find later: the original and the first edit of `edited`,
+    // the original of `gone`.
+    let edited = owner.core.send_message(&channel, "PLAIN-original-edited", None).unwrap();
+    let gone = owner.core.send_message(&channel, "PLAIN-original-gone", None).unwrap();
+    owner.core.edit_message(&edited.id, "PLAIN-first-edit").unwrap();
+    let first_edit = world
+        .network
+        .fetch(server_key)
+        .into_iter()
+        .filter(|r| r.kind() == Kind::MessageEdit)
+        .map(|r| r.body().to_vec())
+        .next()
+        .unwrap();
+    let mut old_bodies = vec![body_of(&edited.id), body_of(&gone.id), first_edit];
+    owner.core.edit_message(&edited.id, "latest edit").unwrap();
+    owner.core.delete_message(&gone.id).unwrap();
+    for body in &mut old_bodies {
+        body.truncate(64);
+    }
+    guest.core.sync_now().unwrap();
+    owner.core.sync_now().unwrap();
+
+    // Shown: the latest edit, and a tombstone in place.
+    for peer in [&owner, &guest] {
+        let got = peer.core.get_messages(&channel, 0, 10).unwrap().messages;
+        assert_eq!(got.len(), 2);
+        let by_id = |id: &str| got.iter().find(|m| m.id == id).unwrap().clone();
+        assert_eq!(by_id(&edited.id).body, "latest edit");
+        assert!(by_id(&edited.id).edited_at.is_some());
+        assert_eq!((by_id(&gone.id).body.as_str(), by_id(&gone.id).deleted), ("", Some(true)));
+    }
+    drop((owner, guest));
+
+    for path in [&owner_db, &guest_db] {
+        // The db and its WAL and rollback journal, if any.
+        let mut bytes = std::fs::read(path).unwrap();
+        for suffix in ["-wal", "-journal"] {
+            let mut side = path.as_os_str().to_owned();
+            side.push(suffix);
+            bytes.extend(std::fs::read(side).unwrap_or_default());
+        }
+        let db = path;
+        for body in &old_bodies {
+            assert!(
+                !contains(&bytes, body),
+                "{}: an old ciphertext is still in the db",
+                db.display()
+            );
+        }
+        for text in ["PLAIN-original-edited", "PLAIN-original-gone", "PLAIN-first-edit"] {
+            assert!(!contains(&bytes, text.as_bytes()), "{}: {text} is in the db", db.display());
+        }
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

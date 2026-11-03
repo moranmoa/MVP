@@ -23,7 +23,7 @@ use records::{ChannelId, Record, Scope, ServerId};
 use sync::{log_name, log_of, Access, Node, NodeConfig, NodeEvent, ServerSecret, Store};
 use tokio::runtime::Runtime;
 
-use crate::access::{KeyBinder, MemberReadGate};
+use crate::access::{KeyBinder, MemberReadGate, MemberStubGate};
 use crate::gate::MemberGate;
 use crate::ports::Network;
 
@@ -77,6 +77,9 @@ impl SyncNetwork {
         let access = Access {
             binder: Some(binder.clone()),
             read_gate: Some(Arc::new(MemberReadGate::new())),
+            // B6-p: stubs only once a held, accepted delete or edit replaced
+            // the record.
+            stub_gate: Some(Arc::new(MemberStubGate)),
         };
         let (node, mut events) = runtime.block_on(Node::start_with(config, access))?;
         // Events are only hints: a stored record wakes the core's sync loop
@@ -160,6 +163,12 @@ impl Network for SyncNetwork {
 
     fn lock(&self) {
         self.binder.lock();
+    }
+
+    fn prune(&self, id: records::RecordId) {
+        if let Err(e) = self.runtime.block_on(self.node.prune(id)) {
+            eprintln!("mvs-core: sync can't prune a record: {e}");
+        }
     }
 
     fn open_server(&self, server: ServerId, secret: &[u8; 32], channels: &BTreeSet<ChannelId>) {

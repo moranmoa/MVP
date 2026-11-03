@@ -23,7 +23,7 @@ pub mod sidecar;
 pub mod syncnet;
 pub mod types;
 
-pub use access::{KeyBinder, MemberReadGate, BINDING_PREFIX};
+pub use access::{KeyBinder, MemberReadGate, MemberStubGate, BINDING_PREFIX};
 pub use dispatch::NOT_YET;
 pub use gate::MemberGate;
 pub use ports::{
