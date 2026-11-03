@@ -37,7 +37,7 @@ proptest! {
         let rotation = Rotation::decode(signed.id, SERVER, signed.author, &signed.body).unwrap();
         prop_assert_eq!(rotation.recipients().copied().collect::<BTreeSet<_>>(), recipients);
         for (secret, _) in &people {
-            prop_assert_eq!(rotation.unwrap_key(secret).unwrap(), key.clone());
+            prop_assert_eq!(*rotation.unwrap_key(secret).unwrap().as_bytes(), *key.as_bytes());
         }
         let (outsider, _) = identity(outsider);
         prop_assert!(rotation.unwrap_key(&outsider).is_err());
@@ -62,7 +62,7 @@ proptest! {
             let mut opened = 0;
             for (secret, _) in &people {
                 if let Ok(got) = rotation.unwrap_key(secret) {
-                    prop_assert_eq!(got, key.clone());
+                    prop_assert_eq!(*got.as_bytes(), *key.as_bytes());
                     opened += 1;
                 }
             }

@@ -280,11 +280,12 @@ fn rotation_epoch_must_follow_prev() {
     assert_eq!(view.head().unwrap().id(), first.id);
 
     assert_eq!(
-        Rotation::create(SERVER, pk(1), CHANNEL, 0, Some(first.id), &everyone, &mut rng(3)),
+        Rotation::create(SERVER, pk(1), CHANNEL, 0, Some(first.id), &everyone, &mut rng(3))
+            .map(|_| ()),
         Err(Error::BadEpochLink)
     );
     assert_eq!(
-        Rotation::create(SERVER, pk(1), CHANNEL, 3, None, &everyone, &mut rng(3)),
+        Rotation::create(SERVER, pk(1), CHANNEL, 3, None, &everyone, &mut rng(3)).map(|_| ()),
         Err(Error::BadEpochLink)
     );
 }
@@ -296,11 +297,11 @@ fn bad_member_keys_are_refused() {
     identity[0] = 1;
     let weak = PublicKey::from_bytes(identity);
     assert_eq!(
-        Rotation::create(SERVER, pk(1), CHANNEL, 0, None, [&pk(1), &weak], &mut rng(1)),
+        Rotation::create(SERVER, pk(1), CHANNEL, 0, None, [&pk(1), &weak], &mut rng(1)).map(|_| ()),
         Err(Error::BadMemberKey(weak))
     );
     assert_eq!(
-        Rotation::create(SERVER, pk(1), CHANNEL, 0, None, [], &mut rng(1)),
+        Rotation::create(SERVER, pk(1), CHANNEL, 0, None, [], &mut rng(1)).map(|_| ()),
         Err(Error::NoRecipients)
     );
 }

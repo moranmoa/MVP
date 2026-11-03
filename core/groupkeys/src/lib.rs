@@ -54,7 +54,7 @@ use records::{ChannelId, Kind, PublicKey, RecordId, ServerId};
 use zeroize::Zeroizing;
 
 mod channel;
-pub use channel::{Applied, ChannelKeys, RotationNeed};
+pub use channel::{Applied, ChannelKeys, Decrypted, RotationNeed};
 
 /// Format version of rotation bodies and message ciphertexts.
 pub const VERSION: u8 = 1;
@@ -82,10 +82,10 @@ const MESSAGE_MAX_BODY: usize = 16 * 1024;
 pub const MAX_RECIPIENTS: usize = u16::MAX as usize;
 
 // Domain separation strings. Never reuse one for another purpose.
-const WRAP_AD: &[u8] = b"mvp/groupkeys/wrap/v1\0";
-const WRAP_KDF: &str = "mvp groupkeys v1 2026-11 wrap key";
-const MESSAGE_AD: &[u8] = b"mvp/groupkeys/message/v1\0";
-const MESSAGE_KDF: &str = "mvp groupkeys v1 2026-11 message key";
+const WRAP_AD: &[u8] = b"mvs/groupkeys/wrap/v1\0";
+const WRAP_KDF: &str = "mvs/groupkeys v1 2026-11 wrap key";
+const MESSAGE_AD: &[u8] = b"mvs/groupkeys/message/v1\0";
+const MESSAGE_KDF: &str = "mvs/groupkeys v1 2026-11 message key";
 
 /// Size of a rotation body with `recipients` wraps (and a `prev`).
 pub const fn rotation_body_len(recipients: usize) -> usize {
@@ -180,7 +180,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// A 32-byte symmetric epoch key. Zeroed on drop; never printed.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct EpochKey(Zeroizing<[u8; KEY_LEN]>);
 
 impl EpochKey {
@@ -452,6 +452,15 @@ impl Rotation {
         if count == 0 {
             return Err(Error::NoRecipients);
         }
+        // Check the count against the bytes actually there before allocating
+        // for it: a 108-byte body must not reserve room for 65,535 wraps.
+        let wraps_len = count * WRAP_LEN;
+        if reader.bytes.len() < wraps_len {
+            return Err(Error::Truncated);
+        }
+        if reader.bytes.len() > wraps_len {
+            return Err(Error::TrailingBytes);
+        }
         let mut wraps: Vec<(PublicKey, [u8; WRAPPED_KEY_LEN])> = Vec::with_capacity(count);
         for _ in 0..count {
             let recipient = PublicKey::from_bytes(reader.array()?);
@@ -460,9 +469,7 @@ impl Rotation {
             }
             wraps.push((recipient, reader.array()?));
         }
-        if !reader.bytes.is_empty() {
-            return Err(Error::TrailingBytes);
-        }
+        debug_assert!(reader.bytes.is_empty(), "length checked above");
         Ok(Rotation { id, server, rotator, channel, epoch, prev, ephemeral, header, wraps })
     }
 
@@ -517,8 +524,12 @@ impl Rotation {
                 .decrypt(&XNonce::default(), Payload { msg: sealed, aad: &ad })
                 .map_err(|_| Error::UnwrapFailed)?,
         );
-        let bytes: [u8; KEY_LEN] = opened.as_slice().try_into().map_err(|_| Error::UnwrapFailed)?;
-        Ok(EpochKey::from_bytes(bytes))
+        let mut key = Zeroizing::new([0; KEY_LEN]);
+        if opened.len() != KEY_LEN {
+            return Err(Error::UnwrapFailed);
+        }
+        key.copy_from_slice(&opened);
+        Ok(EpochKey(key))
     }
 
     /// The context a message sent under this rotation's key is bound to.

@@ -9,8 +9,14 @@ central order); this is the per-epoch wrapped-key design from the spec.
 
 `records` is used for types only (`PublicKey`, `RecordId`, `ServerId`,
 `ChannelId`, and `Kind` to read size limits). The caller puts a rotation body
-into a signed record, and checks with `authority` that its author may rotate,
-before calling `ChannelKeys::apply`.
+into a signed record, applies **every** well-formed rotation record of the
+channel with `ChannelKeys::apply`, and passes the ones `authority` doesn't
+accept (never permitted, or voided later by a concurrent revoke or kick) to
+`set_voided` whenever that set changes. A voided rotation is never the head,
+but its key stays for reading. The result depends only on the two sets, not
+on the order rotations and verdicts arrive in.
+
+All domain-separation and KDF strings start with `mvs/`.
 
 ## API in short
 
@@ -18,11 +24,13 @@ before calling `ChannelKeys::apply`.
 | --- | --- |
 | `ChannelKeys::new(server, channel, my_identity)` | One member's view of one channel |
 | `apply(record_id, author, body)` | Take in a rotation (idempotent, any order). Returns whether we got a key |
-| `head()` | The rotation new messages use |
+| `set_voided(ids)` | The rotations `authority` rejects; recomputes the head |
+| `head()` | The rotation new messages use: linked, not voided, highest epoch, lowest ID |
 | `rotation_need(members)` | `Initial`, `Required { removed }`, `Add { missing }` or `None` |
 | `rotate(rotator, members, rng)` | Body for the next rotation (epoch = head + 1, prev = head) |
 | `encrypt(members, plaintext, rng)` | Seal under the head key. Refuses with `RotationRequired` while a removed member still holds it |
 | `decrypt(author, ciphertext)` | Open with whichever epoch key the header names |
+| `decrypt_with_rotation(author, ciphertext)` | The same, and says which rotation and epoch opened it, so the caller can flag a message sent under a superseded or voided key |
 | `Rotation::create / decode / unwrap_key`, `seal / open` | The lower layer, for other callers and tests |
 
 ## Crypto, and why
@@ -39,6 +47,16 @@ Thormarker, *On using the same key pair for Ed25519 and an X25519 based KEM*
 encryption key can't be rotated on its own; per-device keys (spec: later stage)
 can be bound to the identity when they arrive.
 
+*Why not a dedicated subkey derived from the recovery words?* It would still
+have to be published and signed before anyone could wrap to it, which is the
+extra record this design avoids, and it wouldn't fix the real weakness: a
+stolen identity secret opens every stored epoch, and so would a stolen subkey
+derived from the same words. Only keys that change help, that is per-device
+keys certified by the identity. The way there needs no format change: the wire
+field stays "recipient Ed25519 key", and recipient → X25519 goes through one
+function (`x25519_public`), so a certified device key can be a recipient
+later.
+
 **Wrapping: DH-KEM + BLAKE3 KDF + XChaCha20-Poly1305, with one ephemeral key
 per rotation.** For each recipient: `shared = X25519(ephemeral, recipient)`,
 the all-zero result is rejected, then `wrap_key = BLAKE3.derive_key(ctx,
@@ -46,8 +64,10 @@ shared || ephemeral_pk || recipient_x25519 || AD)`. The AD binds the server, the
 rotator (record author), the whole rotation header (channel, epoch, prev,
 ephemeral key) and the recipient. The epoch key is sealed under `wrap_key` with
 XChaCha20-Poly1305. Each `wrap_key` is used once, so the all-zero nonce is
-safe, even if a rotator's RNG repeated an ephemeral key (the header still
-differs).
+safe. If a rotator's RNG repeated an ephemeral key, the wrap keys still differ
+as long as the channel, epoch or prev differ. If the RNG repeated completely,
+the epoch key repeats too, so the same plaintext is sealed again and nothing
+new leaks. That is the only case left, and it means the RNG is broken anyway.
 
 Why not HPKE (RFC 9180, the `hpke` crate)? HPKE base mode is the same shape
 (DH-KEM, KDF, AEAD), but every recipient carries their own 32-byte `enc`:
@@ -95,11 +115,9 @@ in the AD.
 Tests check all of these: the largest ciphertext is signed into a real
 `Message` record, and a 203-member rotation fits 16,384 bytes.
 
-**Needs a decision (records owner):** `records` has no rotation kind yet, and
-its largest body is 16 KiB, so a rotation tops out at 203 members per record.
-The spec's 500-member server needs either a `KeyRotation` kind with a body
-limit of about 48 KiB (`MAX_RECORD_BYTES` grows with it), or rotations split
-over several records. Tests carry rotations in `Message` envelopes for now.
+`records` has no rotation kind yet, and its largest body is 16 KiB, so a
+rotation tops out at 203 members per record. See decision B below. Tests carry
+rotations in `Message` envelopes for now.
 
 ## Rules
 
@@ -110,10 +128,13 @@ over several records. Tests carry rotations in `Message` envelopes for now.
   goes on, and they read once a rotation includes them.
 - **Concurrent rotations resolve deterministically.** A rotation is *linked*
   if it is epoch 0, or its `prev` is linked and exactly one epoch below. The
-  head is the linked rotation with the highest epoch, and between rotations of
-  the same epoch the **lowest record ID** wins, the tie-break `authority` uses.
-  This depends only on the set of rotations held, so every peer converges
-  (tested over every delivery order). If the winner was made before its author
+  head is the linked, non-voided rotation with the highest epoch, and between
+  rotations of the same epoch the **lowest record ID** wins, the tie-break
+  `authority` uses. This depends only on the rotations held and the voided
+  set, so every peer converges (tested over every delivery order, with verdicts
+  arriving before or after the rotations). A voided rotation still links the
+  rotations built on it: linking only checks the epoch counter, and a later
+  rotation's key is fresh, so it owes nothing to the voided one. If the winner was made before its author
   saw a concurrent kick, the kicked member is still in it, so `Required` fires
   and one more rotation settles it. The losing rotation's key is kept, so
   anything sent under it stays readable to its recipients.
@@ -127,14 +148,9 @@ over several records. Tests carry rotations in `Message` envelopes for now.
 
 ## Where this differs from the spec, or the spec is unclear
 
-1. **History for new members: unclear, and differs from the recommended
-   default.** Open question 3 in `docs/spec.md` ("Does a new user see all the
-   history?", status: under discussion) recommends a per-server setting with
-   **full history by default**, and from-join-only for servers in the public
-   index. This crate does from-join only, as this task asked. Full history
-   would need a "history grant": a moderator re-wraps old epoch keys for the
-   newcomer. That fits the same wrap format, but it's not built. Needs a
-   product decision.
+1. **History for new members.** Open question 3 in `docs/spec.md` recommends
+   **full history by default** (from-join only for public-index servers). This
+   crate does from-join only, as the task asked. See decision A below.
 2. **Per channel, not per server.** The spec talks of one key per server that
    changes on every kick or ban. Keys here are per channel, which also allows
    private channels. A server-wide key is a single fixed `ChannelId`.
@@ -145,6 +161,44 @@ over several records. Tests carry rotations in `Message` envelopes for now.
    one of them can read) is possible later.
 4. **Who may rotate** is left to the caller: moderators and up, matching
    kick. Whether an ordinary member may rotate to add a newcomer is open.
+
+## Decisions for the owner
+
+Nothing below is built yet; it waits for your decision.
+
+### A. What new members see
+
+| Option | New member sees | Privacy | Complexity | Cost |
+| --- | --- | --- | --- | --- |
+| 1. Encrypted, from join (built today) | Only what's sent after the rotation that adds them | Best. Content stays with whoever was a member when it was sent | Nothing more to build | Every join needs a rotation (80 B per member), so a moderator must be online |
+| 2. **Encrypted with history** (the third option) | Everything since the server started | Relays and outsiders still see only ciphertext. But anyone who gets any later key, by joining or through a leak, can read all earlier history | Small. Each rotation also seals the previous epoch key under the new one (a "history link"), so a newcomer gets the current key and walks back. A join needs no rotation: any online member can wrap the current key for the newcomer | +48 B per rotation; a newcomer opens one link per past epoch (microseconds each) |
+| 3. Public, unencrypted | Everything, and so does anyone who has the server ID, relays and DHT nodes included | None. Content is copied to peers and relays and can never be taken back | Fewest keys, but a second code path through sync, search and moderation | Cheapest |
+
+- Option 3 contradicts the spec: "all server content is encrypted with a group key only members hold; relays see only encrypted bytes". If "public" means anyone can join and read, option 2 with open joining gives that and keeps relays blind.
+- For option 2, a history link is cheaper than having moderators re-wrap every past epoch key for each newcomer: 48 B per rotation instead of 48 B × epochs per join, and no moderator needs to be online.
+- A kick still works in option 2: links only point backwards, so a kicked member can't reach new epochs.
+
+**Switching mode later:**
+
+| Change | Existing messages | New messages |
+| --- | --- | --- |
+| 1 → 2 | Newcomers read back as far as the switch. A moderator who still holds older keys may also link further back, as a deliberate "open the past" step | Readable to every later joiner |
+| 2 → 1 | Existing members keep everything. Newcomers get no link, so they can't read anything from before they joined | From join only |
+| 1 or 2 → 3 | Stay encrypted, readable only by people who had the keys, unless moderators publish the old keys, which can't be undone | Plaintext, public |
+| 3 → 1 or 2 | **Stay public forever**: they've already been copied to peers and relays. The UI has to say so | Encrypted |
+
+**My pick: option 2 as the default for the Hebrew-gamers alpha, option 1 as a per-server switch for private groups, and no option 3 in the alpha.** Gamer communities coming from Discord expect to see channel history, and the spec recommends full history by default. Option 2 keeps the spec's promise that relays see only ciphertext, costs 48 B per rotation, and lets a newcomer read without waiting for a moderator, which matters on small servers with few moderators. Servers in the public index follow the spec and default to option 1. Building option 2 means a history-link field in the rotation and a small "add member" wrap record: about a day, plus tests.
+
+### B. Channels bigger than 203 members
+
+| Option | Security | Sync per rotation | Effort | Past 500 (e.g. 5,000) |
+| --- | --- | --- | --- | --- |
+| 1. `KeyRotation` kind with a ~48 KiB limit | Same as today | One 40 KB record to every member: about 20 MB in total across 500 members | Smallest: a kind and a limit in `records`. But `MAX_RECORD_BYTES` roughly triples for **every** record, so the worst-case memory of PR #7's pending queue (4,096 records) also roughly triples | No: tops out at about 613 members |
+| 2. **One rotation split across records (shards)** | Same as today. Each shard is signed, and all carry the same header | Each member fetches only the shard holding their wrap (≤16 KB); 500 members = 3 shards, 5,000 = 25 (about 400 KB in total) | Medium: shard index and count in the body; shards 1..n name shard 0's record ID, which stays the rotation's ID (so lowest record ID still breaks ties, as in `authority`); a member whose shard is missing shows up as `Add` | Yes, linear. The rotator's cost at 5,000 members is about 0.25 s of X25519 |
+| 3. Key tree (TreeKEM/LKH) | Strong; about log₂(n) wraps per rotation | About 1 KB per rotation at 5,000 | High. Every member must agree on the tree's state, which needs a total order: the reason MLS was rejected | Yes in theory, but a poor fit for a log with no central order |
+| 4. Sender keys (Signal/WhatsApp groups) | Adds forward secrecy within each sender's chain | A kick makes every remaining member send a new key to every other: n² wraps, 250k at 500 and 25M at 5,000 | Medium-high | No |
+
+**My pick: option 2, shards, with a dedicated `KeyRotation` kind kept at the current 16 KiB limit.** It's the only option that keeps working at 5,000 members without raising the size limit for every record, and members fetch only their own shard. For the alpha, servers under 200 members already fit in one record, so the shard change can land before open alpha. It's about 1–2 days with tests.
 
 ## Threat model
 
@@ -203,7 +257,7 @@ over several records. Tests carry rotations in `Message` envelopes for now.
 ## Tests
 
 ```
-docker run --rm -v "${PWD}:/work" -v cargo-registry:/usr/local/cargo/registry -v core-target:/target -e CARGO_TARGET_DIR=/target -w /work rust:1.90-bookworm cargo test --release -p groupkeys -- --nocapture
+docker run --rm -v "${PWD}:/work" -v cargo-registry:/usr/local/cargo/registry -v core-target:/target -e CARGO_TARGET_DIR=/target -e CARGO_BUILD_JOBS=4 -w /work rust:1.90-bookworm cargo test --release -p groupkeys -- --nocapture
 ```
 
 Run from `core/`. `tests/scenarios.rs`: a kicked member can't decrypt the next
@@ -213,3 +267,8 @@ member can't read history; size limits. `tests/properties.rs` (proptest):
 wrap/unwrap round trip for random member sets, a tampered rotation never yields
 a different key, channel round trip, and any byte flip in a sealed message is
 rejected.
+`tests/format_and_voiding.rs`: a rotation that `authority` voids stops being
+head in every order of rotations and verdicts; rotations built on a voided one
+still link; voided keys still read and say so; strict decoding (huge count,
+count mismatch, prev tag, version, duplicate or unsorted recipients); and the
+v1 formats pinned with a fixed RNG.
