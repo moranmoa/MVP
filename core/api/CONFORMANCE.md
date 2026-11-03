@@ -91,3 +91,52 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 - `NoticeKind`: `'rekey-waiting'`, sent when removed members still hold a channel key and only a moderator can renew it. Until a moderator does, sending there answers `not-allowed`.
 - `syncNow()`: test-only until `sync` drives updates. It shouldn't ship in
   the UI.
+
+## Proposed: in-app update (B8)
+
+From `core/updater/docs/B8-in-app-update.md`, approved by the tech lead and
+the security lead. A proposal from dev-updater, for dev-identity to build
+after M1. The `updater` crate does the work (verify, unpack, state, lock),
+and `core/api` only wires it in.
+
+**Startup.** `mvs-core --update-root <install folder>`. The shell passes it
+only when packaged and the root checks out (§0: derived from
+`process.execPath`, and `mvs-launcher` must exist). Without it, updates are
+off: each command below answers `not-implemented`, and no timer runs. The
+state folder is `updater::UpdateDirs::default_state_dir()`.
+
+**Commands.** All four are main/core-only. None is in `CoreCommands`
+(`ui/src/core/api.ts`) or in the renderer allow-list
+(`desktop/src/commands.js`), per A2. The renderer keeps only
+`restartToUpdate`, which main handles itself and turns into `applyUpdate`
+plus a relaunch through the launcher.
+
+| Command | Result `ok` | Errors (`code`) |
+| --- | --- | --- |
+| `checkForUpdate()` | `{ "status": "up-to-date" \| "available" \| "staged", "current": "1.2.0", "available": "1.3.0" \| null, "freshness": "fresh" \| "stale" \| "never" }` | `offline`, `invalid-update` (any verification failure; details only in the log), `check-clock` (`IssuedInFuture`, or every manifest expired) |
+| `downloadUpdate()` | `{ "version": "1.3.0" }` once it is verified, unpacked and staged | `nothing-to-download`, `offline`, `invalid-update`, `disk-full` |
+| `applyUpdate()` | `{ "version": "1.3.0" }`: main may now relaunch through the launcher | `nothing-staged`, `not-allowed` (in a voice call or screen share; `update.ready` then has `waitingForCall: true`) |
+| `markHealthy()` | `{ "committed": "1.3.0" \| null }` (`null` when the running version was already committed) | `not-allowed` (not a trial boot) |
+
+**Events.**
+
+| Event | Payload | When |
+| --- | --- | --- |
+| `update.ready` (exists: `UpdateInfo`) | `{ "version": "1.3.0", "waitingForCall": false }` | after a stage, and again when a call ends |
+| `update.installed` (new) | `{ "version": "1.3.0", "notes": "plain text" \| null }` | once, after `markHealthy` commits a new version; `notes` comes from `ManifestBody::notes_for(<UI language>)`. The UI shows it as **text only** |
+| `update.rolledBack` (new) | `{ "failed": "1.3.0", "running": "1.2.0" }` | once, on the first healthy start after the launcher rolled back |
+
+**Rules the core keeps:**
+- It checks at start and then every 6 h ± 30 min (jitter), and downloads as
+  soon as something is available. Downloads are never paused for a call:
+  only the apply step waits.
+- All state goes through `UpdateLock`, `save_state` and `write_atomic`.
+- Before any schema migration, it writes `core.db.pre-<schema>` (owner-only)
+  and records it in `db-snapshot.json`. It deletes the snapshot when
+  `markHealthy` commits (§0).
+- The UI channel maps to the manifest channel: `stable` → `alpha` during the
+  closed alpha.
+
+**`api.ts` changes for dev-ui:**
+- add `update.installed` and `update.rolledBack` to `CoreEvents`;
+- add `'offline' | 'invalid-update' | 'check-clock' | 'nothing-to-download' | 'nothing-staged' | 'disk-full'` to `CoreError.code`, for when main forwards them.
