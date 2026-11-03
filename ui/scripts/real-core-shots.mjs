@@ -1,7 +1,7 @@
 // M1 "talks to itself": the built UI in the Electron shell with the REAL core
 // (mvs-core). Creates an identity through onboarding, creates a server, posts
 // two messages, restarts the app and checks the messages are still there.
-// Screenshots go to ui/screenshots/9x-real-core-*.png.
+// Screenshots go to ui/screenshots/20x-real-core-*.png.
 //
 // Runs in desktop's real-core container (a session D-Bus and an unlocked
 // gnome-keyring for the core's keychain). Build ui/dist and desktop/.core/mvs-core
@@ -72,7 +72,7 @@ await page.getByLabel('שם תצוגה').waitFor({ timeout: 30_000 });
 await page.getByLabel('שם תצוגה').fill('מורן');
 await page.getByRole('button', { name: 'סיום' }).click();
 await page.getByRole('heading', { name: 'ברוכים הבאים' }).waitFor({ timeout: 30_000 });
-await shot(page, '90-real-core-home');
+await shot(page, '200-real-core-home');
 
 await page.getByRole('button', { name: /יצירת שרת/ }).click();
 await page.getByLabel('שם השרת').fill('ערב בדיקות');
@@ -90,7 +90,7 @@ for (const text of ['ההודעה הראשונה דרך הליבה האמיתי�
 }
 const alert = await page.locator('#composer-status[role=alert]').textContent().catch(() => null);
 if (alert) problems.push(`composer error after sending: ${alert}`);
-await shot(page, '91-real-core-chat');
+await shot(page, '201-real-core-chat');
 await app.close();
 
 // ---- second run: the messages are still there ------------------------------------
@@ -99,7 +99,7 @@ await page.getByRole('button', { name: /ערב בדיקות/ }).first().click({ 
 for (const text of ['ההודעה הראשונה דרך הליבה האמיתית', 'lol זה עובד, וגם שומר אחרי הפעלה מחדש']) {
   await page.getByText(text).waitFor({ timeout: 30_000 }).catch(() => problems.push(`after restart: "${text}" missing`));
 }
-await shot(page, '92-real-core-after-restart');
+await shot(page, '202-real-core-after-restart');
 await app.close();
 
 if (problems.length) {
