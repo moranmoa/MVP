@@ -6,6 +6,9 @@
 //! [`Resolver`] reaches the same result incrementally, one arriving record at a
 //! time; `resolve` stays the reference it is tested against.
 //!
+//! Channel records are judged against the resolved control log by
+//! [`check_channel`] (see the `channel` module).
+//!
 //! Rules:
 //! - The genesis author is the owner and can't be demoted or kicked.
 //! - Only the genesis of the record's own server counts: the server ID is
@@ -51,7 +54,12 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
 pub use records::{ChannelId, PublicKey, Record, RecordId, ServerId};
 use records::{Draft, Kind, RecordError, Scope, SigningKey, GENESIS_NONCE_LEN, MAX_CUT_ENTRIES};
 
+mod channel;
 mod incremental;
+pub use channel::{
+    check_channel, check_channel_with, message_text_ok, privileged_only, witness, ChannelGraph,
+    Refusal, Removal, Verdict, Void, VoidRule, MAX_MESSAGE_CODE_POINTS,
+};
 pub use incremental::{Inserted, Resolver, Stats, MAX_PENDING};
 
 /// An actor is identified by their Ed25519 public key.

@@ -731,6 +731,56 @@ impl Resolver {
         seen
     }
 
+    /// The server this resolver holds.
+    pub(crate) fn server(&self) -> ServerId {
+        self.server
+    }
+
+    /// The position just after the latest of `deps` in the linear order, or
+    /// the deps that haven't joined the log yet.
+    pub(crate) fn position_after(&self, deps: &[RecordId]) -> Result<usize, Vec<RecordId>> {
+        let missing: Vec<RecordId> =
+            deps.iter().filter(|dep| !self.pos.contains_key(*dep)).copied().collect();
+        if !missing.is_empty() {
+            return Err(missing);
+        }
+        Ok(deps.iter().map(|dep| self.pos[dep] + 1).max().unwrap_or(0))
+    }
+
+    /// The final pass's state just before position `at`.
+    pub(crate) fn view_at(&self, at: usize) -> impl View + '_ {
+        self.at(at)
+    }
+
+    /// The accepted revokes and kicks of `target`, with their record IDs.
+    pub(crate) fn removals_of(&self, target: Actor) -> impl Iterator<Item = (RecordId, &Action)> {
+        self.touch.get(&target).into_iter().flatten().filter_map(move |id| {
+            let action = self.actions[id].as_ref()?;
+            let is_removal = action.is_removal() && action.target() == Some(target);
+            (is_removal && self.state.accepted.contains(id)).then_some((*id, action))
+        })
+    }
+
+    /// Whether the control record `ancestor` is one of `of`'s ancestors, or
+    /// `of` itself. Ancestors come earlier in the linear order, so the walk
+    /// skips everything before `ancestor`.
+    pub(crate) fn is_control_ancestor(&self, ancestor: RecordId, of: &[RecordId]) -> bool {
+        let Some(&floor) = self.pos.get(&ancestor) else {
+            return false;
+        };
+        let mut seen = HashSet::new();
+        let mut stack: Vec<RecordId> = of.to_vec();
+        while let Some(next) = stack.pop() {
+            if next == ancestor {
+                return true;
+            }
+            if self.pos.get(&next).is_some_and(|pos| *pos > floor) && seen.insert(next) {
+                stack.extend_from_slice(self.known[&next].deps());
+            }
+        }
+        false
+    }
+
     fn at(&self, at: usize) -> AtPosition<'_> {
         AtPosition { resolver: self, at }
     }
