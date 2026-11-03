@@ -131,6 +131,12 @@ impl Core {
             let phrase = inner.vault.open().map_err(vault_error)?;
             inner.me = Some(inner.load_me(phrase)?);
             unlock_cipher(&ports, inner.me.as_ref());
+            // GAP-4: every server opened for sync before any command can
+            // publish to it (the sync loop also reopens them each round).
+            for server in inner.db.servers()? {
+                inner.load(server)?;
+                inner.open_sync(&ports, server)?;
+            }
         }
         Ok(Core { inner: Mutex::new(inner), ports, app_version: config.app_version })
     }
@@ -391,7 +397,6 @@ impl Core {
             let invite = sign(2, vec![general.id()], &model::FIRST_INVITE)?;
             let profile =
                 sign(3, vec![invite.id()], &model::profile_action(&me.profile.display_name))?;
-            let me_key = me.key();
             inner.logs.insert(server, Log::new(server, []));
             // GAP-4: a fresh sync secret, sealed, and sync opened with it
             // before anything is published.
@@ -1228,6 +1233,7 @@ impl Inner {
         Ok(out)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn join(
         &mut self,
         ports: &Ports,

@@ -216,7 +216,12 @@ fn a_genesis_must_belong_to_its_server_id() {
 
     let joiner = world.peer();
     sign_up(&joiner, "Joiner");
-    let link = format!("mvs://join/{}/{}", hex::encode(forged_id.as_bytes()), "00".repeat(32));
+    let link = format!(
+        "mvs://join/{}/{}/{}",
+        hex::encode(forged_id.as_bytes()),
+        "00".repeat(32),
+        "00".repeat(32)
+    );
     joiner.core.join_server(&link).unwrap();
     assert!(matches!(
         joiner.events.take().last(),
@@ -227,7 +232,12 @@ fn a_genesis_must_belong_to_its_server_id() {
     // Unknown server, and a link that isn't one.
     joiner
         .core
-        .join_server(&format!("mvs://join/{}/{}", "ab".repeat(32), "00".repeat(32)))
+        .join_server(&format!(
+            "mvs://join/{}/{}/{}",
+            "ab".repeat(32),
+            "00".repeat(32),
+            "00".repeat(32)
+        ))
         .unwrap();
     assert!(matches!(
         joiner.events.take().last(),
@@ -252,8 +262,12 @@ fn hostile_server_records_are_refused() {
         let genesis =
             authority::sign_genesis(&mallory, [metadata.len() as u8; 16], 1, metadata).unwrap();
         world.network.publish(&genesis);
-        let link =
-            format!("mvs://join/{}/{}", hex::encode(genesis.server().as_bytes()), "00".repeat(32));
+        let link = format!(
+            "mvs://join/{}/{}/{}",
+            hex::encode(genesis.server().as_bytes()),
+            "00".repeat(32),
+            "00".repeat(32)
+        );
         joiner.core.join_server(&link).unwrap();
         assert!(matches!(
             joiner.events.take().last(),
@@ -285,7 +299,7 @@ fn hostile_server_records_are_refused() {
     // A real server with an invite ID it never issued: the join is refused,
     // nothing is stored or sent.
     let sent = world.network.fetch(server_key).len();
-    let bogus = format!("mvs://join/{}/{}", server.id, "11".repeat(32));
+    let bogus = format!("mvs://join/{}/{}/{}", server.id, "11".repeat(32), "00".repeat(32));
     joiner.core.join_server(&bogus).unwrap();
     assert!(matches!(
         joiner.events.take().last(),

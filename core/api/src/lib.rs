@@ -9,8 +9,8 @@
 //! group encryption sit behind [`Network`] and [`GroupCipher`] until their
 //! crates are merged.
 
-mod chat;
 mod access;
+mod chat;
 pub mod crypto;
 mod datadir;
 mod db;

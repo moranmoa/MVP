@@ -206,6 +206,8 @@ mod tests {
         let net = SyncNetwork::start(relay, &dir, Arc::new(MemberGate::new())).unwrap();
         let owner = SigningKey::from_bytes(&[4; 32]);
         let genesis = authority::sign_genesis(&owner, [1; 16], 1, b"{}").unwrap();
+        // GAP-4: nothing is synced, or published, for a server not opened.
+        net.open_server(genesis.server(), &[7; 32], &BTreeSet::new());
         net.publish(&genesis);
         let other = ServerId::from_bytes([8; 32]);
         assert_eq!(net.read(&log_name(other, Scope::Control)), Vec::<Record>::new());

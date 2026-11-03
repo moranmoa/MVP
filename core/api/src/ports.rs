@@ -108,7 +108,12 @@ pub trait Network: Send + Sync {
     /// GAP-4: sync `server` members-only, with its secret, and these
     /// channels (the ones authority knows). Called at load and whenever
     /// the channels change; opening again is harmless.
-    fn open_server(&self, server: ServerId, secret: &[u8; 32], channels: &BTreeSet<records::ChannelId>) {
+    fn open_server(
+        &self,
+        server: ServerId,
+        secret: &[u8; 32],
+        channels: &BTreeSet<records::ChannelId>,
+    ) {
         let _ = (server, secret, channels);
     }
 }
