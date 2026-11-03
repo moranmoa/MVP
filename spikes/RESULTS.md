@@ -50,7 +50,7 @@ encoding.
 | Mobile (phase 3) needs another shell | `ui/` is a plain web app: Tauri 2 mobile or Capacitor can host the same UI; Android WebView and iOS WKWebView do have WebRTC |
 | CPU per voice participant (~32% of a core on this PC, 6-person mesh) | Native engine inside the core later; it interoperates with Chromium peers already (mixed rooms below) |
 | Licences | Electron is MIT; Chromium is BSD plus third-party; `ffmpeg.dll` is LGPL, dynamically linked and unmodified, which the policy allows |
-| The electron-builder `.deb` misses `libasound2t64` on Debian 13 (the app does not start without it) | Add it to `linux.debian.depends` when the real package is made |
+| The electron-builder `.deb` misses `libasound2t64` on Debian 13 (the app does not start without it) | Declared in `build.deb.depends` (done in the spike package; keep it in the real one) |
 
 ## What was measured and what was simulated
 
@@ -234,11 +234,36 @@ removed at least twice) and the Debian 13 images above.
 | Local data after a silent uninstall | **kept** (`%LOCALAPPDATA%\dev.mvp.shellspike.tauri`, WebView2 profile) | **kept** (`%APPDATA%\shell-spike-electron`) |
 | Ask keep / delete data on uninstall | built in: Tauri's NSIS uninstaller has a "delete application data" checkbox (interactive only) | not built in: `nsis.deleteAppDataOnUninstall` deletes without asking; a prompt needs a custom `nsis.include` script |
 | OS keychain entry | not touched by either uninstaller | not touched |
-| Linux `.deb` | needs root (`sudo apt install ./x.deb`, `sudo apt remove`); not per-user | same; also must add `libasound2t64` to its dependencies |
+| Linux `.deb` | needs root (`sudo apt install ./x.deb`, `sudo apt remove`); not per-user | same (the measured build lacked `libasound2t64`; fixed since) |
 | Linux per-user | AppImage: one file, no install; uninstall = delete it; data in `~/.local/share/<identifier>` stays | AppImage: same; data in `~/.config/<name>` stays |
 
 The spike shells hold only mock data; the keep / delete prompt and the
 keychain rule belong to the real packages (B1 / T12).
+
+What each package registers, found by diffing the per-user registry, Start
+menu, desktop and data folders before and after install + one launch, and
+again after uninstall (Windows), and from `dpkg-deb -c` plus one launch
+(Debian 13):
+
+| | Tauri | Electron |
+| --- | --- | --- |
+| `mvs://` URL handler | none | none |
+| Autostart | none (no `HKCU\...\Run` value, no `~/.config/autostart` entry) | none |
+| File associations / MIME types | none | none |
+| Windows uninstall key | `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\ShellSpikeTauri` (`UninstallString` only, no `QuietUninstallString`) | `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\169df8e2-50f9-5fea-b18c-9805ad553a53` (`QuietUninstallString` = `"...\Uninstall ShellSpikeElectron.exe" /currentuser /S`) |
+| Other Windows registry | none | `HKCU\Software\169df8e2-50f9-5fea-b18c-9805ad553a53` (install location) |
+| Windows shortcuts | Start menu and desktop `ShellSpikeTauri.lnk` | Start menu and desktop `ShellSpikeElectron.lnk` |
+| Linux files | `/usr/bin/shell-spike-tauri`, `/usr/share/applications/ShellSpikeTauri.desktop` | `/opt/ShellSpikeElectron/`, `/usr/share/applications/shell-spike-electron.desktop`, `/usr/bin/shell-spike-electron` via `/etc/alternatives` |
+| Local data, Windows | `%LOCALAPPDATA%\dev.mvp.shellspike.tauri` (WebView2 profile) | `%APPDATA%\shell-spike-electron` |
+| Local data, Linux | `~/.local/share/dev.mvp.shellspike.tauri` | `~/.config/shell-spike-electron` (+ `~/.local/share/pki`, Chromium's NSS database) |
+| Left after uninstall | only the local data folder | only the local data folder |
+| Keychain entry | none: the mock core keeps its account in `localStorage`; the real identity's service / account name comes from the core (identity team) | none |
+
+All six packages for the T12 check are built by
+`spikes/shell/build-packages.sh [output dir]` (Docker only; exits non-zero
+if any is missing): `shell-{tauri,electron}-windows-x64-setup.exe`,
+`shell-{tauri,electron}-linux-amd64.deb` and `.AppImage`. The Electron
+`.deb` now declares `libasound2t64 | libasound2`.
 
 ## Reproduce
 
