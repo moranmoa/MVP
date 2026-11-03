@@ -8,6 +8,7 @@ use records::{ChannelId, Kind, PublicKey, Record, RecordId, Scope, ServerId, MAX
 use serde::{Deserialize, Serialize};
 
 use crate::types::{AgeRestriction, ErrorCode, ProfileInput, Role};
+use zeroize::Zeroizing;
 
 // BLAKE3 derive_key contexts. Frozen for the alpha.
 const DEFAULT_CHANNEL_CTX: &str = "mvs 2026-11 default channel id v1";
@@ -134,14 +135,29 @@ pub(crate) struct GenesisBody {
 // records (relays too) until control-log content is encrypted.
 // TODO(profiles): updateProfile re-posts it to every server.
 
-pub(crate) fn invite_link(server: ServerId, invite: RecordId) -> String {
-    format!("{INVITE_PREFIX}{}/{}", hex_id(server.as_bytes()), hex_id(invite.as_bytes()))
+/// `mvs://join/<server>/<invite>/<secret>`, all 64 hex. The secret (GAP-4)
+/// is a bearer credential: never logged, only copied by the user.
+pub(crate) fn invite_link(server: ServerId, invite: RecordId, secret: &[u8; 32]) -> String {
+    format!(
+        "{INVITE_PREFIX}{}/{}/{}",
+        hex_id(server.as_bytes()),
+        hex_id(invite.as_bytes()),
+        hex::encode(secret)
+    )
 }
 
-/// `(server, invite)` from an invite link.
-pub(crate) fn parse_invite_link(link: &str) -> Option<(ServerId, RecordId)> {
-    let (server, invite) = link.strip_prefix(INVITE_PREFIX)?.split_once('/')?;
-    Some((ServerId::from_bytes(parse_hex32(server)?), RecordId::from_bytes(parse_hex32(invite)?)))
+/// `(server, invite, secret)` from an invite link; `None` without all three.
+pub(crate) fn parse_invite_link(link: &str) -> Option<(ServerId, RecordId, Zeroizing<[u8; 32]>)> {
+    let mut parts = link.strip_prefix(INVITE_PREFIX)?.split('/');
+    let (server, invite, secret) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((
+        ServerId::from_bytes(parse_hex32(server)?),
+        RecordId::from_bytes(parse_hex32(invite)?),
+        Zeroizing::new(parse_hex32(secret)?),
+    ))
 }
 
 /// The first invite a new server gets: no expiry, no use limit.

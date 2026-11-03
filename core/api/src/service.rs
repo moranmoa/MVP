@@ -13,6 +13,7 @@ use identity::{PhraseError, RecoveryPhrase, Vault, VaultError, VaultState};
 use rand_core::{OsRng, RngCore};
 use records::{ChannelId, Draft, Kind, PublicKey, Record, RecordId, Scope, ServerId};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::chat;
 use crate::db::Db;
@@ -138,6 +139,7 @@ impl Core {
     /// secret and every channel key. TODO(app lock): the commands.
     pub fn lock_keys(&self) {
         self.ports.cipher.lock();
+        self.ports.network.lock();
     }
 
     /// After the app lock: the cipher gets our secret back. The next read or
@@ -327,7 +329,7 @@ impl Core {
         let mut out = Vec::new();
         for id in inner.db.servers()? {
             inner.load(id)?;
-            out.push(inner.view(id)?.summary(inner.me.as_ref().map(Me::key)));
+            out.push(inner.summary(id)?);
         }
         Ok(out)
     }
@@ -391,12 +393,18 @@ impl Core {
                 sign(3, vec![invite.id()], &model::profile_action(&me.profile.display_name))?;
             let me_key = me.key();
             inner.logs.insert(server, Log::new(server, []));
+            // GAP-4: a fresh sync secret, sealed, and sync opened with it
+            // before anything is published.
+            let mut secret = Zeroizing::new([0u8; 32]);
+            OsRng.fill_bytes(secret.as_mut());
+            inner.save_secret(server, &secret)?;
+            ports.network.open_server(server, &secret, &inner.known(server)?);
             for record in [genesis, general, invite, profile] {
                 ports.network.publish(&record);
                 inner.store(server, record)?;
             }
             inner.db.add_server(server, ports.clock.now_ms())?;
-            let summary = inner.view(server)?.summary(Some(me_key));
+            let summary = inner.summary(server)?;
             events.push(Event::ServerAdded(summary.clone()));
             Ok(summary)
         })
@@ -405,16 +413,19 @@ impl Core {
     /// Resolves with the first status; the outcome follows as `join.status`.
     pub fn join_server(&self, link: &str) -> CoreResult<JoinStatus> {
         let link = link.trim().to_owned();
-        let Some((server, invite)) = model::parse_invite_link(&link) else {
+        let Some((server, invite, secret)) = model::parse_invite_link(&link) else {
             return Ok(JoinStatus::Invalid { link });
         };
         let searching = JoinStatus::Searching { link: link.clone() };
         self.ports.events.emit(&Event::JoinStatus(searching.clone()));
+        // GAP-4: only the secret lets us ask for the server's logs.
+        let general = BTreeSet::from([model::default_channel(server)]);
+        self.ports.network.open_server(server, &secret, &general);
         // Fetch without the lock, so UI commands don't wait on the network.
         let fetched: Vec<Record> =
             self.ports.network.fetch(server).into_iter().filter(|r| r.server() == server).collect();
         self.run(|inner, ports, events| {
-            let status = inner.join(ports, server, invite, &link, fetched, events)?;
+            let status = inner.join(ports, server, invite, &secret, &link, fetched, events)?;
             events.push(Event::JoinStatus(status));
             Ok(searching)
         })
@@ -641,11 +652,17 @@ impl Core {
     /// crate's push and pull instead of a command.
     pub fn sync_now(&self) -> CoreResult<()> {
         let servers = {
-            let inner = self.lock();
+            let mut inner = self.lock();
             if inner.me.is_none() {
                 return Ok(());
             }
-            inner.db.servers()?
+            let servers = inner.db.servers()?;
+            // GAP-4: (re)open each server with its secret and channels first.
+            for server in &servers {
+                inner.load(*server)?;
+                inner.open_sync(&self.ports, *server)?;
+            }
+            servers
         };
         // Fetch without the lock, so UI commands don't wait on the network.
         let fetched: Vec<(ServerId, Vec<Record>)> =
@@ -768,6 +785,35 @@ impl Core {
 }
 
 impl Inner {
+    /// This server's sync secret, from the sealed store.
+    fn secret(&self, server: ServerId) -> CoreResult<Option<Zeroizing<[u8; 32]>>> {
+        let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?;
+        let key = *me.identity.storage_key().expose_secret();
+        self.db.load_server_secret(&key, server)
+    }
+
+    fn save_secret(&self, server: ServerId, secret: &[u8; 32]) -> CoreResult<()> {
+        let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?;
+        let key = *me.identity.storage_key().expose_secret();
+        self.db.save_server_secret(&key, server, secret)
+    }
+
+    fn summary(&self, server: ServerId) -> CoreResult<ServerSummary> {
+        let me = self.me.as_ref().map(Me::key);
+        let secret = self.secret(server)?;
+        Ok(self.view(server)?.summary(me, secret.as_deref()))
+    }
+
+    /// Syncs a loaded server members-only (GAP-4) with its secret and the
+    /// channels authority knows. Harmless to repeat; a server without a
+    /// stored secret (from before GAP-4) isn't synced.
+    fn open_sync(&self, ports: &Ports, server: ServerId) -> CoreResult<()> {
+        if let Some(secret) = self.secret(server)? {
+            ports.network.open_server(server, &secret, &self.known(server)?);
+        }
+        Ok(())
+    }
+
     /// The channels authority knows for a loaded server.
     fn known(&self, server: ServerId) -> CoreResult<BTreeSet<ChannelId>> {
         let log = self.logs.get(&server).ok_or(ErrorCode::Internal)?;
@@ -1187,6 +1233,7 @@ impl Inner {
         ports: &Ports,
         server: ServerId,
         invite: RecordId,
+        secret: &[u8; 32],
         link: &str,
         fetched: Vec<Record>,
         events: &mut Events,
@@ -1250,19 +1297,23 @@ impl Inner {
         for record in &mine {
             ports.network.publish(record);
         }
+        self.save_secret(server, secret)?;
         self.db.add_server(server, ports.clock.now_ms())?;
-        events.push(Event::ServerAdded(self.view(server)?.summary(Some(key))));
+        events.push(Event::ServerAdded(self.summary(server)?));
         Ok(JoinStatus::Joined { link, server_id: server_hex })
     }
 }
 
 impl ServerView<'_> {
     /// `me` picks my own invite for the link when I have one.
-    fn summary(&self, me: Option<PublicKey>) -> ServerSummary {
+    /// `secret`: the server's sync secret, which the link carries (GAP-4).
+    fn summary(&self, me: Option<PublicKey>, secret: Option<&[u8; 32]>) -> ServerSummary {
         let id = model::hex_id(self.id.as_bytes());
-        // No usable invite left: no link, until someone makes a new one.
-        let invite_link =
-            self.invite(me).map(|invite| model::invite_link(self.id, invite)).unwrap_or_default();
+        // No usable invite left, or no secret: no link.
+        let invite_link = match (self.invite(me), secret) {
+            (Some(invite), Some(secret)) => model::invite_link(self.id, invite, secret),
+            _ => String::new(),
+        };
         ServerSummary {
             name: self.genesis.name.clone(),
             initials: model::initials(&self.genesis.name),
@@ -1340,5 +1391,7 @@ fn cipher_error(error: CipherError) -> CoreError {
 fn unlock_cipher(ports: &Ports, me: Option<&Me>) {
     if let Some(me) = me {
         ports.cipher.unlock(Arc::new(MemberSecret::new(me.identity.signing_key())));
+        // GAP-4: peer bindings with the identity key.
+        ports.network.unlock(me.identity.signing_key());
     }
 }
