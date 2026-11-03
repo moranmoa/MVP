@@ -5,7 +5,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const NOW: &str = "1800000000";
+fn now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+}
 
 fn updater(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_updater")).args(args).output().unwrap()
@@ -51,8 +53,8 @@ fn write_body(dir: &TempDir, artifact: &Path, version: &str, revoked: &[&str]) -
         "format": 1,
         "channel": "stable",
         "version": version,
-        "issued_at": 1_799_990_000u64,
-        "expires_at": 1_800_600_000u64,
+        "issued_at": now() - 100,
+        "expires_at": now() + 7 * 86_400,
         "artifacts": { "linux-x86_64": entry },
         "revoked": revoked,
     });
@@ -77,26 +79,26 @@ fn two_of_three_release_flow() {
     let manifest = dir.path("manifest.json");
 
     ok(&["sign-manifest", "--key", &dir.path("a.key"), "--body", &body, "--out", &manifest]);
-    let err = fails(&["verify", "--manifest", &manifest, "--root", &root, "--now", NOW]);
+    let err = fails(&["verify", "--manifest", &manifest, "--root", &root]);
     assert!(err.contains("1 of 2"), "{err}");
 
-    ok(&["sign-manifest", "--key", &dir.path("c.key"), "--manifest", &manifest, "--out", &manifest]);
-    let out = ok(&["verify", "--manifest", &manifest, "--root", &root, "--now", NOW,
+    ok(&["sign-manifest", "--key", &dir.path("c.key"), "--manifest", &manifest, "--expect-version", "1.1.0", "--out", &manifest]);
+    let out = ok(&["verify", "--manifest", &manifest, "--root", &root,
                    "--installed", "1.0.0", "--artifact", artifact.to_str().unwrap(), "--platform", "linux-x86_64"]);
     assert!(out.contains("update 1.0.0 -> 1.1.0 allowed"), "{out}");
     assert!(out.contains("matches linux-x86_64"), "{out}");
 
     // Downgrade, revoked install and expiry are refused.
-    fails(&["verify", "--manifest", &manifest, "--root", &root, "--now", NOW, "--installed", "1.2.0"]);
-    let out = ok(&["verify", "--manifest", &manifest, "--root", &root, "--now", NOW, "--installed", "1.0.1"]);
+    fails(&["verify", "--manifest", &manifest, "--root", &root, "--installed", "1.2.0"]);
+    let out = ok(&["verify", "--manifest", &manifest, "--root", &root, "--installed", "1.0.1"]);
     assert!(out.contains("installed version 1.0.1 is revoked"), "{out}");
-    let err = fails(&["verify", "--manifest", &manifest, "--root", &root, "--now", "1800600000"]);
+    let err = fails(&["verify", "--manifest", &manifest, "--root", &root, "--now", &(now() + 8 * 86_400).to_string()]);
     assert!(err.contains("expired"), "{err}");
 
     // A tampered artifact is refused.
     let bad = dir.0.join("bad.bin");
     fs::write(&bad, b"release 1.1.0 byteZ").unwrap();
-    let err = fails(&["verify", "--manifest", &manifest, "--root", &root, "--now", NOW,
+    let err = fails(&["verify", "--manifest", &manifest, "--root", &root,
                       "--artifact", bad.to_str().unwrap(), "--platform", "linux-x86_64"]);
     assert!(err.contains("hash"), "{err}");
 }
@@ -112,7 +114,7 @@ fn single_key_closed_alpha_flow() {
     let manifest = dir.path("m.json");
     ok(&["sign-manifest", "--key", &dir.path("root.key"), "--body", &write_body(&dir, &artifact, "0.1.0", &[]),
          "--out", &manifest]);
-    ok(&["verify", "--manifest", &manifest, "--root", &root, "--now", NOW]);
+    ok(&["verify", "--manifest", &manifest, "--root", &root]);
 }
 
 #[test]
@@ -139,4 +141,79 @@ fn secret_key_is_owner_only() {
     ok(&["keygen", "--out", dir.0.to_str().unwrap()]);
     let mode = fs::metadata(dir.0.join("root.key")).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
+}
+
+#[test]
+fn co_signer_must_name_the_version_they_sign() {
+    let dir = TempDir::new("cosign");
+    for n in ["a", "b"] {
+        ok(&["keygen", "--out", dir.0.to_str().unwrap(), "--name", n]);
+    }
+    let artifact = dir.0.join("app.bin");
+    fs::write(&artifact, b"x").unwrap();
+    let manifest = dir.path("m.json");
+    ok(&["sign-manifest", "--key", &dir.path("a.key"), "--body", &write_body(&dir, &artifact, "2.0.0", &[]),
+         "--out", &manifest]);
+    let (b_key, out) = (dir.path("b.key"), dir.path("m2.json"));
+    let co = |extra: &[&str]| {
+        let mut args = vec!["sign-manifest", "--key", &b_key, "--manifest", &manifest, "--out", &out];
+        args.extend_from_slice(extra);
+        updater(&args)
+    };
+    assert!(!co(&[]).status.success(), "co-signing without --expect-version must fail");
+    let wrong = co(&["--expect-version", "1.9.0"]);
+    assert!(!wrong.status.success());
+    assert!(String::from_utf8_lossy(&wrong.stderr).contains("not signing"));
+    let right = co(&["--expect-version", "2.0.0"]);
+    assert!(right.status.success());
+    assert!(String::from_utf8_lossy(&right.stdout).contains("version 2.0.0"), "body is shown before signing");
+}
+
+#[test]
+fn refuses_to_sign_a_body_from_the_future() {
+    let dir = TempDir::new("future");
+    ok(&["keygen", "--out", dir.0.to_str().unwrap()]);
+    let body = serde_json::json!({
+        "format": 1, "channel": "stable", "version": "1.0.0",
+        "issued_at": now() + 86_400, "expires_at": now() + 8 * 86_400,
+        "artifacts": { "linux-x86_64": { "sha256": "ab".repeat(32), "size": 1 } },
+    });
+    let path = dir.path("body.json");
+    fs::write(&path, body.to_string()).unwrap();
+    let err = fails(&["sign-manifest", "--key", &dir.path("root.key"), "--body", &path, "--out", &dir.path("m.json")]);
+    assert!(err.contains("clock"), "{err}");
+}
+
+#[test]
+fn one_key_to_two_of_three_rotation_flow() {
+    let dir = TempDir::new("rotate");
+    for n in ["alpha", "a", "b", "c"] {
+        ok(&["keygen", "--out", dir.0.to_str().unwrap(), "--name", n]);
+    }
+    let v1 = dir.path("root-v1.json");
+    ok(&["make-root", "--threshold", "1", "--pub", &dir.path("alpha.pub"), "--out", &v1]);
+    let v2 = dir.path("root-v2.json");
+    ok(&["make-root", "--version", "2", "--threshold", "2", "--pub", &dir.path("a.pub"), "--pub", &dir.path("b.pub"),
+         "--pub", &dir.path("c.pub"), "--out", &v2]);
+    let rot = dir.path("rotation-2.json");
+    ok(&["sign-root", "--key", &dir.path("alpha.key"), "--root", &v2, "--out", &rot]);
+    for k in ["a", "b"] {
+        ok(&["sign-root", "--key", &dir.path(&format!("{k}.key")), "--rotation", &rot, "--expect-root-version", "2",
+             "--out", &rot]);
+    }
+
+    let artifact = dir.0.join("app.bin");
+    fs::write(&artifact, b"x").unwrap();
+    let body = write_body(&dir, &artifact, "1.0.0", &[]);
+    let old_only = dir.path("old.json");
+    ok(&["sign-manifest", "--key", &dir.path("alpha.key"), "--body", &body, "--out", &old_only]);
+    // Before the rotation the alpha key works; after it, it does not.
+    ok(&["verify", "--manifest", &old_only, "--root", &v1]);
+    fails(&["verify", "--manifest", &old_only, "--root", &v1, "--root-update", &rot]);
+
+    let new = dir.path("new.json");
+    ok(&["sign-manifest", "--key", &dir.path("b.key"), "--body", &body, "--out", &new]);
+    ok(&["sign-manifest", "--key", &dir.path("c.key"), "--manifest", &new, "--expect-version", "1.0.0", "--out", &new]);
+    let out = ok(&["verify", "--manifest", &new, "--root", &v1, "--root-update", &rot]);
+    assert!(out.contains("trust root now v2"), "{out}");
 }

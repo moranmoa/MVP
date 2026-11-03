@@ -34,6 +34,12 @@ pub enum Error {
     PreviouslyFailed(Version),
     /// A health report arrived with no trial boot in progress.
     NoTrial,
+    /// A root rotation skipped or repeated a version.
+    RootVersion { expected: u64, found: u64 },
+    /// The artifact was verified for another platform.
+    WrongPlatform { expected: String, found: String },
+    /// A persisted state file is inconsistent (corrupted or tampered with).
+    InvalidState(String),
     Io(String),
 }
 
@@ -68,6 +74,13 @@ impl fmt::Display for Error {
             }
             Error::PreviouslyFailed(v) => write!(f, "version {v} already failed its health check"),
             Error::NoTrial => write!(f, "no trial boot in progress"),
+            Error::RootVersion { expected, found } => {
+                write!(f, "root update has version {found}, expected {expected}")
+            }
+            Error::WrongPlatform { expected, found } => {
+                write!(f, "artifact is for platform {found:?}, this install is {expected:?}")
+            }
+            Error::InvalidState(why) => write!(f, "invalid persisted state: {why}"),
             Error::Io(why) => write!(f, "i/o error: {why}"),
         }
     }
