@@ -4,6 +4,13 @@ name: Release
 # to build unsigned artifacts into a DRAFT pre-release. Nothing here holds or
 # needs the update root key: the owner signs manifest-body.json offline and
 # publishes the draft by hand (docs/release/RELEASING.md).
+#
+# Trust split (GAP-20): the build jobs run third-party code (crates, npm
+# packages, the Rust toolchain action) with a READ-ONLY token and no caches,
+# so neither a poisoned cache nor a compromised dependency can touch the
+# release. They hand their output over as workflow artifacts. Only the
+# `publish` job can write, and it runs nothing but GitHub's own actions, the
+# preinstalled gh/node and our own script.
 
 on:
   push:
@@ -21,69 +28,43 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_BUILD_JOBS: "4"
   TAG: ${{ github.ref_name }}
-  GH_TOKEN: ${{ github.token }}
-  GH_REPO: ${{ github.repository }}
   # Channel written into the manifest body. Closed alpha only, for now.
   CHANNEL: alpha
   # Binaries from core/ shipped in each platform archive.
   CORE_BINS: "updater spike-peer sync-peer"
 
-# Third-party actions are pinned to full commit SHAs, same as ci.yml.
+# Actions are pinned to full commit SHAs, same as ci.yml.
 
 jobs:
-  prepare:
-    name: draft pre-release
+  check:
+    name: check tag
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - id: version
-        name: Check tag format
         run: |
           if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
             echo "::error::tag $TAG is not vMAJOR.MINOR.PATCH (no suffixes: core/updater rejects them)"
             exit 1
           fi
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-      - name: Create draft (or reuse it on a re-run)
-        run: |
-          if gh release view "$TAG" --json isDraft --jq .isDraft > is_draft 2>/dev/null; then
-            if [ "$(cat is_draft)" != "true" ]; then
-              echo "::error::release $TAG is already published; refusing to replace its assets"
-              exit 1
-            fi
-            echo "draft $TAG exists, re-using it"
-            exit 0
-          fi
-          cat > notes.md <<EOF
-          **Closed alpha - unsigned build. Only install it if you were invited.**
-
-          Built by GitHub Actions from \`${GITHUB_SHA}\`. Check downloads against \`SHA256SUMS\`.
-          \`manifest.json\` (signed offline by the owner) is attached before this is published.
-          EOF
-          gh release create "$TAG" --draft --prerelease --verify-tag \
-            --title "MVS ${TAG} (closed alpha)" --notes-file notes.md
 
   ui:
     name: ui build
-    needs: prepare
+    needs: check
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     env:
-      VERSION: ${{ needs.prepare.outputs.version }}
+      VERSION: ${{ needs.check.outputs.version }}
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+      # No npm cache: release builds start clean.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
       - name: Licence policy (lockfile, before installing anything)
         working-directory: ui
         run: |
@@ -98,17 +79,21 @@ jobs:
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npm run build
-      - name: Upload
+      - name: Archive
         run: |
-          tar -czf "mvs-ui-${VERSION}.tar.gz" -C ui/dist .
-          gh release upload "$TAG" "mvs-ui-${VERSION}.tar.gz" --clobber
+          mkdir -p out
+          tar -czf "out/mvs-ui-${VERSION}.tar.gz" -C ui/dist .
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ui
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
 
   core:
     name: core ${{ matrix.platform }}
-    needs: [prepare, ui]
+    needs: [check, ui]
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -121,7 +106,7 @@ jobs:
           # Oldest still-supported runner = oldest glibc we link against.
           - { platform: linux-x86_64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, exe: "" }
     env:
-      VERSION: ${{ needs.prepare.outputs.version }}
+      VERSION: ${{ needs.check.outputs.version }}
     defaults:
       run:
         shell: bash
@@ -133,14 +118,17 @@ jobs:
         with:
           toolchain: "1.90"
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          workspaces: core
-          key: release-${{ matrix.target }}
+      # No rust-cache here on purpose (GAP-20): a cache written by any PR
+      # build could otherwise end up inside a release binary.
 
       - name: Build core
         working-directory: core
         run: cargo build --release --locked --target "${{ matrix.target }}" --bins
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ui
+          path: stage
 
       - name: Stage files
         run: |
@@ -149,7 +137,6 @@ jobs:
           for bin in $CORE_BINS; do
             cp "core/target/${{ matrix.target }}/release/${bin}${{ matrix.exe }}" "$stage/bin/"
           done
-          gh release download "$TAG" --pattern "mvs-ui-${VERSION}.tar.gz" --dir stage
           tar -xzf "stage/mvs-ui-${VERSION}.tar.gz" -C "$stage/ui"
           printf 'MVS %s (%s), closed alpha, UNSIGNED.\nBuilt from %s.\n' \
             "$VERSION" "${{ matrix.platform }}" "$GITHUB_SHA" > "$stage/README.txt"
@@ -163,9 +150,10 @@ jobs:
       # step below and delete the other one. Whatever it produces MUST be
       # renamed to dist/mvs-<version>-<platform>.zip|.tar.gz: that file name
       # is how manifest-body.mjs finds the updater artifact for a platform.
-      # Installers (.msi/.dmg/.AppImage) can be attached alongside it under
-      # any other name. All of it stays unsigned until code-signing certs
-      # exist (CSC_* / APPLE_* / TAURI_SIGNING_* secrets are not set).
+      # Installers (.msi/.dmg/.AppImage) can go into dist/ alongside it under
+      # any other name. This job has a read-only token: packaging tools must
+      # not need to write to the repo. All of it stays unsigned until
+      # code-signing certs exist (no CSC_* / APPLE_* / TAURI_SIGNING_* secrets).
       # ------------------------------------------------------------------
       - name: "[shell] Tauri bundle (sketch)"
         if: vars.MVS_SHELL == 'tauri'
@@ -211,29 +199,39 @@ jobs:
           fi
       # ------------------------------------------------------------------
 
-      - name: Upload
-        run: gh release upload "$TAG" dist/* --clobber
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: core-${{ matrix.platform }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
 
-  manifest:
-    name: checksums + unsigned manifest body
-    needs: [prepare, core]
+  publish:
+    # The only job with write access. It runs no third-party code: GitHub's
+    # own checkout/download-artifact actions, the runner's preinstalled gh
+    # and node, and .github/scripts/manifest-body.mjs (Node built-ins only).
+    name: draft pre-release
+    needs: [check, ui, core]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
-      VERSION: ${{ needs.prepare.outputs.version }}
+      VERSION: ${{ needs.check.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+          sparse-checkout: .github/scripts
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          node-version: "22"
-      - name: Download artifacts
-        run: gh release download "$TAG" --pattern "mvs-*" --dir dist
+          path: dist
+          merge-multiple: true
       - name: SHA256SUMS
         working-directory: dist
         run: |
+          ls -l
           sha256sum mvs-* > SHA256SUMS
           cat SHA256SUMS
       - name: manifest-body.json (unsigned)
@@ -241,8 +239,25 @@ jobs:
           node .github/scripts/manifest-body.mjs --version "$VERSION" --channel "$CHANNEL" \
             --dir dist --days 14 --out dist/manifest-body.json
           cat dist/manifest-body.json
-      - name: Upload
-        run: gh release upload "$TAG" dist/SHA256SUMS dist/manifest-body.json --clobber
+      - name: Create or update the draft
+        run: |
+          if gh release view "$TAG" --json isDraft --jq .isDraft > is_draft 2>/dev/null; then
+            if [ "$(cat is_draft)" != "true" ]; then
+              echo "::error::release $TAG is already published; refusing to replace its assets"
+              exit 1
+            fi
+            echo "draft $TAG exists (re-run), replacing its assets"
+          else
+            cat > notes.md <<EOF
+          **Closed alpha - unsigned build. Only install it if you were invited.**
+
+          Built by GitHub Actions from \`${GITHUB_SHA}\`. Check downloads against \`SHA256SUMS\`.
+          \`manifest.json\` (signed offline by the owner) is attached before this is published.
+          EOF
+            gh release create "$TAG" --draft --prerelease --verify-tag \
+              --title "MVS ${TAG} (closed alpha)" --notes-file notes.md
+          fi
+          gh release upload "$TAG" dist/* --clobber
       - name: Summary
         run: |
           {
