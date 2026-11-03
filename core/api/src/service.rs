@@ -331,27 +331,27 @@ impl Core {
 
     /// Rust addition (`revokeRole`): back to plain member.
     pub fn revoke_role(&self, server_id: &str, user_id: &str) -> CoreResult<()> {
-        self.control_action(server_id, Action::Revoke { target: parse_user(user_id)? })
+        self.control_action(server_id, Action::revoke(parse_user(user_id)?))
     }
 
     /// Allowed for moderators and up, against anyone ranked lower
     /// (`authority`'s rule; the mock only lets the owner kick).
     pub fn kick_member(&self, server_id: &str, user_id: &str) -> CoreResult<()> {
-        self.control_action(server_id, Action::Kick { target: parse_user(user_id)? })
+        self.control_action(server_id, Action::kick(parse_user(user_id)?))
     }
 
     // TODO(records B4):
-    // - Kick, Leave and Revoke carry a cut of up to 64 channel heads. Sync
-    //   channel heads first, then fill the cut, starting with the channels
-    //   where the target has records.
-    // - When an invite expires, send `InviteRevoke` automatically if we are
+    // - Kick, Leave and Revoke go out with an empty cut today (`Action::kick`,
+    //   `Action::revoke`). B4-4: fill it with up to 64 channel heads, syncing
+    //   them first, starting with the channels where the target has records.
+    // - When an invite expires, send `RevokeInvite` automatically if we are
     //   its inviter or a moderator and up.
     fn control_action(&self, server_id: &str, action: Action) -> CoreResult<()> {
         let server = parse_server(server_id)?;
         self.run(|inner, ports, events| {
             inner.load_mine(server)?;
             let me = inner.me.as_ref().ok_or(ErrorCode::NotFound)?;
-            if action == (Action::Kick { target: me.key() }) {
+            if matches!(&action, Action::Kick { target, .. } if *target == me.key()) {
                 return Err(ErrorCode::NotAllowed.into());
             }
             let view = inner.view(server)?;
