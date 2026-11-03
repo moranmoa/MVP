@@ -420,6 +420,12 @@ from view rather than voided.
 - Any member can leak plaintext or keys.
 - The owner's home IP is public via the bootstrap domain (spec decision 24).
   Mitigation path: a rented bootstrap/relay (any cheap VPS) when that matters.
+- **Cloudflare in front of the relay's wss (#114).** It terminates TLS but
+  sees only Noise ciphertext; it does see which IPs connect, when and how
+  much. Accepted for DDoS protection and hiding the home IP. Condition: the
+  relay address always carries `/p2p/<relay peer id>` so Noise pins the
+  relay and the proxy can't stand in for it. Diversity fix: a second
+  bootstrap at another provider (GAP-9).
 - One update key in the closed alpha.
 - A window between a kick and its arrival during which messages are still
   readable by the kicked member (groupkeys README).
