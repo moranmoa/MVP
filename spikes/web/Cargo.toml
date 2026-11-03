@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["wire", "browser", "native"]
+
+# The browser bundle: small over fast.
+[profile.wasm]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Web peer spike</title>
+</head>
+<body>
+  <p id="status">loading wasm…</p>
+  <script type="module">
+    import init, { WebPeer } from './pkg/web_peer.js';
+    const started = performance.now();
+    await init();
+    // The harness drives the peer through these globals.
+    window.wasmInitMs = performance.now() - started;
+    window.WebPeer = WebPeer;
+    window.ready = true;
+    document.getElementById('status').textContent = `wasm ready in ${window.wasmInitMs.toFixed(0)} ms`;
+  </script>
+</body>
+</html>
