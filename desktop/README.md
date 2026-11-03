@@ -39,7 +39,7 @@ runs the real core (otherwise core commands answer `core-unavailable`);
 | Navigation and redirects off `app://mvs` blocked; `<webview>` attachment blocked | `will-navigate`, `will-redirect`, `will-attach-webview` | e2e |
 | No permissions (microphone, notifications, devices, screen capture) | `setPermissionRequestHandler` / `CheckHandler`, `setDevicePermissionHandler`, `setDisplayMediaRequestHandler` | unit + e2e |
 | Crash reporter on with uploads off | `crashReporter.start({ uploadToServer: false })` | – |
-| No default menu (so no DevTools) in packaged builds; `MVS_UI_DIR` only in a checkout | `main.js` | – (B1-3, packaged build) |
+| No default menu and `devTools: false` in packaged builds (and no `devtools://` requests); `MVS_UI_DIR` and `MVS_DEMO` only in a checkout; the link dialog shows the parsed URL (punycode) | `main.js` | – (B1-3, packaged build) |
 
 ## Core bridge (B1-2)
 
