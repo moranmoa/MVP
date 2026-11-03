@@ -2,17 +2,19 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use authority::Action;
+use groupkeys::MemberSecret;
 use identity::{PhraseError, RecoveryPhrase, Vault, VaultError, VaultState};
 use rand_core::{OsRng, RngCore};
-use records::{PublicKey, Record, RecordId, ServerId};
+use records::{ChannelId, Draft, Kind, PublicKey, Record, RecordId, Scope, ServerId};
 use serde::{Deserialize, Serialize};
 
+use crate::chat;
 use crate::db::Db;
 use crate::model::{self, GenesisBody, Log, ServerView};
-use crate::ports::{CipherOutcome, Ports, SharedSecrets};
+use crate::ports::{CipherError, CipherOutcome, GroupCipher, Ports, SharedSecrets};
 use crate::types::*;
 
 const DEFAULT_STORAGE_LIMIT: u64 = 5 * 1024 * 1024 * 1024;
@@ -114,8 +116,21 @@ impl Core {
         if inner.vault.state().map_err(vault_error)? == VaultState::Ready {
             let phrase = inner.vault.open().map_err(vault_error)?;
             inner.me = Some(inner.load_me(phrase)?);
+            unlock_cipher(&ports, inner.me.as_ref());
         }
         Ok(Core { inner: Mutex::new(inner), ports, app_version: config.app_version })
+    }
+
+    /// What the app lock and sign-out call: the group cipher drops our
+    /// secret and every channel key. TODO(app lock): the commands.
+    pub fn lock_keys(&self) {
+        self.ports.cipher.lock();
+    }
+
+    /// After the app lock: the cipher gets our secret back. The next read or
+    /// send replays what it lost (see `unlock_cipher`).
+    pub fn unlock_keys(&self) {
+        unlock_cipher(&self.ports, self.lock().me.as_ref());
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -147,7 +162,7 @@ impl Core {
     }
 
     pub fn create_identity(&self, input: NewIdentityInput) -> CoreResult<CreatedIdentity> {
-        self.run(|inner, _, events| {
+        self.run(|inner, ports, events| {
             if inner.me.is_some() {
                 return Err(ErrorCode::NotAllowed.into());
             }
@@ -166,6 +181,7 @@ impl Core {
             let words = phrase.words().iter().map(|w| (*w).to_owned()).collect();
             let identity = inner.identity_json(&me)?;
             inner.me = Some(me);
+            unlock_cipher(ports, inner.me.as_ref());
             events.push(progress(ProgressStep::Done, 100));
             Ok(CreatedIdentity { identity, words })
         })
@@ -255,7 +271,7 @@ impl Core {
     }
 
     pub fn restore_identity(&self, words: Vec<String>) -> CoreResult<Identity> {
-        self.run(|inner, _, _| {
+        self.run(|inner, ports, _| {
             if inner.me.is_some() {
                 return Err(ErrorCode::NotAllowed.into());
             }
@@ -267,6 +283,7 @@ impl Core {
             let me = inner.new_me(phrase, Profile::default())?;
             let identity = inner.identity_json(&me)?;
             inner.me = Some(me);
+            unlock_cipher(ports, inner.me.as_ref());
             Ok(identity)
         })
     }
@@ -464,6 +481,127 @@ impl Core {
         })
     }
 
+    // ---- messages ---------------------------------------------------------
+    //
+    // TODO(chat): replies, edit, delete, retry; channels other than the
+    // default one; auth_deps that always include our latest control heads
+    // (today: up to MAX_AUTH_DEPS of the current heads).
+
+    /// Seals `body` for the channel's members and sends it. The first
+    /// message of a channel, or the first after a removal, needs a key
+    /// rotation: a moderator or above makes one on the way; anyone else
+    /// gets `not-allowed` until one arrives.
+    pub fn send_message(
+        &self,
+        channel_id: &str,
+        body: &str,
+        reply_to: Option<&str>,
+    ) -> CoreResult<Message> {
+        if reply_to.is_some() {
+            return Err(ErrorCode::NotImplemented.into());
+        }
+        if body.trim().is_empty() || !authority::message_text_ok(body) {
+            return Err(ErrorCode::BadRequest.into());
+        }
+        self.run(|inner, ports, events| {
+            let (server, channel) = inner.find_channel(channel_id)?;
+            let cipher = &*ports.cipher;
+            let me = inner.me.as_ref().ok_or(ErrorCode::NotFound)?;
+            let key = me.key();
+            let view = inner.view(server)?;
+            let members = view.state.members.clone();
+            let may_rotate = view.state.role(key) >= authority::Role::Moderator;
+            let auth_deps = auth_deps(&view);
+            cipher.membership_changed(server, &members);
+            let log = inner.logs.get_mut(&server).ok_or(ErrorCode::Internal)?;
+            chat::sync_cipher(cipher, server, log);
+            let sealed = match cipher.encrypt(server, channel, body.as_bytes()) {
+                Err(CipherError::NoKey | CipherError::RotationRequired) if may_rotate => {
+                    let parts = cipher.rotate(server, channel, &members).map_err(cipher_error)?;
+                    // All parts or none, each signed once (see `GroupCipher::rotate`).
+                    let seq = chat::channel_seq(log, channel, &key);
+                    let deps = chat::channel_deps(log, channel);
+                    let mut signed = Vec::new();
+                    for (i, part) in parts.into_iter().enumerate() {
+                        signed.push(inner.sign_channel(
+                            server,
+                            channel,
+                            seq + i as u64,
+                            deps.clone(),
+                            auth_deps.clone(),
+                            ports.clock.now_ms(),
+                            Kind::KeyRotation,
+                            part,
+                        )?);
+                    }
+                    for record in signed {
+                        inner.store(server, record.clone())?;
+                        ports.network.publish(&record);
+                    }
+                    let log = inner.logs.get_mut(&server).ok_or(ErrorCode::Internal)?;
+                    chat::sync_cipher(cipher, server, log);
+                    cipher.encrypt(server, channel, body.as_bytes()).map_err(cipher_error)?
+                }
+                other => other.map_err(cipher_error)?,
+            };
+            let log = inner.logs.get(&server).ok_or(ErrorCode::Internal)?;
+            let seq = chat::channel_seq(log, channel, &key);
+            let deps = chat::channel_deps(log, channel);
+            let record = inner.sign_channel(
+                server,
+                channel,
+                seq,
+                deps,
+                auth_deps,
+                ports.clock.now_ms(),
+                Kind::Message,
+                sealed,
+            )?;
+            inner.store(server, record.clone())?;
+            ports.network.publish(&record);
+            let index = inner.message_count(cipher, server, channel)?.saturating_sub(1);
+            let message = message_json(&record, body, index, channel, Some(SendState::Sent));
+            events.push(Event::MessageAdded(message.clone()));
+            Ok(message)
+        })
+    }
+
+    pub fn get_message_count(&self, channel_id: &str) -> CoreResult<usize> {
+        let mut inner = self.lock();
+        let (server, channel) = inner.find_channel(channel_id)?;
+        inner.message_count(&*self.ports.cipher, server, channel)
+    }
+
+    /// Messages `start..end` (0-based, end exclusive) of the channel.
+    pub fn get_messages(
+        &self,
+        channel_id: &str,
+        start: usize,
+        end: usize,
+    ) -> CoreResult<MessageRange> {
+        let mut inner = self.lock();
+        let (server, channel) = inner.find_channel(channel_id)?;
+        let me = inner.me.as_ref().map(Me::key);
+        let shown = inner.shown(&*self.ports.cipher, server, channel)?;
+        let end = end.min(shown.len());
+        let start = start.min(end);
+        let messages = shown[start..end]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let mine = Some(s.record.author()) == me;
+                message_json(
+                    &s.record,
+                    &s.text,
+                    start + i,
+                    channel,
+                    mine.then_some(SendState::Sent),
+                )
+            })
+            .collect();
+        Ok(MessageRange { channel_id: channel_id.to_owned(), start, messages })
+    }
+
     /// Rust addition (`syncNow`): pulls every server's records from the
     /// network and reports what changed. TODO(sync): driven by the sync
     /// crate's push and pull instead of a command.
@@ -586,6 +724,61 @@ impl Core {
 }
 
 impl Inner {
+    /// The server of my default channel `channel_id`; `not-found` for any
+    /// other. Loads the server.
+    fn find_channel(&mut self, channel_id: &str) -> CoreResult<(ServerId, ChannelId)> {
+        let channel =
+            model::parse_hex32(channel_id).map(ChannelId::from_bytes).ok_or(ErrorCode::NotFound)?;
+        for server in self.db.servers()? {
+            if model::default_channel(server) == channel {
+                self.load(server)?;
+                return Ok((server, channel));
+            }
+        }
+        Err(ErrorCode::NotFound.into())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sign_channel(
+        &self,
+        server: ServerId,
+        channel: ChannelId,
+        seq: u64,
+        deps: Vec<RecordId>,
+        auth_deps: Vec<RecordId>,
+        ts: u64,
+        kind: Kind,
+        body: Vec<u8>,
+    ) -> CoreResult<Record> {
+        let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?;
+        Draft { server, scope: Scope::Channel(channel), seq, deps, auth_deps, ts, kind, body }
+            .sign(me.identity.signing_key())
+            .map_err(|_| ErrorCode::BadRequest.into())
+    }
+
+    /// The channel's shown messages, after giving the cipher what's new.
+    fn shown(
+        &mut self,
+        cipher: &dyn GroupCipher,
+        server: ServerId,
+        channel: ChannelId,
+    ) -> CoreResult<Vec<chat::Shown>> {
+        let members = self.view(server)?.state.members.clone();
+        cipher.membership_changed(server, &members);
+        let log = self.logs.get_mut(&server).ok_or(ErrorCode::Internal)?;
+        chat::sync_cipher(cipher, server, log);
+        Ok(chat::messages(cipher, server, channel, log))
+    }
+
+    fn message_count(
+        &mut self,
+        cipher: &dyn GroupCipher,
+        server: ServerId,
+        channel: ChannelId,
+    ) -> CoreResult<usize> {
+        Ok(self.shown(cipher, server, channel)?.len())
+    }
+
     fn challenge(&self) -> CoreResult<Option<Challenge>> {
         match self.db.get(KV_RECOVERY_CHALLENGE)? {
             None => Ok(None),
@@ -758,7 +951,7 @@ impl Inner {
         let view = ServerView::build(server, &log).ok_or(ErrorCode::Internal)?;
         let profile =
             sign(&view, view.deps(None), &model::profile_action(&me.profile.display_name))?;
-        for record in &log.records {
+        for record in log.records.iter().chain(&log.channel) {
             self.db.put_record(record)?;
         }
         self.logs.insert(server, log);
@@ -802,5 +995,49 @@ impl ServerView<'_> {
             unread: false,
             mentions: 0,
         }
+    }
+}
+
+/// Control heads a channel record relies on, at most `MAX_AUTH_DEPS`.
+fn auth_deps(view: &ServerView) -> Vec<RecordId> {
+    let heads = view.deps(None);
+    heads[heads.len().saturating_sub(records::MAX_AUTH_DEPS)..].to_vec()
+}
+
+fn message_json(
+    record: &Record,
+    text: &str,
+    index: usize,
+    channel: ChannelId,
+    send_state: Option<SendState>,
+) -> Message {
+    Message {
+        id: model::hex_id(record.id().as_bytes()),
+        channel_id: model::hex_id(channel.as_bytes()),
+        index,
+        author_id: model::hex_id(record.author().as_bytes()),
+        body: text.to_owned(),
+        created_at: record.ts(),
+        send_state,
+    }
+}
+
+/// Can't write yet (no key, or a rotation only a moderator can make):
+/// `not-allowed`. No group encryption: `not-implemented`.
+fn cipher_error(error: CipherError) -> CoreError {
+    match error {
+        CipherError::NoKey | CipherError::RotationRequired => ErrorCode::NotAllowed.into(),
+        CipherError::Unavailable => ErrorCode::NotImplemented.into(),
+        CipherError::Rejected => ErrorCode::Internal.into(),
+    }
+}
+
+/// Hands the group cipher our member secret: at identity load, create and
+/// restore, and again after the app lock (`Core::unlock_keys`). The next
+/// read or send gives it the channels, the accepted set and the stored
+/// rotations again (`chat::sync_cipher`).
+fn unlock_cipher(ports: &Ports, me: Option<&Me>) {
+    if let Some(me) = me {
+        ports.cipher.unlock(Arc::new(MemberSecret::new(me.identity.signing_key())));
     }
 }

@@ -59,6 +59,7 @@ fn names(events: &[Event]) -> Vec<&'static str> {
             Event::JoinStatus(_) => "join.status",
             Event::UpdateReady(_) => "update.ready",
             Event::Notice { .. } => "notice",
+            Event::MessageAdded(_) => "message.added",
         })
         .collect()
 }
@@ -595,4 +596,193 @@ fn diagnostics_hold_no_secrets() {
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Encrypted chat in process (the relay version is tests/two_peers.rs).
+#[test]
+fn members_chat_through_the_group_cipher() {
+    use api::crypto::GroupKeysCipher;
+
+    let world = World::new();
+    // Locked ciphers: the core unlocks them when the identity is restored.
+    let spy = Arc::new(Spy::new());
+    let open = |words: &str, name: &str, cipher: Arc<dyn GroupCipher>| {
+        let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
+        peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        peer.core.update_profile(profile).unwrap();
+        peer
+    };
+    let owner = open(OWNER_WORDS, "Owner", spy.clone());
+    let guest = open(LEGAL, "Guest", Arc::new(GroupKeysCipher::locked()));
+    let server = owner.core.create_server("Chat", AgeRestriction::None).unwrap();
+    guest.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+
+    // No key yet, and a plain member can't make one.
+    guest.core.sync_now().unwrap();
+    assert_eq!(
+        guest.core.send_message(&channel, "first?", None).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+    // Bad input, and replies (not yet).
+    assert_eq!(
+        owner.core.send_message(&channel, "  ", None).unwrap_err().code,
+        ErrorCode::BadRequest
+    );
+    assert_eq!(
+        owner.core.send_message(&channel, "x", Some("ab")).unwrap_err().code,
+        ErrorCode::NotImplemented
+    );
+    assert_eq!(owner.core.get_message_count("nope").unwrap_err().code, ErrorCode::NotFound);
+
+    owner.events.take();
+    let sent = owner.core.send_message(&channel, "שלום", None).unwrap();
+    assert_eq!((sent.index, sent.send_state), (0, Some(SendState::Sent)));
+    assert_eq!(names(&owner.events.take()), ["message.added"]);
+
+    guest.core.sync_now().unwrap();
+    let got = guest.core.get_messages(&channel, 0, 10).unwrap();
+    assert_eq!(got.messages.len(), 1);
+    assert_eq!((got.messages[0].body.as_str(), got.messages[0].send_state), ("שלום", None));
+    guest.core.send_message(&channel, "hi", None).unwrap();
+
+    owner.core.sync_now().unwrap();
+    let bodies: Vec<String> = owner
+        .core
+        .get_messages(&channel, 0, 10)
+        .unwrap()
+        .messages
+        .into_iter()
+        .map(|m| m.body)
+        .collect();
+    assert_eq!(bodies, ["שלום", "hi"]);
+    let page = owner.core.get_messages(&channel, 1, 99).unwrap();
+    assert_eq!((page.start, page.messages.len(), page.messages[0].index), (1, 1, 1));
+
+    // App lock: nothing opens; after unlock the stored rotations are
+    // replayed and the old messages open again.
+    owner.core.lock_keys();
+    assert_eq!(owner.core.get_message_count(&channel).unwrap(), 0);
+    owner.core.unlock_keys();
+    assert_eq!(owner.core.get_message_count(&channel).unwrap(), 2);
+
+    // A valid rotation and message for a channel authority doesn't know:
+    // stored, never handed to the cipher, never shown.
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let key = identity::RecoveryPhrase::parse(OWNER_WORDS).unwrap().identity();
+    let control: Vec<_> = world
+        .network
+        .fetch(server_key)
+        .iter()
+        .filter(|r| r.scope() == Scope::Control)
+        .map(|r| r.id())
+        .collect();
+    let unknown = records::ChannelId::from_bytes([0xee; 32]);
+    // A real rotation part's body, so the record itself is valid.
+    let part = world
+        .network
+        .fetch(server_key)
+        .into_iter()
+        .find(|r| r.kind() == Kind::KeyRotation)
+        .expect("the owner rotated")
+        .body()
+        .to_vec();
+    for (seq, kind, body) in [(0, Kind::KeyRotation, part), (1, Kind::Message, vec![1; 40])] {
+        let record = Draft {
+            server: server_key,
+            scope: Scope::Channel(unknown),
+            seq,
+            deps: vec![],
+            auth_deps: vec![*control.iter().max().unwrap()],
+            ts: 1,
+            kind,
+            body,
+        }
+        .sign(key.signing_key())
+        .unwrap_or_else(|e| panic!("{kind:?}: {e:?}"));
+        world.network.publish(&record);
+    }
+    owner.core.sync_now().unwrap();
+    assert_eq!(owner.core.get_message_count(&channel).unwrap(), 2);
+    assert!(
+        !spy.channels.lock().unwrap().contains(&unknown),
+        "an unknown channel reached the cipher"
+    );
+    assert!(spy.channels.lock().unwrap().contains(&records::ChannelId::from_bytes(
+        hex::decode(&channel).unwrap().try_into().unwrap()
+    )));
+}
+
+const OWNER_WORDS: &str =
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+/// The real cipher, recording every channel it is asked about.
+struct Spy {
+    inner: api::crypto::GroupKeysCipher,
+    channels: std::sync::Mutex<BTreeSet<records::ChannelId>>,
+}
+
+impl Spy {
+    fn new() -> Spy {
+        Spy { inner: api::crypto::GroupKeysCipher::locked(), channels: Default::default() }
+    }
+
+    fn saw(&self, channel: records::ChannelId) {
+        self.channels.lock().unwrap().insert(channel);
+    }
+}
+
+impl GroupCipher for Spy {
+    fn membership_changed(&self, server: ServerId, members: &BTreeSet<PublicKey>) -> CipherOutcome {
+        self.inner.membership_changed(server, members)
+    }
+    fn encrypt(
+        &self,
+        s: ServerId,
+        c: records::ChannelId,
+        p: &[u8],
+    ) -> Result<Vec<u8>, CipherError> {
+        self.saw(c);
+        self.inner.encrypt(s, c, p)
+    }
+    fn decrypt(
+        &self,
+        s: ServerId,
+        c: records::ChannelId,
+        a: PublicKey,
+        b: &[u8],
+    ) -> Result<Opened, CipherError> {
+        self.saw(c);
+        self.inner.decrypt(s, c, a, b)
+    }
+    fn apply_rotation(&self, r: &records::Record) -> Result<Vec<records::RecordId>, CipherError> {
+        if let Scope::Channel(c) = r.scope() {
+            self.saw(c);
+        }
+        self.inner.apply_rotation(r)
+    }
+    fn set_accepted(&self, s: ServerId, ids: &BTreeSet<records::RecordId>) {
+        self.inner.set_accepted(s, ids)
+    }
+    fn set_channels(&self, s: ServerId, channels: &BTreeSet<records::ChannelId>) {
+        channels.iter().for_each(|c| self.saw(*c));
+        self.inner.set_channels(s, channels)
+    }
+    fn unlock(&self, secret: Arc<groupkeys::MemberSecret>) {
+        self.inner.unlock(secret)
+    }
+    fn lock(&self) {
+        self.inner.lock()
+    }
+    fn rotate(
+        &self,
+        s: ServerId,
+        c: records::ChannelId,
+        m: &BTreeSet<PublicKey>,
+    ) -> Result<Vec<Vec<u8>>, CipherError> {
+        self.saw(c);
+        self.inner.rotate(s, c, m)
+    }
 }
