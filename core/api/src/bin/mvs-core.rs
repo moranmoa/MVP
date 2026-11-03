@@ -50,9 +50,12 @@ fn main() -> ExitCode {
     let sync: Option<Arc<SyncNetwork>> = match args.relay {
         None => None,
         Some(relay) => {
-            let Ok(relay) = relay.parse() else {
-                eprintln!("mvs-core: --relay is not a multiaddr");
-                return ExitCode::from(2);
+            let relay = match api::syncnet::relay_addr(&relay) {
+                Ok(relay) => relay,
+                Err(why) => {
+                    eprintln!("mvs-core: --relay {why}");
+                    return ExitCode::from(2);
+                }
             };
             // TODO(#64): a start failure (the node.key ACL) as a notice
             // the UI shows, not only this log line and an exit.
