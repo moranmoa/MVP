@@ -23,6 +23,16 @@ describe('composer length limit (QA-10)', () => {
     expect(document.querySelector('.char-count')).toBeNull();
   });
 
+  it('counts an emoji as one character (QA-17)', async () => {
+    const { box, send } = await setup();
+    fireEvent.change(box, { target: { value: '🎉'.repeat(2100) } }); // 4,200 UTF-16 units
+    expect(document.querySelector('.char-count')).toBeNull();
+    expect(send.disabled).toBe(false);
+    fireEvent.change(box, { target: { value: '🎉'.repeat(3900) } });
+    expect(screen.getByText('3,900 / 4,000')).toBeTruthy();
+    expect(send.disabled).toBe(false);
+  });
+
   it('shows a counter from 3,800 characters, and keeps sending allowed', async () => {
     const { box, send } = await setup();
     fireEvent.change(box, { target: { value: 'x'.repeat(3799) } });

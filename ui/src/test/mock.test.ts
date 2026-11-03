@@ -64,8 +64,10 @@ describe('mock core', () => {
     await expect(core.createServer({ name: 'x', ageRestriction: 'none' })).rejects.toMatchObject({
       code: 'recovery-check-required',
     });
-    expect(await core.checkRecoveryWords({ 2: 'wrong', 5: words[4], 9: words[8] })).toBe(false);
-    expect(await core.checkRecoveryWords({ 2: words[1], 5: words[4], 9: words[8] })).toBe(true);
+    const { positions } = await core.getRecoveryChallenge();
+    const answer = (wrongAt?: number) => Object.fromEntries(positions.map((p) => [p, p === wrongAt ? 'wrong' : words[p - 1]]));
+    expect(await core.checkRecoveryWords(answer(positions[0]))).toEqual({ ok: false, wrong: [positions[0]] });
+    expect(await core.checkRecoveryWords(answer())).toEqual({ ok: true });
     const s = await core.createServer({ name: 'שרת', ageRestriction: '18+' });
     expect(s.ageRestriction).toBe('18+');
     expect(await core.listChannels(s.id)).toHaveLength(1);

@@ -1,0 +1,43 @@
+# Voice bench: N Chromium + M str0m participants in one room, each in its own
+# container so netem and CPU accounting are per participant.
+# Use run.sh rather than calling this directly.
+name: voicebench
+
+x-peer: &peer
+  cap_add: [NET_ADMIN]
+  depends_on: [signal]
+  volumes:
+    - ./results:/results
+  environment: &peer-env
+    SIGNAL: http://signal:8080
+    ROOM: ${ROOM:-bench}
+    DURATION: ${DURATION:-60}
+    NETEM: ${NETEM:-}
+    SRC: ${SRC:-pulses}
+    PROCESSING: ${PROCESSING:-1}
+    RESULTS: /results
+    VERBOSE: ${VERBOSE:-}
+    WARMUP: ${WARMUP:-10}
+    END_AT: ${END_AT:-}
+
+services:
+  signal:
+    build: { context: .., dockerfile: bench/Dockerfile.signal }
+    # Peers write their own result files here; reports sent over the socket
+    # (used by testers) are not stored in the bench.
+    environment:
+      RESULTS_DIR: ''
+
+  chromium:
+    <<: *peer
+    build: { context: ., dockerfile: Dockerfile.chromium }
+    shm_size: 256m
+
+  str0m:
+    <<: *peer
+    build: { context: ../str0m-peer }
+
+  # Same, with WebRTC's audio processing (AEC/NS/AGC) compiled in.
+  str0m-apm:
+    <<: *peer
+    build: { context: ../str0m-peer, args: { FEATURES: apm } }

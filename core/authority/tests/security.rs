@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use authority::{
     resolve, sign_control, sign_genesis, Action, Inserted, Record, RecordId, Resolver, Role, State,
 };
-use common::{actor, genesis, key, rec, server};
+use common::{actor, founded, genesis, key, rec, server};
 use records::{Draft, Kind, RecordError, Scope, GENESIS_NONCE_LEN};
 
 /// Both resolvers on the test server, records delivered in the given order.
@@ -114,9 +114,8 @@ fn another_servers_records_without_deps_are_ignored() {
 
 #[test]
 fn demoting_by_grant_is_refused_so_backdating_stays_blocked() {
-    let g = genesis();
-    let moderator =
-        rec(0, 1, vec![g.id()], Action::Grant { target: actor(1), role: Role::Moderator });
+    let (base, heads) = founded(&[1, 2, 5]);
+    let moderator = rec(0, 1, heads, Action::Grant { target: actor(1), role: Role::Moderator });
     let admin =
         rec(0, 2, vec![moderator.id()], Action::Grant { target: actor(2), role: Role::Admin });
     // Demoting with a grant would skip the voiding a revoke does.
@@ -124,7 +123,9 @@ fn demoting_by_grant_is_refused_so_backdating_stays_blocked() {
         rec(0, 3, vec![admin.id()], Action::Grant { target: actor(1), role: Role::Member });
     let lower =
         rec(0, 4, vec![demote.id()], Action::Grant { target: actor(2), role: Role::Moderator });
-    let state = both(&[g.clone(), moderator.clone(), admin.clone(), demote.clone(), lower.clone()]);
+    let mut records = base.clone();
+    records.extend([moderator.clone(), admin.clone(), demote.clone(), lower.clone()]);
+    let state = both(&records);
     assert!(!state.accepted.contains(&demote.id()));
     assert!(!state.accepted.contains(&lower.id()));
     // A grant of Member or Owner doesn't even parse.
@@ -138,7 +139,9 @@ fn demoting_by_grant_is_refused_so_backdating_stays_blocked() {
     // The way to demote is a revoke, which voids a backdated kick.
     let revoke = rec(0, 3, vec![admin.id()], Action::Revoke { target: actor(1) });
     let backdated = rec(1, 0, vec![moderator.id()], Action::Kick { target: actor(5) });
-    let state = both(&[g, moderator, admin, revoke, backdated.clone()]);
+    let mut records = base;
+    records.extend([moderator, admin, revoke, backdated.clone()]);
+    let state = both(&records);
     assert_eq!(state.role(actor(1)), Role::Member);
     assert!(!state.accepted.contains(&backdated.id()));
     assert!(!state.kicked.contains(&actor(5)));
@@ -146,29 +149,33 @@ fn demoting_by_grant_is_refused_so_backdating_stays_blocked() {
 
 #[test]
 fn a_kicked_actor_cannot_be_kicked_again() {
-    let g = genesis();
-    let moderator =
-        rec(0, 1, vec![g.id()], Action::Grant { target: actor(1), role: Role::Moderator });
-    let kick = rec(1, 0, vec![moderator.id()], Action::Kick { target: actor(2) });
-    let again = rec(1, 1, vec![kick.id()], Action::Kick { target: actor(2) });
-    let state = both(&[g, moderator, kick.clone(), again.clone()]);
+    let (mut records, heads) = founded(&[1, 2]);
+    let moderator = rec(0, 2, heads, Action::Grant { target: actor(1), role: Role::Moderator });
+    let kick = rec(1, 1, vec![moderator.id()], Action::Kick { target: actor(2) });
+    let again = rec(1, 2, vec![kick.id()], Action::Kick { target: actor(2) });
+    records.extend([moderator, kick.clone(), again.clone()]);
+    let state = both(&records);
     assert!(state.accepted.contains(&kick.id()));
     assert!(!state.accepted.contains(&again.id()));
 }
 
 #[test]
 fn kicked_actors_cannot_act() {
-    let g = genesis();
-    let admin = rec(0, 1, vec![g.id()], Action::Grant { target: actor(1), role: Role::Admin });
-    let kick = rec(0, 2, vec![admin.id()], Action::Kick { target: actor(1) });
+    let (base, heads) = founded(&[1, 3, 4]);
+    let admin = rec(0, 2, heads, Action::Grant { target: actor(1), role: Role::Admin });
+    let kick = rec(0, 3, vec![admin.id()], Action::Kick { target: actor(1) });
     // After seeing the kick, and concurrently with it.
-    let after = rec(1, 0, vec![kick.id()], Action::Post { text: "still here".into() });
+    let after = rec(1, 1, vec![kick.id()], Action::Post { text: "still here".into() });
     let grant =
-        rec(1, 1, vec![after.id()], Action::Grant { target: actor(3), role: Role::Moderator });
-    let concurrent = rec(1, 2, vec![admin.id()], Action::Kick { target: actor(4) });
-    let regrant = rec(0, 3, vec![kick.id()], Action::Grant { target: actor(1), role: Role::Admin });
-    let state = both(&[g, admin, kick, after, grant, concurrent, regrant.clone()]);
-    assert_eq!(state.accepted.len(), 3, "only genesis, grant and kick");
+        rec(1, 2, vec![after.id()], Action::Grant { target: actor(3), role: Role::Moderator });
+    let concurrent = rec(1, 3, vec![admin.id()], Action::Kick { target: actor(4) });
+    let regrant = rec(0, 4, vec![kick.id()], Action::Grant { target: actor(1), role: Role::Admin });
+    let mut records = base.clone();
+    records.extend([admin.clone(), kick.clone(), after, grant, concurrent, regrant.clone()]);
+    let state = both(&records);
+    let expected: std::collections::BTreeSet<RecordId> =
+        base.iter().map(Record::id).chain([admin.id(), kick.id()]).collect();
+    assert_eq!(state.accepted, expected, "only the founding records, the grant and the kick");
     assert!(state.kicked.contains(&actor(1)));
     assert!(!state.kicked.contains(&actor(4)));
     assert_eq!(state.role(actor(3)), Role::Member);
@@ -257,9 +264,9 @@ fn large_hostile_logs_resolve_quickly() {
 
     // Many posts by ordinary members: every record used to get an ancestor
     // bit set as long as the log (50,000^2 bits = 312 MB).
-    let moderator =
-        rec(0, 1, vec![g.id()], Action::Grant { target: actor(1), role: Role::Moderator });
-    let mut log = vec![g.clone(), moderator.clone()];
+    let (mut log, heads) = founded(&[1, 2, 3, 4, 5]);
+    let moderator = rec(0, 2, heads, Action::Grant { target: actor(1), role: Role::Moderator });
+    log.push(moderator.clone());
     let mut heads = vec![moderator.id()];
     for seq in 0..50_000u64 {
         let author = 2 + (seq % 4) as u8;

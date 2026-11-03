@@ -1,0 +1,23 @@
+[package]
+name = "shell-spike-tauri"
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+description = "Tauri shell around ui/ for the footprint spike (experiment 6)"
+
+# Standalone, outside the core workspace.
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

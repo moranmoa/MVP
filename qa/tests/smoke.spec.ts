@@ -15,7 +15,7 @@ test.describe('smoke', () => {
     expect(errors).toEqual([]);
   });
 
-  test('recovery words: 12 distinct-looking words, always LTR', async ({ page }) => {
+  test('recovery words: hidden until shown, then 12 words, always LTR', async ({ page }) => {
     await page.goto('/?fresh=1&still=1');
     await page.getByRole('button', { name: he.next }).click();
     await page.getByRole('checkbox').check();
@@ -25,8 +25,14 @@ test.describe('smoke', () => {
     await page.getByLabel('חודש').fill('1');
     await page.getByLabel('שנה').fill('1990');
     await page.getByRole('button', { name: he.next }).click();
+    // B19: hidden until the user asks, and "כתבתי אותן" does nothing before that.
+    await expect(page.getByRole('list', { name: he.wordsHidden })).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('.word-grid .word:not(.word-mask)')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: he.written })).toHaveAttribute('aria-disabled', 'true');
+    await page.getByRole('button', { name: he.reveal }).click();
+    await expect(page.getByRole('button', { name: he.written })).not.toHaveAttribute('aria-disabled', 'true');
     const grid = page.getByRole('list', { name: he.wordsGrid });
-    await expect(grid).toBeVisible({ timeout: 10_000 });
+    await expect(grid).toBeVisible();
     await expect(grid).toHaveAttribute('dir', 'ltr');
     await expect(grid.locator('.word')).toHaveCount(12);
   });

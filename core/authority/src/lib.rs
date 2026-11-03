@@ -14,6 +14,18 @@
 //! - Rank: owner > admin > moderator > member. An actor can only grant a role
 //!   below its own, and only revoke or kick someone ranked below it. Grants
 //!   only promote; demoting is a revoke. A kicked actor can't be kicked again.
+//! - Membership: the owner is a member; anyone else becomes one by a `Join`
+//!   that names an invite and depends on it. Moderators and above sign
+//!   invites. A join is accepted while the invite is unrevoked, has uses left
+//!   (counted in linear order), hasn't expired and its author isn't kicked.
+//!   A kick ends membership and blocks rejoining. Posts and grants need a
+//!   member. An invite is revoked by its author or by someone ranked above
+//!   them, and the revoke voids every join through it that isn't one of its
+//!   causal ancestors: a join racing a revoke loses, whatever the linear
+//!   order, and the joiner needs a new invite. A revoke or kick of the
+//!   invite's author does the same for all their invites, so a demoted or
+//!   kicked moderator's links stop working even for joins that only depend
+//!   on the invite.
 //! - A revoke voids the target's privileged actions that are concurrent with
 //!   it (not causal ancestors of it). A kick voids all of the target's
 //!   concurrent records. This blocks "backdating": signing new records whose
@@ -25,7 +37,12 @@
 //! Records come from the `records` crate, so they are signed and their IDs are
 //! content hashes. Records outside the control-log scope are ignored, and so
 //! is a record whose body doesn't parse for its kind (it stays in the graph,
-//! but is never accepted). Timestamps are informational and never consulted.
+//! but is never accepted). Timestamps are informational, with one exception:
+//! a join's claimed `ts` is compared with its invite's expiry. That expiry is
+//! soft, an accepted risk: a joiner holding the invite can backdate `ts`.
+//! Peers don't drop joins by their own clock, since peers with different
+//! clocks would then disagree. The hard controls are the use limit and a
+//! revoke-invite, which the client posts when an invite expires.
 
 use std::cell::RefCell;
 use std::cmp::Reverse;
@@ -61,10 +78,33 @@ impl Role {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
     Genesis,
-    Grant { target: Actor, role: Role },
-    Revoke { target: Actor },
-    Kick { target: Actor },
-    Post { text: String },
+    Grant {
+        target: Actor,
+        role: Role,
+    },
+    Revoke {
+        target: Actor,
+    },
+    Kick {
+        target: Actor,
+    },
+    Post {
+        text: String,
+    },
+    /// `expires_ms`: last join `ts` accepted, 0 for never. `max_uses`: 0 for
+    /// unlimited.
+    Invite {
+        expires_ms: u64,
+        max_uses: u32,
+    },
+    /// The record must also list `invite` in its deps.
+    RevokeInvite {
+        invite: RecordId,
+    },
+    /// The record must also list `invite` in its deps.
+    Join {
+        invite: RecordId,
+    },
 }
 
 impl Action {
@@ -75,12 +115,17 @@ impl Action {
             Action::Revoke { .. } => Kind::Revoke,
             Action::Kick { .. } => Kind::Kick,
             Action::Post { .. } => Kind::Post,
+            Action::Invite { .. } => Kind::Invite,
+            Action::RevokeInvite { .. } => Kind::RevokeInvite,
+            Action::Join { .. } => Kind::Join,
         }
     }
 
     /// Body encoding: target key (32 bytes), then the role byte for a grant;
-    /// UTF-8 text for a post. A genesis body (nonce, then server metadata) is
-    /// not read here: write one with [`sign_genesis`].
+    /// UTF-8 text for a post; `expires_ms` (u64 LE) then `max_uses` (u32 LE)
+    /// for an invite; the invite's record ID for a revoke-invite or a join.
+    /// A genesis body (nonce, then server metadata) is not read here: write
+    /// one with [`sign_genesis`].
     pub fn body(&self) -> Vec<u8> {
         match self {
             Action::Genesis => Vec::new(),
@@ -91,6 +136,10 @@ impl Action {
             }
             Action::Revoke { target } | Action::Kick { target } => target.as_bytes().to_vec(),
             Action::Post { text } => text.as_bytes().to_vec(),
+            Action::Invite { expires_ms, max_uses } => {
+                [&expires_ms.to_le_bytes()[..], &max_uses.to_le_bytes()].concat()
+            }
+            Action::RevokeInvite { invite } | Action::Join { invite } => invite.as_bytes().to_vec(),
         }
     }
 
@@ -99,6 +148,7 @@ impl Action {
     pub fn from_record(record: &Record) -> Option<Action> {
         let body = record.body();
         let key = |bytes: &[u8]| Some(PublicKey::from_bytes(bytes.try_into().ok()?));
+        let id = |bytes: &[u8]| Some(RecordId::from_bytes(bytes.try_into().ok()?));
         match record.kind() {
             Kind::Genesis => Some(Action::Genesis),
             Kind::Grant => {
@@ -113,21 +163,54 @@ impl Action {
             Kind::Revoke => Some(Action::Revoke { target: key(body)? }),
             Kind::Kick => Some(Action::Kick { target: key(body)? }),
             Kind::Post => Some(Action::Post { text: String::from_utf8(body.to_vec()).ok()? }),
+            Kind::Invite => {
+                let (expires, uses) = body.split_at_checked(8)?;
+                Some(Action::Invite {
+                    expires_ms: u64::from_le_bytes(expires.try_into().ok()?),
+                    max_uses: u32::from_le_bytes(uses.try_into().ok()?),
+                })
+            }
+            Kind::RevokeInvite => Some(Action::RevokeInvite { invite: id(body)? }),
+            Kind::Join => Some(Action::Join { invite: id(body)? }),
             Kind::Message => None,
         }
     }
 
+    /// The actor whose role is changed by a grant, revoke or kick.
     fn target(&self) -> Option<Actor> {
         match self {
             Action::Grant { target, .. } | Action::Revoke { target } | Action::Kick { target } => {
                 Some(*target)
             }
-            Action::Genesis | Action::Post { .. } => None,
+            Action::Genesis
+            | Action::Post { .. }
+            | Action::Invite { .. }
+            | Action::RevokeInvite { .. }
+            | Action::Join { .. } => None,
         }
     }
 
+    /// The actor whose role history this action writes to, if any: the
+    /// target, or the author of a join.
+    fn subject(&self, author: Actor) -> Option<Actor> {
+        match self {
+            Action::Join { .. } => Some(author),
+            _ => self.target(),
+        }
+    }
+
+    /// The invite a join or revoke-invite names.
+    fn invite(&self) -> Option<RecordId> {
+        match self {
+            Action::RevokeInvite { invite } | Action::Join { invite } => Some(*invite),
+            _ => None,
+        }
+    }
+
+    /// Needs a rank above member; a revoke voids these when concurrent.
     fn is_privileged(&self) -> bool {
         self.target().is_some()
+            || matches!(self, Action::Invite { .. } | Action::RevokeInvite { .. })
     }
 
     fn is_removal(&self) -> bool {
@@ -185,14 +268,36 @@ pub struct State {
     pub owner: Option<Actor>,
     pub roles: BTreeMap<Actor, Role>,
     pub kicked: BTreeSet<Actor>,
+    /// Current members, the owner included. This is the member set
+    /// `groupkeys` rotates to.
+    pub members: BTreeSet<Actor>,
+    /// Accepted invites by record ID.
+    pub invites: BTreeMap<RecordId, Invite>,
     /// Accepted posts, in display order.
     pub posts: Vec<RecordId>,
     pub accepted: BTreeSet<RecordId>,
 }
 
+/// An accepted invite and how it has been used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Invite {
+    pub author: Actor,
+    /// 0 for never.
+    pub expires_ms: u64,
+    /// 0 for unlimited.
+    pub max_uses: u32,
+    /// Accepted joins through it.
+    pub uses: u32,
+    pub revoked: bool,
+}
+
 impl State {
     pub fn role(&self, actor: Actor) -> Role {
         self.role_of(actor)
+    }
+
+    pub fn is_member(&self, actor: Actor) -> bool {
+        self.members.contains(&actor)
     }
 }
 
@@ -201,6 +306,10 @@ trait View {
     fn owner(&self) -> Option<Actor>;
     fn assigned_role(&self, actor: Actor) -> Role;
     fn is_kicked(&self, actor: Actor) -> bool;
+    /// Joined and not removed since; the owner is a member regardless.
+    fn has_joined(&self, actor: Actor) -> bool;
+    /// An accepted invite as it stands at this point.
+    fn invite(&self, id: RecordId) -> Option<Invite>;
 
     fn role_of(&self, actor: Actor) -> Role {
         if self.owner() == Some(actor) {
@@ -208,6 +317,10 @@ trait View {
         } else {
             self.assigned_role(actor)
         }
+    }
+
+    fn is_member(&self, actor: Actor) -> bool {
+        self.owner() == Some(actor) || self.has_joined(actor)
     }
 }
 
@@ -222,6 +335,14 @@ impl View for State {
 
     fn is_kicked(&self, actor: Actor) -> bool {
         self.kicked.contains(&actor)
+    }
+
+    fn has_joined(&self, actor: Actor) -> bool {
+        self.members.contains(&actor)
+    }
+
+    fn invite(&self, id: RecordId) -> Option<Invite> {
+        self.invites.get(&id).copied()
     }
 }
 
@@ -243,7 +364,10 @@ fn permitted(view: &impl View, record: &Record, action: &Action) -> bool {
         // grant if wanted), so it voids the target's concurrent privileged
         // records like any revoke: a demoted moderator can't backdate a kick.
         Action::Grant { target, role } => {
-            author_role > *role && *role > view.role_of(*target) && !view.is_kicked(*target)
+            author_role > *role
+                && *role > view.role_of(*target)
+                && !view.is_kicked(*target)
+                && view.is_member(*target)
         }
         Action::Revoke { target } => {
             let target_role = view.role_of(*target);
@@ -254,42 +378,101 @@ fn permitted(view: &impl View, record: &Record, action: &Action) -> bool {
                 && author_role > view.role_of(*target)
                 && !view.is_kicked(*target)
         }
-        Action::Post { .. } => true,
+        Action::Post { .. } => view.is_member(author),
+        Action::Invite { .. } => author_role >= Role::Moderator,
+        Action::RevokeInvite { invite } => {
+            record.deps().contains(invite)
+                && view.invite(*invite).is_some_and(|invite| {
+                    !invite.revoked
+                        && (invite.author == author || author_role > view.role_of(invite.author))
+                })
+        }
+        Action::Join { invite } => {
+            record.deps().contains(invite)
+                && !view.is_member(author)
+                && view.invite(*invite).is_some_and(|invite| {
+                    !invite.revoked
+                        && !view.is_kicked(invite.author)
+                        && (invite.max_uses == 0 || invite.uses < invite.max_uses)
+                        && (invite.expires_ms == 0 || record.ts() <= invite.expires_ms)
+                })
+        }
     }
 }
 
-/// What an accepted privileged record left its target with.
+/// What an accepted record left its subject with. Every write is a full
+/// snapshot: a role above member implies membership (grants need a member,
+/// and kicks reset the role), so no write depends on the state before it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Write {
     record: RecordId,
     role: Role,
     kicked: bool,
+    member: bool,
 }
 
-/// Applies an accepted genesis or privileged record to the roles. Posts are
-/// left to the caller, which knows where they go in display order.
+/// Applies an accepted genesis, privileged record or join to the roles and
+/// members. Posts are left to the caller, which knows where they go in
+/// display order, and so are invite uses.
 fn apply(state: &mut State, record: &Record, action: &Action) -> Option<(Actor, Write)> {
-    let write = |role, kicked| Write { record: record.id(), role, kicked };
+    let write = |role, kicked, member| Write { record: record.id(), role, kicked, member };
     match action {
         Action::Genesis => {
             state.owner = Some(record.author());
+            state.members.insert(record.author());
             None
         }
         Action::Grant { target, role } => {
             // Never Member: grants only promote.
             state.roles.insert(*target, *role);
-            Some((*target, write(*role, false)))
+            Some((*target, write(*role, false, true)))
         }
         Action::Revoke { target } => {
+            // Only roles above member are revoked, so the target is a member.
             state.roles.remove(target);
-            Some((*target, write(Role::Member, false)))
+            Some((*target, write(Role::Member, false, true)))
         }
         Action::Kick { target } => {
             state.roles.remove(target);
             state.kicked.insert(*target);
-            Some((*target, write(Role::Member, true)))
+            state.members.remove(target);
+            Some((*target, write(Role::Member, true, false)))
         }
-        Action::Post { .. } => None,
+        Action::Join { .. } => {
+            state.members.insert(record.author());
+            Some((record.author(), write(Role::Member, false, true)))
+        }
+        Action::Post { .. } | Action::Invite { .. } | Action::RevokeInvite { .. } => None,
+    }
+}
+
+/// Updates the invites for an accepted invite, revoke-invite or join, as
+/// the linear-order fold reaches it.
+fn apply_invite(state: &mut State, record: &Record, action: &Action) {
+    match action {
+        Action::Invite { expires_ms, max_uses } => {
+            state.invites.insert(
+                record.id(),
+                Invite {
+                    author: record.author(),
+                    expires_ms: *expires_ms,
+                    max_uses: *max_uses,
+                    uses: 0,
+                    revoked: false,
+                },
+            );
+        }
+        Action::RevokeInvite { invite } => {
+            if let Some(invite) = state.invites.get_mut(invite) {
+                invite.revoked = true;
+            }
+        }
+        Action::Join { invite } => {
+            if let Some(invite) = state.invites.get_mut(invite) {
+                invite.uses = invite.uses.saturating_add(1);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -310,10 +493,15 @@ struct Run {
     /// Targets of kicks and revokes accepted in any pass.
     kick_targets: HashSet<Actor>,
     revoke_targets: HashSet<Actor>,
+    /// Invites with a revoke-invite accepted in any pass.
+    revoked_invites: HashSet<RecordId>,
     /// Actors whose role history differs between passes: some pass accepted
     /// a privileged record about them that the final pass didn't, or the
-    /// other way round. Only the final pass's history is kept.
-    unsettled: HashSet<Actor>,
+    /// other way round. Only the final pass's history is kept. When every
+    /// pass accepted the same first kick of the actor, their history is
+    /// frozen from that kick on, so it only differs before it: the kick is
+    /// kept as the bound.
+    unsettled: HashMap<Actor, Option<RecordId>>,
     /// Same, for the genesis: ownership differed between passes.
     owner_unsettled: bool,
     /// Final pass: the writes each actor received, in linear order.
@@ -336,23 +524,35 @@ fn full_run<'a>(server: ServerId, records: impl IntoIterator<Item = &'a Record>)
     let mut excluded = vec![false; order.len()];
     let mut kick_targets = HashSet::new();
     let mut revoke_targets = HashSet::new();
-    let mut earlier_passes: Vec<BTreeSet<usize>> = Vec::new();
+    let mut revoked_invites = HashSet::new();
+    let mut earlier_passes: Vec<(BTreeSet<usize>, HashMap<Actor, usize>)> = Vec::new();
     loop {
         let pass = graph.fold(&excluded);
         kick_targets.extend(pass.kick_targets);
         revoke_targets.extend(pass.revoke_targets);
+        revoked_invites.extend(pass.revoked_invites);
         let fresh: Vec<usize> = pass.voided.into_iter().filter(|i| !excluded[*i]).collect();
         if fresh.is_empty() {
-            let mut unsettled = HashSet::new();
+            let mut unsettled = HashMap::new();
             let mut owner_unsettled = false;
-            for settled in &earlier_passes {
+            for (settled, _) in &earlier_passes {
                 for &i in pass.settled.symmetric_difference(settled) {
-                    match graph.actions[i].as_ref().and_then(Action::target) {
+                    let author = graph.records[i].author();
+                    match graph.actions[i].as_ref().and_then(|a| a.subject(author)) {
                         Some(target) => {
-                            unsettled.insert(target);
+                            unsettled.insert(target, None);
                         }
                         None => owner_unsettled = true,
                     }
+                }
+            }
+            // A kicked actor can't be granted, revoked, kicked or rejoin,
+            // so after the same first kick in every pass their history is
+            // the same in all of them.
+            for (actor, bound) in &mut unsettled {
+                let Some(&kick) = pass.first_kicks.get(actor) else { continue };
+                if earlier_passes.iter().all(|(_, kicks)| kicks.get(actor) == Some(&kick)) {
+                    *bound = Some(order[kick]);
                 }
             }
             let excluded = (0..order.len()).filter(|i| excluded[*i]).map(|i| order[i]).collect();
@@ -362,13 +562,14 @@ fn full_run<'a>(server: ServerId, records: impl IntoIterator<Item = &'a Record>)
                 excluded,
                 kick_targets,
                 revoke_targets,
+                revoked_invites,
                 unsettled,
                 owner_unsettled,
                 writes: pass.writes,
                 genesis: pass.genesis,
             };
         }
-        earlier_passes.push(pass.settled);
+        earlier_passes.push((pass.settled, pass.first_kicks));
         for i in fresh {
             excluded[i] = true;
         }
@@ -411,6 +612,8 @@ struct Graph<'a> {
     /// Positions of each record's deps.
     deps: Vec<Vec<usize>>,
     by_author: HashMap<Actor, Vec<usize>>,
+    /// Invite -> positions of the joins naming it.
+    joins: HashMap<RecordId, Vec<usize>>,
     /// What each accepted removal voids, worked out the first time a pass
     /// accepts it. Only removals need to know their ancestors, so a log full
     /// of posts costs no ancestry memory.
@@ -420,10 +623,14 @@ struct Graph<'a> {
 struct Pass {
     state: State,
     voided: Vec<usize>,
-    /// Positions of accepted genesis and privileged records.
+    /// Positions of accepted records that write a role history: the
+    /// genesis, grants, revokes, kicks and joins.
     settled: BTreeSet<usize>,
     kick_targets: Vec<Actor>,
     revoke_targets: Vec<Actor>,
+    revoked_invites: Vec<RecordId>,
+    /// Position of the accepted kick of each kicked actor.
+    first_kicks: HashMap<Actor, usize>,
     writes: HashMap<Actor, Vec<Write>>,
     genesis: Option<RecordId>,
 }
@@ -439,8 +646,17 @@ impl<'a> Graph<'a> {
         for (i, record) in records.iter().enumerate() {
             by_author.entry(record.author()).or_default().push(i);
         }
-        let actions = records.iter().map(|r| Action::from_record(r)).collect();
-        Graph { records, actions, deps, by_author, voids: RefCell::default() }
+        let actions: Vec<Option<Action>> = records.iter().map(|r| Action::from_record(r)).collect();
+        let mut joins: HashMap<RecordId, Vec<usize>> = HashMap::new();
+        for (i, action) in actions.iter().enumerate() {
+            // Only a join that depends on its invite can be accepted.
+            if let Some(Action::Join { invite }) = action {
+                if records[i].deps().contains(invite) {
+                    joins.entry(*invite).or_default().push(i);
+                }
+            }
+        }
+        Graph { records, actions, deps, by_author, joins, voids: RefCell::default() }
     }
 
     fn fold(&self, excluded: &[bool]) -> Pass {
@@ -450,6 +666,8 @@ impl<'a> Graph<'a> {
             settled: BTreeSet::new(),
             kick_targets: Vec::new(),
             revoke_targets: Vec::new(),
+            revoked_invites: Vec::new(),
+            first_kicks: HashMap::new(),
             writes: HashMap::new(),
             genesis: None,
         };
@@ -464,13 +682,20 @@ impl<'a> Graph<'a> {
                 continue;
             }
             pass.state.accepted.insert(record.id());
+            apply_invite(&mut pass.state, record, action);
             match action {
                 Action::Post { .. } => {
                     pass.state.posts.push(record.id());
                     continue;
                 }
+                Action::Invite { .. } => continue,
+                Action::RevokeInvite { invite } => {
+                    pass.voided.extend(self.voids_of(i));
+                    pass.revoked_invites.push(*invite);
+                    continue;
+                }
                 Action::Genesis => pass.genesis = Some(record.id()),
-                Action::Grant { .. } => {}
+                Action::Grant { .. } | Action::Join { .. } => {}
                 Action::Revoke { target } => {
                     pass.voided.extend(self.voids_of(i));
                     pass.revoke_targets.push(*target);
@@ -478,6 +703,7 @@ impl<'a> Graph<'a> {
                 Action::Kick { target } => {
                     pass.voided.extend(self.voids_of(i));
                     pass.kick_targets.push(*target);
+                    pass.first_kicks.insert(*target, i);
                 }
             }
             if let Some((target, write)) = apply(&mut pass.state, record, action) {
@@ -488,14 +714,22 @@ impl<'a> Graph<'a> {
         pass
     }
 
-    /// What the accepted removal at `removal` voids: the target's records it
-    /// hadn't seen (only privileged ones for a revoke). Cached per removal;
-    /// the target and kind are read from the record itself, so the cache key
-    /// says everything.
+    /// What the accepted removal or revoke-invite at `removal` voids, of the
+    /// records it hadn't seen: for a kick, all the target's records; for a
+    /// revoke, the target's privileged ones; for both, the joins through
+    /// the target's invites (a removed moderator's links stop working); for
+    /// a revoke-invite, the joins through that invite. Cached per record;
+    /// what it voids is read from the record itself, so the cache key says
+    /// everything.
     fn voids_of(&self, removal: usize) -> Vec<usize> {
-        let (target, privileged_only) = match &self.actions[removal] {
-            Some(Action::Revoke { target }) => (*target, true),
-            Some(Action::Kick { target }) => (*target, false),
+        let (own, privileged_only, invites) = match &self.actions[removal] {
+            Some(Action::Revoke { target }) => {
+                (self.by_author.get(target), true, self.invites_by(*target))
+            }
+            Some(Action::Kick { target }) => {
+                (self.by_author.get(target), false, self.invites_by(*target))
+            }
+            Some(Action::RevokeInvite { invite }) => (None, false, vec![*invite]),
             _ => return Vec::new(),
         };
         let mut voids = self.voids.borrow_mut();
@@ -508,16 +742,27 @@ impl<'a> Graph<'a> {
                     stack.extend_from_slice(&self.deps[i]);
                 }
             }
-            let by_target = self.by_author.get(&target).into_iter().flatten().copied();
-            by_target
-                .filter(|&i| {
-                    i != removal
-                        && !seen.get(i).copied().unwrap_or(false)
-                        && (!privileged_only
-                            || self.actions[i].as_ref().is_some_and(Action::is_privileged))
-                })
-                .collect()
+            let own = own.into_iter().flatten().copied().filter(|&i| {
+                !privileged_only || self.actions[i].as_ref().is_some_and(Action::is_privileged)
+            });
+            let joins =
+                invites.iter().filter_map(|invite| self.joins.get(invite)).flatten().copied();
+            let mut voided: Vec<usize> = own
+                .chain(joins)
+                .filter(|&i| i != removal && !seen.get(i).copied().unwrap_or(false))
+                .collect();
+            voided.sort_unstable();
+            voided.dedup();
+            voided
         });
         voided.clone()
+    }
+
+    /// The invites `author` signed.
+    fn invites_by(&self, author: Actor) -> Vec<RecordId> {
+        let mine = self.by_author.get(&author).into_iter().flatten();
+        mine.filter(|&&i| matches!(self.actions[i], Some(Action::Invite { .. })))
+            .map(|&i| self.records[i].id())
+            .collect()
     }
 }
