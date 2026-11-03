@@ -3,7 +3,7 @@
 The single source of truth for who does what, in which order, and what blocks the closed alpha.
 Owner: pm (see [`docs/TEAM.md`](TEAM.md)). Updated whenever a PR lands; if this board disagrees with a PR, a review or a chat, **the board wins until it is corrected here**.
 
-Last updated: 2026-11-03 ~07:30 UTC. `main` has PRs #1–#4, #6, #7, #10, #12–#14, #16. Open: #5, #8, #9, #11, #15, #17, #18 (draft).
+Last updated: 2026-11-03, refresh 3. `main` has PRs #1–#17, #22, #23, #25–#27; refresh 2 (#25) and the QA re-test commit land on `main` with this PR. Open: #18 (draft), #24, #28–#30.
 
 **Contents:** [Rules](#rules) · [Milestones](#milestones) · [Open PRs](#open-prs) · [Board](#board) · [Dependency map and critical path](#dependency-map-and-critical-path) · [Next assignments](#next-assignments) · [File ownership](#file-ownership) · [Risks and blockers](#risks-and-blockers) · [Owner decisions](#owner-decisions)
 
@@ -34,17 +34,15 @@ Last updated: 2026-11-03 ~07:30 UTC. `main` has PRs #1–#4, #6, #7, #10, #12–
 
 | PR | What | Author | Required verdicts | Status | Next step |
 | --- | --- | --- | --- | --- | --- |
-| [#5](https://github.com/moranmoa/MVP/pull/5) | sync hardening + QA-16 spike-peer timeout | dev-sync | tech-lead, sec-lead | in review | tech-lead APPROVE (`3bb79db`); sec-lead verdict, then merge |
-| [#8](https://github.com/moranmoa/MVP/pull/8) | updater audit, root rotation (R4), QA-14/15; CI ui job, pinned actions | dev-updater | tech-lead, sec-lead | in progress | tech-lead CHANGES REQUESTED on `7419319` |
-| [#9](https://github.com/moranmoa/MVP/pull/9) | groupkeys: per-channel epoch keys | dev-crypto | tech-lead, sec-lead | in progress | tech-lead CHANGES REQUESTED on `218b073` |
-| [#11](https://github.com/moranmoa/MVP/pull/11) | identity: 12 recovery words, keychain vault | dev-identity | tech-lead, sec-lead | in review | **ready to merge**: sec-lead + tech-lead APPROVE (`8422149`) |
-| [#15](https://github.com/moranmoa/MVP/pull/15) | threat model, relay review, PR checklist | sec-lead | tech-lead (lead's own PR) | in review | **ready to merge**: tech-lead APPROVE (`db772ff`) |
-| [#17](https://github.com/moranmoa/MVP/pull/17) | release pipeline (`release.yml`, draft pre-release, offline signing) + hardened relay ops (Caddy) | devops | tech-lead, sec-lead (relay) | in review | no verdict yet |
-| [#18](https://github.com/moranmoa/MVP/pull/18) | **T1** `core/api`: core API, first flows end to end (draft, stacked on #11) | dev-identity | tech-lead, sec-lead | in progress | draft; rebase after #11 merges; messages wait on #9 |
+| [#18](https://github.com/moranmoa/MVP/pull/18) | **T1** `core/api`: core API, first flows end to end | dev-identity | tech-lead, sec-lead | in progress | draft; #11 is merged, so rebase on `main` and take out of draft |
+| [#24](https://github.com/moranmoa/MVP/pull/24) | UI: B17 mixed text direction (UX-01, UX-03, UX-18, U4) | dev-ui | tech-lead (+ ux visual check) | in progress | tech-lead APPROVE (`ec6aef7`); ux visual check CHANGES REQUESTED |
+| [#28](https://github.com/moranmoa/MVP/pull/28) | UI: B19 recovery-words screen safety (QA-01, U1) | dev-ui | tech-lead, sec-lead (recovery words), ux visual | in review | tech-lead APPROVE (`2ca0e0e`); sec-lead + ux pending |
+| [#29](https://github.com/moranmoa/MVP/pull/29) | Spike 5: browser peer (rust-libp2p → WASM) | dev-web | tech-lead, sec-lead (network) | in review | no verdict yet |
+| [#30](https://github.com/moranmoa/MVP/pull/30) | relay: T4a hardening (R1 R2 R3 R6 R7 R10) + tag protection | devops | tech-lead, sec-lead (relay) | in progress | tech-lead CHANGES REQUESTED (`578696a`) |
 
-Merged since the first board: #6 (PO review + backlog), #7 (records hardening), #10 (UI security), #12 (UX review), #13 (QA plan), #14 (board + team), #16 (business plan 1).
+Merged since the first board: #5, #6, #7, #8 (updater audit), #9 (groupkeys), #10, #11, #12, #13, #14, #15, #16, #17, #22 + #26 (UX specs), #23, #25, #27 (QA re-test).
 
-**Merge order for core** (keeps `core/Cargo.toml` / `Cargo.lock` conflicts to one line): #5 (needs sec-lead verdict) → #11 → #18 (rebased off #11) → #9 → #8. Each later PR rebases and keeps every crate in `members`. Docs PR #15 merges any time. #17 touches `infra/` and `.gitignore` only, no conflict with core.
+**Merge order for core**: #18 (T1, rebased on `main` with #8/#9 in) next. Every later core PR rebases and keeps every crate in `members`. UI PRs #24 and #28 merge any time.
 
 ---
 
@@ -58,33 +56,37 @@ Merged since the first board: #6 (PO review + backlog), #7 (records hardening), 
 | S2 | Log sync spike (`core/sync`) | dev-sync | done | #2 | – | M | M1 |
 | S3 | Signed records + incremental authority | tech-lead | done | #3 | – | M | M1 |
 | R1 | Records/authority hardening: genesis binding, pending-queue flood, `mvs/` contexts | tech-lead | done | #7 | S3 | M | M1 |
-| R2 | Sync hardening: canonical deps, bounded input, global pull limit | dev-sync | in review | #5 | S2 | M | M1 |
-| B2 | Identity: 12 words, keychain, restore (+ QA-01 core side) | dev-identity | in review (approved) | #11 | – | S | M1 |
-| B3 | Group encryption by epoch, re-key on kick | dev-crypto | in review | #9 | S3; D30 for final shape | L | M1 |
-| R4 | Updater audit: root-rotation chain DoS, QA-14, QA-15 | dev-updater | in review | #8 | S1 | S | M3 |
-| QA-16 | `spike-peer` hangs when relay is unreachable | dev-sync | in review | #5 | – | S | M2 |
-| T2 | All crypto domain strings `mvs/…`, pinned by tests | each crate owner | in review | #5 #8 #9 #11 (records done in #7) | – | S | M1 |
-| B4 | MVP record kinds: server edit/close, channels, invite + revoke, **Join + member set (GAP-3; #18 borrows a control `Post` tagged `mvs/join/v1` until `Kind::Join` exists)**, edit/delete tombstones, leave, age claim, kick blocks rejoin (ש-4); revoke-only demotion (D28); `Kind::KeyRotation` ~48 KiB (R7); **`auth_deps` format for channel messages (GAP-2)**; `#general` auto-named (UX-04) | core-5 (tech-lead until staffed) | todo | – | R1 ✔; D30 for history flag; GAP-2 format decision by tech-lead + sec-lead | L | M1 |
-| B4-sync | Verify records at ingest and before gossip forward (GAP-1); roles only from the signed log | dev-sync | todo | – | R2, B4 kinds | M | M1 |
+| R2 | Sync hardening: canonical deps, bounded input, global pull limit | dev-sync | done | #5 | S2 | M | M1 |
+| B2 | Identity: 12 words, keychain, restore (+ QA-01 core side) | dev-identity | done | #11 | – | S | M1 |
+| B2-f | B2 follow-up from the approved B19 spec: `getRecoveryChallenge()`; `checkRecoveryWords` returns `{ ok }` or `{ ok: false, wrong }`, only for the challenge positions, capped at 5 failures | dev-identity | todo | – | #11 ✔, B19 spec ✔ (#22); sec-lead reviews the implementation | S | M1 |
+| B3 | Group encryption by epoch, re-key on kick | dev-crypto | done | #9 | S3; D30 for final shape | L | M1 |
+| R4 | Updater audit: root-rotation chain DoS, QA-14, QA-15 | dev-updater | done | #8 | S1 | S | M3 |
+| QA-16 | `spike-peer` hangs when relay is unreachable | dev-sync | done | #5 | – | S | M2 |
+| T2 | All crypto domain strings `mvs/…`, pinned by tests | each crate owner | done | #5 #7 #8 #9 #11 | – | S | M1 |
+| B4 | MVP record kinds: server edit/close, channels, invite + revoke, **Join + member set (GAP-3; #18 borrows a control `Post` tagged `mvs/join/v1` until `Kind::Join` exists)**, edit/delete tombstones, leave, age claim, kick blocks rejoin (ש-4), **kick-undo (owner only) + the removed-members list behind `listRemovedMembers`**; revoke-only demotion (D28); `Kind::KeyRotation` ~48 KiB (R7); **`auth_deps` format for channel messages (GAP-2)**; `#general` auto-named (UX-04) | core-5 (records-authority-dev-b4) | in progress | – | R1 ✔; D30 for history flag; GAP-2 format decision by tech-lead + sec-lead | L | M1 |
+| B4-sync | Verify records at ingest and before gossip forward (GAP-1, with T1); roles only from the signed log; **F1** answer pulls off the swarm task (`spawn_blocking` + read-only connection); **F3** dropped `Stored` events must surface (`Lagged` event or sequence number) so T1 re-reads the store | dev-sync | todo | – | R2, B4 kinds | M | M1 |
+| F2 | Sync: filter dialled addresses, with a "LAN allowed" switch for the harness | dev-sync | todo | – | #5 | S | M2 |
+| F4 | Sync: `make_room` scans all 4,096 buckets per new peer when full; switch to LRU if the limit grows | dev-sync | todo | – | #5 | S | – |
 | GAP-4 | Answer sync only for members: peer-ID ↔ identity binding, secret-derived topic names | dev-sync | todo | – | B4 (member set), B4-sync | M | M2 |
-| GAP-6 | Kademlia client mode, filter private addresses, `/mvs/kad/1.0.0` | dev-sync | todo | – | R2 | S | M2 |
-| B23 | Name sanitising in core: bidi controls, invisible chars (QA-13, QA-06) | core-5 | todo | – | B4 | S | M2 |
-| T1 | **Integration crate `core/api`** — wires sync → records → authority → groupkeys (the glue sec-lead called `core/node`) and exposes the `CoreApi` facade matching `ui/src/core/api.ts` commands, events and error codes. First PR: identity, server create, roles, kick, age gate, SQLite, conformance fixtures; `Network` and `GroupCipher` are stand-in adapters until #5 and #9 land; messages answer `not-implemented` | dev-identity (lead), dev-crypto (crypto module, GAP-5) | in progress | #18 (draft) | B2, R2, B3, B4 (initial kinds) | L | M1 |
-| GAP-5 | Wire encryption into T1: `Kind::KeyRotation`, `may_rotate`, feed `set_voided` from authority | dev-crypto | todo | – | T1 skeleton, B4 (`KeyRotation`) | M | M1 |
+| GAP-6 | Clients: Kademlia client mode, filter private addresses, `/mvs/kad/1.0.0` (relay side in T4a; ship together) | dev-sync | todo | – | B4-sync | S | M2 |
+| B23 | Name sanitising in core: bidi controls, invisible chars (QA-06; QA-13 fixed in the UI by #10, core-side check still needed) | core-5 | todo | – | B4 | S | M2 |
+| T1 | **Integration crate `core/api`** — the single glue crate (no `core/node`; confirmed by tech-lead): wires sync → records → authority → groupkeys, verifies peer input (GAP-1 with B4-sync) and exposes the `CoreApi` facade matching `ui/src/core/api.ts` commands, events and error codes. First PR: identity, server create, roles, kick, age gate, SQLite, conformance fixtures; `Network` and `GroupCipher` are stand-in adapters until #5 and #9 land; messages answer `not-implemented`. **Parity also covers the spec additions:** `getRecoveryChallenge`, `leaveServer`, `updateServer`, `closeServer`, `createChannel`/`updateChannel`/`deleteChannel`, `revokeInvite`, `confirmJoin`, `listPendingJoins`, `cancelPendingMessage`, `listRemovedMembers`, `undoKick` | dev-identity (lead), dev-crypto (crypto module, GAP-5) | in progress | #18 (draft) | B2, R2, B3, B4 (initial kinds) | L | M1 |
+| GAP-5 | Wire encryption into T1 in `core/api/src/crypto`: `Kind::KeyRotation`, `may_rotate`, feed `set_voided` from authority | dev-crypto | todo | – | T1 skeleton, B4 (`KeyRotation`) | M | M1 |
 
 ### Shell, packaging, release
 
 | ID | Title | Owner | Status | PR | Depends on | Size | MS |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | S4/6 | Spike 4+6: voice + footprint, **Tauri vs Electron** | dev-voice-shell | in progress | – | – | M | M1 |
-| S5 | Spike 5: browser peer interop with native peers | dev-web | in progress | – | S2 | M | – |
+| S5 | Spike 5: browser peer (rust-libp2p → WASM) joins the network | dev-web | in review | #29 | S2 | M | – |
 | B1 | Desktop shell (per S4/6) + real `CoreApi` over IPC; core in its own process; mock stays at `?demo`; minimal IPC surface (GAP-17) | dev-voice-shell | blocked (S4/6) | – | S4/6, T1 | L | M1 |
-| B10 | CI: ui job (#8), `qa/` smoke on every PR, advisories blocking, `ring` exception permanent (D29) | dev-updater | in review | #8 | #13 for smoke; T3 for blocking | S | M2 |
+| B10 | CI: ui job (#8), `qa/` smoke on every PR, advisories blocking, `ring` exception permanent (D29) | dev-updater | in progress (ui job merged in #8) | #8 | #13 for smoke; T3 for blocking | S | M2 |
 | T3 | libp2p 0.54 → current (clears `ring 0.16` advisories, rcgen, hickory) | dev-sync | todo | – | #5 merged | M | M2 |
-| B9 | Installers: release workflow + archives + `SHA256SUMS` + unsigned manifest body (in #17); then EXE/MSI, DMG, AppImage/deb/rpm via the shell plug-in point; third-party notices; SmartScreen/Gatekeeper notes | devops | in review (pipeline) / blocked (packaging on B1) | #17 | B1; D-sign | M | M3 |
-| T4 | Relay + seeder + bootstrap in Docker on the owner's machine behind Caddy and the owner's domain (D24); relay limits raised for catch-up; stop logging who talks to whom (GAP-7); relay lockfile + pinned images (R7-relay) | devops | in review | #17 | D-domain for go-live | M | M2 |
+| B9 | Installers: release workflow + archives + `SHA256SUMS` + unsigned manifest body (in #17); then EXE/MSI, DMG, AppImage/deb/rpm via the shell plug-in point; third-party notices; SmartScreen/Gatekeeper notes | devops | in progress (pipeline merged in #17; packaging skeleton next, final packaging blocked on B1) | #17 | B1; D-sign | M | M3 |
+| T4a | **P0 before alpha**, relay hardening from the #17 review: relay R7 `Cargo.lock` + `--locked` + images pinned by digest; R3 connection + memory limits; R6 `node.key` 0600, refuse otherwise; R1/R2 global-address filter + `/mvs/kad/1.0.0` (with dev-sync, GAP-6); R10 identify string `/mvs/0.1.0`; `v*` tag protection | devops | in progress | #30 | #17 | S | M2 |
+| T4 | Relay + seeder + bootstrap in Docker on the owner's machine behind Caddy and `<relay-domain>` (D24, 5.1); relay limits raised for catch-up; stop logging who talks to whom (GAP-7, closed in #17); no connection logs on disk at the relay or bootstrap, only in-memory metadata and aggregate counters (product-lead, #16) | devops | todo (go-live; domain decided) | #17 | D-domain for go-live | M | M2 |
 | B8 | In-app update: P2P + seeder, verify before install/forward, rail icon (UX-14), rollback after 3 failed starts, "what's new" from signed `notes` (ש-24) | dev-updater | blocked (B1) | – | R4, B1, B9, T4 | M | M3 |
-| B5 | Real networks: 3 machines (home/cellular/work, 3 OSes), p95 < 1 s, creator leaves and others continue, offline catch-up via relay only, `spike-peer` ≥ 10 pairs ≥ 95 % (results committed, no IPs) | dev-sync + qa | blocked (QA-16 #5, T4) | – | QA-16, T4, B4-sync | M | M2 |
+| B5 | Real networks: 3 machines (home/cellular/work, 3 OSes), p95 < 1 s, creator leaves and others continue, offline catch-up via relay only, `spike-peer` ≥ 10 pairs ≥ 95 % (results committed, no IPs) | dev-sync + qa | blocked (B4-sync, T4 go-live) | – | QA-16, T4, B4-sync | M | M2 |
 | B14 | UI performance in the real shell (incl. < 50 ms pending echo for B6) | dev-web | todo | – | B1 | M | M3 |
 | B15 | Real diagnostics export from core | dev-identity | todo | – | T1 | S | M3 |
 
@@ -92,23 +94,24 @@ Merged since the first board: #6 (PO review + backlog), #7 (records hardening), 
 
 | ID | Title | Owner | Status | PR | Depends on | Size | MS |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| B6 | Real send states: pending/sent/delivered (receipt ack ש-11), failed + retry; composer 16 KiB cap and no text loss (QA-10) | dev-sync (ack) + dev-ui (composer) | todo | – | B4-sync, T1; QA-10 part can start now | S | M2 |
+| B6 | Real send states: pending/sent/delivered (receipt ack ש-11), failed + retry; composer cap and no text loss (QA-10); **QA-17** (product-lead decision): one limit of **4,000 code points** in composer, display, sanitizer and core; counter shown from 3,800; fits under the 16 KiB record limit | dev-sync (ack) + dev-ui (composer) | todo | – | B4-sync, T1; QA-10 part can start now | S | M2 |
 | B7 | Age end-to-end: < 16 blocked, 120-year check (QA-04), signed age claims, 18+ channels hidden (ש-12), DOB correction rules, UX-15, UX-23 | core-5 (claims) + dev-ui | todo | – | B4 | M | M2 |
-| B11a | Leave server (owner blocked, ש-19) | dev-ui | todo | – | B4 for core | S | M3 |
-| B11b | Edit / close server (ש-22, ש-23) | dev-ui | todo | – | B4 | M | M3 |
-| B11c | Channels: create, rename, delete (ש-20), 18+ flag | dev-ui | todo | – | B4 | M | M3 |
-| B11d | Revoke invite + new link (ש-21) | dev-ui | todo | – | B4 | S | M3 |
-| B11e | Edit profile: name, avatar, banner, bio (UX-02, UX-16, QA-02, QA-03) | dev-ui | todo | – | – (mock first) | S | M2 |
-| B12 | Display bugs + 200 % / 24 px check (U1, U2, U4–U6, UX-05, UX-17, QA-12). **UX-19 (decided by product-lead):** identity code stays next to the name on every message, 0.75rem, `--text-muted`, `aria-hidden` on the code, `aria-labelledby` on the article | dev-ui | todo | – | – | M | M3 |
+| B11a | Leave server (owner blocked, ש-19) | dev-ui | todo (spec approved) | spec #26 | B4 for core | S | M3 |
+| B11b | Edit / close server (ש-22, ש-23) | dev-ui | todo (spec approved) | spec #26 | B4 | M | M3 |
+| B11c | Channels: create, rename, delete (ש-20), 18+ flag | dev-ui | todo (spec approved) | spec #26 | B4 | M | M3 |
+| B11d | Revoke invite + new link (ש-21) | dev-ui | todo (spec approved) | spec #26 | B4 | S | M3 |
+| B11e | Edit profile: name, avatar, banner, bio (UX-02, UX-16, QA-02; QA-03 fixed by #10) | dev-ui | todo (spec approved) | spec #26 | – (mock first) | S | M2 |
+| B12 | Display bugs + 200 % / 24 px check (U1, U2, U4–U6, UX-05, UX-17, QA-12); **QA-18 (High)**: at 375 px the recovery-word check step is 516 px wide and "בדיקה" is off-screen (same root as UX-05; do it with B19); **QA-19** (Low): reply reference tap target ~19 px, goal ≥ 44 px | dev-ui | todo | – | – | M | M3 |
 | B13 | Wording, product name MVS (`mvs://`, `app.name`, `document.title`), spec updates (ש-1, ש-2, ש-5, ש-8, ש-9), UX-39, UX-40 | product-lead (spec + string table), dev-ui (i18n files) | todo | – | – | S | M2 |
-| B17 | Mixed-direction text in messages and strings (UX-01 blocker, UX-03, UX-18) | dev-ui | todo | – | – | S–M | M1 |
-| B18 | P2P states in UI: own new server, offline server, background join (UX-07..09, QA-08) | dev-ui + dev-sync (API contract) | todo | – | T1 contract for background join | M | M2 |
-| B19 | Recovery-words screen safety: resume after reload (QA-01), reading order, hidden by default (UX-05, UX-06, U1) | dev-ui | todo | – | B2 for persistence | S | M1 |
+| B17 | Mixed-direction text in messages and strings (UX-01 blocker, UX-03, UX-18), built from `docs/ux/specs/B17-mixed-direction.md` (spec approved). Includes **UX-19** on the same message-head line: identity code next to the name, 0.75rem, `--text-muted`, `aria-hidden` on the code, `aria-labelledby` on the article | dev-ui | in progress (ux visual changes requested) | #24 (spec #22) | – | S–M | M1 |
+| B18 | P2P states in UI: own new server, offline server, background join (UX-07..09, QA-08) | dev-ui + dev-sync (API contract) | todo (spec approved) | spec #26 | T1 contract for background join | M | M2 |
+| B19 | Recovery-words screen safety: resume after reload (QA-01), reading order, hidden by default (UX-05, UX-06, U1), recovery challenge | dev-ui | in review | #28 (spec #22) | B2-f for the core side | S | M1 |
 | B20 | Contrast AA (UX-13) | dev-ui | todo | – | – | S | M3 |
 | B16 | Settings export/import, message density, date separators (UX-12) | dev-ui | todo | – | – | M | – |
 | B21 | Accessibility + keyboard (UX-11, UX-20, UX-21, UX-34, UX-37, UX-38) | dev-ui | todo | – | – | M | – |
 | B22 | Flow polish (UX-22..32 part, UX-41..48, QA-05, QA-07, QA-09, QA-11) | dev-ui | todo | – | – | M | – |
-| UX-10 | `mvs://` links not clickable in WhatsApp/Telegram/Discord → https landing page on the owner's domain | devops + dev-ui | blocked (D-domain) | – | D-domain, T4 | S | M3 |
+| B24 | About screen: abuse-report address, links to the agreement and privacy notice (business plan §3.3, approved by product-lead in #16) | dev-ui | todo (5.1 decided) | – | 5.1 | S | M3 |
+| UX-10 | `mvs://` links not clickable in WhatsApp/Telegram/Discord → https landing page on `<relay-domain>` | devops + dev-ui | todo (5.1 decided) | – | T4 | S | M3 |
 
 ### Reviews, QA, security, business
 
@@ -118,8 +121,9 @@ Merged since the first board: #6 (PO review + backlog), #7 (records hardening), 
 | UX-R1 | UX review 1 (48 findings, mapped into B12/B13/B17–B22) | ux | done | #12 | – | M | M1 |
 | UI-SEC | UI security audit + phone layout | dev-ui | done | #10 | – | M | M1 |
 | QA-P1 | QA plan + Playwright smoke + bug list | qa | done | #13 | – | M | M1 |
-| T11 | UX specs before build: B17 → B19 → B11e → B18 → B11a–d in `docs/ux/specs/` | ux | todo | – | – | M | M1–M3 |
-| T5 | Threat model, relay review, PR checklist | sec-lead | in review (approved) | #15 | – | M | M2 |
+| QA-R1 | QA re-test 1: QA-17..19 new, QA-03/13 closed | qa | done | #27 | – | S | M1 |
+| T11 | UX specs before build: B17, B19, B11e, B18, B11a–d in `docs/ux/specs/` | ux | done | #22, #26 | – | M | M1–M3 |
+| T5 | Threat model, relay review, PR checklist | sec-lead | done | #15 | – | M | M2 |
 | T6 | Business plan 1: alpha recruitment, costs, legal drafts, owner decisions §5 | biz | done | #16 | – | M | M3 |
 | T10 | Team structure + review flows (`docs/TEAM.md`) | pm | done | #14 | – | S | M1 |
 | T7 | QA on the real shell: rerun smoke + SC-01..SC-04 against the B1 build | qa | blocked (B1) | – | B1 | M | M2 |
@@ -130,14 +134,11 @@ Merged since the first board: #6 (PO review + backlog), #7 (records hardening), 
 
 | ID | Finding | PR | Owner | Status |
 | --- | --- | --- | --- | --- |
-| R2 | Non-canonical deps: a stored blob is served back under a different id | #5 | dev-sync | fixed, awaiting re-review |
-| R3 | A groupkeys rotation voided later by authority can't be withdrawn → peers diverge | #9 | dev-crypto | fixed (`set_voided`), awaiting re-review |
-| R4 | Any peer can block root rotation → client frozen on old root | #8 | dev-updater | fixed; tech-lead re-review requested more changes |
 | R7 | `KeyRotation` doesn't fit a 16 KiB record above ~203 members | #9 → B4 | core-5 | todo (B4) |
 | R8 | identity: macOS build and real OS keychain not exercised in tests | #11 | dev-identity + devops | todo (macOS runner) |
-| GAP-1..7, GAP-17 | Threat-model P0 gaps: no ingest verification, no `auth_deps`, no member set, sync answers anyone, no wire encryption, DHT leaks IPs, relay logs pairs, IPC surface | #15 | see B4-sync, B4, GAP-4, GAP-5, GAP-6, T4, B1 | todo |
+| GAP-1..7, GAP-17 | Threat-model P0 gaps: no ingest verification, no `auth_deps`, no member set, sync answers anyone, no wire encryption, DHT leaks IPs, relay logs pairs, IPC surface | #15 | GAP-1 → B4-sync + T1; GAP-2/3/5 records side → B4; GAP-4 and GAP-6 clients → dev-sync after B4-sync; GAP-6 relay → T4a; GAP-7 closed in #17; GAP-5 encryption → dev-crypto; GAP-17 → dev-voice-shell + dev-identity (B1) | todo |
 
-Closed since the first board: R1 (#7), R5 (#11 security APPROVE), R6 (#13).
+Closed since the first board: R1 (#7), R2 (#5), R5 (#11), R6 (#13); R3 and R4 approved in #9 and #8.
 
 ### T acceptance criteria
 
@@ -147,7 +148,7 @@ B-items: `docs/reviews/po-review-1.md` §8. T2 and T5–T8 are as written in the
 | --- | --- |
 | T1 | The crate exposes every command and event in `ui/src/core/api.ts`, with the same names, the JSON shapes from `types.ts` and the same error codes; a parity test fails if `api.ts` and the crate disagree. Every call is async and answers from the local store, without waiting on the network. An integration test covers M1: create an identity, create a server, send a message, restart and see it again; two instances on one machine sync. Peer input reaches T1 only through `Record::decode`, and a malformed-input test proves there's no panic. The UI contract tests pass against both the mock and T1. |
 | T3 | libp2p is upgraded and all tests are green; `ring 0.16` and `rcgen 0.11` are gone from `Cargo.lock`; the advisories job is clean, or each remaining advisory is listed with a reason. |
-| T4 | One compose file runs relay, seeder and bootstrap, with a templated hostname and no IPs in git. TLS comes from the reverse proxy, which forwards only WebSocket; TCP/UDP ports are documented. Relay circuit limits are raised so 10,000 missed messages catch up over a relay-only path, measured. Restart policies and a health check are in place. |
+| T4 | One compose file runs relay, seeder and bootstrap, with a templated hostname and no IPs in git. TLS comes from the reverse proxy, which forwards only WebSocket; TCP/UDP ports are documented. Relay circuit limits are raised so 10,000 missed messages catch up over a relay-only path, measured. Restart policies and a health check are in place. No connection logs on disk at the relay or bootstrap; only in-memory metadata and aggregate counters. |
 | T9 | The go/no-go checklist covers the spec's Definition of Done, M3 "done when", all Blocker/High bugs closed, SC-01..04 results committed, and tester instructions (install, unsigned-build warnings if relevant, how to export diagnostics). |
 | T11 | Each spec has RTL and LTR layouts, all states, exact Hebrew and English strings, keyboard and screen-reader behaviour, and acceptance checks; product-lead approves it before dev-ui starts the item (B17 may start from UX-01 now). |
 
@@ -166,14 +167,14 @@ graph LR
   classDef crit stroke-width:4px
 
   R1[R1 records hardening #7]:::done
-  S2[S2 sync]:::done --> R2[R2 sync hardening #5]:::review
-  B2[B2 identity #11]:::review
-  R1 --> B3[B3 groupkeys #9]:::review
+  S2[S2 sync]:::done --> R2[R2 sync hardening #5]:::done
+  B2[B2 identity #11]:::done
+  R1 --> B3[B3 groupkeys #9]:::done
   D30{{D30 history for new members}}:::decision --> B3
   D30 --> B4
   D31{{D31 large-channel rotation}}:::decision -. not alpha-blocking .-> B3
   GAP2{{GAP-2 auth_deps format}}:::decision --> B4
-  R1 --> B4[B4 MVP record kinds + member set]:::todo
+  R1 --> B4[B4 MVP record kinds + member set]:::prog
   R2 --> B4S[B4-sync verify at ingest]:::todo
   B4 --> B4S
   B2 --> T1[T1 core/api #18]:::prog
@@ -185,11 +186,11 @@ graph LR
   T1 --> B1
   G5 --> M1((M1 talks to itself))
   B1 --> M1
-  B17[B17 mixed direction]:::todo --> M1
-  B19[B19 recovery words]:::todo --> M1
+  B17[B17 mixed direction #24]:::prog --> M1
+  B19[B19 recovery words #28]:::review --> M1
 
-  QA16[QA-16 #5]:::review --> B5
-  DD{{D-domain}}:::decision --> T4[T4 relay ops #17]:::review
+  QA16[QA-16 #5]:::done --> B5
+  DD{{D-domain decided}}:::done --> T4[T4 relay ops #17 #30]:::prog
   T4 --> B5[B5 real networks]:::blocked
   B4S --> G4[GAP-4 members-only sync]:::todo --> M2
   B4S --> B5
@@ -203,7 +204,7 @@ graph LR
 
   B1 --> B9[B9 installers #17]:::review
   DS{{D-sign code signing}}:::decision --> B9
-  R4[R4 updater audit #8]:::review --> B8[B8 in-app update]:::blocked
+  R4[R4 updater audit #8]:::done --> B8[B8 in-app update]:::blocked
   B1 --> B8
   B9 --> B8
   T4 --> B8
@@ -226,8 +227,8 @@ B4 MVP record kinds ─► B4-sync ─► T1 integration crate ─► B1 desktop
   D30     GAP-2 format          B2 (#11)  B3 (#9)        S4/6 spike
 ```
 
-- **Longest chain:** B4 (L) → B4-sync (M) → T1 (L) → B1 (L) → B9 (M) → B8 (M). R1 is now done, so **B4 is the head of the path and has no developer** (core-5 slot open; see K13).
-- **Non-code gates on the path:** D30 and the GAP-2 `auth_deps` format (B4), S4/6 result (B1), D-domain (T4 → B5, B8), D-sign (B9).
+- **Longest chain:** B4 (L) → B4-sync (M) → T1 (L) → B1 (L) → B9 (M) → B8 (M). R1 is done, so **B4 is the head of the path**; it is now staffed (core-5, see K13).
+- **Non-code gates on the path:** D30 and the GAP-2 `auth_deps` format (B4), S4/6 result (B1), D-sign (B9). D-domain is decided.
 - **Biggest lever:** staff B4 now, and start T1 as soon as #11 and #5 merge, against the kinds that exist.
 - **Parallel path to M2:** T4 relay ops (#17) → B5 real-network run; GAP-4 members-only sync.
 
@@ -239,30 +240,30 @@ What each agent picks up **after its current PR merges**, the lead who assigns i
 
 | Agent | Assigned by | Now | Next (in order) | Writes | Must not touch |
 | --- | --- | --- | --- | --- | --- |
-| **core-5** (open slot) | tech-lead → core sub-lead | – | 1. **B4** incl. member set (GAP-3), `auth_deps` (GAP-2), `KeyRotation` (R7), revoke-only demotion (D28). 2. B7 age-claim records. 3. B23 core name sanitising. | `core/records/**`, `core/authority/**` | `core/sync`, `core/groupkeys`, T1 crate |
-| **tech-lead** | manager | reviews #5, #8, #9, #11, #17; #15 as other lead | 1. Decide GAP-2 format with sec-lead and the T1 crate name/split. 2. Hold `core/records` + `core/authority` until core-5 starts (if no core-5, tech-lead does B4 and sec-lead reviews it). | `core/records/**`, `core/authority/**` (custodian) | – |
-| **dev-sync** | tech-lead → dev-identity | #5 | 1. **B4-sync** (GAP-1). 2. GAP-6 Kademlia client mode. 3. GAP-4 members-only sync (after B4 member set). 4. Receipt ack for B6 (ש-11). 5. T3 libp2p upgrade (alone, see conflicts). 6. B5 run with qa. | `core/sync/**`, `core/spike-peer/**` | `core/records`, `infra/` |
-| **dev-identity** (core sub-lead) | tech-lead | #11 (approved), #18 (T1 draft) | 1. **T1**: take #18 out of draft after #11 merges; swap the `Network` adapter for `sync` after #5. 2. B15 diagnostics. 3. Split core assignments among core devs. | `core/api/**`, `core/identity/**` | `ui/**` (contract changes go to dev-ui) |
-| **dev-crypto** | tech-lead → dev-identity | #9 | 1. **D30 + D31 recommendation** to the owner. 2. GAP-5 crypto module in T1 after the skeleton merges. 3. B3 acceptance: relay sees only ciphertext; 500-member rotation size. | `core/groupkeys/**`; T1 `src/crypto/**` after skeleton | rest of T1 crate, `core/records` |
-| **dev-updater** | tech-lead → dev-identity | #8 | 1. B10: `qa/` smoke job in `ci.yml` (after #13); advisories blocking after T3. 2. **B8** in-app update after B1 + B9. | `core/updater/**`, `.github/workflows/ci.yml`, `.github/scripts/npm-licenses.mjs`, `.github/scripts/install-cargo-deny.sh`, `.github/dependabot.yml`, `core/deny.toml` | `release.yml`, `.github/scripts/manifest-body.mjs` |
+| **core-5** (records-authority-dev-b4) | tech-lead → core sub-lead | B4 | 1. **B4** incl. member set (GAP-3), `auth_deps` (GAP-2), `KeyRotation` (R7), revoke-only demotion (D28), kick-undo + removed-members list. 2. B7 age-claim records. 3. B23 core name sanitising. | `core/records/**`, `core/authority/**` | `core/sync`, `core/groupkeys`, `core/api` |
+| **tech-lead** | manager | reviews #18, #24 (re-check), #29, #30; B4 | 1. GAP-2 format with sec-lead (feeds B4). 2. Review B4 as it lands. | – (`core/records` + `core/authority` handed to core-5) | – |
+| **dev-sync** | tech-lead → dev-identity | – (#5 merged) | 1. **B4-sync** (GAP-1 + F1 + F3). 2. GAP-6 clients (ship with T4a relay side, #30) + F2. 3. GAP-4 members-only sync (after B4 member set). 4. Receipt ack for B6 (ש-11). 5. T3 libp2p upgrade (alone, see conflicts). 6. B5 run with qa. F4 when the peer limit grows. | `core/sync/**`, `core/spike-peer/**` | `core/records`, `infra/` |
+| **dev-identity** (core sub-lead) | tech-lead | #18 (T1 draft) | 1. **T1**: rebase #18 on `main`, out of draft; swap the `Network` adapter for `sync`; F3 handling; spec additions for parity. 2. **B2-f** recovery challenge + 5-failure cap. 3. GAP-17 IPC surface with dev-voice-shell (B1). 4. B15 diagnostics. | `core/api/**`, `core/identity/**` | `ui/**` (contract changes go to dev-ui) |
+| **dev-crypto** | tech-lead → dev-identity | – (#9 merged) | 1. **D30 + D31 recommendation** to the owner. 2. GAP-5 crypto module in T1 after the skeleton merges. 3. B3 acceptance: relay sees only ciphertext; 500-member rotation size. | `core/groupkeys/**`; T1 `src/crypto/**` after skeleton | rest of T1 crate, `core/records` |
+| **dev-updater** | tech-lead → dev-identity | – (#8 merged) | 1. B10: `qa/` smoke job in `ci.yml` (after #13); advisories blocking after T3. 2. **B8** in-app update after B1 + B9. | `core/updater/**`, `.github/workflows/ci.yml`, `.github/scripts/npm-licenses.mjs`, `.github/scripts/install-cargo-deny.sh`, `.github/dependabot.yml`, `core/deny.toml` | `release.yml`, `.github/scripts/manifest-body.mjs` |
 | **dev-voice-shell** | tech-lead → dev-ui | S4/6 spike | 1. Spike results + recommendation (decision log lines 1 and 7). 2. **B1** desktop shell + IPC `CoreApi`; fill the shell plug-in point in `release.yml` with devops. | `desktop/**` (new; or `ui/src-tauri/**`), `ui/src/core/ipc.ts` (new) | other `ui/src/**`, `release.yml` (send devops a patch) |
-| **dev-web** | tech-lead → dev-ui | S5 spike | 1. Spike 5 results doc. 2. **B14** UI perf harness in the real shell (after B1). Until then: S5 follow-ups only. | spike dir, later `perf/**` (new) | `ui/**`, `qa/**` |
-| **dev-ui** (client sub-lead) | tech-lead | – (#10 merged) | 1. **B17** mixed direction (from the UX spec; may start now from UX-01, already specified). 2. **B19** recovery-words safety (from the UX spec; QA-01, U1). 3. QA-10 composer cap. 4. B11e profile (from the UX spec; mock). 5. B13 strings from product-lead's table. 6. B12 (incl. UX-19), B20, B18 (from the UX spec), B11a–d (from the UX spec). | `ui/**` (sole writer, incl. `ui/src/i18n/*.json`) | `ui/src/core/ipc.ts`, `desktop/**` |
-| **devops** | tech-lead | #17 | 1. Land #17 (release pipeline + Caddy relay). 2. **T4** go-live once D-domain is decided. 3. macOS runner for R8. 4. **B9** packaging once B1 lands. | `infra/**`, `.github/workflows/release.yml`, `.github/scripts/manifest-body.mjs`, `docs/release/**`, `packaging/**` (new) | `ci.yml` (dev-updater) |
-| **sec-lead** | manager | #15 (approved) | 1. Verdict on #5 (last one missing). 2. GAP-2 format with tech-lead. 3. Standing review on #5, #8, #9, #17 and every B4/B4-sync/T1/GAP PR (`PR-CHECKLIST.md`). 4. Key custody for D-sign / D23. | `docs/security/**` | crate code (findings go to owners) |
-| **qa** | manager | – (#13 merged) | 1. B5 run with dev-sync. 2. T7 rerun on the real shell. | `qa/**` | `ui/**`, `ci.yml` (ask dev-updater) |
-| **product-lead** | manager | reviews #14, #16 | 1. **B13**: spec updates + a ready-to-paste string table. 2. Acceptance of engineering deliveries against criteria. 3. Review of product/UX/business/QA/board PRs. Also folds sec-lead's GAP decisions and biz §5 into the spec once decided. | `docs/spec.md`, `docs/reviews/po-*` | `ui/src/i18n/*` |
-| **ux** | product-lead | – (#12 merged) | 1. **T11 UX specs**, in order: B17 → B19 → B11e → B18 → B11a–d, in `docs/ux/specs/` (layouts in RTL and LTR, all states, exact Hebrew and English strings, keyboard and screen-reader behaviour, acceptance checks). 2. Visual review of dev-ui's PRs against those specs. 3. T8 after B1. | `docs/ux/**`, `docs/reviews/ux-*` | `ui/**` |
+| **dev-web** | tech-lead → dev-ui | #29 (S5) | 1. Land #29. 2. **B14** UI perf harness in the real shell (after B1). | spike dir, later `perf/**` (new) | `ui/**`, `qa/**` |
+| **dev-ui** (client sub-lead) | tech-lead | #24 (B17), #28 (B19) | 1. Fix ux visual findings on #24. 2. QA-17 / QA-10: 4,000-code-point limit (B6 UI part). 3. QA-18 with B19 if not in #28. 4. B11e, B18, B11a–d from the approved specs (#26), mock first. 5. B13 strings. 6. B12, B20, B24 (unblocked), UX-10 link handling. | `ui/**` (sole writer, incl. `ui/src/i18n/*.json`) | `ui/src/core/ipc.ts`, `desktop/**` |
+| **devops** | tech-lead | #30 (T4a) | 1. Fix tech-lead findings on #30. 2. **B9** installer skeleton under `packaging/**`. 3. macOS runner for R8. 4. **T4** go-live on `<relay-domain>` (never commit the real name). 5. UX-10 landing page with dev-ui. | `infra/**`, `.github/workflows/release.yml`, `.github/scripts/manifest-body.mjs`, `docs/release/**`, `packaging/**` (new) | `ci.yml` (dev-updater) |
+| **sec-lead** | manager | – (#15 merged) | 1. Verdicts on #28 (B19), #29, #30. 2. GAP-2 format with tech-lead. 3. Review B2-f, B4, B4-sync, T1 (#18) (`PR-CHECKLIST.md`). 4. Key custody for D-sign / D23. | `docs/security/**` | crate code (findings go to owners) |
+| **qa** | manager | – (#27 merged) | 1. Re-test B17/B19 once #24/#28 merge. 2. B5 run with dev-sync. 3. T7 rerun on the real shell. | `qa/**` | `ui/**`, `ci.yml` (ask dev-updater) |
+| **product-lead** | manager | – | 1. **B13**: spec updates + string table. 2. Acceptance of B17/B19 against their specs. 3. Review of product/UX/business/QA/board PRs. | `docs/spec.md`, `docs/reviews/po-*` | `ui/src/i18n/*` |
+| **ux** | product-lead | – (#22, #26 merged) | 1. Visual check of dev-ui PRs against the specs (#24 re-check, #28). 2. T8 after B1. | `docs/ux/**`, `docs/reviews/ux-*` | `ui/**` |
 | **biz** | product-lead | – (#16 merged) | 1. Answer the owner's questions on §5 (5.1–5.13). 2. Tester recruitment wave 1 with product-lead. | `docs/business/**` | – |
-| **pm** | manager | #14 | Update the board whenever a PR lands; flag conflicts. | `docs/BOARD.md`, `docs/TEAM.md` | everything else |
+| **pm** | manager | this PR | Batched board refreshes; flag conflicts. | `docs/BOARD.md`, `docs/TEAM.md` | everything else |
 
 ### File-ownership conflicts to manage
 
 | Path | Who wants it | Rule |
 | --- | --- | --- |
 | `core/Cargo.toml` `members`, `core/Cargo.lock` | #5, #8, #9, #11, then T1, T3 | One-line conflict each time: **keep every crate**, regenerate the lock and commit it. Follow the merge order. T3 (libp2p) lands alone, not with T1's first PR. |
-| `core/records/**`, `core/authority/**` | B4, B7 claims, B23 (core-5), R7 `KeyRotation` (dev-crypto's requirement), GAP-2/3 (sec-lead's findings) | core-5 only (tech-lead until staffed). Others file requirements; they don't edit. |
-| T1 crate `core/api/**` | dev-identity (#18), dev-crypto (GAP-5), dev-sync (ack, background join, ingest checks) | Settled in practice as `core/api` (#18); sec-lead's `core/node` checks (GAP-1..5) live there. tech-lead confirms in the #18 review. dev-identity owns it; others add modules in their own subdirectory after #18 merges. #18 also touches `core/identity` (stacked on #11): dev-identity's own path, no conflict. |
+| `core/records/**`, `core/authority/**` | B4, B7 claims, B23 (core-5), R7 `KeyRotation` (dev-crypto), GAP-2/3 (sec-lead), kick-undo (product-lead) | core-5 (records-authority-dev-b4) only. Others file requirements; they don't edit. |
+| T1 crate `core/api/**` | dev-identity (#18), dev-crypto (GAP-5), dev-sync (ack, background join, ingest checks) | `core/api` is the single glue crate (tech-lead). dev-identity owns it; others add modules in their own subdirectory after #18 merges. |
 | `core/spike-peer/src/main.rs` | #5 (QA-16), B5 | dev-sync only; qa runs it. |
 | `ui/src/core/*` | dev-ui (types, mock), dev-voice-shell (IPC), T1 contract | `api.ts`/`types.ts`/`mock.ts`/`index.ts` = dev-ui; `ipc.ts` = dev-voice-shell. A contract change is a dev-ui PR first; IPC follows. |
 | `ui/src/i18n/*.json` | dev-ui, B13/UX-39/40 (product-lead, ux) | dev-ui is the only writer; product-lead/ux deliver a string table. |
@@ -281,7 +282,7 @@ What each agent picks up **after its current PR merges**, the lead who assigns i
 | K1 | **S4/6 Tauri vs Electron** undecided | B1, B9 packaging, B8, B14, T7, T8 wait | Timebox the spike; #17's shell plug-in point already lets the pipeline ship plain archives | dev-voice-shell, tech-lead |
 | K2 | **D30 history for new members** pending | B4 history flag, B3 final behaviour, join copy | dev-crypto recommendation; B4 reserves the field | owner, dev-crypto |
 | K3 | **D31 large-channel rotation** pending | > ~200 members per kick > 16 KiB; not alpha-blocking | Alpha caps servers below; `KeyRotation` ~48 KiB covers ~500 (R7) | owner, dev-crypto |
-| K4 | **Domain + reverse proxy** (D24) undecided | T4 go-live, B5 relay-only runs, B8 seeder, UX-10 | Awaiting owner on 5.1 (biz recommends a cheap technical domain now); #17 keeps the host templated (`.env.example`) | owner, biz, devops |
+| K4 | Domain decided (5.1, private: written `<relay-domain>` everywhere in git) | T4 go-live, B5, B8, UX-10 now unblocked on the domain | Never commit the real name; `infra/.env.example` stays templated | devops |
 | K5 | **Code signing** undecided | SmartScreen/Gatekeeper friction; macOS keychain may differ unsigned (R8) | Awaiting owner on 5.7 + 5.8 (biz recommends unsigned closed alpha); #17 already ships unsigned archives + offline manifest signing | owner, biz, devops |
 | K6 | **Threat-model P0 gaps** (GAP-1..7): crates are solid alone, nothing wires them | M2 security bar; an outsider can read/flood a server today | Gaps mapped to B4, B4-sync, GAP-4/5/6, T4, B1; sec-lead reviews each | tech-lead, sec-lead |
 | K7 | Many parallel core PRs touching `Cargo.toml`/`Cargo.lock` | Rebase churn, CI `--locked` failures | Fixed merge order; T3 alone | pm, manager |
@@ -290,7 +291,7 @@ What each agent picks up **after its current PR merges**, the lead who assigns i
 | K10 | UX-01 mixed-direction blocker in chat | Hebrew users see garbled messages | B17 first for dev-ui | dev-ui |
 | K11 | QA-01 recovery words lost on reload | Account can never create a server | B19 + B2 persistence | dev-ui, dev-identity |
 | K12 | macOS untested for identity/keychain (R8) | Silent failure on 1 of 3 alpha OSes | macOS runner | devops |
-| K13 | **B4 has no developer** and heads the critical path; tech-lead now reviews every engineering PR | Either B4 stalls or tech-lead becomes the review bottleneck | Manager staffs core-5 for `core/records` + `core/authority`; fallback: tech-lead writes B4 and sec-lead reviews it | manager |
+| K13 | B4 heads the critical path | B4 slips → T1, B1 and everything after slip | Staffed: records-authority-dev-b4 (core-5) is on B4; tech-lead reviews | tech-lead |
 | K14 | Review load on tech-lead + sec-lead (5 engineering PRs open now) | Merge queue stalls | Sub-leads pre-review; follow the merge order; docs PRs go to product-lead | tech-lead, sec-lead |
 
 ## Owner decisions
@@ -309,7 +310,7 @@ All rows below are **awaiting owner**: the recommendations are written, and the 
 | --- | --- | --- | --- | --- | --- |
 | D30 | History for new members: per-server setting — encrypted with no pre-join history, or public unencrypted? | dev-crypto (groupkeys) | awaiting owner | B4 history flag, B3 final shape, join copy (B13) | Before B4 merges (M1) |
 | D31 | Key rotation in large channels (> ~200 members) | dev-crypto (groupkeys) | awaiting owner | Post-alpha scaling only | Before open alpha |
-| 5.1 (D-domain) ⏰ | Domain name (reverse proxy is Caddy in #17) | Cheap technical domain now (e.g. `getmvs.app`) with WHOIS privacy; no marketing domain before the trademark check | awaiting owner | T4 go-live, B5, B8, UX-10 | Before M2 |
+| 5.1 (D-domain) ⏰ | Domain name (reverse proxy is Caddy in #17) | – | **decided** by the owner; private, written `<relay-domain>` | T4 go-live, B5, B8, UX-10, B24 | – |
 | 5.2 | When to open the code (repo is public but has no licence) | At the start of the open alpha, with `SECURITY.md` + `CONTRIBUTING.md` (DCO) | awaiting owner | – (decision log line 8) | Before open alpha |
 | 5.3 | Project licence | MPL-2.0 for app + core, MIT for the SDK, DCO | awaiting owner | 5.2 | Before open alpha |
 | 5.4 | Does the relay leave the home machine? | Home in closed alpha, VPS from open alpha | awaiting owner | T4 hosting plan | Before open alpha |
