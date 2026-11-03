@@ -17,7 +17,7 @@ import {
   ReplyIcon,
   TrashIcon,
 } from '../../components/icons';
-import { textDir, useUiDir } from '../../app/textDir';
+import { paragraphs, textDir, useUiDir } from '../../app/textDir';
 import { displayName, lookalikeIds, LookalikeTag } from './MemberList';
 
 const GROUP_GAP_MS = 5 * 60_000;
@@ -277,6 +277,7 @@ const MessageRow = memo(function MessageRow({
 } & Handlers) {
   const intl = useIntl();
   const uiDir = useUiDir();
+  const lines = useMemo(() => paragraphs(m.body, uiDir), [m.body, uiDir]);
   const name = author ? displayName(author) : '…';
   const tab = actionsTabbable ? 0 : -1;
   const time = new Date(m.createdAt);
@@ -350,16 +351,20 @@ const MessageRow = memo(function MessageRow({
               </time>
             </div>
           )}
-          <p className="msg-body user-text" dir={textDir(m.body, uiDir)}>
-            {m.body}
-            {m.editedAt && (
-              <>
-                {' '}
-                <span className="edited" title={intl.formatDate(m.editedAt, { dateStyle: 'full', timeStyle: 'short' })}>
-                  <FormattedMessage id="chat.edited" />
-                </span>
-              </>
-            )}
+          <p className="msg-body">
+            {lines.map((l, i) => (
+              <span key={i} className="msg-line user-text" dir={l.dir}>
+                {l.text}
+                {m.editedAt && i === lines.length - 1 && (
+                  <>
+                    {' '}
+                    <span className="edited" title={intl.formatDate(m.editedAt, { dateStyle: 'full', timeStyle: 'short' })}>
+                      <FormattedMessage id="chat.edited" />
+                    </span>
+                  </>
+                )}
+              </span>
+            ))}
           </p>
           {m.clipped && (
             <p className="muted small clipped-note">

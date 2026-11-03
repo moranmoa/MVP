@@ -5,7 +5,7 @@ import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { App } from '../app/App';
 import type { Settings } from '../app/settings';
-import { textDir } from '../app/textDir';
+import { paragraphs, textDir } from '../app/textDir';
 import { MockCore } from '../core/mock';
 
 describe('textDir', () => {
@@ -13,7 +13,9 @@ describe('textDir', () => {
     ['lol זה היה מטורף', 'rtl'],
     ['GG על המשחק אתמול, 3:1 לנו!', 'rtl'],
     ['@Itamar תבדוק את ה-patch החדש', 'rtl'],
-    ['version 2.4.1 fixed it', 'ltr'],
+    ['version 2.4.1 fixed the crash', 'ltr'],
+    ['https://youtu.be/abcdefg תראו את זה', 'rtl'],
+    ['`npm run build` ואז לבדוק', 'rtl'],
     ['the server was laggy for me yesterday, anyone else?', 'ltr'],
     ['ok אחי', 'rtl'],
   ] as const)('%s → %s in either interface', (text, dir) => {
@@ -26,6 +28,18 @@ describe('textDir', () => {
       expect(textDir(text, 'rtl')).toBe('rtl');
       expect(textDir(text, 'ltr')).toBe('ltr');
     }
+  });
+
+  it('lets a leading RLM or LRM decide', () => {
+    expect(textDir(String.fromCharCode(0x200f) + 'ok', 'ltr')).toBe('rtl');
+    expect(textDir(String.fromCharCode(0x200e) + 'שלום', 'rtl')).toBe('ltr');
+  });
+
+  it('gives each paragraph its own direction', () => {
+    expect(paragraphs('שלום לכולם' + String.fromCharCode(10) + 'npm run build', 'rtl')).toEqual([
+      { text: 'שלום לכולם', dir: 'rtl' },
+      { text: 'npm run build', dir: 'ltr' },
+    ]);
   });
 
   it('counts Arabic as right to left', () => {
@@ -45,6 +59,7 @@ describe('messages in the chat', () => {
     };
     render(<App core={core} initialSettings={settings('en')} />);
     const body = await screen.findByText('lol זה היה מטורף');
+    expect(body.classList.contains('msg-line')).toBe(true);
     expect(body.getAttribute('dir')).toBe('rtl');
     expect(body.classList.contains('user-text')).toBe(true);
   });
