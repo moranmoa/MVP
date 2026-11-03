@@ -43,7 +43,7 @@
 
 1. **אייקון:** 80px עגול, "בחירת אייקון" ו"הסרה". אותו עיבוד כמו אווטאר ב-B11e §4 (‏256×256, ‏≤512KB, ש-22). בלי אייקון – ראשי התיבות על `color`.
 2. **שם השרת** (חובה): `maxLength={48}`, מונה מ-40.
-3. **תיאור** (לא חובה): `textarea`, 4 שורות, `maxLength={300}`, מונה מ-260. **לאישור מנהל המוצר:** מגבלת 300 התווים היא הצעה שלי.
+3. **תיאור** (לא חובה): `textarea`, 4 שורות, `maxLength={300}`, מונה מ-260. (מאושר.)
 4. **הגבלת גיל:** אותן 3 אפשרויות ואותו ניסוח של יצירת שרת (B7 / UX-15).
    - **העלאת** הגבלה (למשל ללא ← 18+) מציגה מתחת: `server.settings.ageRaiseWarning` (B7: מי שמתחת לגיל מאבדים גישה ומקבלים הודעה).
    - הורדת הגבלה – בלי אזהרה.
@@ -75,7 +75,7 @@
 
 - ליד הכותרת "ערוצים" בפס הערוצים: כפתור "+" (`channel.create`), רק לבעלים. גם מתפריט השרת.
 - דיאלוג:
-  - **שם הערוץ** (חובה): `maxLength={32}`. רווחים הופכים ל-`-` תוך כדי הקלדה (הרגל מדיסקורד), ורצף מקפים מתכווץ לאחד. מתחת לשדה: תצוגה "#שם-הערוץ" ב-`<bdi>`. **לאישור מנהל המוצר:** מגבלת 32 היא הצעה.
+  - **שם הערוץ** (חובה): `maxLength={32}`. רווחים הופכים ל-`-` תוך כדי הקלדה (הרגל מדיסקורד), ורצף מקפים מתכווץ לאחד. מתחת לשדה: תצוגה "#שם-הערוץ" ב-`<bdi>`. (מאושר.)
   - **"ערוץ למבוגרים (18+)"** – checkbox, עם `channel.adultHint`. אם לבעלים עצמם אין טענת 18+ – ה-checkbox מושבת עם `channel.adultNeeds18`.
   - "יצירה" / "ביטול".
 - אחרי יצירה: הערוץ נפתח, והפוקוס בתיבת הכתיבה.
@@ -112,6 +112,22 @@
 - אחרי אישור: `revokeInvite(serverId)` ← הלינק החדש מופיע מייד, עם הדגשה קצרה (רקע `--accent-soft` ל-1.5 שניות), ו-toast `invite.revoke.done`.
 - **מי שמנסים להצטרף עם הלינק הישן:** `join.status` עם `phase: 'revoked'` ← בדיאלוג ההצטרפות, או ב-toast אם זו הצטרפות ברקע: `join.revoked` (הניסוח של ש-21).
 - **חברים קיימים:** לא מושפעים. כפתור ההעתקה שלהם מעתיק את הלינק החדש (`server.updated`).
+
+## 5א. חשבונות שהורחקו – ביטול הרחקה (ש-4)
+
+לפי ש-4, מי שהורחקו לא יכולים לחזור עם הלינק עד שהבעלים מבטלים את ההרחקה.
+
+**בהגדרות השרת ← "כללי", מתחת ל"לינק הזמנה":** הקטע "חשבונות שהורחקו" (`server.removed.section`).
+- כשאין הרחקות – הקטע לא מוצג.
+- רשימה, הכי חדשים למעלה. בכל שורה: אווטאר (32px), שם ב-`<bdi>` (שורה אחת עם `…`), קוד הזהות (`Code`), ותאריך ההרחקה (`Intl.DateTimeFormat`, `dateStyle: 'medium'`). בצד ה-end: כפתור משני "ביטול ההרחקה" (`server.removed.undo`).
+- לחיצה: בלי דיאלוג, כי הפעולה הפיכה (אפשר להרחיק שוב). השורה מקבלת spinner. אחרי ההצלחה היא יורדת מהרשימה, ומופיע toast `server.removed.undone`. מי שבוטלה ההרחקה שלהם יכולים להצטרף שוב עם לינק הזמנה תקף. הם לא חוזרים אוטומטית.
+- כשל: בתוך השורה `error.generic` עם "לנסות שוב".
+- יותר מ-20 הרחקות: 20 ראשונות, ו"הצגת כל ה-{count}" (`server.removed.showAll`).
+- טלפון: השורה נשברת לשתיים – שם וקוד למעלה, תאריך וכפתור (ברוחב מלא, 44px) למטה.
+
+**בהצטרפות של חשבון שהורחק:** `join.status` עם `phase: 'removed'` ← בדיאלוג ההצטרפות (או ב-toast, אם זו הצטרפות ברקע של B18): `join.removed`. בלי כפתור "הצטרפות". "סגירה" בלבד.
+
+**מקלדת וקורא מסך:** רשימה (`<ul>`) עם כותרת `h3`. השם הנגיש של כל כפתור: `server.removed.undoFor` ("ביטול ההרחקה של {name}"). אחרי ביטול, הפוקוס עובר לכפתור בשורה הבאה. אם זו הייתה השורה האחרונה – לכותרת "לינק הזמנה".
 
 ## 6. מצבים
 
@@ -153,6 +169,9 @@
 | `channel.added` | **אירוע חדש:** `Channel` | היום יש רק `channel.updated` |
 | `JoinStatus` | **שינוי חוזה:** מוסיפים `{ phase: 'preview'; link; server: { name, iconDataUrl?, ageRestriction, description?, memberCount } }` ו-`{ phase: 'revoked'; link }` | ש-23, ש-21 |
 | `confirmJoin(link): Promise<JoinStatus>` | **חדש** | אחרי `preview`. מחזיר `joined` או `age-blocked` |
+| `JoinStatus` (הרחקה) | **שינוי חוזה:** מוסיפים `{ phase: 'removed'; link }` | ש-4 |
+| `listRemovedMembers(serverId): Promise<RemovedMember[]>` | **חדש** (בעלים בלבד) | `RemovedMember = { userId, displayName, shortCode, avatarColor, avatarDataUrl?, removedAt: Timestamp }`. לאחר שינוי נשלח `server.updated` |
+| `undoKick(serverId, userId): Promise<void>` | **חדש** (בעלים בלבד) | רשומה חתומה. נדחה עם `not-allowed` לאחרים, ועם `not-found` אם אין הרחקה |
 | `CoreError['code']` | **שינוי חוזה:** מוסיפים `'name-taken'` (ו-`'invalid-name'`, `'too-large'` מ-B11e) | |
 
 ## 9. מחרוזות
@@ -204,12 +223,18 @@
 | `invite.revoke.confirm` | `ביטול הלינק ויצירת חדש` | `Revoke and create a new link` |
 | `invite.revoke.done` | `נוצר לינק הזמנה חדש.` | `A new invite link was created.` |
 | `join.revoked` | `הלינק הזה בוטל. אפשר לבקש לינק חדש.` | `This link was revoked. Ask for a new one.` |
-| `join.preview.members` | `{count, plural, one {חבר אחד} two {שני חברים} other {# חברים}}` | `{count, plural, one {# member} other {# members}}` |
+| `join.preview.members` | `{count, plural, one {אדם אחד בשרת} two {שני אנשים בשרת} other {# אנשים בשרת}}` | `{count, plural, one {# member} other {# members}}` |
+| `server.removed.section` | `חשבונות שהורחקו` | `Removed accounts` |
+| `server.removed.undo` | `ביטול ההרחקה` | `Undo removal` |
+| `server.removed.undoFor` | `ביטול ההרחקה של ⁨{name}⁩` | `Undo removal of ⁨{name}⁩` |
+| `server.removed.undone` | `ההרחקה בוטלה. אפשר להצטרף שוב עם לינק הזמנה.` | `Removal undone. They can join again with an invite link.` |
+| `server.removed.showAll` | `הצגת כל ה-{count}` | `Show all {count}` |
+| `join.removed` | `החשבון הזה הורחק מהשרת, ולכן אי אפשר להצטרף. אפשר לפנות לבעלים.` | `This account was removed from the server, so it can't join. You can contact the owner.` |
 | `join.preview.confirm` | `הצטרפות` | `Join` |
 | `join.preview.found` | `השרת ⁨{server}⁩ נמצא.` | `Found ⁨{server}⁩.` |
 | `join.preview.details` | `לפרטים` | `Details` |
 
-הערה על `join.preview.members`: "חבר אחד" הוא שם עצם ממוגדר ביחיד. כאן הוא מונה ולא פנייה לאדם, ולכן לפי הכלל הוא בסדר. **לאישור מנהל המוצר.** חלופה ניטרלית: "{count} בשרת".
+**הוכרע:** מגבלות האורך (תיאור 300, ערוץ 32, שם תצוגה 32, ביו 190, שם שרת 48) מאושרות. `join.preview.members` משתמש ב"אנשים", כי "חבר" הוא שם עצם ממוגדר ביחיד.
 
 ## 10. בדיקות קבלה
 
@@ -222,6 +247,7 @@
 6. **B11d:** "ביטול הלינק ויצירת חדש" ← `inviteLink` חדש מופיע. הצטרפות עם הלינק הישן ← `join.revoked`.
 7. **ש-23:** הצטרפות ← שלב תצוגה מקדימה עם התיאור לפני `confirmJoin`.
 8. **בעלים בני 17 (דמה)** ← ה-checkbox של 18+ מושבת.
+9. **ש-4:** הרחקת חבר ← הוא מופיע ב"חשבונות שהורחקו". הצטרפות שלו עם הלינק ← `join.removed`. "ביטול ההרחקה" ← `undoKick` נקרא, השורה יורדת, ואותה הצטרפות מצליחה. בלי הרחקות – הקטע לא ב-DOM.
 
 **צילומים:**
 
@@ -241,3 +267,4 @@
 | 121 | `121-join-revoked-he` | הצטרפות עם לינק שבוטל |
 | 122 | `122-server-settings-phone-he` | 375px: הגדרות שרת במסך מלא עם טאבים |
 | 123 | `123-server-menu-200` | 200% + 24px: שם שרת של 48 תווים בכותרת התפריט, בלי גלישה |
+| 124 | `124-removed-accounts-he` | "חשבונות שהורחקו" עם 2 שורות (שם, קוד, תאריך, "ביטול ההרחקה"), ובנוסף דיאלוג הצטרפות עם `join.removed` |
