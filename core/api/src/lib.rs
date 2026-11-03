@@ -12,6 +12,7 @@
 pub mod crypto;
 mod datadir;
 mod db;
+mod chat;
 mod dispatch;
 mod gate;
 mod model;
