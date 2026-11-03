@@ -111,7 +111,7 @@ attaches.
 CI can't cover these, and they stay manual:
 
 - the uninstall UI and the keep/delete prompt (INS-09, INS-17);
-- the packaged app against the real core (INS-18);
+- the packaged app against the real core (INS-18) and `mvs://` links (INS-19);
 - a real N-1 → N update (INS-05, 06; there is one version of each spike);
 - interrupted installs (INS-07);
 - restoring from the 12 words (INS-12; needs the real core);
@@ -194,6 +194,9 @@ On a clean VM with a snapshot. Note "before" and "after" for every item in
 - [ ] INS-18: the packaged app against the real core. Onboarding up to and
       including the recovery-word check, then create a server; it is still
       there after restarting the app.
+- [ ] INS-19: clicking an `mvs://` link opens the join screen with the
+      invite filled in, and nothing is joined until the user clicks Join
+      (no drive-by join).
 
 ## Results
 
