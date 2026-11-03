@@ -15,6 +15,14 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # Crypto majors that would put a second copy of a crypto crate next to
+      # the one ed25519-dalek 2 or libp2p 0.54 still pins, with no advisory
+      # asking for it. Bump them together with those, at T3.
+      - dependency-name: curve25519-dalek
+        versions: [">=5"]
+      - dependency-name: argon2
+        versions: [">=0.6"]
   - package-ecosystem: npm
     directory: /ui
     schedule:
