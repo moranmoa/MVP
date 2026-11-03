@@ -6,10 +6,11 @@ mod common;
 use std::time::{Duration, Instant};
 
 use authority::{
-    resolve, sign_control, sign_genesis, Action, Inserted, Record, RecordId, Resolver, Role, State,
+    resolve, sign_control, sign_genesis, Action, ChannelId, Cut, Inserted, Record, RecordId,
+    Resolver, Role, State,
 };
 use common::{actor, founded, genesis, key, rec, server};
-use records::{Draft, Kind, RecordError, Scope, GENESIS_NONCE_LEN};
+use records::{Draft, Kind, RecordError, Scope, GENESIS_NONCE_LEN, MAX_CUT_ENTRIES};
 
 /// Both resolvers on the test server, records delivered in the given order.
 fn both(records: &[Record]) -> State {
@@ -60,7 +61,7 @@ fn a_forged_genesis_cannot_take_the_server() {
         1,
         vec![rival.id()],
         0,
-        &Action::Kick { target: actor(0) },
+        &Action::kick(actor(0)),
     )
     .unwrap();
 
@@ -137,8 +138,8 @@ fn demoting_by_grant_is_refused_so_backdating_stays_blocked() {
     assert_eq!(state.role(actor(2)), Role::Admin);
 
     // The way to demote is a revoke, which voids a backdated kick.
-    let revoke = rec(0, 3, vec![admin.id()], Action::Revoke { target: actor(1) });
-    let backdated = rec(1, 0, vec![moderator.id()], Action::Kick { target: actor(5) });
+    let revoke = rec(0, 3, vec![admin.id()], Action::revoke(actor(1)));
+    let backdated = rec(1, 0, vec![moderator.id()], Action::kick(actor(5)));
     let mut records = base;
     records.extend([moderator, admin, revoke, backdated.clone()]);
     let state = both(&records);
@@ -148,11 +149,78 @@ fn demoting_by_grant_is_refused_so_backdating_stays_blocked() {
 }
 
 #[test]
+fn removal_cuts_have_exactly_one_encoding() {
+    let head =
+        |n: u8| (ChannelId::from_bytes([n; 32]), RecordId::from_bytes([n.wrapping_add(100); 32]));
+    let full: Vec<_> = (0..MAX_CUT_ENTRIES as u8).map(head).collect();
+    assert!(Cut::new(full.clone()).is_some());
+    assert!(Cut::new([full.clone(), vec![head(200)]].concat()).is_none(), "65 pairs");
+    assert_eq!(Cut::new(vec![head(1), head(1)]), Cut::new(vec![head(1)]), "deduplicated");
+
+    // A channel with two concurrent heads: both are kept, and the limit
+    // counts pairs, not channels.
+    let (a, b) = (RecordId::from_bytes([7; 32]), RecordId::from_bytes([3; 32]));
+    let two = Cut::new(vec![(head(1).0, a), head(2), (head(1).0, b)]).unwrap();
+    assert_eq!(two.heads(), [(head(1).0, b), (head(1).0, a), head(2)]);
+    assert_eq!(two.heads_of(head(1).0).collect::<Vec<_>>(), [b, a]);
+    assert_eq!(two.heads_of(head(2).0).collect::<Vec<_>>(), [head(2).1]);
+    assert!(two.names(head(1).0) && !two.names(head(9).0), "an unnamed channel has no heads");
+    let one_channel: Vec<_> =
+        (0..MAX_CUT_ENTRIES as u8).map(|n| (head(1).0, RecordId::from_bytes([n; 32]))).collect();
+    assert!(Cut::new(one_channel).is_some(), "64 heads in one channel");
+    assert_eq!(Cut::new(vec![head(2), head(1)]), Cut::new(vec![head(1), head(2)]), "sorted");
+
+    let (mut records, heads) = founded(&[1, 2]);
+    let full_kick = Action::Kick { target: actor(1), cut: Cut::new(full).unwrap() };
+    let kick = rec(0, 2, heads.clone(), full_kick.clone());
+    assert_eq!(kick.body().len(), Kind::Kick.max_body());
+    assert_eq!(Action::from_record(&kick), Some(full_kick));
+    let two_kick = Action::Kick { target: actor(1), cut: two };
+    assert_eq!(Action::from_record(&rec(0, 3, heads.clone(), two_kick.clone())), Some(two_kick));
+
+    // Bodies `encode` never produces: no count, a count that doesn't match,
+    // pairs out of order or repeated, heads of one channel out of order.
+    let pair = |n: u8| [[n; 32], [n.wrapping_add(100); 32]].concat();
+    let target = actor(2).as_bytes().to_vec();
+    let bad_cuts: Vec<Vec<u8>> = vec![
+        vec![],
+        vec![1],
+        [vec![0], pair(1)].concat(),
+        [vec![2], pair(1)].concat(),
+        [vec![2], pair(2), pair(1)].concat(),
+        [vec![2], pair(1), pair(1)].concat(),
+        [vec![1], pair(1), vec![0]].concat(),
+        [vec![2], [[1; 32], [9; 32]].concat(), [[1; 32], [8; 32]].concat()].concat(),
+    ];
+    let mut refused = Vec::new();
+    for (seq, cut) in bad_cuts.into_iter().enumerate() {
+        let record = Draft {
+            server: server(),
+            scope: Scope::Control,
+            seq: 10 + seq as u64,
+            deps: heads.clone(),
+            auth_deps: vec![],
+            ts: 0,
+            kind: Kind::Kick,
+            body: [target.clone(), cut].concat(),
+        }
+        .sign(&key(0))
+        .unwrap();
+        assert_eq!(Action::from_record(&record), None);
+        refused.push(record);
+    }
+    records.extend(refused.iter().cloned());
+    let state = both(&records);
+    assert!(!state.kicked.contains(&actor(2)));
+    assert!(refused.iter().all(|r| !state.accepted.contains(&r.id())));
+}
+
+#[test]
 fn a_kicked_actor_cannot_be_kicked_again() {
     let (mut records, heads) = founded(&[1, 2]);
     let moderator = rec(0, 2, heads, Action::Grant { target: actor(1), role: Role::Moderator });
-    let kick = rec(1, 1, vec![moderator.id()], Action::Kick { target: actor(2) });
-    let again = rec(1, 2, vec![kick.id()], Action::Kick { target: actor(2) });
+    let kick = rec(1, 1, vec![moderator.id()], Action::kick(actor(2)));
+    let again = rec(1, 2, vec![kick.id()], Action::kick(actor(2)));
     records.extend([moderator, kick.clone(), again.clone()]);
     let state = both(&records);
     assert!(state.accepted.contains(&kick.id()));
@@ -163,12 +231,12 @@ fn a_kicked_actor_cannot_be_kicked_again() {
 fn kicked_actors_cannot_act() {
     let (base, heads) = founded(&[1, 3, 4]);
     let admin = rec(0, 2, heads, Action::Grant { target: actor(1), role: Role::Admin });
-    let kick = rec(0, 3, vec![admin.id()], Action::Kick { target: actor(1) });
+    let kick = rec(0, 3, vec![admin.id()], Action::kick(actor(1)));
     // After seeing the kick, and concurrently with it.
     let after = rec(1, 1, vec![kick.id()], Action::Post { text: "still here".into() });
     let grant =
         rec(1, 2, vec![after.id()], Action::Grant { target: actor(3), role: Role::Moderator });
-    let concurrent = rec(1, 3, vec![admin.id()], Action::Kick { target: actor(4) });
+    let concurrent = rec(1, 3, vec![admin.id()], Action::kick(actor(4)));
     let regrant = rec(0, 4, vec![kick.id()], Action::Grant { target: actor(1), role: Role::Admin });
     let mut records = base.clone();
     records.extend([admin.clone(), kick.clone(), after, grant, concurrent, regrant.clone()]);
@@ -279,7 +347,7 @@ fn large_hostile_logs_resolve_quickly() {
         }
         log.push(post);
     }
-    let kick = rec(1, 0, vec![moderator.id()], Action::Kick { target: actor(2) });
+    let kick = rec(1, 0, vec![moderator.id()], Action::kick(actor(2)));
     log.push(kick.clone());
     let start = Instant::now();
     let state = resolve(server(), &log);

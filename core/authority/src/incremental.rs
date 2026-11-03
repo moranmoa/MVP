@@ -409,9 +409,9 @@ impl Resolver {
                 }
                 author
             }
-            Action::Grant { target, .. } | Action::Revoke { target } | Action::Kick { target } => {
-                target
-            }
+            Action::Grant { target, .. }
+            | Action::Revoke { target, .. }
+            | Action::Kick { target, .. } => target,
         };
 
         // From here on the record is judged the same way in every pass.

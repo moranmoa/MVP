@@ -144,11 +144,26 @@ pub enum Scope {
 #[repr(u16)]
 pub enum Kind {
     Genesis = 1,
+    /// Body: target key, role byte.
     Grant = 2,
+    /// Body: target key, then a [cut](CUT_BYTES).
     Revoke = 3,
+    /// Body: target key, then a [cut](CUT_BYTES).
     Kick = 4,
     /// A text post in the control log (announcements; used by the spike).
     Post = 5,
+    /// Changes the server's name, icon or description. Body: `history u8`
+    /// (reserved for D30, written as 0), then the metadata.
+    ServerEdit = 6,
+    /// The owner closes the server for good.
+    ServerClose = 7,
+    /// Body: the new channel's ID, `history u8` (reserved for D30), flags,
+    /// then its name.
+    ChannelCreate = 8,
+    /// Renames a channel or changes its flags (18+).
+    ChannelEdit = 9,
+    /// Body: the channel's ID.
+    ChannelDelete = 10,
     /// A signed invite with an expiry and a use limit. Its record ID is what
     /// an invite link carries.
     Invite = 11,
@@ -157,21 +172,67 @@ pub enum Kind {
     /// The author joins the server through an invite, which it names and
     /// depends on.
     Join = 13,
+    /// The author leaves the server. Body: a [cut](CUT_BYTES).
+    Leave = 14,
+    /// The author's age claim (B7).
+    AgeClaim = 15,
     /// A chat message in a channel.
     Message = 16,
+    /// Replaces the text of the author's own message. Body: the message's
+    /// record ID, then the new text.
+    MessageEdit = 17,
+    /// A tombstone for a message. Body: the message's record ID.
+    MessageDelete = 18,
+    /// One part of a channel key rotation. Body: a
+    /// [header](ROTATION_HEADER_LEN), then what `groupkeys` puts there.
+    KeyRotation = 19,
+    /// The owner lets a kicked key join again. Body: the key.
+    Unban = 20,
 }
 
+/// Most (channel, head) pairs a cut names, over all its channels.
+pub const MAX_CUT_ENTRIES: usize = 64;
+
+/// Largest cut: the channel heads a kick, revoke or leave was signed on,
+/// which later decide which of the target's channel records are voided. A
+/// cut is `count u8`, then `count` pairs of (channel ID, head record ID),
+/// strictly ascending by (channel, head), so a channel may have several
+/// heads. Records checks only the size; the authority parses it.
+pub const CUT_BYTES: usize = 1 + MAX_CUT_ENTRIES * 2 * ID_LEN;
+
+/// Most parts one key rotation is split into (R7): about 200 members fit in
+/// a part, so 32 parts cover about 6,500 members. Decode enforces it, so
+/// raising it later would make older clients reject the new rotations.
+pub const MAX_ROTATION_PARTS: u8 = 32;
+
+/// A key rotation body starts with this header: `rotation [u8; 32]`, the
+/// same in every part of one rotation (`groupkeys` decides how it is
+/// derived), then `part u8` and `parts u8`, with `part < parts` and
+/// `1 <= parts <=` [`MAX_ROTATION_PARTS`]. The rest is opaque here.
+pub const ROTATION_HEADER_LEN: usize = ID_LEN + 2;
+
 impl Kind {
-    const ALL: [Kind; 9] = [
+    const ALL: [Kind; 20] = [
         Kind::Genesis,
         Kind::Grant,
         Kind::Revoke,
         Kind::Kick,
         Kind::Post,
+        Kind::ServerEdit,
+        Kind::ServerClose,
+        Kind::ChannelCreate,
+        Kind::ChannelEdit,
+        Kind::ChannelDelete,
         Kind::Invite,
         Kind::RevokeInvite,
         Kind::Join,
+        Kind::Leave,
+        Kind::AgeClaim,
         Kind::Message,
+        Kind::MessageEdit,
+        Kind::MessageDelete,
+        Kind::KeyRotation,
+        Kind::Unban,
     ];
 
     const LARGEST_BODY: usize = 16 * 1024;
@@ -189,20 +250,29 @@ impl Kind {
     pub fn max_body(self) -> usize {
         match self {
             // Server name, icon reference, description.
-            Kind::Genesis => 2 * 1024,
+            Kind::Genesis | Kind::ServerEdit => 2 * 1024,
             // Target key plus a role byte, with room for future fields.
-            Kind::Grant | Kind::Revoke | Kind::Kick => 128,
+            Kind::Grant => 128,
+            Kind::Revoke | Kind::Kick => ID_LEN + CUT_BYTES,
+            Kind::Leave => CUT_BYTES,
             // Expiry and use limit, or an invite's record ID, with room for
             // future fields.
             Kind::Invite | Kind::RevokeInvite | Kind::Join => 128,
+            // A channel ID or a key, with room for future fields.
+            Kind::ServerClose | Kind::ChannelDelete | Kind::AgeClaim | Kind::Unban => 64,
+            Kind::MessageDelete => 64,
+            // Channel ID, history byte, flags and a name.
+            Kind::ChannelCreate | Kind::ChannelEdit => 512,
             Kind::Post => 4 * 1024,
-            Kind::Message => Kind::LARGEST_BODY,
+            Kind::Message | Kind::MessageEdit | Kind::KeyRotation => Kind::LARGEST_BODY,
         }
     }
 
     fn allowed_in(self, scope: Scope) -> bool {
         match self {
-            Kind::Message => matches!(scope, Scope::Channel(_)),
+            Kind::Message | Kind::MessageEdit | Kind::MessageDelete | Kind::KeyRotation => {
+                matches!(scope, Scope::Channel(_))
+            }
             _ => scope == Scope::Control,
         }
     }
@@ -234,6 +304,9 @@ pub enum RecordError {
     GenesisWithDeps,
     /// The genesis author and nonce don't hash to the record's server ID.
     GenesisServerMismatch,
+    /// A key rotation body without a valid part header (see
+    /// [`ROTATION_HEADER_LEN`]).
+    BadRotationHeader,
     BadAuthorKey,
     BadSignature,
 }
@@ -268,6 +341,7 @@ impl fmt::Display for RecordError {
             RecordError::GenesisServerMismatch => {
                 write!(f, "genesis author and nonce don't match the server ID")
             }
+            RecordError::BadRotationHeader => write!(f, "key rotation part header is invalid"),
             RecordError::BadSignature => write!(f, "signature does not verify"),
         }
     }
@@ -359,6 +433,14 @@ impl Fields {
         let max = self.kind.max_body();
         if self.body.len() > max {
             return Err(RecordError::BodyTooLarge { kind: self.kind, len: self.body.len(), max });
+        }
+        if self.kind == Kind::KeyRotation {
+            let header = self.body.get(ID_LEN..ROTATION_HEADER_LEN);
+            let valid =
+                header.is_some_and(|h| (1..=MAX_ROTATION_PARTS).contains(&h[1]) && h[0] < h[1]);
+            if !valid {
+                return Err(RecordError::BadRotationHeader);
+            }
         }
         Ok(())
     }
@@ -738,21 +820,80 @@ mod tests {
         assert_eq!(auth_deps_in_control.sign(&key(1)), Err(RecordError::AuthDepsInControlScope));
     }
 
+    /// A body of `len` bytes that passes the kind's own header check.
+    fn body_for(kind: Kind, len: usize) -> Vec<u8> {
+        let mut body = vec![0; len];
+        if kind == Kind::KeyRotation {
+            body[ID_LEN + 1] = 1; // part 0 of 1
+        }
+        body
+    }
+
     #[test]
-    fn membership_kinds_are_small_control_records() {
-        for kind in [Kind::Invite, Kind::RevokeInvite, Kind::Join] {
+    fn every_kind_has_one_scope_and_a_body_limit() {
+        let channel = Scope::Channel(ChannelId::from_bytes([4; 32]));
+        let codes: Vec<u16> = Kind::ALL.iter().map(|kind| kind.code()).collect();
+        assert_eq!(codes, (1..=20).collect::<Vec<u16>>(), "codes are dense and in order");
+        // The genesis has its own tests: its body must carry the nonce.
+        for kind in Kind::ALL.into_iter().filter(|kind| *kind != Kind::Genesis) {
             assert_eq!(Kind::from_code(kind.code()), Some(kind));
+            let in_channel = matches!(
+                kind,
+                Kind::Message | Kind::MessageEdit | Kind::MessageDelete | Kind::KeyRotation
+            );
+            let (home, other) =
+                if in_channel { (channel, Scope::Control) } else { (Scope::Control, channel) };
+            let auth_deps = if in_channel { vec![RecordId::from_bytes([5; 32])] } else { vec![] };
+            let at = |len| Draft {
+                scope: home,
+                kind,
+                body: body_for(kind, len),
+                auth_deps: auth_deps.clone(),
+                ..draft()
+            };
             let max = kind.max_body();
-            let at_limit = Draft { kind, body: vec![0; max], ..draft() }.sign(&key(1)).unwrap();
+            let at_limit = at(max).sign(&key(1)).unwrap();
             assert_eq!(Record::decode(&at_limit.encode()).unwrap(), at_limit);
             assert_eq!(
-                Draft { kind, body: vec![0; max + 1], ..draft() }.sign(&key(1)),
+                at(max + 1).sign(&key(1)),
                 Err(RecordError::BodyTooLarge { kind, len: max + 1, max })
             );
-            let in_channel =
-                Draft { scope: Scope::Channel(ChannelId::from_bytes([4; 32])), kind, ..draft() };
-            assert_eq!(in_channel.sign(&key(1)), Err(RecordError::KindNotAllowedInScope(kind)));
+            let elsewhere = Draft { scope: other, kind, auth_deps: vec![], ..at(max) };
+            assert_eq!(elsewhere.sign(&key(1)), Err(RecordError::KindNotAllowedInScope(kind)));
         }
+    }
+
+    #[test]
+    fn removals_have_room_for_a_full_cut() {
+        assert_eq!(CUT_BYTES, 4097);
+        assert_eq!(Kind::Kick.max_body(), 4129);
+        assert_eq!(Kind::Revoke.max_body(), 4129);
+        assert!(Kind::Leave.max_body() >= CUT_BYTES);
+    }
+
+    #[test]
+    fn key_rotation_parts_carry_a_valid_header() {
+        let channel = Scope::Channel(ChannelId::from_bytes([4; 32]));
+        let rotation = |header: &[u8]| {
+            let mut body = vec![7; ID_LEN];
+            body.extend_from_slice(header);
+            body.extend_from_slice(b"wraps");
+            Draft { scope: channel, kind: Kind::KeyRotation, body, ..draft() }.sign(&key(1))
+        };
+        for (part, parts) in [(0, 1), (0, 8), (7, 8), (2, 3), (0, 32), (31, 32)] {
+            let record = rotation(&[part, parts]).unwrap();
+            assert_eq!(Record::decode(&record.encode()).unwrap(), record);
+        }
+        assert_eq!(MAX_ROTATION_PARTS, 32);
+        for bad in [&[0, 0][..], &[1, 1], &[32, 32], &[0, 33], &[40, 33], &[3, 2], &[0], &[]] {
+            assert_eq!(rotation(bad), Err(RecordError::BadRotationHeader), "header {bad:?}");
+        }
+        // The check runs on decode too: patch a valid part into part 1 of 1.
+        let record = rotation(&[0, 1]).unwrap();
+        let mut bytes = record.encode();
+        let at = body_offset(&record) + ID_LEN;
+        bytes[at] = 1;
+        assert_eq!(Record::decode(&bytes), Err(RecordError::BadRotationHeader));
     }
 
     #[test]

@@ -410,6 +410,9 @@ for (const [section, name] of [
   await p.getByRole('article').first().waitFor();
   await p.waitForTimeout(800);
   await checkBidi(p, '76-bidi-he-200', 'he', true);
+  // B12: at 200% the window lays out like 683px, so the member list is closed and the chat keeps its room.
+  const room = await p.evaluate(() => ({ main: document.querySelector('.main')?.clientWidth ?? 0, members: !!document.querySelector('.members') }));
+  if (room.main < 600 || room.members) problems.push(`76: chat is ${room.main}px wide, member list open: ${room.members}`);
   await shot(p, '76-bidi-he-200');
   await p.evaluate(() => localStorage.removeItem('mvp.settings.v1'));
   await p.close();
