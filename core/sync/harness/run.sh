@@ -1,13 +1,14 @@
 #!/bin/bash
 # Builds the harness binaries in a Rust container, then runs the scenarios.
 # Needs the relay from infra/ to be up. Run from anywhere (Git Bash on Windows).
+# Builds with CARGO_BUILD_JOBS (default 4) to stay within Docker's shared memory.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 core="$here/../.."
 case "$(uname -s)" in MINGW*|MSYS*) export MSYS_NO_PATHCONV=1; core_mount="$(cd "$core" && pwd -W)";; *) core_mount="$(cd "$core" && pwd)";; esac
 
 docker run --rm -v "$core_mount:/work" -v cargo-registry:/usr/local/cargo/registry \
-  -v core-target-sync:/target -e CARGO_TARGET_DIR=/target -w /work rust:1.90-bookworm \
+  -v core-target-sync:/target -e CARGO_TARGET_DIR=/target -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" -w /work rust:1.90-bookworm \
   bash -c "cargo build --release -p sync --bins && mkdir -p sync/harness/dist && cp /target/release/sync-peer /target/release/sync-harness sync/harness/dist/"
 
 cd "$here"
