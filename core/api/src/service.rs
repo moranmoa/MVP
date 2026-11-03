@@ -485,7 +485,8 @@ impl Core {
             return Err(ErrorCode::NotAllowed.into());
         }
         let names = view.display_names();
-        let kicked_at: HashMap<RecordId, u64> = view.records.iter().map(|r| (r.id(), r.ts())).collect();
+        let kicked_at: HashMap<RecordId, u64> =
+            view.records.iter().map(|r| (r.id(), r.ts())).collect();
         Ok(view
             .state
             .removed
