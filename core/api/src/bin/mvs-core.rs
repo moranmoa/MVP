@@ -23,8 +23,9 @@ fn main() -> ExitCode {
         eprintln!("usage: mvs-core --data-dir <dir>");
         return ExitCode::from(2);
     };
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("mvs-core: can't create the data dir: {}", e.kind());
+    // Owner-only, or the core doesn't start (fail closed, as sync does).
+    if let Err(e) = sidecar::prepare_data_dir(&dir) {
+        eprintln!("mvs-core: can't prepare the data dir: {e}");
         return ExitCode::FAILURE;
     }
     let out = Lines::new(io::stdout());

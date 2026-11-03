@@ -9,6 +9,7 @@
 //! group encryption sit behind [`Network`] and [`GroupCipher`] until their
 //! crates are merged.
 
+mod datadir;
 mod db;
 mod dispatch;
 mod model;

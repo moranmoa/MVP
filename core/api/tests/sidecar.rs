@@ -83,7 +83,7 @@ fn malformed_lines_get_an_error_and_serving_goes_on() {
             bad_request(Value::Null),
             bad_request(Value::Null),
             bad_request(json!(7)),
-            bad_request(json!({ "x": 1 })),
+            bad_request(Value::Null),
             bad_request(json!(8)),
             json!({ "type": "response", "id": 9, "ok": null }),
             json!({ "type": "response", "id": 10, "ok": null }),

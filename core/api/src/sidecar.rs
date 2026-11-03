@@ -7,7 +7,8 @@
 //!   `{"type":"event","event","payload"}`, one per line. A request's events
 //!   are written before its response.
 //! - A line that isn't a request, or is over [`MAX_LINE`], gets an error
-//!   response (`id` null unless it could be read), and serving goes on.
+//!   response (`id` null unless it is a number or string), and serving
+//!   goes on.
 
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
@@ -17,6 +18,8 @@ use serde_json::{json, Value};
 use crate::ports::EventSink;
 use crate::types::{CoreError, ErrorCode, Event};
 use crate::Core;
+
+pub use crate::datadir::prepare as prepare_data_dir;
 
 /// Longest request line, in bytes, without its newline.
 pub const MAX_LINE: usize = 1 << 20;
@@ -113,12 +116,15 @@ pub fn serve<W: Write + Send>(
             Ok(line) if line.iter().all(u8::is_ascii_whitespace) => continue,
             Ok(line) => match serde_json::from_slice::<Value>(&line) {
                 Ok(Value::Object(mut request)) => {
-                    let id = request.remove("id").unwrap_or(Value::Null);
+                    // Only a number or string is echoed: anything else could
+                    // be large or shaped to confuse the shell.
+                    let id = match request.remove("id") {
+                        Some(id @ (Value::Number(_) | Value::String(_))) => id,
+                        _ => Value::Null,
+                    };
                     let args = request.remove("args").unwrap_or(Value::Null);
-                    match (request.get("cmd").and_then(Value::as_str), &id) {
-                        (Some(cmd), Value::Number(_) | Value::String(_)) => {
-                            response(&id, core.handle_value(cmd, args))
-                        }
+                    match request.get("cmd").and_then(Value::as_str) {
+                        Some(cmd) if !id.is_null() => response(&id, core.handle_value(cmd, args)),
                         _ => response(&id, bad()),
                     }
                 }

@@ -138,7 +138,11 @@ pub enum CipherOutcome {
 /// `Decrypted.accepted` is false is shown as untrusted, never as a normal
 /// message (issue #21). Rotations are deny-by-default: feed
 /// `ChannelKeys::set_accepted` / `accept` with `authority::State::accepted` ∩
-/// the channel's rotation IDs (GAP-5).
+/// the channel's rotation IDs (GAP-5). As of #70 those are part record IDs:
+/// every `KeyRotation` record is a part, so pass that intersection straight
+/// through. Parts that `ChannelKeys` evicted under a flood (their IDs come
+/// back from `apply`) are fetched again. A part we re-send is the same
+/// stored record, never re-signed.
 /// Messages with `Verdict::Pending` (auth_deps not here yet) are neither
 /// shown nor forwarded until they resolve (B4).
 /// API as of #51: build one `Arc<MemberSecret>` (`MemberSecret::new(
