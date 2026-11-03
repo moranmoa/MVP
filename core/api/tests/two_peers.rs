@@ -26,7 +26,7 @@ struct Peer {
     core: Core,
     events: Arc<CollectingSink>,
     net: Arc<SyncNetwork>,
-    cipher: Arc<GroupKeysCipher>,
+    _cipher: Arc<GroupKeysCipher>,
     _dir: std::path::PathBuf,
 }
 
@@ -53,7 +53,7 @@ fn peer(name: &str, words: &str, relay: &str) -> Peer {
     core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
     let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
     core.update_profile(profile).unwrap();
-    Peer { core, events, net, cipher, _dir: dir }
+    Peer { core, events, net, _cipher: cipher, _dir: dir }
 }
 
 fn eventually(what: &str, mut ok: impl FnMut() -> bool) {
@@ -117,27 +117,74 @@ fn two_users_chat_through_a_relay() {
         .collect();
     assert_eq!(bodies, ["שלום, מה נשמע?", "hi!"]);
 
-    // The stranger holds the same records (the log is public to sync) but
-    // was never in a rotation: nothing opens.
+    // B6-p over the relay: the owner edits its message and deletes the
+    // guest's; both cores prune, in their own db and in sync's store.
+    let server_key =
+        records::ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let messages = owner.net.fetch(server_key);
+    let mut old: Vec<Vec<u8>> = messages
+        .iter()
+        .filter(|r| r.kind() == Kind::Message)
+        .map(|r| r.body()[..r.body().len().min(64)].to_vec())
+        .collect();
+    assert_eq!(old.len(), 2);
+    owner.core.edit_message(&sent.id, "edited").unwrap();
+    let hi = owner.core.get_messages(&channel, 0, 10).unwrap().messages[1].id.clone();
+    owner.core.delete_message(&hi).unwrap();
+    eventually("the guest to see the edit and the delete", || {
+        guest.core.sync_now().unwrap();
+        let got = guest.core.get_messages(&channel, 0, 10).unwrap().messages;
+        got.len() == 2 && got[0].body == "edited" && got[1].deleted == Some(true)
+    });
+    owner.core.sync_now().unwrap();
+    old.dedup();
+    for (name, dir) in [("owner", &owner._dir), ("guest", &guest._dir)] {
+        // Right after the prune, with the peers still running: the db files
+        // and their WAL and rollback journals.
+        for file in [
+            "core.db",
+            "core.db-wal",
+            "core.db-journal",
+            "store.db",
+            "store.db-wal",
+            "store.db-journal",
+        ] {
+            let bytes = std::fs::read(dir.join(file)).unwrap_or_default();
+            for body in &old {
+                assert!(
+                    !bytes.windows(body.len()).any(|w| w == body.as_slice()),
+                    "{name}'s {file} still holds an old ciphertext"
+                );
+            }
+        }
+    }
+    eprintln!("B6-p: old bodies gone from both dbs");
+
+    // GAP-4: a stranger with only the server ID gets nothing. Even with the
+    // secret from the link it gets the control log (a joiner needs it
+    // before its join exists) but no channel record: the read gate serves
+    // channels to members only.
     let server_id =
         records::ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
-    let mut held = Vec::new();
-    eventually("the stranger to hold both messages", || {
-        held = stranger.net.fetch(server_id);
-        held.iter().filter(|r| r.kind() == Kind::Message).count() == 2
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(stranger.net.fetch(server_id).is_empty(), "no secret, nothing");
+    let secret: [u8; 32] =
+        hex::decode(server.invite_link.rsplit('/').next().unwrap()).unwrap().try_into().unwrap();
+    let general = BTreeSet::from([records::ChannelId::from_bytes(
+        hex::decode(&channel).unwrap().try_into().unwrap(),
+    )]);
+    stranger.net.open_server(server_id, &secret, &general);
+    eventually("the stranger to get the control log", || {
+        stranger.net.fetch(server_id).iter().any(|r| r.kind() == Kind::Genesis)
     });
-    let rotations: BTreeSet<records::RecordId> =
-        held.iter().filter(|r| r.kind() == Kind::KeyRotation).map(|r| r.id()).collect();
-    assert!(!rotations.is_empty());
-    for record in held.iter().filter(|r| r.kind() == Kind::KeyRotation) {
-        let _ = stranger.cipher.apply_rotation(record);
-    }
-    stranger.cipher.set_accepted(server_id, &rotations);
-    for message in held.iter().filter(|r| r.kind() == Kind::Message) {
-        let Scope::Channel(ch) = message.scope() else { panic!("a channel record") };
-        assert!(stranger.cipher.decrypt(server_id, ch, message.author(), message.body()).is_err());
-    }
-    eprintln!("the stranger can't read: done");
+    std::thread::sleep(Duration::from_secs(5));
+    let held = stranger.net.fetch(server_id);
+    assert!(
+        held.iter().all(|r| r.scope() == Scope::Control),
+        "a non-member got channel records: {}",
+        held.iter().filter(|r| r.scope() != Scope::Control).count()
+    );
+    eprintln!("the stranger gets no channel records: done");
 }
 
 /// The app's background sync (`Core::run_sync_loop`, as mvs-core runs it):

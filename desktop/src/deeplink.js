@@ -6,15 +6,19 @@
 'use strict';
 
 const SCHEME = 'mvs';
-/** mvs://join/<server id, 32 bytes hex>/<invite record id, 32 bytes hex> */
-const INVITE = /^mvs:\/\/join\/([0-9a-f]{64})\/([0-9a-f]{64})\/?$/;
-const MAX_LEN = 200;
+/**
+ * mvs://join/<server id>/<invite record id>/<server secret>, each 32 bytes hex
+ * (GAP-4). The secret is a bearer credential: links are never logged, and a
+ * link without it is not an invite.
+ */
+const INVITE = /^mvs:\/\/join\/([0-9a-f]{64})\/([0-9a-f]{64})\/([0-9a-f]{64})\/?$/;
+const MAX_LEN = 256;
 
 /** The canonical invite link, or null. */
 function parseInviteLink(raw) {
   if (typeof raw !== 'string' || raw.length > MAX_LEN) return null;
   const m = INVITE.exec(raw.trim().toLowerCase());
-  return m ? `mvs://join/${m[1]}/${m[2]}` : null;
+  return m ? `mvs://join/${m[1]}/${m[2]}/${m[3]}` : null;
 }
 
 /**

@@ -16,8 +16,8 @@ const require = createRequire(import.meta.url);
 const ELECTRON = require('electron');
 const FAKE_CORE = fileURLToPath(new URL('./fake-core.js', import.meta.url));
 const FIXTURE_UI = fileURLToPath(new URL('./fixtures/link-ui', import.meta.url));
-const A = `mvs://join/${'a'.repeat(64)}/${'b'.repeat(64)}`;
-const B = `mvs://join/${'c'.repeat(64)}/${'d'.repeat(64)}`;
+const A = `mvs://join/${'a'.repeat(64)}/${'b'.repeat(64)}/${'e'.repeat(64)}`;
+const B = `mvs://join/${'c'.repeat(64)}/${'d'.repeat(64)}/${'f'.repeat(64)}`;
 const env = { ...process.env, MVS_CORE_PATH: FAKE_CORE };
 
 let app;
