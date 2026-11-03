@@ -8,6 +8,8 @@ publish = false
 identity = { path = "../identity" }
 records = { path = "../records" }
 authority = { path = "../authority" }
+# The P2P layer; core/api is its integration layer (T1).
+sync = { path = "../sync" }
 # BSD-3-Clause
 ed25519-dalek = "2"
 # CC0-1.0 OR Apache-2.0

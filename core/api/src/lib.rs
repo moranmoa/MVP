@@ -12,6 +12,7 @@
 mod datadir;
 mod db;
 mod dispatch;
+mod gate;
 mod model;
 mod ports;
 mod service;
@@ -19,6 +20,7 @@ pub mod sidecar;
 pub mod types;
 
 pub use dispatch::NOT_YET;
+pub use gate::MemberGate;
 pub use ports::{
     CipherOutcome, Clock, CollectingSink, EventSink, FixedClock, GroupCipher, LoopbackNetwork,
     Network, PendingGroupKeys, Ports, SharedSecrets, SystemClock,
