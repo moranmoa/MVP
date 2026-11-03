@@ -85,18 +85,21 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "api"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "authority",
  "blake3",
  "chacha20poly1305",
  "ed25519-dalek",
  "hex",
  "identity",
+ "libp2p",
  "rand_core 0.6.4",
  "records",
  "rusqlite",
  "serde",
  "serde_json",
  "sync",
+ "tokio",
  "windows-sys 0.61.2",
  "zeroize",
 ]
