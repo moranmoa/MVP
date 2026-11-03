@@ -196,6 +196,29 @@ impl<K: Hash + Eq + Clone> RateLimiter<K> {
         }
     }
 
+    /// Tokens `key` has now, without spending any. For byte budgets, where
+    /// the cost is only known afterwards (see [`RateLimiter::charge`]).
+    pub fn available(&mut self, key: K, now: Instant) -> usize {
+        if !self.buckets.contains_key(&key) && self.buckets.len() >= self.max_keys {
+            self.make_room(now);
+        }
+        let (burst, per_sec) = (self.burst, self.per_sec);
+        let (tokens, last) = self.buckets.entry(key).or_insert((burst, now));
+        *tokens = (*tokens + now.saturating_duration_since(*last).as_secs_f64() * per_sec).min(burst);
+        *last = now;
+        tokens.max(0.0) as usize
+    }
+
+    /// Spends `cost` tokens. The balance may go negative (a page is never
+    /// cut below one record); [`RateLimiter::available`] then reports 0
+    /// until it has refilled.
+    pub fn charge(&mut self, key: K, now: Instant, cost: usize) {
+        self.available(key.clone(), now);
+        if let Some((tokens, _)) = self.buckets.get_mut(&key) {
+            *tokens -= cost as f64;
+        }
+    }
+
     fn make_room(&mut self, now: Instant) {
         let full: Vec<K> = self
             .buckets
@@ -361,6 +384,19 @@ mod tests {
         assert_eq!(limiter.len(), 2, "a and b were dropped, drained and c kept");
         assert!(limiter.allow("drained", later));
         assert!(!limiter.allow("drained", later), "a dropped bucket would have had 2 tokens");
+    }
+
+    #[test]
+    fn byte_budget_is_spent_after_the_fact_and_refills() {
+        let start = Instant::now();
+        let mut bytes = RateLimiter::new(1000, 100, 10);
+        assert_eq!(bytes.available("peer", start), 1000);
+        // A page bigger than what was left: the balance goes negative...
+        bytes.charge("peer", start, 1500);
+        assert_eq!(bytes.available("peer", start), 0);
+        // ...and is back above zero only after it has refilled: 500 / 100 per s.
+        assert_eq!(bytes.available("peer", start + Duration::from_secs(4)), 0);
+        assert_eq!(bytes.available("peer", start + Duration::from_secs(7)), 200);
     }
 
     #[test]
