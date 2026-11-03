@@ -127,8 +127,7 @@ impl Core {
     pub fn open(config: Config, ports: Ports) -> CoreResult<Core> {
         let db = Db::open(config.db_path.as_deref())?;
         let vault = Vault::new(SharedSecrets(ports.secrets.clone()));
-        let mut inner =
-            Inner {
+        let mut inner = Inner {
             db,
             vault,
             me: None,
