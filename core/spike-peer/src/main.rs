@@ -23,7 +23,7 @@ use libp2p::{
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-const PROTOCOL_VERSION: &str = "/descord-replacement/0.1.0";
+const PROTOCOL_VERSION: &str = "/mvs/0.1.0";
 const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(NetworkBehaviour)]
@@ -142,20 +142,31 @@ async fn run(args: Vec<String>, interactive: bool) -> Result<()> {
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
     // Connect to the relay and learn our public address from it. That
-    // address is what the other side will try to punch through to.
+    // address is what the other side will try to punch through to. A wrong
+    // or unreachable relay must end the run, not hang it.
     swarm.dial(relay_addr.clone())?;
+    let relay_deadline = tokio::time::sleep(DIAL_TIMEOUT);
+    tokio::pin!(relay_deadline);
     loop {
-        if let SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received {
-            peer_id,
-            info,
-            ..
-        })) = swarm.select_next_some().await
-        {
-            if peer_id == relay_peer {
-                info!(address = %info.observed_addr, "relay sees us at");
-                swarm.add_external_address(info.observed_addr);
-                break;
+        tokio::select! {
+            _ = &mut relay_deadline => {
+                return relay_failed(&relay_addr, &format!("no answer within {} s", DIAL_TIMEOUT.as_secs()));
             }
+            event = swarm.select_next_some() => match event {
+                SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. }))
+                    if peer_id == relay_peer =>
+                {
+                    info!(address = %info.observed_addr, "relay sees us at");
+                    swarm.add_external_address(info.observed_addr);
+                    break;
+                }
+                SwarmEvent::OutgoingConnectionError { peer_id, error, .. }
+                    if peer_id.is_none() || peer_id == Some(relay_peer) =>
+                {
+                    return relay_failed(&relay_addr, &error.to_string());
+                }
+                _ => {}
+            },
         }
     }
 
@@ -237,4 +248,15 @@ async fn run(args: Vec<String>, interactive: bool) -> Result<()> {
         punch_error.as_deref().unwrap_or("-"),
     );
     Ok(())
+}
+
+/// Ends the run when the relay can't be reached: the same RESULT line as a
+/// failed test (so collected results stay uniform), then a plain error.
+fn relay_failed(relay_addr: &Multiaddr, reason: &str) -> Result<()> {
+    println!("RESULT path=failed relayed_ms=- direct_ms=- rtt_ms=- punch_error=relay_unreachable");
+    bail!(
+        "could not connect to the relay at {relay_addr}: {reason}\n\
+         Check that the relay address was copied exactly (it must end with the relay's /p2p/12D3KooW... ID) \
+         and that this computer is online."
+    )
 }

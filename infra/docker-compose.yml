@@ -1,12 +1,27 @@
+# Settings shared by every service: rotated logs, no privilege escalation.
+x-hardening: &hardening
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
 services:
   # Bootstrap (DHT) + circuit relay. Needed from the closed alpha.
   relay:
-    build: ./relay
-    restart: unless-stopped
+    <<: *hardening
+    build:
+      context: ./relay
+      args:
+        CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-4}
     environment:
       KEY_PATH: /data/node.key
       EXTERNAL_ADDRS: ${EXTERNAL_ADDRS:-}
       RUST_LOG: ${RUST_LOG:-info}
+      STATS_INTERVAL_SECS: ${STATS_INTERVAL_SECS:-300}
       # Circuit limits; empty keeps libp2p's defaults. See .env.example.
       MAX_CIRCUITS: ${MAX_CIRCUITS:-}
       MAX_CIRCUITS_PER_PEER: ${MAX_CIRCUITS_PER_PEER:-}
@@ -19,12 +34,63 @@ services:
       - "${WS_BIND:-127.0.0.1}:4002:4002/tcp"
     volumes:
       - relay-data:/data
+    # Only /data (the node key) is writable.
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    ulimits:
+      nofile: { soft: 65536, hard: 65536 }
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
+          pids: 256
+    healthcheck:
+      test: ["CMD", "relay-node", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  # wss:// in front of the relay's WebSocket port, with automatic TLS from
+  # Let's Encrypt. Start with: --profile proxy (needs RELAY_DOMAIN in .env
+  # and ports 80 + 443 forwarded on the router). See README.md.
+  caddy:
+    <<: *hardening
+    image: caddy:2.10-alpine
+    profiles: ["proxy"]
+    depends_on:
+      relay:
+        condition: service_healthy
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN:-relay.example.com}
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # TLS certificates and the ACME account key.
+      - caddy-data:/data
+      - caddy-config:/config
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    # Binding 80/443 inside the container.
+    cap_add: [NET_BIND_SERVICE]
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
 
   # TURN for voice and the Web client (phase 2). Start with: --profile voice
   coturn:
+    <<: *hardening
     image: coturn/coturn:4.6.2
     profiles: ["voice"]
-    restart: unless-stopped
     command:
       - -n
       - --log-file=stdout
@@ -42,6 +108,15 @@ services:
       - "3478:3478/udp"
       - "3478:3478/tcp"
       - "49160-49200:49160-49200/udp"
+    # Not read_only yet: untested with a read-only root (pid file, runtime
+    # database). Revisit when voice is switched on.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
 
 volumes:
   relay-data:
+  caddy-data:
+  caddy-config:

@@ -281,6 +281,8 @@ legend {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
+  /* a fieldset is min-content wide by default, which stops the wrap */
+  min-inline-size: 0;
 }
 
 .segmented legend {
@@ -468,6 +470,26 @@ legend {
   color: var(--accent);
 }
 
+.lookalike-tag {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  padding: 0.0625rem 0.375rem;
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-s);
+  background: var(--warning-bg);
+  color: var(--warning-text);
+  white-space: nowrap;
+  cursor: help;
+}
+
+.warning-text {
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius-s);
+  background: var(--warning-bg);
+  color: var(--warning-text);
+  font-size: 0.8125rem;
+}
+
 /* ---- dialogs -------------------------------------------------------------- */
 
 .dialog {
@@ -554,6 +576,15 @@ legend {
   border-radius: var(--radius-l);
   background: var(--bg-elevated);
   box-shadow: var(--shadow);
+}
+
+.brand {
+  margin: 0 0 0.75rem;
+  font-size: 1.125rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  unicode-bidi: isolate;
 }
 
 .onb-top {
@@ -650,6 +681,11 @@ legend {
 
 .prep-steps li.done {
   color: var(--success);
+}
+
+.words-shown {
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .word-grid {
@@ -1229,6 +1265,11 @@ legend {
 .msg-head .author {
   font-weight: 700;
   font-size: 1em;
+  /* names are capped at 32 characters, but some characters are very wide */
+  max-inline-size: 20em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .msg-head time {
@@ -1239,6 +1280,8 @@ legend {
 .msg-body {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  /* combining marks are capped, this keeps what is left inside the row */
+  overflow: hidden;
   font-size: 1em;
   line-height: 1.45;
 }
@@ -1756,13 +1799,164 @@ meter {
   }
 }
 
+/* ---- phones --------------------------------------------------------------- */
+/* Below 40rem the channel list and the chat become two pages (Shell switches
+   between .phone-nav and .phone-chat), the member list covers the chat, and
+   dialogs take the whole screen. */
+
+.members-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-inline: 0.5rem 0;
+  margin-block-end: 0.5rem;
+}
+
+.members-header h2 {
+  font-size: 1rem;
+}
+
 @media (max-width: 40rem) {
-  :root {
-    --sidebar-w: 12rem;
+  .shell {
+    height: 100dvh;
+    padding-block-end: env(safe-area-inset-bottom);
+  }
+
+  .shell.phone-nav {
+    grid-template-columns: var(--rail-w) minmax(0, 1fr);
+    grid-template-areas:
+      'banner banner'
+      'rail sidebar';
+  }
+
+  .shell.phone-nav .main {
+    display: none;
+  }
+
+  .shell.phone-chat {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      'banner'
+      'main';
+  }
+
+  .shell.phone-chat .rail,
+  .shell.phone-chat .sidebar {
+    display: none;
+  }
+
+  .shell .members {
+    position: fixed;
+    inset: 0;
+    width: auto;
+    z-index: 20;
+    padding-block-start: max(0.75rem, env(safe-area-inset-top));
+    box-shadow: none;
+  }
+
+  .chat-header {
+    padding-inline: 0.25rem 0.25rem;
+    gap: 0.25rem;
+  }
+
+  .chat-header h2 {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Touch targets of at least 44px. */
+  .icon-button {
+    width: 2.75rem;
+    height: 2.75rem;
+  }
+
+  .msg-actions button {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+
+  .composer textarea {
+    min-height: 2.75rem;
+  }
+
+  button.primary,
+  button.secondary,
+  .file-button {
+    min-height: 2.75rem;
+  }
+
+  .channel,
+  .member {
+    min-height: 2.75rem;
+  }
+
+  .composer {
+    padding: 0 0.5rem 0.5rem;
+  }
+
+  .msg-head .author {
+    max-inline-size: 11em;
+  }
+
+  .banner {
+    flex-wrap: wrap;
+    padding: 0.5rem 0.75rem;
+  }
+
+  .dialog {
+    width: 100vw;
+    max-width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
+    margin: 0;
+    border-radius: 0;
+  }
+
+  .settings-dialog {
+    width: 100vw;
+    height: 100dvh;
   }
 
   .settings {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 0.75rem;
+  }
+
+  .settings-nav,
+  .settings-panel {
+    min-width: 0;
+  }
+
+  .settings-panel {
+    overflow-y: auto;
+  }
+
+  .settings-nav ul {
+    flex-direction: row;
+    overflow-x: auto;
+  }
+
+  .settings-nav button {
+    white-space: nowrap;
+  }
+
+  .onboarding {
+    padding: 0;
+    place-items: stretch;
+  }
+
+  .onb-card {
+    width: 100%;
+    border-radius: 0;
+    padding: 1.25rem 1rem 1.5rem;
+    box-shadow: none;
+  }
+
+  .home {
+    padding: 1.5rem 1rem;
   }
 
   .word-grid,

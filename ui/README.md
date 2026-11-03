@@ -1,4 +1,4 @@
-# ui – MVP interface shell
+# ui – MVS interface shell
 
 React + TypeScript + Vite. A plain web app with no desktop-shell APIs, so it
 can sit unchanged inside Tauri or Electron. Today it talks to a **mock core**
@@ -35,8 +35,17 @@ docker compose run --rm shots
 ```
 
 `shots` captures the main screens into `screenshots/` with Playwright
-(`mcr.microsoft.com/playwright:v1.56.1-noble`) and prints a rough
-performance check (scrolling the 100k-message channel, server switch).
+(`mcr.microsoft.com/playwright:v1.56.1-noble`), at desktop size and at 375 px
+(phone), and prints a rough performance check (scrolling the 100k-message
+channel, server switch). It fails on any Content-Security-Policy violation,
+page error, recovery word in storage, or sideways overflow on the phone.
+
+```bash
+docker compose run --rm ui npm run licenses
+```
+
+Checks every npm package's licence against the allow-list (shipped:
+MIT/ISC/BSD/0BSD/Apache-2.0). Security notes are in [SECURITY.md](SECURITY.md).
 
 ## Demo URL flags (mock core only)
 
@@ -49,6 +58,7 @@ performance check (scrolling the 100k-message channel, server switch).
 | `?theme=light` / `?theme=dark` | Theme (not saved) |
 | `?update=<ms>` | Show the "update ready" pill after `<ms>` (default 45 s) |
 | `?still=1` | No simulated activity from other members |
+| `?hostile=1` | With `?demo=1`: adds attacker-style names and messages (see SECURITY.md) |
 
 In the demo: a message containing `/fail` fails to send (shows retry); the
 server "החבר׳ה" has nobody online (messages stay pending); an invite link
@@ -77,6 +87,10 @@ src/
   identity codes are always LTR.
 - Directional CSS uses logical properties, so the layout mirrors by itself:
   in Hebrew the server rail is on the right, in English on the left.
+- Below 40rem (phones) the channel list and the chat are two pages with a
+  back button, the member list covers the chat, and dialogs fill the screen.
+- Everything from the core passes through `src/core/sanitize.ts` once (see
+  SECURITY.md); screens never see raw peer data.
 - The message list is virtualised (TanStack Virtual) and reads messages from
   the core in pages of 100, so a 100k-message channel keeps ~25 rows in the DOM.
 

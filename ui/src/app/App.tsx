@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState } from 'react';
 import { FormattedMessage } from 'react-intl';
 import { CoreContext, type CoreApi } from '../core';
+import { guardCore } from '../core/sanitize';
 import { Onboarding } from '../screens/onboarding/Onboarding';
 import { Shell } from '../screens/shell/Shell';
 import { SettingsProvider, type Settings } from './settings';
@@ -14,7 +15,9 @@ export function useAppStore(): Store {
   return s;
 }
 
-export function App({ core, initialSettings }: { core: CoreApi; initialSettings?: Settings }) {
+export function App({ core: rawCore, initialSettings }: { core: CoreApi; initialSettings?: Settings }) {
+  // Every value from the core passes through the cleaners once, here.
+  const [core] = useState(() => guardCore(rawCore));
   const [store] = useState(() => new Store(core));
   const [ready, setReady] = useState(false);
 

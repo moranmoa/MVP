@@ -20,7 +20,9 @@ Run it from this folder. `tests/convergence.rs` is spike experiment 3: 10,000
 random scenarios, each delivered to a peer in 3 random orders, must all reach
 the same state, and after every arrival the incremental `Resolver` must equal
 `resolve` over the records held so far. It also prints timings for a ~5,000
-record log, incremental vs full.
+record log, incremental vs full. `tests/security.rs` covers attacks by hostile
+peers: forged geneses, other servers' records, demotion and kick edge cases,
+the pending-queue bound, and logs built to cost quadratic time.
 
 ## Building spike-peer.exe for Windows testers
 

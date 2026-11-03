@@ -1,0 +1,40 @@
+[package]
+name = "identity"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+default = ["os-keychain"]
+# The real OS keychain (Windows Credential Manager, macOS Keychain, Linux
+# Secret Service). Without it only `MemoryStore` is available.
+os-keychain = ["dep:keyring", "dep:keyring-core"]
+
+[dependencies]
+records = { path = "../records" }
+# CC0-1.0. BIP-39 English word list, checksum and seed.
+bip39 = { version = "2", features = ["zeroize"] }
+# BSD-3-Clause
+ed25519-dalek = "2"
+# MIT OR Apache-2.0 (RustCrypto)
+hkdf = "0.12"
+sha2 = "0.10"
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "zeroize"] }
+chacha20poly1305 = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = "1"
+# MIT
+strsim = "0.11"
+# MIT OR Apache-2.0. Default `v1` features: Windows Credential Manager,
+# macOS Keychain, and Secret Service over zbus (pure Rust, so no libdbus is
+# linked in).
+keyring = { version = "4", optional = true }
+# MIT OR Apache-2.0. Entries with store modifiers (Windows: target name,
+# Local persistence). Already in the tree through keyring.
+keyring-core = { version = "1", optional = true }
+# MIT OR Apache-2.0. NFC for the app lock passphrase. Already in the tree
+# through bip39.
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+hex = "0.4"

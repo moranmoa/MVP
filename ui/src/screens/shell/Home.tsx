@@ -5,6 +5,7 @@ import { useStore } from '../../app/store';
 import { isCoreError, useCore, useCoreEvent, type AgeRestriction, type Id, type JoinStatus, type ServerSummary } from '../../core';
 import { Code, Dialog } from '../../components/common';
 import { LinkIcon, PlusIcon, ShieldIcon, WifiOffIcon } from '../../components/icons';
+import { LINK_MAX } from '../../core/sanitize';
 
 export function Home({ hasServers, onCreate, onJoin }: { hasServers: boolean; onCreate: () => void; onJoin: () => void }) {
   return (
@@ -241,6 +242,7 @@ export function JoinDialog({ open, onClose, onJoined }: { open: boolean; onClose
             autoFocus
             disabled={busy}
             placeholder="mvp://join/…"
+            maxLength={LINK_MAX}
             spellCheck={false}
             aria-invalid={status?.phase === 'invalid' || undefined}
             onChange={(e) => {
