@@ -1,0 +1,15 @@
+# wss://<RELAY_DOMAIN> -> relay WebSocket (plain ws on 4002 inside Docker).
+# Caddy gets and renews the certificate itself; RELAY_DOMAIN must resolve
+# to this PC and ports 80 + 443 must reach it.
+{
+	# No admin API listener: nothing needs to reconfigure Caddy at runtime.
+	admin off
+}
+
+# There is deliberately no `log` directive: Caddy then keeps no access log,
+# so visitors' IP addresses are never written to disk.
+{$RELAY_DOMAIN} {
+	# The whole (sub)domain belongs to the relay, so peers dial
+	# /dns4/<RELAY_DOMAIN>/tcp/443/wss with no path component.
+	reverse_proxy relay:4002
+}
