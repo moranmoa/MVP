@@ -18,7 +18,11 @@ const quiet = { warn() {} };
 test('the root is derived for the base copy and for versions/<ver>', () => {
   assert.equal(deriveRoot({ execPath: BASE, platform: 'win32', exists: withLauncher }), ROOT);
   assert.equal(deriveRoot({ execPath: V2, platform: 'win32', exists: withLauncher }), ROOT);
-  assert.equal(deriveRoot({ execPath: path.join(ROOT, 'versions', '0.3.0-alpha.1', 'MVS.exe'), platform: 'win32', exists: withLauncher }), ROOT);
+  assert.equal(deriveRoot({ execPath: path.join(ROOT, 'versions', '10.0.12', 'MVS.exe'), platform: 'win32', exists: withLauncher }), ROOT);
+  // Only names the updater can write (strict MAJOR.MINOR.PATCH).
+  for (const odd of ['0.3.0-alpha.1', '01.2.0', '1.2', '1.2.0.0', 'v1.2.0']) {
+    assert.equal(deriveRoot({ execPath: path.join(ROOT, 'versions', odd, 'MVS.exe'), platform: 'win32', exists: withLauncher }), null, odd);
+  }
 });
 
 test('no launcher, odd folder names, or a dev checkout: updates off', () => {

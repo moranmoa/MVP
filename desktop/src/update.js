@@ -26,8 +26,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const ARG = '--mvs-update-root=';
-/** A version folder name: semver, optionally with a pre-release tag. */
-const VERSION_DIR = /^\d{1,5}\.\d{1,5}\.\d{1,5}(?:-[0-9A-Za-z.-]{1,64})?$/;
+/**
+ * A version folder name, exactly as the updater writes it (updater::Version:
+ * MAJOR.MINOR.PATCH, no leading zeros, no pre-release; the same regex as
+ * .github/scripts/manifest-body.mjs). Anything else is not ours.
+ */
+const VERSION_DIR = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
 const launcherName = (platform) => (platform === 'win32' ? 'mvs-launcher.exe' : 'mvs-launcher');
 
