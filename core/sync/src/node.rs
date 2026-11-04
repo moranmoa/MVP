@@ -144,6 +144,12 @@ const ACK_TTL: Duration = Duration::from_secs(600);
 const MAX_OWN: usize = 10_000;
 /// After writing, the log is pulled again this soon, to pick up acks.
 const ACK_PULL: Duration = Duration::from_secs(1);
+/// How long the larger peer ID waits for the smaller one to make the direct
+/// connection before dialling itself (once).
+const DIRECT_FALLBACK: Duration = Duration::from_secs(10);
+/// Retries of a busy saved listen port before a random one (about 2 s).
+const SAVED_PORT_TRIES: u32 = 8;
+const SAVED_PORT_WAIT: Duration = Duration::from_millis(250);
 /// Reachability is `Connecting` at most this long after starting.
 const CONNECTING: Duration = Duration::from_secs(10);
 /// Peers' stubs waiting for the delete or edit that replaced them.
@@ -277,6 +283,7 @@ enum Command {
     Peers { reply: oneshot::Sender<Vec<PeerId>> },
     ListenAddrs { reply: oneshot::Sender<Vec<Multiaddr>> },
     RelayOnly { on: bool },
+    NoDirectDials,
     #[cfg(test)]
     Served { peer: PeerId, log: String, reply: oneshot::Sender<usize> },
     Prune { id: RecordId, reply: oneshot::Sender<Result<bool>> },
@@ -465,7 +472,30 @@ impl Node {
         let backoff: SharedBackoff =
             Arc::new(Mutex::new(DialBackoff::new(DIAL_BACKOFF_MIN, DIAL_BACKOFF_MAX, MAX_TRACKED_PEERS)));
         let mut swarm = build_swarm(key, config.relay.clone(), backoff.clone()).await?;
-        let listener = swarm.listen_on(config.listen.clone())?;
+        // A stable port: `listen` with TCP port 0 reuses the one saved in
+        // `listen.port` (written on first start); if it is taken now, a random
+        // one, and the saved one is kept for next time.
+        let port_file = config.data_dir.join("listen.port");
+        let listen = with_saved_port(&config.listen, &port_file);
+        // After a quick restart (Windows especially) the old process may still
+        // hold the port for a moment: try it for about 2 s before giving up on
+        // it, so the port the user allowed in the firewall is kept.
+        let mut attempt = 0;
+        let (listener, listen) = loop {
+            match swarm.listen_on(listen.clone()) {
+                Ok(id) => break (id, listen),
+                Err(err) if listen != config.listen && attempt < SAVED_PORT_TRIES => {
+                    attempt += 1;
+                    debug!(%err, attempt, "the saved listen port is busy; trying again");
+                    tokio::time::sleep(SAVED_PORT_WAIT).await;
+                }
+                Err(err) if listen != config.listen => {
+                    warn!(%err, "the saved listen port is taken: listening on a random one this time");
+                    break (swarm.listen_on(config.listen.clone())?, config.listen.clone());
+                }
+                Err(err) => return Err(err.into()),
+            }
+        };
         for addr in &config.bootstrap {
             let _ = swarm.dial(DialOpts::unknown_peer_id().address(addr.clone()).build());
         }
@@ -519,7 +549,11 @@ impl Node {
             soon: HashSet::new(),
             direct_candidates: HashMap::new(),
             relay_only: false,
-            listen: config.listen.clone(),
+            fallback_at: HashMap::new(),
+            fallback_done: HashSet::new(),
+            direct_dials: true,
+            listen: listen.clone(),
+            port_file,
             listener: Some(listener),
             relayed_preferred: HashSet::new(),
             dial_backoff: backoff,
@@ -620,6 +654,13 @@ impl Node {
     /// never shares direct addresses; peers reach it only through the relay,
     /// and nobody but the relay learns its IP. Connections that are already
     /// direct stay until they close.
+    /// Tests only: this node never dials a direct connection itself (as if
+    /// a firewall blocked it), so the other side's turn can be shown.
+    #[doc(hidden)]
+    pub fn test_no_direct_dials(&self) -> Result<()> {
+        self.send(Command::NoDirectDials)
+    }
+
     pub fn set_relay_only(&self, on: bool) -> Result<()> {
         self.send(Command::RelayOnly { on })
     }
@@ -889,9 +930,19 @@ struct Task {
     /// "Relay only" (GAP-6): no direct listener, no direct dials or upgrades,
     /// no direct addresses to members. Everything goes through the relay.
     relay_only: bool,
+    /// Peers whose direct turn is ours later (the larger peer ID), and peers
+    /// we already took that turn for (once per connection).
+    fallback_at: HashMap<PeerId, Instant>,
+    fallback_done: HashSet<PeerId>,
+    /// Tests: our own direct dials can be switched off (stands in for a
+    /// firewall), to show the other side's turn.
+    direct_dials: bool,
     /// The direct listener (`NodeConfig::listen`), removed while relay-only.
     listen: Multiaddr,
     listener: Option<ListenerId>,
+    /// Where our TCP listen port is kept, so it stays the same across
+    /// restarts (a firewall or router rule can then allow it once).
+    port_file: PathBuf,
     /// Relayed connections dialled by the smaller peer ID (see `keep_relayed`).
     relayed_preferred: HashSet<ConnectionId>,
     /// Peers from the DHT whose dials failed, and when to try them again.
@@ -964,6 +1015,7 @@ impl Task {
                 Some((key, records, more, acked)) = decoded.recv() => self.on_decoded(key, records, more, acked),
                 _ = soon.tick() => {
                     self.pull_soon();
+                    self.direct_fallback();
                     let gone = self.presence.expire(Instant::now());
                     self.went_offline(gone);
                 }
@@ -1041,6 +1093,7 @@ impl Task {
                 let _ = reply.send(self.served.get(&(peer, log)).copied().unwrap_or(0));
             }
             Command::RelayOnly { on } => self.set_relay_only(on),
+            Command::NoDirectDials => self.direct_dials = false,
             Command::ListenAddrs { reply } => {
                 let _ = reply.send(self.swarm.listeners().cloned().collect());
             }
@@ -1203,12 +1256,39 @@ impl Task {
         if self.relay_only || self.direct.contains_key(&peer) || !self.relayed.contains_key(&peer) {
             return;
         }
-        // Only one side dials (the smaller peer ID; the other accepts): when
-        // both learn each other's addresses at once, two simultaneous dials
-        // to each other's listener left neither connection up (seen on
-        // Windows). The other side still answers our pulls with its addresses.
+        // Only one side dials first (the smaller peer ID; the other accepts):
+        // two simultaneous dials, each from its own listening port, are a TCP
+        // simultaneous open that Windows never completes. The larger side
+        // dials once later if the pair is still relayed (`direct_fallback`):
+        // in turn, never at the same time; e.g. when the smaller side can't
+        // reach us, or nobody can reach it.
         if *self.swarm.local_peer_id() > peer {
-            debug!(%peer, "the peer with the smaller ID dials the direct connection");
+            if !self.fallback_done.contains(&peer) {
+                self.fallback_at.entry(peer).or_insert_with(|| Instant::now() + DIRECT_FALLBACK);
+            }
+            return;
+        }
+        self.dial_direct(peer);
+    }
+
+    /// The larger side's turn: pairs still relayed `DIRECT_FALLBACK` after
+    /// the smaller side's turn get one dial from us.
+    fn direct_fallback(&mut self) {
+        let now = Instant::now();
+        let due: Vec<PeerId> = self.fallback_at.iter().filter(|(_, at)| **at <= now).map(|(p, _)| *p).collect();
+        for peer in due {
+            self.fallback_at.remove(&peer);
+            if self.relay_only || self.direct.contains_key(&peer) || !self.relayed.contains_key(&peer) {
+                continue;
+            }
+            self.fallback_done.insert(peer);
+            debug!(%peer, "still relayed: our turn to dial directly");
+            self.dial_direct(peer);
+        }
+    }
+
+    fn dial_direct(&mut self, peer: PeerId) {
+        if !self.direct_dials {
             return;
         }
         let lan = self.allow_lan && self.is_member(peer);
@@ -1375,6 +1455,8 @@ impl Task {
                 }
                 self.bound.retain(|(p, _), _| *p != peer_id);
                 self.direct_candidates.remove(&peer_id);
+                self.fallback_at.remove(&peer_id);
+                self.fallback_done.remove(&peer_id);
                 let gone = self.presence.disconnected(&peer_id);
                 self.went_offline(gone);
                 self.inflight.retain(|_, (p, _)| *p != peer_id);
@@ -1414,6 +1496,9 @@ impl Task {
                     self.swarm.behaviour_mut().kad.get_closest_peers(me);
                     self.pull_all();
                 }
+            }
+            SwarmEvent::NewListenAddr { listener_id, address } if Some(listener_id) == self.listener => {
+                save_port(&self.port_file, &address);
             }
             SwarmEvent::ListenerClosed { listener_id, .. } if self.circuit == Some(listener_id) => {
                 // Reservation refused or lost: the next discovery tick asks again.
@@ -2016,6 +2101,27 @@ fn dialable(addr: &Multiaddr, allow_lan: bool) -> bool {
     !addr.iter().any(|p| p == Protocol::P2pCircuit) && reachable(addr, allow_lan)
 }
 
+/// `listen`, with its TCP port 0 replaced by the port saved in `file`, if any.
+fn with_saved_port(listen: &Multiaddr, file: &std::path::Path) -> Multiaddr {
+    let saved = std::fs::read_to_string(file).ok().and_then(|s| s.trim().parse::<u16>().ok()).filter(|p| *p != 0);
+    match saved {
+        Some(port) => listen.iter().map(|p| if p == Protocol::Tcp(0) { Protocol::Tcp(port) } else { p }).collect(),
+        None => listen.clone(),
+    }
+}
+
+/// Saves the TCP port of our listen address the first time we get one.
+fn save_port(file: &std::path::Path, address: &Multiaddr) {
+    if file.exists() {
+        return;
+    }
+    if let Some(Protocol::Tcp(port)) = address.iter().find(|p| matches!(p, Protocol::Tcp(_))) {
+        if let Err(err) = std::fs::write(file, port.to_string()) {
+            warn!(%err, "saving the listen port failed");
+        }
+    }
+}
+
 /// The addresses a relayed peer reported that we keep for a direct upgrade:
 /// direct ones only (no circuits), at most [`MAX_DIRECT_CANDIDATES`], so a
 /// peer can't make us dial dozens of addresses.
@@ -2420,6 +2526,47 @@ mod tests {
         assert_eq!(kept.len(), MAX_DIRECT_CANDIDATES);
         assert!(kept.iter().all(|a| !a.iter().any(|p| p == Protocol::P2pCircuit)));
         assert!(!kept.iter().any(|a| a.to_string().starts_with("/ip4/0.0.0.0")));
+    }
+
+    /// The listen port stays the same across restarts (so a firewall or
+    /// router rule can allow it once); if it's taken, a random one this time,
+    /// and the saved one is kept.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_listen_port_is_kept_across_restarts() {
+        let dir = std::env::temp_dir().join(format!("sync-port-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = || NodeConfig {
+            relay: format!("/ip4/127.0.0.1/tcp/9/p2p/{}", PeerId::random()).parse().unwrap(),
+            data_dir: dir.clone(),
+            logs: Vec::new(),
+            authorizer: Arc::new(AcceptAll),
+            listen: "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
+            bootstrap: Vec::new(),
+            allow_lan: true,
+        };
+        let (first, _) = Node::start(config()).await.unwrap();
+        let port = port_of(&first).await;
+        first.shutdown().await.unwrap();
+        let (again, _) = Node::start(config()).await.unwrap();
+        assert_eq!(port_of(&again).await, port, "a new port after a restart");
+        again.shutdown().await.unwrap();
+        // Something else holds the port now: a random one, the saved one kept.
+        // (Windows may take a moment to release it after the shutdown.)
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let taken = loop {
+            match std::net::TcpListener::bind(("127.0.0.1", port)) {
+                Ok(l) => break l,
+                Err(err) => {
+                    assert!(Instant::now() < deadline, "port {port} never released: {err}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        };
+        let (moved, _) = Node::start(config()).await.unwrap();
+        assert_ne!(port_of(&moved).await, port);
+        assert_eq!(std::fs::read_to_string(dir.join("listen.port")).unwrap(), port.to_string());
+        moved.shutdown().await.unwrap();
+        drop(taken);
     }
 
     /// What we send members as our direct addresses comes from
