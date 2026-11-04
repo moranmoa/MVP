@@ -1,11 +1,40 @@
-import { useEffect, useId, useRef, type ReactNode } from 'react';
-import { useIntl } from 'react-intl';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import { FormattedMessage, useIntl } from 'react-intl';
+import { copyText } from '../app/clipboard';
 import { safeColor, safeImageSrc } from '../core/sanitize';
 import { CloseIcon } from './icons';
 
 /** User-controlled names are isolated so they never reorder the sentence around them. */
 export function Name({ children, className }: { children: string; className?: string }) {
   return <bdi className={className ?? 'name'}>{children}</bdi>;
+}
+
+/**
+ * An invite link: shown as selectable text (one click selects all of it, so
+ * Ctrl+C always works) with a Copy button that says whether it worked.
+ */
+export function InviteBox({ link }: { link: string }) {
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  return (
+    <div className="stack-tight">
+      <div className="invite-box">
+        <span className="code invite-link" dir="ltr">
+          {link}
+        </span>
+        <button
+          type="button"
+          className="secondary small"
+          onClick={async () => setState((await copyText(link)) ? 'copied' : 'failed')}
+        >
+          <FormattedMessage id={state === 'copied' ? 'common.copied' : 'common.copy'} />
+        </button>
+      </div>
+      <p className={state === 'failed' ? 'error small' : 'visually-hidden'} role="status">
+        {state === 'failed' && <FormattedMessage id="common.copyFailed" values={RICH} />}
+        {state === 'copied' && <FormattedMessage id="common.copied" />}
+      </p>
+    </div>
+  );
 }
 
 /** Identity codes and recovery words read left to right in every language. */
