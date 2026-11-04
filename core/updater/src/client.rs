@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -179,6 +180,10 @@ pub struct Updater<S: UpdateSource> {
     cfg: UpdaterConfig,
     source: S,
     root: TrustRoot,
+    /// One download at a time: two would unpack into the same
+    /// `versions/<v>.partial`. In-process is enough, since only the core
+    /// (a single instance) downloads; the launcher never does.
+    downloading: Mutex<()>,
 }
 
 impl<S: UpdateSource> Updater<S> {
@@ -190,7 +195,7 @@ impl<S: UpdateSource> Updater<S> {
     /// Like `new`, starting from another root: tests and tools only, never
     /// the app.
     pub fn with_root(cfg: UpdaterConfig, source: S, root: TrustRoot) -> Self {
-        Updater { cfg, source, root }
+        Updater { cfg, source, root, downloading: Mutex::new(()) }
     }
 
     fn lock(&self) -> Result<UpdateLock, UpdateError> {
@@ -264,7 +269,9 @@ impl<S: UpdateSource> Updater<S> {
     }
 
     /// `check`, then downloads, verifies, unpacks and stages the payload.
+    /// Concurrent calls wait for each other (not re-entrant by design).
     pub fn download(&self, now: u64) -> Result<Downloaded, UpdateError> {
+        let _one_at_a_time = self.downloading.lock().unwrap_or_else(|p| p.into_inner());
         let (manifest, result) = self.fetch_verified(now)?;
         let version = match result.status {
             CheckStatus::UpToDate => return Err(UpdateError::NothingToDownload),
