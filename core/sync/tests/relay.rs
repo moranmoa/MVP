@@ -332,6 +332,7 @@ async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
         let _relay = start_relay_counting(relay_key, port, circuits.clone(), true);
         let a = bound_node(&format!("lan-a-{allow_lan}"), &relay, 1, allow_lan, Arc::new(AcceptAll)).await;
         let b = bound_node(&format!("lan-b-{allow_lan}"), &relay, 2, allow_lan, Arc::new(AcceptAll)).await;
+        let b_identity = records::PublicKey::from_bytes(SigningKey::from_bytes(&[2; 32]).verifying_key().to_bytes());
         let (ids, start) = ([a.peer_id(), b.peer_id()], Instant::now());
         let closed = || CIRCUITS_CLOSED.lock().unwrap().iter().filter(|p| ids.contains(p)).count();
         let opened = || circuits.lock().unwrap().iter().filter(|(p, ok)| *ok && ids.contains(p)).count();
@@ -346,9 +347,18 @@ async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             assert_eq!(a.peers().await.unwrap(), vec![b.peer_id()], "the direct connection is up");
+            // The UI indicator: B is online on A, and directly.
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while !a.presence(test_server().0).await.unwrap().direct.contains(&b_identity) {
+                assert!(Instant::now() < deadline, "B never shown as direct");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         } else {
             tokio::time::sleep(Duration::from_secs(10)).await;
             assert_eq!(closed(), 0, "went direct without LAN allowed");
+            // The UI indicator: B is online on A, through the relay.
+            let seen = a.presence(test_server().0).await.unwrap();
+            assert!(seen.online.contains(&b_identity) && seen.direct.is_empty(), "{seen:?}");
         }
         a.shutdown().await.unwrap();
         b.shutdown().await.unwrap();

@@ -54,6 +54,12 @@ impl Presence {
         self.remove_where(|seen| now.duration_since(seen.last) >= TTL)
     }
 
+    /// The online identities, each with the peers it was seen on.
+    pub fn peers(&self, server: &ServerId) -> Vec<(PublicKey, Vec<PeerId>)> {
+        let Some(m) = self.servers.get(server) else { return Vec::new() };
+        m.iter().map(|(k, s)| (*k, s.peers.iter().copied().collect())).collect()
+    }
+
     pub fn online(&self, server: &ServerId) -> Vec<PublicKey> {
         self.servers.get(server).map(|m| m.keys().copied().collect()).unwrap_or_default()
     }
