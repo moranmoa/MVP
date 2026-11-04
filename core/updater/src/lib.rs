@@ -42,7 +42,7 @@ pub use manifest::{
 pub use policy::{Baseline, ClientPolicy, Decision, Freshness};
 pub use rollback::{Boot, Committed, InstallState, Trial, MAX_ATTEMPTS};
 pub use root::{
-    parse_public_key, parse_root_fetch, RootChain, SignedRoot, TrustRoot, TrustRootFile, MAX_ROOT_FETCH_BYTES,
+    embedded_root, parse_public_key, parse_root_fetch, RootChain, EMBEDDED_ROOT_JSON, SignedRoot, TrustRoot, TrustRootFile, MAX_ROOT_FETCH_BYTES,
     MAX_ROOT_UPDATES_PER_FETCH, MAX_ROOT_UPDATE_BYTES, ROOT_SIGNING_CONTEXT,
 };
 pub use unpack::{
