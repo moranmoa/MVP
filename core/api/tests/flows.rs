@@ -1761,3 +1761,32 @@ fn channel_commands() {
     assert_eq!(left.as_slice(), std::slice::from_ref(&general.id));
     assert_eq!(owner.core.get_message_count(&room.id).unwrap_err().code, ErrorCode::NotFound);
 }
+
+/// #185 review: an owner without an 18+ claim can't make or mark an 18+
+/// channel: `not-allowed`, and nothing is signed or published.
+#[test]
+fn an_owner_without_an_adult_claim_cannot_make_adult_channels() {
+    let world = World::new();
+    let owner = world.peer();
+    // Restored: no birth date, so the age claim says "not 18+".
+    owner.core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
+    let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None };
+    owner.core.update_profile(profile).unwrap();
+    let server = owner.core.create_server("Minors", AgeRestriction::None).unwrap();
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let room = owner.core.create_channel(&server.id, "room", false).unwrap();
+    let held = world.network.fetch(server_key).len();
+    assert_eq!(
+        owner.core.create_channel(&server.id, "night", true).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+    assert_eq!(
+        owner.core.update_channel(&room.id, None, Some(true)).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+    assert_eq!(world.network.fetch(server_key).len(), held, "something was published");
+    // A long name is cut to 32 before trimming its dashes.
+    let long =
+        owner.core.create_channel(&server.id, &format!("{}-x", "a".repeat(31)), false).unwrap();
+    assert_eq!(long.name, format!("{}", "a".repeat(31)));
+}

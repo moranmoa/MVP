@@ -48,7 +48,8 @@ pub(crate) fn channel_name(raw: &str) -> Option<String> {
             out.push(c);
         }
     }
-    let out: String = out.trim_matches('-').chars().take(authority::MAX_CHANNEL_NAME).collect();
+    let cut: String = out.chars().take(authority::MAX_CHANNEL_NAME).collect();
+    let out = cut.trim_matches('-').to_owned();
     authority::channel_name_ok(&out).then_some(out)
 }
 

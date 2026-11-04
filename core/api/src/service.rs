@@ -492,6 +492,7 @@ impl Core {
         let name = model::channel_name(name).ok_or(ErrorCode::BadRequest)?;
         let server = parse_server(server_id)?;
         self.check_name_free(server, &name, None)?;
+        self.check_may_mark_adult(server, adult)?;
         let mut id = [0u8; 32];
         OsRng.fill_bytes(&mut id);
         let channel = ChannelId::from_bytes(id);
@@ -515,6 +516,7 @@ impl Core {
         };
         self.check_name_free(server, &name, Some(channel))?;
         let adult = adult.unwrap_or(current.adult);
+        self.check_may_mark_adult(server, adult)?;
         let server_id = model::hex_id(server.as_bytes());
         self.control_action(&server_id, Action::ChannelEdit { channel, adult, name })?;
         let json = self.channel_json(server, channel)?;
@@ -534,7 +536,7 @@ impl Core {
         self.control_action(&server_id, Action::ChannelDelete { channel })?;
         self.ports.events.emit(&Event::ChannelRemoved {
             server_id,
-            channel_id: channel_id.to_owned(),
+            channel_id: model::hex_id(channel.as_bytes()),
             name: current.name,
         });
         Ok(())
@@ -549,6 +551,22 @@ impl Core {
         let view = inner.view(server)?;
         let current = view.state.channels.get(&channel).cloned().ok_or(ErrorCode::NotFound)?;
         Ok((server, channel, current))
+    }
+
+    /// An 18+ channel only from someone whose own age claim says 18+: else
+    /// they couldn't see the channel they made (B7). `not-allowed` before
+    /// anything is signed or sent.
+    fn check_may_mark_adult(&self, server: ServerId, adult: bool) -> CoreResult<()> {
+        if !adult {
+            return Ok(());
+        }
+        let mut inner = self.lock();
+        let server = inner.load_mine(server)?;
+        let me = inner.me.as_ref().map(Me::key).ok_or(ErrorCode::NotFound)?;
+        if !inner.view(server)?.state.adults.contains(&me) {
+            return Err(ErrorCode::NotAllowed.into());
+        }
+        Ok(())
     }
 
     fn check_name_free(
