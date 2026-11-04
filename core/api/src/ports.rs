@@ -105,6 +105,13 @@ pub trait Network: Send + Sync {
 
     fn lock(&self) {}
 
+    /// M2: who of `server` is online now (bound identities, members or
+    /// not: the core shows members only). `None` if not tracked.
+    fn online(&self, server: ServerId) -> Option<BTreeSet<PublicKey>> {
+        let _ = server;
+        None
+    }
+
     /// B6: where a record written here stands; `None` if not tracked.
     fn send_state(&self, id: records::RecordId) -> Option<crate::types::SendState> {
         let _ = id;

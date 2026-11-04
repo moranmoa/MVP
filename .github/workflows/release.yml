@@ -24,6 +24,8 @@ on:
       - .github/workflows/release.yml
       - .github/scripts/collect-release.sh
       - .github/scripts/write-relay-config.mjs
+      - .github/scripts/changelog-section.mjs
+      - CHANGELOG.md
       - .github/scripts/manifest-body.mjs
       - desktop/package.json
       - desktop/package-lock.json
@@ -68,6 +70,27 @@ jobs:
             exit 1
           fi
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github/scripts
+            CHANGELOG.md
+          sparse-checkout-cone-mode: false
+      # Every release carries its "what changed" notes: no section, no build.
+      - name: CHANGELOG section for this version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            node .github/scripts/changelog-section.mjs "$VERSION" > /dev/null
+            echo "CHANGELOG.md has a section for $VERSION"
+          else
+            # Dry run: the newest section must still be readable.
+            newest=$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | tr -d '#[] ')
+            node .github/scripts/changelog-section.mjs "$newest" > /dev/null
+            echo "dry run: newest CHANGELOG section ($newest) is readable"
+          fi
 
   ui:
     name: ui build
@@ -268,7 +291,10 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-          sparse-checkout: .github/scripts
+          sparse-checkout: |
+            .github/scripts
+            CHANGELOG.md
+          sparse-checkout-cone-mode: false
       # No merge-multiple: each artifact lands in its own artifacts/<name>/,
       # so one build job can't overwrite another's file.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -285,7 +311,10 @@ jobs:
             fi
             echo "draft $TAG exists (re-run), replacing its assets"
           else
-            cat > notes.md <<EOF
+            # What changed (CHANGELOG.md), then how to install and verify.
+            node .github/scripts/changelog-section.mjs "$VERSION" > notes.md
+            printf '\n---\n\n' >> notes.md
+            cat >> notes.md <<EOF
           **Closed alpha - unsigned build. Only install it if you were invited.**
 
           | System | Download |
@@ -297,7 +326,7 @@ jobs:
           How to install and get started (Hebrew):
           [docs/release/ALPHA-QUICKSTART.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/docs/release/ALPHA-QUICKSTART.md)
 
-          - **First pre-release:** the data format may still change (record format v2). Servers and messages made with this build may be reset by a later one. Your identity is safe as long as you keep your 12 recovery words.
+          - **Alpha:** the data format may still change. Servers and messages made with this build may be reset by a later one. Your identity is safe as long as you keep your 12 recovery words.
           - The installers are **not code-signed**. Windows SmartScreen will warn: choose "More info" and then "Run anyway".
           - The \`.zip\`/\`.tar.gz\` files are the in-app updater payloads; you don't need them.
           - \`manifest-body.json\` is the **unsigned** updater manifest. The owner signs it offline and attaches \`manifest.json\`; until then, in-app updates are not offered.

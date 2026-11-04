@@ -12,7 +12,11 @@ use libp2p::{
     PeerId, StreamProtocol, SwarmBuilder,
 };
 use records::{ChannelId, Draft, Kind, RecordId, Scope, ServerId, SigningKey};
-use sync::{log_name, AcceptAll, Node, NodeConfig, NodeEvent, Record};
+use sync::{log_name, AcceptAll, Access, ControlLog, Node, NodeConfig, NodeEvent, ReadGate, Record, ServerSecret};
+
+/// Destinations of circuits the test relays saw close (all tests in this
+/// binary; filter by peer).
+static CIRCUITS_CLOSED: std::sync::Mutex<Vec<PeerId>> = std::sync::Mutex::new(Vec::new());
 use tokio::sync::mpsc;
 
 #[derive(NetworkBehaviour)]
@@ -26,6 +30,17 @@ struct RelayBehaviour {
 /// A relay like `infra/relay` (circuits, identify, `/mvs/kad/1.0.0`), on a
 /// fixed key and port so a restart looks the same to its clients.
 fn start_relay(key: identity::Keypair, port: u16) -> tokio::task::JoinHandle<()> {
+    start_relay_counting(key, port, Arc::default(), false)
+}
+
+/// Also records the destination of every circuit request (accepted or
+/// denied), as the live relay's circuit counters do.
+fn start_relay_counting(
+    key: identity::Keypair,
+    port: u16,
+    circuits: Arc<std::sync::Mutex<Vec<(PeerId, bool)>>>,
+    circuits_only: bool,
+) -> tokio::task::JoinHandle<()> {
     let mut swarm = SwarmBuilder::with_existing_identity(key)
         .with_tokio()
         .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)
@@ -39,7 +54,16 @@ fn start_relay(key: identity::Keypair, port: u16) -> tokio::task::JoinHandle<()>
             );
             kad.set_mode(Some(kad::Mode::Server));
             RelayBehaviour {
-                relay: relay::Behaviour::new(peer_id, relay::Config::default()),
+                relay: relay::Behaviour::new(
+                    peer_id,
+                    // R11, as on the live relay.
+                    relay::Config {
+                        max_circuits_per_peer: 8,
+                        max_circuit_duration: Duration::from_secs(3600),
+                        max_circuit_bytes: 32 << 20,
+                        ..relay::Config::default()
+                    },
+                ),
                 identify: identify::Behaviour::new(identify::Config::new("/mvs/0.1.0".into(), key.public())),
                 ping: ping::Behaviour::new(ping::Config::new()),
                 kad,
@@ -54,12 +78,25 @@ fn start_relay(key: identity::Keypair, port: u16) -> tokio::task::JoinHandle<()>
     swarm.add_external_address(addr);
     tokio::spawn(async move {
         loop {
-            if let SwarmEvent::Behaviour(RelayBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) =
-                swarm.select_next_some().await
-            {
-                for addr in info.listen_addrs {
-                    swarm.behaviour_mut().kad.add_address(&peer_id, addr);
+            match swarm.select_next_some().await {
+                SwarmEvent::Behaviour(RelayBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
+                    for addr in info.listen_addrs {
+                        if circuits_only && !addr.iter().any(|p| p == libp2p::multiaddr::Protocol::P2pCircuit) {
+                            continue;
+                        }
+                        swarm.behaviour_mut().kad.add_address(&peer_id, addr);
+                    }
                 }
+                SwarmEvent::Behaviour(RelayBehaviourEvent::Relay(
+                    relay::Event::CircuitReqAccepted { dst_peer_id, .. },
+                )) => circuits.lock().unwrap().push((dst_peer_id, true)),
+                SwarmEvent::Behaviour(RelayBehaviourEvent::Relay(relay::Event::CircuitClosed { dst_peer_id, .. })) => {
+                    CIRCUITS_CLOSED.lock().unwrap().push(dst_peer_id)
+                }
+                SwarmEvent::Behaviour(RelayBehaviourEvent::Relay(relay::Event::CircuitReqDenied { dst_peer_id, .. })) => {
+                    circuits.lock().unwrap().push((dst_peer_id, false))
+                }
+                _ => {}
             }
         }
     })
@@ -97,6 +134,12 @@ fn messages(n: u64) -> Vec<Record> {
 /// A node that knows only the relay, plus a channel of the times it got a
 /// relay reservation.
 async fn node(name: &str, relay: &Multiaddr) -> (Node, mpsc::UnboundedReceiver<Instant>) {
+    node_lan(name, relay, true).await
+}
+
+/// Like [`node`]; with `allow_lan` off, peers on this host only meet through
+/// relay circuits, as two users behind NAT do.
+async fn node_lan(name: &str, relay: &Multiaddr, allow_lan: bool) -> (Node, mpsc::UnboundedReceiver<Instant>) {
     let (server, channel) = test_server();
     let dir = std::env::temp_dir().join(format!("sync-relay-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -107,7 +150,7 @@ async fn node(name: &str, relay: &Multiaddr) -> (Node, mpsc::UnboundedReceiver<I
         authorizer: Arc::new(AcceptAll),
         listen: "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
         bootstrap: vec![],
-        allow_lan: true,
+        allow_lan,
     };
     let (node, mut events) = Node::start(config).await.unwrap();
     let (tx, rx) = mpsc::unbounded_channel();
@@ -172,5 +215,188 @@ async fn a_node_reserves_again_within_a_minute_of_a_relay_restart() {
     let _relay = start_relay(relay_key, port);
     let again = reserved_within(&mut reserved, Duration::from_secs(60)).await;
     eprintln!("reserved again {:?} after the relay came back", again - back);
+    b.shutdown().await.unwrap();
+}
+
+/// The live relay saw circuits_denied climb: clients kept asking for
+/// circuits to peers whose reservation had ended. A peer that goes offline
+/// stays in the relay's DHT table, so every discovery round (Kademlia's own
+/// lookups included) asked for a circuit to it. Count those requests.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_offline_peer_is_not_asked_for_circuits_again_and_again() {
+    let relay_key = identity::Keypair::generate_ed25519();
+    let port = free_port();
+    let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::from(relay_key.public())).parse().unwrap();
+    let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _relay = start_relay_counting(relay_key, port, circuits.clone(), false);
+
+    // C reserves, so the relay's table has its circuit address; then it goes.
+    let (c, mut c_reserved) = node("gone", &relay).await;
+    reserved_within(&mut c_reserved, Duration::from_secs(20)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await; // identify reaches the relay
+    let gone = c.peer_id();
+    c.shutdown().await.unwrap();
+
+    // A keeps discovering for 30 s.
+    let (a, mut a_reserved) = node("stays", &relay).await;
+    reserved_within(&mut a_reserved, Duration::from_secs(20)).await;
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let asked = circuits.lock().unwrap().iter().filter(|(dst, _)| *dst == gone).count();
+    eprintln!("circuit requests to the offline peer in 30 s: {asked}");
+    // A few tries are fine; one every discovery round (3 s) is not.
+    // Our dials back off; Kademlia's own lookups can add a few until the
+    // DialGuard (#190) holds them back too. One every 3 s would be 10+.
+    assert!(asked <= 6, "{asked} circuit requests to a peer that went offline");
+    a.shutdown().await.unwrap();
+}
+
+/// v0.2.0's live smoke: two users behind NAT couldn't chat, and the relay
+/// denied circuits by the thousand while accepting only a few. Two peers
+/// that can only meet through relay circuits must sync, and keep using the
+/// circuits they have: a handful of circuit requests in total, none denied,
+/// over many discovery and pull rounds.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_peers_behind_nat_reuse_their_circuits() {
+    let relay_key = identity::Keypair::generate_ed25519();
+    let port = free_port();
+    let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::from(relay_key.public())).parse().unwrap();
+    let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
+    // Hands out only circuit addresses, as for users behind NAT (their own
+    // addresses are private and unreachable).
+    let _relay = start_relay_counting(relay_key, port, circuits.clone(), true);
+
+    let (a, mut a_reserved) = node_lan("nat-a", &relay, false).await;
+    let (b, mut b_reserved) = node_lan("nat-b", &relay, false).await;
+    reserved_within(&mut a_reserved, Duration::from_secs(20)).await;
+    reserved_within(&mut b_reserved, Duration::from_secs(20)).await;
+    for record in messages(10) {
+        a.append(record).await.unwrap();
+    }
+    let (server, channel) = test_server();
+    let log = log_name(server, Scope::Channel(channel));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while b.state(&log).await.unwrap().count < 10 {
+        assert!(Instant::now() < deadline, "no sync through the relay");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // 90 s: 30 discovery rounds and 18 pull rounds on each side.
+    tokio::time::sleep(Duration::from_secs(90)).await;
+    let all = circuits.lock().unwrap().clone();
+    let accepted = all.iter().filter(|(_, ok)| *ok).count();
+    let denied = all.len() - accepted;
+    eprintln!("circuits accepted {accepted}, denied {denied}");
+    assert_eq!(denied, 0, "the relay denied {denied} circuits");
+    assert!(accepted <= 4, "{accepted} circuits opened between two peers");
+    a.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
+}
+
+/// A node of a server opened with its secret (so peers bind), meeting
+/// others only through relay circuits, with "LAN allowed" (F2) as given.
+async fn bound_node(name: &str, relay: &Multiaddr, key: u8, allow_lan: bool, gate: Arc<dyn ReadGate>) -> Node {
+    let (server, channel) = test_server();
+    let dir = std::env::temp_dir().join(format!("sync-relay-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let config = NodeConfig {
+        relay: relay.clone(),
+        data_dir: dir,
+        logs: vec![],
+        authorizer: Arc::new(AcceptAll),
+        listen: "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
+        bootstrap: vec![],
+        allow_lan,
+    };
+    let access = Access {
+        binder: Some(Arc::new(SigningKey::from_bytes(&[key; 32]))),
+        read_gate: Some(gate),
+        ..Access::default()
+    };
+    let (node, _events) = Node::start_with(config, access).await.unwrap();
+    node.open_server(server, ServerSecret::from_bytes([42; 32])).unwrap();
+    node.open_channel(server, channel).await.unwrap();
+    node
+}
+
+/// F2: two bound peers on one LAN, which first meet through the relay
+/// (the DHT never carries LAN addresses), switch to a direct connection:
+/// the relay sees their circuit close while both keep running. Without
+/// "LAN allowed" they stay relayed.
+#[tokio::test(flavor = "multi_thread")]
+async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
+    for allow_lan in [true, false] {
+        let relay_key = identity::Keypair::generate_ed25519();
+        let port = free_port();
+        let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::from(relay_key.public())).parse().unwrap();
+        let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
+        // Circuit addresses only in the relay's DHT, like for peers behind NAT.
+        let _relay = start_relay_counting(relay_key, port, circuits.clone(), true);
+        let a = bound_node(&format!("lan-a-{allow_lan}"), &relay, 1, allow_lan, Arc::new(AcceptAll)).await;
+        let b = bound_node(&format!("lan-b-{allow_lan}"), &relay, 2, allow_lan, Arc::new(AcceptAll)).await;
+        let (ids, start) = ([a.peer_id(), b.peer_id()], Instant::now());
+        let closed = || CIRCUITS_CLOSED.lock().unwrap().iter().filter(|p| ids.contains(p)).count();
+        let opened = || circuits.lock().unwrap().iter().filter(|(p, ok)| *ok && ids.contains(p)).count();
+        // They meet through the relay first.
+        while opened() == 0 {
+            assert!(start.elapsed() < Duration::from_secs(30), "never met through the relay");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if allow_lan {
+            while closed() == 0 {
+                assert!(start.elapsed() < Duration::from_secs(30), "stayed relayed on one LAN");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert_eq!(a.peers().await.unwrap(), vec![b.peer_id()], "the direct connection is up");
+        } else {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            assert_eq!(closed(), 0, "went direct without LAN allowed");
+        }
+        a.shutdown().await.unwrap();
+        b.shutdown().await.unwrap();
+    }
+    // "LAN allowed" but not bound (no shared server secret): stay relayed.
+    let relay_key = identity::Keypair::generate_ed25519();
+    let port = free_port();
+    let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::from(relay_key.public())).parse().unwrap();
+    let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _relay = start_relay_counting(relay_key, port, circuits.clone(), true);
+    let (a, _) = node_lan("lan-unbound-a", &relay, true).await;
+    let (b, _) = node_lan("lan-unbound-b", &relay, true).await;
+    let ids = [a.peer_id(), b.peer_id()];
+    let start = Instant::now();
+    while !circuits.lock().unwrap().iter().any(|(p, ok)| *ok && ids.contains(p)) {
+        assert!(start.elapsed() < Duration::from_secs(30), "unbound peers never met through the relay");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let closed = CIRCUITS_CLOSED.lock().unwrap().iter().filter(|p| ids.contains(p)).count();
+    assert_eq!(closed, 0, "an unbound peer was dialled at its LAN address");
+    a.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
+
+    // Bound, but neither side's read gate counts the other as a member (a
+    // non-member with the secret, or a kicked member): no LAN dial, relayed.
+    struct Nobody;
+    impl ReadGate for Nobody {
+        fn may_read(&self, _: &records::PublicKey, _: &ControlLog<'_>) -> bool {
+            false
+        }
+    }
+    let relay_key = identity::Keypair::generate_ed25519();
+    let port = free_port();
+    let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::from(relay_key.public())).parse().unwrap();
+    let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _relay = start_relay_counting(relay_key, port, circuits.clone(), true);
+    let a = bound_node("lan-nonmember-a", &relay, 3, true, Arc::new(Nobody)).await;
+    let b = bound_node("lan-nonmember-b", &relay, 4, true, Arc::new(Nobody)).await;
+    let ids = [a.peer_id(), b.peer_id()];
+    let start = Instant::now();
+    while !circuits.lock().unwrap().iter().any(|(p, ok)| *ok && ids.contains(p)) {
+        assert!(start.elapsed() < Duration::from_secs(30), "non-members never met through the relay");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let closed = CIRCUITS_CLOSED.lock().unwrap().iter().filter(|p| ids.contains(p)).count();
+    assert_eq!(closed, 0, "a bound non-member was dialled at its LAN address");
+    a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
 }
