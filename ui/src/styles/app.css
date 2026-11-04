@@ -2134,3 +2134,26 @@ kbd {
   color: inherit;
   cursor: pointer;
 }
+
+/* T8-01: the core is not answering. */
+.core-down {
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 0.75rem;
+  min-height: 100dvh;
+  padding: 2rem;
+  text-align: center;
+  background: var(--bg-app);
+}
+
+.core-down svg {
+  width: 2.5rem;
+  height: 2.5rem;
+  color: var(--warning, var(--text-muted));
+}
+
+.core-down p {
+  max-width: 32rem;
+  color: var(--text-muted);
+}

@@ -51,6 +51,8 @@ export interface MockOptions {
   updateRolledBack?: boolean;
   /** Act as if in a voice call: restartToUpdate is refused with not-allowed. */
   inCall?: boolean;
+  /** As the desktop shell would: report the core down, for the T8-01 screen. */
+  coreDown?: 'missing' | 'start-failed' | 'crashed' | 'crash-loop' | 'keyring';
   /** Add members and messages written the way an attacker would (see SECURITY.md). */
   hostile?: boolean;
   /** `getRecoveryWords()` fails, to show the load error state. */
@@ -163,6 +165,10 @@ export class MockCore implements CoreApi {
           800,
         ),
       );
+    }
+    if (options.coreDown) {
+      const detail = options.coreDown;
+      this.timers.push(setTimeout(() => this.emit('core.status', { state: 'down', detail }), 300));
     }
     if (options.updateRolledBack) {
       this.timers.push(setTimeout(() => this.emit('update.rolledBack', { failed: '0.3.0', running: '0.2.0' }), 800));
