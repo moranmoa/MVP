@@ -281,7 +281,13 @@ fn a_joiner_writes_first_through_a_relay() {
             guest.core.send_message(&channel, "hello from B", None).is_ok()
         });
         eventually("A to read B's message", || {
-            owner.core.get_messages(&channel, 0, 9).unwrap().messages.iter().any(|m| m.body == "hello from B")
+            owner
+                .core
+                .get_messages(&channel, 0, 9)
+                .unwrap()
+                .messages
+                .iter()
+                .any(|m| m.body == "hello from B")
         });
         stop.store(true, Ordering::SeqCst);
         owner.net.wake();
