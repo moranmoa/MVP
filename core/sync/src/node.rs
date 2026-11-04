@@ -1018,14 +1018,7 @@ impl Task {
     /// [`reachable`], plus: a circuit through our own relay is always fine
     /// (we dial that relay anyway, whatever its address).
     fn reachable(&self, addr: &Multiaddr) -> bool {
-        let mut parts = addr.iter().peekable();
-        let mut via_our_relay = false;
-        while let Some(p) = parts.next() {
-            if p == Protocol::P2p(self.relay_peer) && parts.peek() == Some(&Protocol::P2pCircuit) {
-                via_our_relay = true;
-            }
-        }
-        via_our_relay || reachable(addr, self.allow_lan)
+        via_relay(addr, &self.relay_addr) || reachable(addr, self.allow_lan)
     }
 
     fn listen_on_circuit(&mut self) {
@@ -1789,6 +1782,17 @@ fn dialable(addr: &Multiaddr, allow_lan: bool) -> bool {
     !addr.iter().any(|p| p == Protocol::P2pCircuit) && reachable(addr, allow_lan)
 }
 
+/// Whether `addr` is a circuit through our configured relay: everything
+/// before `/p2p-circuit` must be exactly `relay` (its address and peer ID).
+/// Matching the peer ID alone would let a peer put any address in front
+/// of it, e.g. a LAN one, and make us dial it.
+fn via_relay(addr: &Multiaddr, relay: &Multiaddr) -> bool {
+    let parts: Vec<Protocol<'_>> = addr.iter().collect();
+    let Some(circuit) = parts.iter().position(|p| *p == Protocol::P2pCircuit) else { return false };
+    let prefix: Multiaddr = parts[..circuit].iter().cloned().collect();
+    prefix == *relay
+}
+
 /// Like [`dialable`], but a relay circuit is fine (it is how peers behind
 /// NAT are reached) as long as the relay's own address is global. Used for
 /// addresses learned from peers (Kademlia, identify) before storing or
@@ -2081,6 +2085,28 @@ mod tests {
         let bytes = serde_json::to_vec(&response).unwrap();
         let back: SyncResponse = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(back.records, vec![WireEntry::Stub(ByteBuf::from(stub.encode()))]);
+    }
+
+    /// Only a circuit through exactly our configured relay address passes;
+    /// our relay's peer ID behind any other address (a LAN one) does not.
+    #[test]
+    fn only_circuits_through_our_exact_relay_address_are_trusted() {
+        let relay_id = PeerId::random();
+        let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/4001/p2p/{relay_id}").parse().unwrap();
+        let target = PeerId::random();
+        let ok: Multiaddr = format!("{relay}/p2p-circuit/p2p/{target}").parse().unwrap();
+        assert!(via_relay(&ok, &relay));
+        for bad in [
+            format!("/ip4/192.168.1.1/tcp/22/p2p/{relay_id}/p2p-circuit/p2p/{target}"),
+            format!("/ip4/127.0.0.1/tcp/22/p2p/{relay_id}/p2p-circuit/p2p/{target}"),
+            format!("/ip4/127.0.0.1/tcp/4001/p2p/{}/p2p-circuit/p2p/{target}", PeerId::random()),
+            format!("/ip4/127.0.0.1/tcp/4001/p2p/{relay_id}"),
+        ] {
+            let bad: Multiaddr = bad.parse().unwrap();
+            assert!(!via_relay(&bad, &relay), "{bad} trusted");
+            // Nor does the general rule let the LAN ones through without allow_lan.
+            assert!(!reachable(&bad, false) || bad.iter().all(|p| !matches!(p, Protocol::Ip4(ip) if ip.is_private())));
+        }
     }
 
     #[test]
