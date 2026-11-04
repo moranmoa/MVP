@@ -37,6 +37,21 @@ pub(crate) fn general_name(locale: Option<crate::types::Locale>) -> &'static str
     }
 }
 
+/// A channel name as stored (B11): spaces become `-`, runs of `-` collapse,
+/// at most 32 code points; `None` unless authority would accept it
+/// (`channel_name_ok`: no bidi, control or zero-width characters).
+pub(crate) fn channel_name(raw: &str) -> Option<String> {
+    let mut out = String::new();
+    for c in raw.trim().chars() {
+        let c = if c.is_whitespace() { '-' } else { c };
+        if !(c == '-' && out.ends_with('-')) {
+            out.push(c);
+        }
+    }
+    let out: String = out.trim_matches('-').chars().take(authority::MAX_CHANNEL_NAME).collect();
+    authority::channel_name_ok(&out).then_some(out)
+}
+
 pub(crate) fn default_channel(server: ServerId) -> ChannelId {
     ChannelId::from_bytes(blake3::derive_key(DEFAULT_CHANNEL_CTX, server.as_bytes()))
 }
