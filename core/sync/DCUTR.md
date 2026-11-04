@@ -45,3 +45,39 @@ replaced (our `track_connection` already closes it).
 1. Is bound and not kicked the right bar for revealing our public IP to a
    peer, or should it be the owner's choice per server?
 2. "Relay only": a per-user setting, a per-server setting, or both?
+
+## The security lead's checklist (#184)
+
+1. **Who learns whose IP.**
+   - **Through the relay** (today): nobody learns a member's IP, only the
+     relay does.
+   - **On a LAN** (F2, #183): only a peer *bound* on a shared server gets
+     dialled at a LAN address, and only after it reported it to us over the
+     existing connection.
+   - **Across NAT:** the same bar, a bound member of a shared server who
+     isn't kicked. DCUtR is never started toward, or answered for, an
+     unbound peer, a relay or DHT neighbour, or a leaked-link holder who
+     hasn't bound.
+2. **"Relay only".** A per-user setting (per-server can come later). It
+   turns off DCUtR in both directions, the direct-address upgrade (F2),
+   and sending listen or observed addresses. Default for the closed alpha:
+   off, as the owner wants direct connections; the alpha invite says so
+   (point 6). Cost: every message makes two hops through the relay. That's
+   tens of ms more on the same continent, and bounded by R11 (8 circuits,
+   32 MiB, 1 h).
+3. **mDNS.** Not used, and not planned. F2 learns LAN addresses from the
+   peer itself over the relayed connection (identify), not by broadcasting
+   on the LAN, so nothing about us is published on the local network.
+4. **Address filtering.** Observed addresses (identify or AutoNAT) go
+   through the same filters as listen addresses: global only, private ones
+   only under `allow_lan` and only toward bound peers. They never go into
+   the DHT. DCUtR dials only addresses the peer sent in the DCUtR exchange
+   over the authenticated connection, filtered the same way.
+5. **Resources.**
+   - At most 4 addresses per punch attempt.
+   - At most 3 attempts per peer per hour, backed off like DHT dials
+     (#158).
+   - At most 8 punches in flight in total.
+   - A failed punch leaves the relayed connection in place.
+6. **The alpha invite** gets a line: "Members of a server you're in can
+   see your IP address, unless you turn on Relay only."
