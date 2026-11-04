@@ -109,8 +109,10 @@ const MAX_INCOMING_CONNECTIONS: u32 = 256;
 const MAX_OUTGOING_CONNECTIONS: u32 = 128;
 const MAX_CONNECTIONS: u32 = 384;
 const MAX_PENDING_INCOMING: u32 = 64;
-/// A direct and a relayed connection to the same peer can briefly coexist.
-const MAX_CONNECTIONS_PER_PEER: u32 = 2;
+/// A direct and a relayed connection to the same peer briefly coexist (the
+/// relayed one is closed once the direct one is up), and two simultaneous
+/// dials can add one more for a moment.
+const MAX_CONNECTIONS_PER_PEER: u32 = 3;
 /// Direct incoming connections from one IP address (IPv6: one /64). PeerIds are free to
 /// make, so the per-peer cap alone doesn't stop one machine taking every
 /// incoming slot. Relayed connections all come from the relay and aren't counted.
@@ -519,6 +521,7 @@ impl Node {
             relay_only: false,
             listen: config.listen.clone(),
             listener: Some(listener),
+            relayed_preferred: HashSet::new(),
             dial_backoff: backoff,
             #[cfg(test)]
             served: HashMap::new(),
@@ -889,6 +892,8 @@ struct Task {
     /// The direct listener (`NodeConfig::listen`), removed while relay-only.
     listen: Multiaddr,
     listener: Option<ListenerId>,
+    /// Relayed connections dialled by the smaller peer ID (see `keep_relayed`).
+    relayed_preferred: HashSet<ConnectionId>,
     /// Peers from the DHT whose dials failed, and when to try them again.
     /// Shared with the swarm's `DialGuard`, which refuses any dial (Kademlia's
     /// included) to a peer still backing off.
@@ -1198,14 +1203,26 @@ impl Task {
         if self.relay_only || self.direct.contains_key(&peer) || !self.relayed.contains_key(&peer) {
             return;
         }
+        // Only one side dials (the smaller peer ID; the other accepts): when
+        // both learn each other's addresses at once, two simultaneous dials
+        // to each other's listener left neither connection up (seen on
+        // Windows). The other side still answers our pulls with its addresses.
+        if *self.swarm.local_peer_id() > peer {
+            debug!(%peer, "the peer with the smaller ID dials the direct connection");
+            return;
+        }
         let lan = self.allow_lan && self.is_member(peer);
         let Some(listen_addrs) = self.direct_candidates.get(&peer) else { return };
         let addrs: Vec<Multiaddr> = listen_addrs.iter().filter(|a| dialable(a, lan)).cloned().collect();
         if addrs.is_empty() {
+            debug!(%peer, lan, candidates = listen_addrs.len(), "no direct address to try");
             return;
         }
+        debug!(%peer, lan, ?addrs, "trying a direct connection");
         let opts = DialOpts::peer_id(peer).addresses(addrs).condition(PeerCondition::Always).build();
-        let _ = self.swarm.dial(opts);
+        if let Err(err) = self.swarm.dial(opts) {
+            debug!(%peer, ?err, "direct dial refused");
+        }
     }
 
     /// Pulls the logs we just wrote to, so receipt acks come back quickly.
@@ -1331,6 +1348,7 @@ impl Task {
             }
             SwarmEvent::ConnectionClosed { peer_id, connection_id, num_established, .. } => {
                 self.per_ip.release(connection_id);
+                self.relayed_preferred.remove(&connection_id);
                 for conns in [&mut self.relayed, &mut self.direct] {
                     if let Some(set) = conns.get_mut(&peer_id) {
                         set.remove(&connection_id);
@@ -1416,7 +1434,7 @@ impl Task {
                         }
                     }
                 }
-                debug!(%peer, %error, "dial failed");
+                debug!(%peer, ?error, "dial failed");
             }
             SwarmEvent::Behaviour(BehaviourEvent::Kad(kad::Event::OutboundQueryProgressed {
                 result: kad::QueryResult::GetClosestPeers(Ok(ok)),
@@ -1683,6 +1701,7 @@ impl Task {
                 // A member's direct addresses (F2): try a direct connection.
                 let addrs: Vec<Multiaddr> =
                     response.direct_addrs.iter().filter_map(|b| Multiaddr::try_from(b.to_vec()).ok()).collect();
+                debug!(peer = %key.0, ?addrs, relayed = self.relayed.contains_key(&key.0), "member offered direct addresses");
                 if !addrs.is_empty() && self.relayed.contains_key(&key.0) {
                     self.direct_candidates.insert(key.0, direct_candidates_of(addrs));
                     self.try_direct(key.0);
@@ -1917,14 +1936,31 @@ impl Task {
             }
         }
         if is_relayed(endpoint) {
+            // One relayed connection per peer is enough: both sides often dial
+            // each other's circuit at once, and a second one would use up the
+            // per-peer limit and keep a direct connection out. Both sides must
+            // keep the *same* one, whatever order they saw them in: the one
+            // dialled by the smaller peer ID.
+            let preferred = keep_relayed(self.swarm.local_peer_id(), &peer, endpoint.is_dialer());
             if self.direct.contains_key(&peer) {
                 self.swarm.close_connection(id);
-            } else {
-                let first = !self.relayed.contains_key(&peer);
-                self.relayed.entry(peer).or_default().insert(id);
-                if first {
-                    self.emit(NodeEvent::Link { peer, direct: false });
+            } else if let Some(existing) = self.relayed.get(&peer) {
+                let existing_preferred = existing.iter().any(|c| self.relayed_preferred.contains(c));
+                if preferred && !existing_preferred {
+                    for old in self.relayed.remove(&peer).unwrap_or_default() {
+                        self.swarm.close_connection(old);
+                    }
+                    self.relayed.insert(peer, HashSet::from([id]));
+                    self.relayed_preferred.insert(id);
+                } else {
+                    self.swarm.close_connection(id);
                 }
+            } else {
+                self.relayed.insert(peer, HashSet::from([id]));
+                if preferred {
+                    self.relayed_preferred.insert(id);
+                }
+                self.emit(NodeEvent::Link { peer, direct: false });
             }
         } else {
             if !self.direct.contains_key(&peer) {
@@ -1951,6 +1987,13 @@ fn incoming_ip(endpoint: &ConnectedPoint) -> Option<std::net::IpAddr> {
         Protocol::Ip6(ip) => Some(ip.into()),
         _ => None,
     })
+}
+
+/// Of two relayed connections between the same two peers, both keep the
+/// one dialled by the smaller peer ID, so they never close different ones
+/// (which would leave none). `we_dialed`: we dialled this connection.
+fn keep_relayed(local: &PeerId, peer: &PeerId, we_dialed: bool) -> bool {
+    if we_dialed { local < peer } else { peer < local }
 }
 
 fn is_relayed(endpoint: &ConnectedPoint) -> bool {
@@ -1980,7 +2023,27 @@ fn direct_candidates_of(listen_addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
     let specified = |a: &Multiaddr| {
         !a.iter().any(|p| matches!(p, Protocol::Ip4(ip) if ip.is_unspecified()) || matches!(p, Protocol::Ip6(ip) if ip.is_unspecified()))
     };
-    listen_addrs.into_iter().filter(|a| dialable(a, true) && specified(a)).take(MAX_DIRECT_CANDIDATES).collect()
+    // Machines with VPN, Hyper-V or Docker adapters list many addresses:
+    // drop link-local ones (never routable between hosts), and try private
+    // LAN addresses first, loopback last, before the cap.
+    let link_local = |a: &Multiaddr| {
+        a.iter().any(|p| match p {
+            Protocol::Ip4(ip) => ip.is_link_local(),
+            Protocol::Ip6(ip) => (ip.segments()[0] & 0xffc0) == 0xfe80,
+            _ => false,
+        })
+    };
+    let rank = |a: &Multiaddr| match a.iter().next() {
+        Some(Protocol::Ip4(ip)) if ip.is_private() => 0,
+        Some(Protocol::Ip4(ip)) if ip.is_loopback() => 2,
+        Some(Protocol::Ip6(ip)) if ip.is_loopback() => 2,
+        _ => 1,
+    };
+    let mut addrs: Vec<Multiaddr> =
+        listen_addrs.into_iter().filter(|a| dialable(a, true) && specified(a) && !link_local(a)).collect();
+    addrs.sort_by_key(rank);
+    addrs.truncate(MAX_DIRECT_CANDIDATES);
+    addrs
 }
 
 /// Whether `addr` is a circuit through our configured relay: everything
@@ -2304,6 +2367,45 @@ mod tests {
         let bytes = serde_json::to_vec(&response).unwrap();
         let back: SyncResponse = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(back.records, vec![WireEntry::Stub(ByteBuf::from(stub.encode()))]);
+    }
+
+    /// Two relayed connections between A and B, X dialled by A and Y by B:
+    /// both sides keep the same one, whichever order each saw them in.
+    #[test]
+    fn both_sides_keep_the_same_relayed_connection() {
+        for _ in 0..20 {
+            let (a, b) = (PeerId::random(), PeerId::random());
+            // X: A dialled it; on A we_dialed, on B not. Y: the reverse.
+            let a_keeps_x = keep_relayed(&a, &b, true);
+            let a_keeps_y = keep_relayed(&a, &b, false);
+            let b_keeps_x = keep_relayed(&b, &a, false);
+            let b_keeps_y = keep_relayed(&b, &a, true);
+            // Exactly one is kept, and the same one on both sides (so the
+            // order they arrived in doesn't matter).
+            assert!(a_keeps_x != a_keeps_y);
+            assert_eq!((a_keeps_x, a_keeps_y), (b_keeps_x, b_keeps_y));
+            // It's the one dialled by the smaller peer ID.
+            assert_eq!(a_keeps_x, a < b);
+        }
+    }
+
+    /// A Windows PC with Hyper-V, Docker and VPN adapters: link-local ones
+    /// are dropped, and the real LAN address survives the cap, ahead of the
+    /// rest, with loopback last.
+    #[test]
+    fn lan_addresses_come_first_and_link_local_ones_never() {
+        let mut addrs: Vec<Multiaddr> = Vec::new();
+        for i in 0..10 {
+            addrs.push(format!("/ip4/169.254.{i}.1/tcp/4001").parse().unwrap());
+            addrs.push(format!("/ip4/100.64.0.{i}/tcp/4001").parse().unwrap()); // CGNAT / VPN
+        }
+        addrs.push("/ip6/fe80::1/tcp/4001".parse().unwrap());
+        addrs.push("/ip4/127.0.0.1/tcp/4001".parse().unwrap());
+        addrs.push("/ip4/192.168.1.20/tcp/4001".parse().unwrap()); // the real LAN, listed last
+        let kept = direct_candidates_of(addrs);
+        assert_eq!(kept.len(), MAX_DIRECT_CANDIDATES);
+        assert_eq!(kept[0].to_string(), "/ip4/192.168.1.20/tcp/4001");
+        assert!(!kept.iter().any(|a| a.to_string().contains("169.254") || a.to_string().contains("fe80")));
     }
 
     /// F2: a peer reporting dozens of addresses gets at most 8 tried, and
