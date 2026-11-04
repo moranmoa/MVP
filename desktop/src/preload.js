@@ -26,6 +26,8 @@ contextBridge.exposeInMainWorld('mvs', {
    * `link.open` { link } when the OS opens an mvs:// invite. Returns an
    * unsubscribe.
    */
+  /** Puts plain text on the clipboard (e.g. an invite link). Resolves true if it did. */
+  copyText: (text) => ipcRenderer.invoke('clipboard:write', String(text)),
   onEvent: (callback) => {
     if (typeof callback !== 'function') return () => {};
     listeners.add(callback);
