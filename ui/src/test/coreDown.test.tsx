@@ -61,6 +61,7 @@ describe('core unavailable', () => {
       expect(retryCore).toHaveBeenCalledTimes(1);
       fireEvent.click(screen.getByRole('button', { name: 'Open the logs folder' }));
       expect(openLogsFolder).toHaveBeenCalledTimes(1);
+      expect(screen.getByText('The logs may show which servers you use. Check them before you share them.')).toBeTruthy();
     } finally {
       delete (window as { mvs?: unknown }).mvs;
     }

@@ -19,6 +19,7 @@
   "core.down.unknown": "Trying to reconnect automatically.",
   "core.down.keyring": "No system keyring found. On Linux, MVS needs a service like gnome-keyring or KWallet.",
   "core.down.openLogs": "Open the logs folder",
+  "core.down.logsNote": "The logs may show which servers you use. Check them before you share them.",
   "error.generic": "Something went wrong. Please try again.",
   "a11y.skipToChat": "Skip to chat",
 

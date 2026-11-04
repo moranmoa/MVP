@@ -19,6 +19,7 @@
   "core.down.unknown": "מנסים להתחבר שוב אוטומטית.",
   "core.down.keyring": "לא נמצא במערכת שירות לשמירת סודות (keyring). ב-Linux צריך שירות כמו gnome-keyring או KWallet.",
   "core.down.openLogs": "פתיחת תיקיית הלוגים",
+  "core.down.logsNote": "הלוגים עשויים להראות באילו שרתים משתמשים. כדאי לבדוק אותם לפני ששולחים אותם למישהו.",
   "error.generic": "משהו השתבש. אפשר לנסות שוב.",
   "a11y.skipToChat": "דילוג לצ׳אט",
 

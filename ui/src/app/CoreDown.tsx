@@ -42,6 +42,11 @@ export function CoreDownScreen({ detail, onRetry }: { detail: CoreDownDetail | u
           </button>
         )}
       </div>
+      {openLogsFolder && (
+        <p className="muted small">
+          <FormattedMessage id="core.down.logsNote" />
+        </p>
+      )}
     </div>
   );
 }
