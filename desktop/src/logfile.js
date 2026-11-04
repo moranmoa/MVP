@@ -30,15 +30,28 @@ function createLog(dir, { maxBytes = MAX_BYTES } = {}) {
   } catch {
     // Logging must never stop the app.
   }
-  return function log(line) {
+  // Literal names to hide wherever they appear (the configured relay host:
+  // a bare "relay.example.org:443" in an error text has no /dns*/ around it).
+  const literals = [];
+  function log(line) {
+    let clean = redact(String(line).replace(/[\r\n]+/g, ' '));
+    for (const re of literals) clean = clean.replace(re, '<host>');
+    writeLine(clean);
+  }
+  log.hide = (name) => {
+    if (typeof name === 'string' && name.length >= 3) literals.push(new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'));
+  };
+  return log;
+
+  function writeLine(clean) {
     try {
-      const text = `${new Date().toISOString()} ${redact(String(line).replace(/[\r\n]+/g, ' ')).slice(0, 2000)}\n`;
+      const text = `${new Date().toISOString()} ${clean.slice(0, 2000)}\n`;
       if (fs.existsSync(file) && fs.statSync(file).size + text.length > maxBytes) fs.renameSync(file, `${file}.1`);
       fs.appendFileSync(file, text, { mode: 0o600 });
     } catch {
       // ignore: a full disk or a locked file is no reason to crash
     }
-  };
+  }
 }
 
 module.exports = { createLog, redact, MAX_BYTES };

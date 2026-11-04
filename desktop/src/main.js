@@ -76,11 +76,15 @@ function startCore() {
   const dataDir = path.join(app.getPath('userData'), 'core');
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   if (process.platform !== 'win32') fs.chmodSync(dataDir, 0o700);
+  const relay = relayFor({ packaged: app.isPackaged, resourcesPath: process.resourcesPath });
+  // The relay's host must never reach the log, not even as a bare name.
+  const host = relay && /^\/dns(?:4|6|addr)?\/([^/]+)/.exec(relay);
+  if (host) fileLog.hide(host[1]);
   core = new Sidecar({
     exe: CORE_EXE,
     dataDir,
     // Without a relay the core runs offline (no invites, no chat with others).
-    relay: relayFor({ packaged: app.isPackaged, resourcesPath: process.resourcesPath }),
+    relay,
     onEvent: toPages,
     onStatus: setCoreStatus,
     // stderr only (counts and error kinds); stdout is never logged.

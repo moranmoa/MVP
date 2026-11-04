@@ -220,3 +220,14 @@ test('the log file never holds addresses, peer IDs or 64-hex IDs', () => {
   assert.match(out, /<ip>/);
   assert.match(out, /<id>/);
 });
+
+test('the configured relay host is hidden even as a bare name, any case', () => {
+  const { createLog } = require('../src/logfile');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mvs-logs-'));
+  const log = createLog(dir);
+  log.hide('relay.example.org');
+  log('connect to relay.example.org:443 failed; RELAY.Example.ORG unreachable');
+  const text = fs.readFileSync(path.join(dir, 'mvs.log'), 'utf8');
+  assert.ok(!/relay\.example\.org/i.test(text), text);
+  assert.match(text, /<host>:443 failed; <host> unreachable/);
+});
