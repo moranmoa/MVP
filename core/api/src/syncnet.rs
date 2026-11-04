@@ -94,7 +94,9 @@ impl SyncNetwork {
             authorizer: gate,
             listen: "/ip4/0.0.0.0/tcp/0".parse().expect("valid multiaddr"),
             bootstrap: Vec::new(),
-            allow_lan: false,
+            // F2: a direct LAN connection to a peer that proved it shares a
+            // server with us (sync never takes LAN addresses from the DHT).
+            allow_lan: true,
         };
         // GAP-4: our pulls carry bindings signed with the identity key (once
         // unlocked), and channel logs are served to members only.

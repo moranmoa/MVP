@@ -171,9 +171,9 @@ pub struct NodeConfig {
     /// Peers to dial directly, without a peer ID (e.g. `/dns4/p2/tcp/4001`),
     /// besides those found through the relay. Redialled while not connected.
     pub bootstrap: Vec<Multiaddr>,
-    /// Whether non-global addresses (LAN, loopback) may be dialled to turn a
-    /// relayed connection into a direct one. Off for real users; on for a
-    /// LAN test setup like the Docker harness.
+    /// F2 "LAN allowed": whether a LAN (or loopback) address a connected,
+    /// bound peer reports may be dialled to turn a relayed connection into a
+    /// direct one. LAN addresses never come from, or go to, the DHT.
     pub allow_lan: bool,
 }
 
@@ -429,6 +429,7 @@ impl Node {
             own: HashSet::new(),
             acks: Acks::new(ACKS_PER_AUTHOR, MAX_ACK_AUTHORS, ACK_TTL),
             soon: HashSet::new(),
+            direct_candidates: HashMap::new(),
             dial_backoff: DialBackoff::new(DIAL_BACKOFF_MIN, DIAL_BACKOFF_MAX, MAX_TRACKED_PEERS),
             #[cfg(test)]
             served: HashMap::new(),
@@ -775,6 +776,9 @@ struct Task {
     acks: Acks<(ServerId, PublicKey)>,
     /// Logs to pull again shortly (to pick up acks after writing).
     soon: HashSet<String>,
+    /// Addresses relayed peers reported (identify): tried for a direct
+    /// connection; LAN ones only once the peer is bound (F2).
+    direct_candidates: HashMap<PeerId, Vec<Multiaddr>>,
     /// Peers from the DHT whose dials failed, and when to try them again.
     dial_backoff: DialBackoff<PeerId>,
     /// Tests: entries served per (peer, log).
@@ -1018,7 +1022,8 @@ impl Task {
     /// [`reachable`], plus: a circuit through our own relay is always fine
     /// (we dial that relay anyway, whatever its address).
     fn reachable(&self, addr: &Multiaddr) -> bool {
-        via_relay(addr, &self.relay_addr) || reachable(addr, self.allow_lan)
+        // Never LAN addresses here: these come from or go to the DHT (F2).
+        via_relay(addr, &self.relay_addr) || reachable(addr, false)
     }
 
     fn listen_on_circuit(&mut self) {
@@ -1031,12 +1036,15 @@ impl Task {
 
     /// Dials a peer we only reach through the relay at the addresses it
     /// listens on, so its traffic can move off the capped relay circuit.
-    fn try_direct(&mut self, peer: PeerId, listen_addrs: Vec<Multiaddr>) {
-        if self.direct.contains_key(&peer) {
+    /// LAN addresses (F2) only to a peer bound to us, i.e. one that proved an
+    /// identity on a server we share; global ones to any connected peer.
+    fn try_direct(&mut self, peer: PeerId) {
+        if self.direct.contains_key(&peer) || !self.relayed.contains_key(&peer) {
             return;
         }
-        let addrs: Vec<Multiaddr> =
-            listen_addrs.into_iter().filter(|a| dialable(a, self.allow_lan)).collect();
+        let Some(listen_addrs) = self.direct_candidates.get(&peer) else { return };
+        let lan = self.allow_lan && self.bound.keys().any(|(p, _)| *p == peer);
+        let addrs: Vec<Multiaddr> = listen_addrs.iter().filter(|a| dialable(a, lan)).cloned().collect();
         if addrs.is_empty() {
             return;
         }
@@ -1115,6 +1123,8 @@ impl Task {
         let control = self.secrets.get(&server)?.handle(Scope::Control);
         let identity = binding.verify(&peer, &control, now)?;
         self.bound.insert((peer, server), (binding, identity));
+        // Now bound: a LAN address it reported may be tried (F2).
+        self.try_direct(peer);
         Some(identity)
     }
 
@@ -1190,6 +1200,7 @@ impl Task {
                     self.emit(NodeEvent::PeerDisconnected(peer_id));
                 }
                 self.bound.retain(|(p, _), _| *p != peer_id);
+                self.direct_candidates.remove(&peer_id);
                 let gone = self.presence.disconnected(&peer_id);
                 self.went_offline(gone);
                 self.inflight.retain(|_, (p, _)| *p != peer_id);
@@ -1210,8 +1221,11 @@ impl Task {
                     for addr in known {
                         self.swarm.behaviour_mut().kad.add_address(&peer_id, addr);
                     }
+                    // F2: LAN addresses only ever from a connected peer, kept for a
+                    // direct upgrade once it proved who it is (a GAP-4 binding).
                     if self.relayed.contains_key(&peer_id) {
-                        self.try_direct(peer_id, info.listen_addrs);
+                        self.direct_candidates.insert(peer_id, info.listen_addrs);
+                        self.try_direct(peer_id);
                     }
                 }
             }
@@ -2543,8 +2557,10 @@ mod tests {
         assert!(online(&owner).await.online.contains(&id(2)));
         // Residual GAP-4b (PRESENCE.md): members pull from the stranger too,
         // and a pull carries the requester's binding, so the stranger learns
-        // who pulls from it. Its answers never told it anything (below).
-        assert_eq!(online(&stranger).await.online.len(), 2);
+        // who pulls from it (here the owner; it meets nobody else since LAN
+        // addresses never enter the DHT, F2). Its answers never told it
+        // anything (below).
+        assert!(online(&stranger).await.online.contains(&id(0)));
         // Our own identity is never listed.
         assert!(!online(&owner).await.online.contains(&id(0)));
 
