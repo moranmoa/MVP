@@ -217,7 +217,7 @@ function createWindow() {
   win.webContents.on('did-finish-load', () => {
     flushInvite();
     // The page may have missed earlier changes; the preload keeps this for the UI.
-    win.webContents.send('core:event', 'core.status', coreStatus);
+    if (sec.isInternalUrl(win.webContents.getURL())) win.webContents.send('core:event', 'core.status', coreStatus);
   });
   // The mock demo (?demo) is for checkouts only, never a release build.
   const demo = !app.isPackaged && process.env.MVS_DEMO ? `?demo=${encodeURIComponent(process.env.MVS_DEMO)}` : '';

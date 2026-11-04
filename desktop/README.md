@@ -189,7 +189,9 @@ command answers `{ code: 'core-unavailable', detail }`, with `detail` one of:
 - `crash-loop`: five failures in a row without ever answering. It keeps retrying, every 30 s at most.
 
 The page also gets `core.status` events, `{ state: 'starting' | 'up' | 'down', detail? }`,
-on every change and on every page load. The preload keeps the latest one
+on every change and on every page load (our own origin only). After `down`
+there is no `starting` again: it stays `down` (with the latest detail) until
+the core answers and it turns `up`. The preload keeps the latest one
 for the first subscriber, like `link.open`. The core counts as `up` once it
 answers or prints `mvs-core: ready`. Core error codes (e.g. a missing
 keyring, QA-20) pass through unchanged. Tests: `test/sidecar.test.js`,
