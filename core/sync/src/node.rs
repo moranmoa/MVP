@@ -109,8 +109,10 @@ const MAX_INCOMING_CONNECTIONS: u32 = 256;
 const MAX_OUTGOING_CONNECTIONS: u32 = 128;
 const MAX_CONNECTIONS: u32 = 384;
 const MAX_PENDING_INCOMING: u32 = 64;
-/// A direct and a relayed connection to the same peer can briefly coexist.
-const MAX_CONNECTIONS_PER_PEER: u32 = 2;
+/// A direct and a relayed connection to the same peer briefly coexist (the
+/// relayed one is closed once the direct one is up), and two simultaneous
+/// dials can add one more for a moment.
+const MAX_CONNECTIONS_PER_PEER: u32 = 3;
 /// Direct incoming connections from one IP address (IPv6: one /64). PeerIds are free to
 /// make, so the per-peer cap alone doesn't stop one machine taking every
 /// incoming slot. Relayed connections all come from the relay and aren't counted.
@@ -515,6 +517,7 @@ impl Node {
             acks: Acks::new(ACKS_PER_AUTHOR, MAX_ACK_AUTHORS, ACK_TTL),
             soon: HashSet::new(),
             direct_candidates: HashMap::new(),
+            relayed_preferred: HashSet::new(),
             dial_backoff: backoff,
             #[cfg(test)]
             served: HashMap::new(),
@@ -870,6 +873,8 @@ struct Task {
     /// Addresses relayed peers reported (identify): tried for a direct
     /// connection; LAN ones only once the peer is bound (F2).
     direct_candidates: HashMap<PeerId, Vec<Multiaddr>>,
+    /// Relayed connections dialled by the smaller peer ID (see `keep_relayed`).
+    relayed_preferred: HashSet<ConnectionId>,
     /// Peers from the DHT whose dials failed, and when to try them again.
     /// Shared with the swarm's `DialGuard`, which refuses any dial (Kademlia's
     /// included) to a peer still backing off.
@@ -1288,6 +1293,7 @@ impl Task {
             }
             SwarmEvent::ConnectionClosed { peer_id, connection_id, num_established, .. } => {
                 self.per_ip.release(connection_id);
+                self.relayed_preferred.remove(&connection_id);
                 for conns in [&mut self.relayed, &mut self.direct] {
                     if let Some(set) = conns.get_mut(&peer_id) {
                         set.remove(&connection_id);
@@ -1878,14 +1884,31 @@ impl Task {
             }
         }
         if is_relayed(endpoint) {
+            // One relayed connection per peer is enough: both sides often dial
+            // each other's circuit at once, and a second one would use up the
+            // per-peer limit and keep a direct connection out. Both sides must
+            // keep the *same* one, whatever order they saw them in: the one
+            // dialled by the smaller peer ID.
+            let preferred = keep_relayed(self.swarm.local_peer_id(), &peer, endpoint.is_dialer());
             if self.direct.contains_key(&peer) {
                 self.swarm.close_connection(id);
-            } else {
-                let first = !self.relayed.contains_key(&peer);
-                self.relayed.entry(peer).or_default().insert(id);
-                if first {
-                    self.emit(NodeEvent::Link { peer, direct: false });
+            } else if let Some(existing) = self.relayed.get(&peer) {
+                let existing_preferred = existing.iter().any(|c| self.relayed_preferred.contains(c));
+                if preferred && !existing_preferred {
+                    for old in self.relayed.remove(&peer).unwrap_or_default() {
+                        self.swarm.close_connection(old);
+                    }
+                    self.relayed.insert(peer, HashSet::from([id]));
+                    self.relayed_preferred.insert(id);
+                } else {
+                    self.swarm.close_connection(id);
                 }
+            } else {
+                self.relayed.insert(peer, HashSet::from([id]));
+                if preferred {
+                    self.relayed_preferred.insert(id);
+                }
+                self.emit(NodeEvent::Link { peer, direct: false });
             }
         } else {
             if !self.direct.contains_key(&peer) {
@@ -1912,6 +1935,13 @@ fn incoming_ip(endpoint: &ConnectedPoint) -> Option<std::net::IpAddr> {
         Protocol::Ip6(ip) => Some(ip.into()),
         _ => None,
     })
+}
+
+/// Of two relayed connections between the same two peers, both keep the
+/// one dialled by the smaller peer ID, so they never close different ones
+/// (which would leave none). `we_dialed`: we dialled this connection.
+fn keep_relayed(local: &PeerId, peer: &PeerId, we_dialed: bool) -> bool {
+    if we_dialed { local < peer } else { peer < local }
 }
 
 fn is_relayed(endpoint: &ConnectedPoint) -> bool {
@@ -2247,6 +2277,26 @@ mod tests {
         let bytes = serde_json::to_vec(&response).unwrap();
         let back: SyncResponse = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(back.records, vec![WireEntry::Stub(ByteBuf::from(stub.encode()))]);
+    }
+
+    /// Two relayed connections between A and B, X dialled by A and Y by B:
+    /// both sides keep the same one, whichever order each saw them in.
+    #[test]
+    fn both_sides_keep_the_same_relayed_connection() {
+        for _ in 0..20 {
+            let (a, b) = (PeerId::random(), PeerId::random());
+            // X: A dialled it; on A we_dialed, on B not. Y: the reverse.
+            let a_keeps_x = keep_relayed(&a, &b, true);
+            let a_keeps_y = keep_relayed(&a, &b, false);
+            let b_keeps_x = keep_relayed(&b, &a, false);
+            let b_keeps_y = keep_relayed(&b, &a, true);
+            // Exactly one is kept, and the same one on both sides (so the
+            // order they arrived in doesn't matter).
+            assert!(a_keeps_x != a_keeps_y);
+            assert_eq!((a_keeps_x, a_keeps_y), (b_keeps_x, b_keeps_y));
+            // It's the one dialled by the smaller peer ID.
+            assert_eq!(a_keeps_x, a < b);
+        }
     }
 
     /// F2: a peer reporting dozens of addresses gets at most 8 tried, and
