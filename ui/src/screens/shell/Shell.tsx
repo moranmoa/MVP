@@ -4,11 +4,12 @@ import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import { phoneQuery, useMediaQuery } from '../../app/media';
 import { useSettings } from '../../app/settings';
-import { useCore, useCoreEvent, type Id } from '../../core';
+import { useCore, useCoreEvent, type Channel, type Id } from '../../core';
 import { Dialog } from '../../components/common';
 import { ShieldIcon } from '../../components/icons';
 import { RecoveryCheck, RecoveryWordsPanel } from '../onboarding/RecoveryWords';
 import { SettingsScreen } from '../settings/SettingsScreen';
+import { ChannelDialog } from './ChannelDialog';
 import { ChannelSidebar } from './ChannelSidebar';
 import { ChatView } from './ChatView';
 import { CreateServerDialog, Home, JoinDialog } from './Home';
@@ -70,7 +71,27 @@ export function Shell() {
   const shellRef = useRef<HTMLDivElement>(null);
 
   const channels = useStore(store, (s) => (serverId === 'home' ? undefined : s.channels[serverId]));
-  const channelId = serverId === 'home' ? undefined : (channelByServer[serverId] ?? channels?.[0]?.id);
+  // A channel that was deleted (or never chosen) falls back to the server's default one.
+  const chosen = serverId === 'home' ? undefined : channelByServer[serverId];
+  const channelId =
+    serverId === 'home'
+      ? undefined
+      : channels?.some((c) => c.id === chosen)
+        ? chosen
+        : (channels?.find((c) => c.isDefault) ?? channels?.[0])?.id;
+  // B11c: the owner's channel dialog, and a notice when the open channel is deleted.
+  const [channelDialog, setChannelDialog] = useState<{ kind: 'create'; serverId: Id } | { kind: 'edit'; channel: Channel } | null>(null);
+  const [channelGone, setChannelGone] = useState<string | null>(null);
+  const openChannel = useRef(channelId);
+  openChannel.current = channelId;
+  useCoreEvent('channel.removed', ({ channelId: gone, name }) => {
+    if (gone === openChannel.current) setChannelGone(name);
+  });
+  useEffect(() => {
+    if (!channelGone) return;
+    const t = setTimeout(() => setChannelGone(null), 6000);
+    return () => clearTimeout(t);
+  }, [channelGone]);
   const server = servers.find((s) => s.id === serverId);
 
   useEffect(() => {
@@ -193,8 +214,15 @@ export function Shell() {
             goPhone('chat');
           }}
           onOpenSettings={() => setSettingsOpen(true)}
+          onCreateChannel={() => setChannelDialog({ kind: 'create', serverId: server.id })}
+          onEditChannel={(channel) => setChannelDialog({ kind: 'edit', channel })}
         />
       )}
+      <ChannelDialog
+        mode={channelDialog}
+        onClose={() => setChannelDialog(null)}
+        onCreated={(c) => setChannelByServer((m) => ({ ...m, [c.serverId]: c.id }))}
+      />
       <main id="chat-main" className="main" tabIndex={-1}>
         {server && channelId ? (
           <ChatView
@@ -252,6 +280,11 @@ export function Shell() {
       </Dialog>
       <SettingsScreen open={settingsOpen} onClose={() => setSettingsOpen(false)} onCheckWords={() => setDialog('check')} />
 
+      {channelGone && (
+        <div className="toast" role="status">
+          <FormattedMessage id="channel.deletedNotice" values={{ channel: channelGone }} />
+        </div>
+      )}
       {notice && (
         <div className="toast" role="status">
           <ShieldIcon />

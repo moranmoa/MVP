@@ -1634,6 +1634,45 @@ legend {
   overflow-wrap: anywhere;
 }
 
+/* B11c: owner-only channel controls. */
+.channel-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.channel-row {
+  position: relative;
+}
+
+.channel-row .channel-edit {
+  position: absolute;
+  inset-inline-end: 0.25rem;
+  inset-block-start: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+}
+
+.channel-row:hover .channel-edit,
+.channel-row:focus-within .channel-edit {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .channel-row .channel-edit {
+    opacity: 1;
+  }
+}
+
+.danger-zone {
+  border-block-start: 1px solid var(--border);
+  padding-block-start: 1rem;
+}
+
 .sidebar-invite {
   padding: 0.5rem;
   border-block-end: 1px solid var(--border);
