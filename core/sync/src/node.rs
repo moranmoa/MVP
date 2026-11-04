@@ -154,6 +154,8 @@ const RELAY_BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// doubling to 5 min.
 const DIAL_BACKOFF_MIN: Duration = Duration::from_secs(5);
 const DIAL_BACKOFF_MAX: Duration = Duration::from_secs(300);
+/// Addresses kept per relayed peer for a direct upgrade (F2).
+const MAX_DIRECT_CANDIDATES: usize = 8;
 
 pub struct NodeConfig {
     /// Bootstrap/relay node, ending in /p2p/<peer id>.
@@ -171,9 +173,9 @@ pub struct NodeConfig {
     /// Peers to dial directly, without a peer ID (e.g. `/dns4/p2/tcp/4001`),
     /// besides those found through the relay. Redialled while not connected.
     pub bootstrap: Vec<Multiaddr>,
-    /// Whether non-global addresses (LAN, loopback) may be dialled to turn a
-    /// relayed connection into a direct one. Off for real users; on for a
-    /// LAN test setup like the Docker harness.
+    /// F2 "LAN allowed": whether a LAN (or loopback) address a connected,
+    /// bound peer reports may be dialled to turn a relayed connection into a
+    /// direct one. LAN addresses never come from, or go to, the DHT.
     pub allow_lan: bool,
 }
 
@@ -429,6 +431,7 @@ impl Node {
             own: HashSet::new(),
             acks: Acks::new(ACKS_PER_AUTHOR, MAX_ACK_AUTHORS, ACK_TTL),
             soon: HashSet::new(),
+            direct_candidates: HashMap::new(),
             dial_backoff: DialBackoff::new(DIAL_BACKOFF_MIN, DIAL_BACKOFF_MAX, MAX_TRACKED_PEERS),
             #[cfg(test)]
             served: HashMap::new(),
@@ -775,6 +778,9 @@ struct Task {
     acks: Acks<(ServerId, PublicKey)>,
     /// Logs to pull again shortly (to pick up acks after writing).
     soon: HashSet<String>,
+    /// Addresses relayed peers reported (identify): tried for a direct
+    /// connection; LAN ones only once the peer is bound (F2).
+    direct_candidates: HashMap<PeerId, Vec<Multiaddr>>,
     /// Peers from the DHT whose dials failed, and when to try them again.
     dial_backoff: DialBackoff<PeerId>,
     /// Tests: entries served per (peer, log).
@@ -1018,7 +1024,8 @@ impl Task {
     /// [`reachable`], plus: a circuit through our own relay is always fine
     /// (we dial that relay anyway, whatever its address).
     fn reachable(&self, addr: &Multiaddr) -> bool {
-        via_relay(addr, &self.relay_addr) || reachable(addr, self.allow_lan)
+        // Never LAN addresses here: these come from or go to the DHT (F2).
+        via_relay(addr, &self.relay_addr) || reachable(addr, false)
     }
 
     fn listen_on_circuit(&mut self) {
@@ -1031,12 +1038,27 @@ impl Task {
 
     /// Dials a peer we only reach through the relay at the addresses it
     /// listens on, so its traffic can move off the capped relay circuit.
-    fn try_direct(&mut self, peer: PeerId, listen_addrs: Vec<Multiaddr>) {
-        if self.direct.contains_key(&peer) {
+    /// LAN addresses (F2) only to a *member*: a peer bound to an identity our
+    /// read gate accepts (a member, not kicked) on a server we share. A
+    /// non-member holding the secret, or a kicked member, can't make us dial
+    /// addresses of their choosing on our LAN. Global ones to any connected
+    /// peer.
+    /// Whether `peer` is bound to an identity our read gate accepts on one of
+    /// the servers it bound for.
+    fn is_member(&self, peer: PeerId) -> bool {
+        let Some(gate) = self.access.read_gate.as_ref() else { return false };
+        self.bound
+            .iter()
+            .any(|((p, server), (_, identity))| *p == peer && gate.may_read(identity, &self.store.control_log(*server)))
+    }
+
+    fn try_direct(&mut self, peer: PeerId) {
+        if self.direct.contains_key(&peer) || !self.relayed.contains_key(&peer) {
             return;
         }
-        let addrs: Vec<Multiaddr> =
-            listen_addrs.into_iter().filter(|a| dialable(a, self.allow_lan)).collect();
+        let lan = self.allow_lan && self.is_member(peer);
+        let Some(listen_addrs) = self.direct_candidates.get(&peer) else { return };
+        let addrs: Vec<Multiaddr> = listen_addrs.iter().filter(|a| dialable(a, lan)).cloned().collect();
         if addrs.is_empty() {
             return;
         }
@@ -1115,6 +1137,8 @@ impl Task {
         let control = self.secrets.get(&server)?.handle(Scope::Control);
         let identity = binding.verify(&peer, &control, now)?;
         self.bound.insert((peer, server), (binding, identity));
+        // Now bound: a LAN address it reported may be tried (F2).
+        self.try_direct(peer);
         Some(identity)
     }
 
@@ -1190,6 +1214,7 @@ impl Task {
                     self.emit(NodeEvent::PeerDisconnected(peer_id));
                 }
                 self.bound.retain(|(p, _), _| *p != peer_id);
+                self.direct_candidates.remove(&peer_id);
                 let gone = self.presence.disconnected(&peer_id);
                 self.went_offline(gone);
                 self.inflight.retain(|_, (p, _)| *p != peer_id);
@@ -1210,8 +1235,11 @@ impl Task {
                     for addr in known {
                         self.swarm.behaviour_mut().kad.add_address(&peer_id, addr);
                     }
+                    // F2: LAN addresses only ever from a connected peer, kept for a
+                    // direct upgrade once it proved who it is (a GAP-4 binding).
                     if self.relayed.contains_key(&peer_id) {
-                        self.try_direct(peer_id, info.listen_addrs);
+                        self.direct_candidates.insert(peer_id, direct_candidates_of(info.listen_addrs));
+                        self.try_direct(peer_id);
                     }
                 }
             }
@@ -1782,6 +1810,13 @@ fn dialable(addr: &Multiaddr, allow_lan: bool) -> bool {
     !addr.iter().any(|p| p == Protocol::P2pCircuit) && reachable(addr, allow_lan)
 }
 
+/// The addresses a relayed peer reported that we keep for a direct upgrade:
+/// direct ones only (no circuits), at most [`MAX_DIRECT_CANDIDATES`], so a
+/// peer can't make us dial dozens of addresses.
+fn direct_candidates_of(listen_addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
+    listen_addrs.into_iter().filter(|a| dialable(a, true)).take(MAX_DIRECT_CANDIDATES).collect()
+}
+
 /// Whether `addr` is a circuit through our configured relay: everything
 /// before `/p2p-circuit` must be exactly `relay` (its address and peer ID).
 /// Matching the peer ID alone would let a peer put any address in front
@@ -2085,6 +2120,18 @@ mod tests {
         let bytes = serde_json::to_vec(&response).unwrap();
         let back: SyncResponse = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(back.records, vec![WireEntry::Stub(ByteBuf::from(stub.encode()))]);
+    }
+
+    /// F2: a peer reporting dozens of addresses gets at most 8 tried, and
+    /// never a relay circuit among them.
+    #[test]
+    fn direct_candidates_are_capped() {
+        let mut addrs: Vec<Multiaddr> =
+            (0..30).map(|i| format!("/ip4/192.168.1.{i}/tcp/4001").parse().unwrap()).collect();
+        addrs.insert(0, format!("/ip4/1.2.3.4/tcp/1/p2p/{}/p2p-circuit", PeerId::random()).parse().unwrap());
+        let kept = direct_candidates_of(addrs);
+        assert_eq!(kept.len(), MAX_DIRECT_CANDIDATES);
+        assert!(kept.iter().all(|a| !a.iter().any(|p| p == Protocol::P2pCircuit)));
     }
 
     /// Only a circuit through exactly our configured relay address passes;
@@ -2543,8 +2590,10 @@ mod tests {
         assert!(online(&owner).await.online.contains(&id(2)));
         // Residual GAP-4b (PRESENCE.md): members pull from the stranger too,
         // and a pull carries the requester's binding, so the stranger learns
-        // who pulls from it. Its answers never told it anything (below).
-        assert_eq!(online(&stranger).await.online.len(), 2);
+        // who pulls from it (here the owner; it meets nobody else since LAN
+        // addresses never enter the DHT, F2). Its answers never told it
+        // anything (below).
+        assert!(online(&stranger).await.online.contains(&id(0)));
         // Our own identity is never listed.
         assert!(!online(&owner).await.online.contains(&id(0)));
 
