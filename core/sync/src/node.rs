@@ -331,17 +331,91 @@ struct SyncResponse {
     /// check that a member stored them.
     #[serde(default)]
     binding: Option<Binding>,
+    /// Our direct (LAN) addresses, only to a member (F2): identify never
+    /// carries them.
+    #[serde(default)]
+    direct_addrs: Vec<ByteBuf>,
 }
 
 #[derive(NetworkBehaviour)]
 struct Behaviour {
     relay_client: relay::client::Behaviour,
-    identify: identify::Behaviour,
+    identify: crate::announce::GlobalIdentify,
     ping: ping::Behaviour,
     kad: kad::Behaviour<kad::store::MemoryStore>,
     gossipsub: gossipsub::Behaviour<gossipsub::IdentityTransform, MaxCountSubscriptionFilter<LogTopics>>,
     sync: request_response::cbor::Behaviour<SyncRequest, SyncResponse>,
     limits: connection_limits::Behaviour,
+    guard: DialGuard,
+}
+
+type SharedBackoff = Arc<Mutex<DialBackoff<PeerId>>>;
+
+/// Refuses every outgoing connection to a peer that is still backing off
+/// after failed dials, whoever asks: our discovery, or Kademlia's own lookups
+/// (which otherwise asked the relay for a circuit to a gone peer every
+/// round).
+struct DialGuard {
+    backoff: SharedBackoff,
+}
+
+impl NetworkBehaviour for DialGuard {
+    type ConnectionHandler = libp2p::swarm::dummy::ConnectionHandler;
+    type ToSwarm = std::convert::Infallible;
+
+    fn handle_pending_outbound_connection(
+        &mut self,
+        _: ConnectionId,
+        peer: Option<PeerId>,
+        _: &[Multiaddr],
+        _: libp2p::core::Endpoint,
+    ) -> Result<Vec<Multiaddr>, libp2p::swarm::ConnectionDenied> {
+        match peer {
+            Some(peer) if !self.backoff.lock().unwrap().may_dial(&peer, Instant::now()) => {
+                Err(libp2p::swarm::ConnectionDenied::new("peer is backing off after failed dials"))
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn handle_established_inbound_connection(
+        &mut self,
+        _: ConnectionId,
+        _: PeerId,
+        _: &Multiaddr,
+        _: &Multiaddr,
+    ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
+        Ok(libp2p::swarm::dummy::ConnectionHandler)
+    }
+
+    fn handle_established_outbound_connection(
+        &mut self,
+        _: ConnectionId,
+        _: PeerId,
+        _: &Multiaddr,
+        _: libp2p::core::Endpoint,
+        _: libp2p::core::transport::PortUse,
+    ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
+        Ok(libp2p::swarm::dummy::ConnectionHandler)
+    }
+
+    fn on_swarm_event(&mut self, _: libp2p::swarm::FromSwarm) {}
+
+    fn on_connection_handler_event(
+        &mut self,
+        _: PeerId,
+        _: ConnectionId,
+        event: libp2p::swarm::THandlerOutEvent<Self>,
+    ) {
+        match event {}
+    }
+
+    fn poll(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<libp2p::swarm::ToSwarm<Self::ToSwarm, libp2p::swarm::THandlerInEvent<Self>>> {
+        std::task::Poll::Pending
+    }
 }
 
 /// Remote peers' subscriptions are only tracked for well-formed log topics
@@ -387,7 +461,9 @@ impl Node {
             _ => bail!("the relay address must end with /p2p/<relay peer ID>"),
         };
 
-        let mut swarm = build_swarm(key).await?;
+        let backoff: SharedBackoff =
+            Arc::new(Mutex::new(DialBackoff::new(DIAL_BACKOFF_MIN, DIAL_BACKOFF_MAX, MAX_TRACKED_PEERS)));
+        let mut swarm = build_swarm(key, config.relay.clone(), backoff.clone()).await?;
         swarm.listen_on(config.listen.clone())?;
         for addr in &config.bootstrap {
             let _ = swarm.dial(DialOpts::unknown_peer_id().address(addr.clone()).build());
@@ -441,7 +517,7 @@ impl Node {
             acks: Acks::new(ACKS_PER_AUTHOR, MAX_ACK_AUTHORS, ACK_TTL),
             soon: HashSet::new(),
             direct_candidates: HashMap::new(),
-            dial_backoff: DialBackoff::new(DIAL_BACKOFF_MIN, DIAL_BACKOFF_MAX, MAX_TRACKED_PEERS),
+            dial_backoff: backoff,
             #[cfg(test)]
             served: HashMap::new(),
             presence: Presence::default(),
@@ -568,7 +644,7 @@ fn load_or_create_key(path: &std::path::Path) -> Result<identity::Keypair> {
     Ok(key)
 }
 
-async fn build_swarm(key: identity::Keypair) -> Result<Swarm<Behaviour>> {
+async fn build_swarm(key: identity::Keypair, relay: Multiaddr, backoff: SharedBackoff) -> Result<Swarm<Behaviour>> {
     Ok(SwarmBuilder::with_existing_identity(key)
         .with_tokio()
         .with_tcp(tcp::Config::default().nodelay(true), noise::Config::new, yamux::Config::default)?
@@ -628,8 +704,13 @@ async fn build_swarm(key: identity::Keypair) -> Result<Swarm<Behaviour>> {
                 relay_client,
                 // Push address changes (e.g. a new relay circuit) to peers at
                 // once instead of waiting for the next identify round.
-                identify: identify::Behaviour::new(
-                    identify::Config::new(IDENTIFY_VERSION.into(), key.public()).with_push_listen_addr_updates(true),
+                // Only global addresses and circuits through our relay are
+                // announced (GAP-6); direct ones go to members only.
+                identify: crate::announce::GlobalIdentify::new(
+                    identify::Behaviour::new(
+                        identify::Config::new(IDENTIFY_VERSION.into(), key.public()).with_push_listen_addr_updates(true),
+                    ),
+                    relay,
                 ),
                 ping: ping::Behaviour::new(ping::Config::new().with_interval(PING_INTERVAL)),
                 kad,
@@ -639,6 +720,7 @@ async fn build_swarm(key: identity::Keypair) -> Result<Swarm<Behaviour>> {
                     request_response::Config::default().with_request_timeout(Duration::from_secs(30)),
                 ),
                 limits: connection_limits::Behaviour::new(limits),
+                guard: DialGuard { backoff },
             })
         })?
         .with_swarm_config(|c| c.with_idle_connection_timeout(IDLE_TIMEOUT))
@@ -791,7 +873,9 @@ struct Task {
     /// connection; LAN ones only once the peer is bound (F2).
     direct_candidates: HashMap<PeerId, Vec<Multiaddr>>,
     /// Peers from the DHT whose dials failed, and when to try them again.
-    dial_backoff: DialBackoff<PeerId>,
+    /// Shared with the swarm's `DialGuard`, which refuses any dial (Kademlia's
+    /// included) to a peer still backing off.
+    dial_backoff: SharedBackoff,
     /// Tests: entries served per (peer, log).
     #[cfg(test)]
     served: HashMap<(PeerId, String), usize>,
@@ -1180,7 +1264,7 @@ impl Task {
     fn on_swarm_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
         match event {
             SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, .. } => {
-                self.dial_backoff.connected(&peer_id);
+                self.dial_backoff.lock().unwrap().connected(&peer_id);
                 if !self.admit_by_ip(connection_id, &endpoint) {
                     debug!(%peer_id, "too many connections from one address");
                     self.swarm.close_connection(connection_id);
@@ -1279,7 +1363,11 @@ impl Task {
             SwarmEvent::OutgoingConnectionError { peer_id: Some(peer), error, .. } if peer != self.relay_peer => {
                 // Back off this peer, and forget circuit addresses that failed
                 // (a reservation that ended): the relay denies each such dial.
-                self.dial_backoff.failed(peer, Instant::now(), |wait| jittered(wait, OsRng.next_u32()));
+                // A dial our own guard refused isn't a new failure.
+                if !matches!(error, libp2p::swarm::DialError::Denied { .. }) {
+                    let jitter = |wait| jittered(wait, OsRng.next_u32());
+                    self.dial_backoff.lock().unwrap().failed(peer, Instant::now(), jitter);
+                }
                 if let libp2p::swarm::DialError::Transport(failed) = &error {
                     for (addr, _) in failed {
                         if addr.iter().any(|p| p == Protocol::P2pCircuit) {
@@ -1297,7 +1385,7 @@ impl Task {
                 for peer in ok.peers {
                     if peer.peer_id == *self.swarm.local_peer_id()
                         || self.connected.contains(&peer.peer_id)
-                        || !self.dial_backoff.may_dial(&peer.peer_id, now)
+                        || !self.dial_backoff.lock().unwrap().may_dial(&peer.peer_id, now)
                     {
                         continue;
                     }
@@ -1393,6 +1481,8 @@ impl Task {
             }
             _ => None,
         };
+        let allow_lan = self.allow_lan;
+        let mine: Vec<Multiaddr> = direct_candidates_of(self.swarm.listeners().cloned().collect());
         let store = self.reader.clone();
         let answers = self.answers.clone();
         tokio::task::spawn_blocking(move || {
@@ -1405,6 +1495,11 @@ impl Task {
                 _ => answer_with_ids(&store, &log, &request.have, max_bytes),
             };
             for_members_only(&mut response, ours, &acks, &store);
+            // Our direct (LAN) addresses go only where our binding went: to a
+            // member (F2; identify announces global ones only).
+            if response.binding.is_some() && allow_lan {
+                response.direct_addrs = mine.iter().map(|a| ByteBuf::from(a.to_vec())).collect();
+            }
             let _ = answers.send((peer, channel, response, max_bytes, ids, log));
         });
     }
@@ -1548,6 +1643,13 @@ impl Task {
             let server = s.server;
             if let Some(identity) = self.verify_binding(key.0, server, binding) {
                 self.mark_seen(server, identity, key.0);
+                // A member's direct addresses (F2): try a direct connection.
+                let addrs: Vec<Multiaddr> =
+                    response.direct_addrs.iter().filter_map(|b| Multiaddr::try_from(b.to_vec()).ok()).collect();
+                if !addrs.is_empty() && self.relayed.contains_key(&key.0) {
+                    self.direct_candidates.insert(key.0, direct_candidates_of(addrs));
+                    self.try_direct(key.0);
+                }
             }
         }
         let acks = self.ack_check(&key, &response);
@@ -1841,14 +1943,17 @@ fn dialable(addr: &Multiaddr, allow_lan: bool) -> bool {
 /// direct ones only (no circuits), at most [`MAX_DIRECT_CANDIDATES`], so a
 /// peer can't make us dial dozens of addresses.
 fn direct_candidates_of(listen_addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
-    listen_addrs.into_iter().filter(|a| dialable(a, true)).take(MAX_DIRECT_CANDIDATES).collect()
+    let specified = |a: &Multiaddr| {
+        !a.iter().any(|p| matches!(p, Protocol::Ip4(ip) if ip.is_unspecified()) || matches!(p, Protocol::Ip6(ip) if ip.is_unspecified()))
+    };
+    listen_addrs.into_iter().filter(|a| dialable(a, true) && specified(a)).take(MAX_DIRECT_CANDIDATES).collect()
 }
 
 /// Whether `addr` is a circuit through our configured relay: everything
 /// before `/p2p-circuit` must be exactly `relay` (its address and peer ID).
 /// Matching the peer ID alone would let a peer put any address in front
 /// of it, e.g. a LAN one, and make us dial it.
-fn via_relay(addr: &Multiaddr, relay: &Multiaddr) -> bool {
+pub(crate) fn via_relay(addr: &Multiaddr, relay: &Multiaddr) -> bool {
     let parts: Vec<Protocol<'_>> = addr.iter().collect();
     let Some(circuit) = parts.iter().position(|p| *p == Protocol::P2pCircuit) else { return false };
     let prefix: Multiaddr = parts[..circuit].iter().cloned().collect();
@@ -1859,7 +1964,7 @@ fn via_relay(addr: &Multiaddr, relay: &Multiaddr) -> bool {
 /// NAT are reached) as long as the relay's own address is global. Used for
 /// addresses learned from peers (Kademlia, identify) before storing or
 /// dialling them.
-fn reachable(addr: &Multiaddr, allow_lan: bool) -> bool {
+pub(crate) fn reachable(addr: &Multiaddr, allow_lan: bool) -> bool {
     let mut global = true;
     for p in addr.iter() {
         match p {
@@ -1965,7 +2070,7 @@ fn decode_page(log: &str, page: &[WireEntry]) -> Vec<Incoming> {
 }
 
 fn empty_response() -> SyncResponse {
-    SyncResponse { records: Vec::new(), more: false, acks: Vec::new(), binding: None }
+    SyncResponse { records: Vec::new(), more: false, acks: Vec::new(), binding: None, direct_addrs: Vec::new() }
 }
 
 /// Adds our binding (presence) and the requester's receipt acks to an
@@ -2156,9 +2261,35 @@ mod tests {
         let mut addrs: Vec<Multiaddr> =
             (0..30).map(|i| format!("/ip4/192.168.1.{i}/tcp/4001").parse().unwrap()).collect();
         addrs.insert(0, format!("/ip4/1.2.3.4/tcp/1/p2p/{}/p2p-circuit", PeerId::random()).parse().unwrap());
+        addrs.insert(0, "/ip4/0.0.0.0/tcp/4001".parse().unwrap());
         let kept = direct_candidates_of(addrs);
         assert_eq!(kept.len(), MAX_DIRECT_CANDIDATES);
         assert!(kept.iter().all(|a| !a.iter().any(|p| p == Protocol::P2pCircuit)));
+        assert!(!kept.iter().any(|a| a.to_string().starts_with("/ip4/0.0.0.0")));
+    }
+
+    /// What we send members as our direct addresses comes from
+    /// `swarm.listeners()`: listening on 0.0.0.0 gives one address per
+    /// interface there, never 0.0.0.0 itself.
+    #[tokio::test]
+    async fn listening_on_all_interfaces_lists_each_interface() {
+        let dir = std::env::temp_dir().join(format!("sync-listen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = NodeConfig {
+            relay: format!("/ip4/127.0.0.1/tcp/9/p2p/{}", PeerId::random()).parse().unwrap(),
+            data_dir: dir,
+            logs: Vec::new(),
+            authorizer: Arc::new(AcceptAll),
+            listen: "/ip4/0.0.0.0/tcp/0".parse().unwrap(),
+            bootstrap: Vec::new(),
+            allow_lan: true,
+        };
+        let (node, _events) = Node::start(config).await.unwrap();
+        port_of(&node).await;
+        let addrs = node.listen_addrs().await.unwrap();
+        assert!(addrs.iter().any(|a| a.to_string().starts_with("/ip4/127.0.0.1/")), "{addrs:?}");
+        assert!(!addrs.iter().any(|a| a.to_string().starts_with("/ip4/0.0.0.0/")), "{addrs:?}");
+        node.shutdown().await.unwrap();
     }
 
     /// Only a circuit through exactly our configured relay address passes;
@@ -2539,7 +2670,11 @@ mod tests {
 
     #[tokio::test]
     async fn the_relay_can_be_dialled_over_wss() {
-        let mut swarm = build_swarm(identity::Keypair::generate_ed25519()).await.unwrap();
+        let mut swarm = build_swarm(
+            identity::Keypair::generate_ed25519(),
+            "/ip4/1.2.3.4/tcp/1".parse().unwrap(),
+            Arc::new(Mutex::new(DialBackoff::new(DIAL_BACKOFF_MIN, DIAL_BACKOFF_MAX, 4))),
+        ).await.unwrap();
         let relay = PeerId::random();
         // Without a WebSocket transport this fails at once ("multiaddr not
         // supported"); with it, the dial is started (DNS + TLS + WebSocket).
