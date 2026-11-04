@@ -61,6 +61,10 @@ pub const CHALLENGE_POSITIONS: usize = 3;
 pub const MAX_CHECK_FAILURES: u8 = 5;
 /// How often the background sync runs without a hint.
 pub const SYNC_EVERY: Duration = Duration::from_secs(2);
+/// Join re-keys are batched: at least this long apart per channel, plus
+/// up to `JOIN_REKEY_JITTER_MS`: 15 s ± 20% (12-18 s). Kicks stay immediate.
+pub const JOIN_REKEY_MIN_MS: u64 = 12_000;
+const JOIN_REKEY_JITTER_MS: u64 = 6_001;
 
 struct Me {
     /// Held only until the recovery check passes, so the UI can show and
@@ -88,6 +92,11 @@ struct Inner {
     announced: HashMap<ServerId, HashMap<RecordId, Announced>>,
     /// For my messages' send state (B6).
     net: Arc<dyn Network>,
+    /// Who each channel was last keyed for by our own rotation, so a
+    /// moderator re-keys when members join (in memory: once after a restart).
+    keyed_for: HashMap<(ServerId, ChannelId), BTreeSet<PublicKey>>,
+    /// The earliest next join re-key per channel (batching, GAP-8).
+    rekey_after: HashMap<(ServerId, ChannelId), u64>,
 }
 
 pub struct Core {
@@ -134,6 +143,8 @@ impl Core {
             logs: HashMap::new(),
             announced: HashMap::new(),
             net: ports.network.clone(),
+            keyed_for: HashMap::new(),
+            rekey_after: HashMap::new(),
         };
         if inner.vault.state().map_err(vault_error)? == VaultState::Ready {
             let phrase = inner.vault.open().map_err(vault_error)?;
@@ -752,6 +763,9 @@ impl Core {
                     }
                     inner.announce(&*ports.cipher, server, events)?;
                     inner.prune(ports, server)?;
+                } else if inner.may_rotate(server)? {
+                    // A join re-key a batch window deferred: retried each round.
+                    let _ = inner.rekey(ports, server, events);
                 }
             }
             Ok(())
@@ -836,6 +850,12 @@ impl Core {
 }
 
 impl Inner {
+    /// Whether we are a moderator or above in a loaded server.
+    fn may_rotate(&self, server: ServerId) -> CoreResult<bool> {
+        let Some(me) = self.me.as_ref().map(Me::key) else { return Ok(false) };
+        Ok(self.view(server)?.state.role(me) >= authority::Role::Moderator)
+    }
+
     /// The known channels this identity may read and write: 18+ channels
     /// only with an accepted 18+ claim (B7).
     fn visible(&self, server: ServerId) -> CoreResult<BTreeSet<ChannelId>> {
@@ -1145,6 +1165,7 @@ impl Inner {
             ports.network.publish(record);
         }
         chat::sync_cipher(cipher, server, log);
+        self.keyed_for.insert((server, channel), members.clone());
         Ok(())
     }
 
@@ -1168,7 +1189,40 @@ impl Inner {
         let server_id = model::hex_id(server.as_bytes());
         for channel in self.known(server)? {
             // A probe: an empty plaintext, never sent.
-            if cipher.encrypt(server, channel, b"") != Err(CipherError::RotationRequired) {
+            let probe = cipher.encrypt(server, channel, b"");
+            if probe != Err(CipherError::RotationRequired) {
+                // v0.2.0 smoke: no key yet, or members joined since we keyed it
+                // (unknown after a restart: once). A moderator or above keys the
+                // channel for everyone now, so a joiner can write and read
+                // without waiting for a moderator to send first. A failure only
+                // leaves things as they were: the next round tries again.
+                let stale = self.keyed_for.get(&(server, channel)) != Some(&members);
+                let no_key = probe == Err(CipherError::NoKey);
+                if may_rotate && (no_key || (probe.is_ok() && stale)) && members.len() > 1 {
+                    // Batched (GAP-8): at most one join re-key per channel every
+                    // 12-18 s (jitter), covering everyone who joined meanwhile;
+                    // later rounds pick up what this one defers.
+                    let now = ports.clock.now_ms();
+                    let due = self.rekey_after.get(&(server, channel)).is_none_or(|t| now >= *t);
+                    if due {
+                        let jitter =
+                            JOIN_REKEY_MIN_MS + u64::from(OsRng.next_u32()) % JOIN_REKEY_JITTER_MS;
+                        self.rekey_after.insert((server, channel), now + jitter);
+                        // Fail closed, as for a kick: a failed rotation is never
+                        // announced as one, and the UI learns the channel waits.
+                        if self
+                            .rotate_channel(ports, server, channel, &members, &auth_deps)
+                            .is_err()
+                        {
+                            let kind = NoticeKind::RekeyWaiting;
+                            events.push(Event::Notice { kind, server_id: server_id.clone() });
+                        }
+                    }
+                } else if !may_rotate && no_key {
+                    // A joiner without a key yet: waiting for a moderator, not ready.
+                    let kind = NoticeKind::RekeyWaiting;
+                    events.push(Event::Notice { kind, server_id: server_id.clone() });
+                }
                 continue;
             }
             // Fail closed: a rotation that didn't happen is never announced as

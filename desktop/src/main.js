@@ -12,7 +12,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { app, BrowserWindow, Menu, crashReporter, dialog, ipcMain, protocol, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, clipboard, crashReporter, dialog, ipcMain, protocol, session, shell } = require('electron');
 const sec = require('./security');
 const { toRequest } = require('./commands');
 const { Sidecar } = require('./sidecar');
@@ -79,6 +79,15 @@ function serveCoreIpc() {
     if (req.error) return { error: { code: req.error } };
     if (!core) return { error: { code: 'core-unavailable' } };
     return core.request(req.cmd, req.args);
+  });
+  // Copy text for the user (an invite link). Web clipboard permissions stay
+  // denied; this writes plain text only, from our own top frame, up to 4 KiB.
+  ipcMain.handle('clipboard:write', (event, text) => {
+    const frame = event.senderFrame;
+    if (!frame || frame !== event.sender.mainFrame || !sec.isInternalUrl(frame.url)) return false;
+    if (typeof text !== 'string' || text.length === 0 || text.length > 4096) return false;
+    clipboard.writeText(text);
+    return true;
   });
 }
 

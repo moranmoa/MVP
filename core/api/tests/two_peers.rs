@@ -249,3 +249,49 @@ fn the_background_sync_delivers_without_sync_now() {
     });
     eprintln!("background sync: done");
 }
+
+/// v0.2.0 live smoke: B joins A's server by invite and writes first; A never
+/// sends. A's background sync sees the join and keys the channel for B, so
+/// B's send is allowed and A reads it. Nobody calls `sync_now`.
+#[test]
+#[ignore = "needs a relay: set RELAY and run with --ignored"]
+fn a_joiner_writes_first_through_a_relay() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let Ok(relay) = std::env::var("RELAY") else {
+        eprintln!("RELAY not set; skipped");
+        return;
+    };
+    let owner = peer("SmokeA", OWNER, &relay);
+    let guest = peer("SmokeB", GUEST, &relay);
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        for p in [&owner, &guest] {
+            let hints = p.net.take_hints().expect("hints");
+            let stop = &stop;
+            scope.spawn(move || p.core.run_sync_loop(&hints, stop));
+        }
+        let server = owner.core.create_server("Smoke", AgeRestriction::None).unwrap();
+        eventually("B to join", || {
+            guest.core.join_server(&server.invite_link).unwrap();
+            guest.core.list_servers().unwrap().iter().any(|s| s.id == server.id)
+        });
+        let channel = guest.core.list_channels(&server.id).unwrap().remove(0).id;
+        eventually("B to be allowed to write", || {
+            guest.core.send_message(&channel, "hello from B", None).is_ok()
+        });
+        eventually("A to read B's message", || {
+            owner
+                .core
+                .get_messages(&channel, 0, 9)
+                .unwrap()
+                .messages
+                .iter()
+                .any(|m| m.body == "hello from B")
+        });
+        stop.store(true, Ordering::SeqCst);
+        owner.net.wake();
+        guest.net.wake();
+    });
+    eprintln!("smoke: B wrote first, A read it");
+}

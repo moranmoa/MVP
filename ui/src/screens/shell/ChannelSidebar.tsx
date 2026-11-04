@@ -3,8 +3,8 @@ import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import type { Channel, Id, ServerSummary } from '../../core';
-import { Avatar, Badge, Code, Name } from '../../components/common';
-import { CheckIcon, GearIcon, HashIcon, LinkIcon } from '../../components/icons';
+import { Avatar, Badge, Code, InviteBox, Name } from '../../components/common';
+import { GearIcon, HashIcon, LinkIcon } from '../../components/icons';
 
 const NO_CHANNELS: Channel[] = [];
 
@@ -23,17 +23,9 @@ export function ChannelSidebar({
   const channels = useStore(store, (s) => s.channels[server.id] ?? NO_CHANNELS);
   const identity = useStore(store, (s) => s.identity)!;
   const intl = useIntl();
-  const [copied, setCopied] = useState(false);
-
-  const copyInvite = async () => {
-    try {
-      await navigator.clipboard.writeText(server.inviteLink);
-    } catch {
-      // clipboard may be unavailable (e.g. insecure context); the link is still shown in the title
-    }
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
+  // The invite link, shown selectable with a Copy button (P0 from v0.2.0: the
+  // desktop page can't write the clipboard by itself, see app/clipboard.ts).
+  const [showInvite, setShowInvite] = useState(false);
 
   return (
     <aside className="sidebar" aria-label={intl.formatMessage({ id: 'channels.label' })}>
@@ -47,13 +39,19 @@ export function ChannelSidebar({
         <button
           type="button"
           className="icon-button"
-          onClick={copyInvite}
-          aria-label={intl.formatMessage({ id: copied ? 'common.copied' : 'server.invite' })}
-          title={server.inviteLink}
+          onClick={() => setShowInvite((v) => !v)}
+          aria-label={intl.formatMessage({ id: 'server.invite' })}
+          aria-expanded={showInvite}
+          aria-controls="sidebar-invite"
         >
-          {copied ? <CheckIcon /> : <LinkIcon />}
+          <LinkIcon />
         </button>
       </header>
+      {showInvite && (
+        <div id="sidebar-invite" className="sidebar-invite">
+          <InviteBox link={server.inviteLink} />
+        </div>
+      )}
       <nav className="channel-list" aria-label={intl.formatMessage({ id: 'channels.label' })}>
         <ul>
           {channels.map((c) => {

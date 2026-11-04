@@ -8,6 +8,7 @@
   "common.done": "Done",
   "common.copy": "Copy",
   "common.copied": "Copied",
+  "common.copyFailed": "Couldn't copy. Select the link and press <kbd>Ctrl+C</kbd>.",
   "common.retry": "Try again",
   "common.loading": "Loading…",
   "error.generic": "Something went wrong. Please try again.",
@@ -147,7 +148,7 @@
   "age.18": "18+",
 
   "server.menu": "Server options",
-  "server.invite": "Copy invite link",
+  "server.invite": "Show the invite link",
   "channels.label": "Channels",
   "channel.adult": "Adults-only channel (18+)",
 

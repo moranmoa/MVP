@@ -34,6 +34,9 @@ services:
       MAX_CIRCUITS_PER_PEER: ${MAX_CIRCUITS_PER_PEER-8}
       MAX_CIRCUIT_SECS: ${MAX_CIRCUIT_SECS-3600}
       MAX_CIRCUIT_BYTES: ${MAX_CIRCUIT_BYTES-33554432}
+      # Reverse-proxy hop address(es) the relay sees for wss clients; they skip
+      # only the per-IP rate limits (README). Set in .env, never committed.
+      PROXY_IPS: ${PROXY_IPS:-}
     ports:
       - "4001:4001/tcp"
       - "4001:4001/udp"

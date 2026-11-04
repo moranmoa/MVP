@@ -89,10 +89,23 @@ test('permissions are refused', async () => {
   assert.notEqual(notif, 'granted');
 });
 
-test('the page sees only invoke and onEvent', async () => {
+test('the page sees only copyText, invoke and onEvent', async () => {
   const keys = await page.evaluate(() => Object.keys(window.mvs).sort());
-  assert.deepEqual(keys, ['invoke', 'onEvent']);
+  assert.deepEqual(keys, ['copyText', 'invoke', 'onEvent']);
   assert.equal(await page.evaluate(() => typeof window.ipcRenderer), 'undefined');
+});
+
+test('copyText writes plain text only, through main', async () => {
+  const link = 'mvs://join/' + 'a'.repeat(64) + '/' + 'b'.repeat(64) + '/' + 'e'.repeat(64);
+  assert.equal(await page.evaluate((l) => window.mvs.copyText(l), link), true);
+  assert.equal(await app.evaluate(({ clipboard }) => clipboard.readText()), link);
+  // Too long or empty: refused, the clipboard is left alone.
+  assert.equal(await page.evaluate(() => window.mvs.copyText('x'.repeat(5000))), false);
+  assert.equal(await page.evaluate(() => window.mvs.copyText('')), false);
+  assert.equal(await app.evaluate(({ clipboard }) => clipboard.readText()), link);
+  // The page itself still has no clipboard permission.
+  const web = await page.evaluate(() => navigator.clipboard.writeText('web').then(() => 'ok', () => 'denied'));
+  assert.equal(web, 'denied');
 });
 
 test('allowed commands reach the core with named args and the data dir', async () => {

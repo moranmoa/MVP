@@ -45,7 +45,8 @@ runs the real core (otherwise core commands answer `core-unavailable`);
 
 | Rule | Where | Test |
 | --- | --- | --- |
-| The page gets only `window.mvs.invoke(cmd, args)` and `window.mvs.onEvent(cb)`, never `ipcRenderer` | `src/preload.js` | e2e |
+| The page gets only `window.mvs.invoke(cmd, args)`, `window.mvs.onEvent(cb)` and `window.mvs.copyText(text)`, never `ipcRenderer` | `src/preload.js` | e2e |
+| `copyText`: plain text only (1–4096 chars), only from our top frame, written by main with `clipboard.writeText`; web clipboard permissions stay denied | `main.js` `clipboard:write` | e2e |
 | Main answers only our top frame on `app://mvs` (`event.senderFrame`) | `main.js` `serveCoreIpc` | e2e (indirect) |
 | Allow-list = `CoreCommands` in ui/src/core/api.ts, same parameter names; core-only commands (`grantRole`, `revokeRole`, `syncNow`) unreachable; prototype names refused | `src/commands.js` | unit (parses api.ts) + e2e |
 | Positional args mapped to named args; extra args, non-arrays and cycles refused; requests over 1 MiB never sent | `toRequest` | unit + e2e |

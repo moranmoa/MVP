@@ -1627,6 +1627,18 @@ legend {
   background: var(--bg-input);
 }
 
+/* One click selects the whole link, so a manual Ctrl+C always works. */
+.invite-link {
+  -webkit-user-select: all;
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+
+.sidebar-invite {
+  padding: 0.5rem;
+  border-block-end: 1px solid var(--border);
+}
+
 .invite-box .code {
   flex: 1;
   font-size: 0.875rem;
