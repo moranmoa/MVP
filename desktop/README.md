@@ -196,3 +196,7 @@ for the first subscriber, like `link.open`. The core counts as `up` once it
 answers or prints `mvs-core: ready`. Core error codes (e.g. a missing
 keyring, QA-20) pass through unchanged. Tests: `test/sidecar.test.js`,
 `test/deeplink.e2e.test.mjs`.
+
+Two shell actions for the screen (preload, top frame of `app://mvs` only):
+- `window.mvs.retryCore()`: start the core again now with a fresh backoff. Resolves `false` if it is already running. Status follows as `core.status`.
+- `window.mvs.openLogsFolder()`: opens the OS logs folder, which holds `mvs.log` (main's notes and the core's stderr, capped at 1 MiB plus `mvs.log.1`; never words or message content).

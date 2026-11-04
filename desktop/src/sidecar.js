@@ -173,6 +173,16 @@ class Sidecar {
     });
   }
 
+  /** The user pressed "try again": start now, with a fresh backoff. */
+  retryNow() {
+    if (this.child || this.stopped) return false;
+    clearTimeout(this.restartTimer);
+    this.restarts = 0;
+    this.setStatus('starting');
+    this.start();
+    return true;
+  }
+
   up() {
     this.restarts = 0;
     this.setStatus('up');

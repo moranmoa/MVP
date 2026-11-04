@@ -18,6 +18,7 @@ const { toRequest } = require('./commands');
 const { Sidecar } = require('./sidecar');
 const deeplink = require('./deeplink');
 const { relayFor } = require('./config');
+const { createLog } = require('./logfile');
 
 // One instance only: a second launch (e.g. an mvs:// link, B1-3) focuses this one.
 if (!app.requestSingleInstanceLock()) {
@@ -43,6 +44,12 @@ const CORE_EXE = app.isPackaged
   ? path.join(process.resourcesPath, process.platform === 'win32' ? 'mvs-core.exe' : 'mvs-core')
   : process.env.MVS_CORE_PATH;
 let core = null;
+/** Main's log: the console and a capped file in the OS logs folder (T8-01). */
+const fileLog = createLog(app.getPath('logs'));
+const log = (line) => {
+  console.log(line);
+  fileLog(line);
+};
 /** Where the core stands, for the "core unavailable" screen (T8-01). */
 let coreStatus = { state: 'starting' };
 
@@ -60,7 +67,7 @@ function setCoreStatus(status) {
 
 function startCore() {
   if (!CORE_EXE || !path.isAbsolute(CORE_EXE) || !fs.existsSync(CORE_EXE)) {
-    console.warn('mvs-core not found; core commands answer core-unavailable');
+    log('mvs-core not found; core commands answer core-unavailable');
     setCoreStatus({ state: 'down', detail: 'missing' });
     return;
   }
@@ -77,7 +84,7 @@ function startCore() {
     onEvent: toPages,
     onStatus: setCoreStatus,
     // stderr only (counts and error kinds); stdout is never logged.
-    log: (line) => console.log(line),
+    log,
   }).start();
 }
 
@@ -91,6 +98,21 @@ function serveCoreIpc() {
     if (req.error) return { error: { code: req.error } };
     if (!core) return { error: { code: 'core-unavailable', detail: 'missing' } };
     return core.request(req.cmd, req.args);
+  });
+  // The "core unavailable" screen (T8-01): try again now, and open the logs.
+  const fromUs = (event) => {
+    const frame = event.senderFrame;
+    return !!frame && frame === event.sender.mainFrame && sec.isInternalUrl(frame.url);
+  };
+  ipcMain.handle('core:retry', (event) => {
+    if (!fromUs(event)) return false;
+    if (core) return core.retryNow();
+    startCore(); // the binary may have been put back since
+    return !!core;
+  });
+  ipcMain.handle('logs:open', async (event) => {
+    if (!fromUs(event)) return false;
+    return (await shell.openPath(app.getPath('logs'))) === '';
   });
   // Copy text for the user (an invite link). Web clipboard permissions stay
   // denied; this writes plain text only, from our own top frame, up to 4 KiB.

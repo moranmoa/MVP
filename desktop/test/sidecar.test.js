@@ -174,3 +174,27 @@ test('five crashes in a row without an answer: crash-loop', async () => {
   assert.deepEqual(statuses[0], { state: 'down', detail: 'crashed' });
   assert.deepEqual(statuses.at(-1), { state: 'down', detail: 'crash-loop' });
 });
+
+test('retryNow: from down, start again at once with a fresh backoff', async () => {
+  const statuses = [];
+  const core = new Sidecar({ exe: FAKE, dataDir: DATA, onEvent() {}, onStatus: (s) => statuses.push(s), backoffBase: 60_000, spawnImpl: failing('exit') }).start();
+  await until(() => statuses.some((s) => s.state === 'down'));
+  assert.equal(core.retryNow(), true);
+  assert.deepEqual(statuses.at(-1), { state: 'starting' });
+  await until(() => statuses.at(-1).state === 'down');
+  core.stop();
+  const running = start().core;
+  assert.equal(running.retryNow(), false, 'nothing to do while it runs');
+  running.stop();
+});
+
+test('the log file is capped, rotates to .1, and keeps one line per entry', () => {
+  const { createLog } = require('../src/logfile');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mvs-logs-'));
+  const log = createLog(dir, { maxBytes: 300 });
+  for (let i = 0; i < 20; i++) log(`line ${i}\nwith a break`);
+  const text = fs.readFileSync(path.join(dir, 'mvs.log'), 'utf8');
+  assert.ok(fs.statSync(path.join(dir, 'mvs.log')).size <= 300);
+  assert.ok(fs.existsSync(path.join(dir, 'mvs.log.1')));
+  assert.ok(!/with a break\n(?!\d)/.test(text.replace(/\n$/, '')) || text.split('\n').every((l) => !l || /^\d{4}-/.test(l)));
+});
