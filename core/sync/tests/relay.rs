@@ -12,7 +12,7 @@ use libp2p::{
     PeerId, StreamProtocol, SwarmBuilder,
 };
 use records::{ChannelId, Draft, Kind, RecordId, Scope, ServerId, SigningKey};
-use sync::{log_name, AcceptAll, Access, Node, NodeConfig, NodeEvent, Record, ServerSecret};
+use sync::{log_name, AcceptAll, Access, ControlLog, Node, NodeConfig, NodeEvent, ReadGate, Record, ServerSecret};
 
 /// Destinations of circuits the test relays saw close (all tests in this
 /// binary; filter by peer).
@@ -291,7 +291,7 @@ async fn two_peers_behind_nat_reuse_their_circuits() {
 
 /// A node of a server opened with its secret (so peers bind), meeting
 /// others only through relay circuits, with "LAN allowed" (F2) as given.
-async fn bound_node(name: &str, relay: &Multiaddr, key: u8, allow_lan: bool) -> Node {
+async fn bound_node(name: &str, relay: &Multiaddr, key: u8, allow_lan: bool, gate: Arc<dyn ReadGate>) -> Node {
     let (server, channel) = test_server();
     let dir = std::env::temp_dir().join(format!("sync-relay-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -306,7 +306,7 @@ async fn bound_node(name: &str, relay: &Multiaddr, key: u8, allow_lan: bool) -> 
     };
     let access = Access {
         binder: Some(Arc::new(SigningKey::from_bytes(&[key; 32]))),
-        read_gate: Some(Arc::new(AcceptAll)),
+        read_gate: Some(gate),
         ..Access::default()
     };
     let (node, _events) = Node::start_with(config, access).await.unwrap();
@@ -328,8 +328,8 @@ async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
         let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
         // Circuit addresses only in the relay's DHT, like for peers behind NAT.
         let _relay = start_relay_counting(relay_key, port, circuits.clone(), true);
-        let a = bound_node(&format!("lan-a-{allow_lan}"), &relay, 1, allow_lan).await;
-        let b = bound_node(&format!("lan-b-{allow_lan}"), &relay, 2, allow_lan).await;
+        let a = bound_node(&format!("lan-a-{allow_lan}"), &relay, 1, allow_lan, Arc::new(AcceptAll)).await;
+        let b = bound_node(&format!("lan-b-{allow_lan}"), &relay, 2, allow_lan, Arc::new(AcceptAll)).await;
         let (ids, start) = ([a.peer_id(), b.peer_id()], Instant::now());
         let closed = || CIRCUITS_CLOSED.lock().unwrap().iter().filter(|p| ids.contains(p)).count();
         let opened = || circuits.lock().unwrap().iter().filter(|(p, ok)| *ok && ids.contains(p)).count();
@@ -368,6 +368,33 @@ async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
     tokio::time::sleep(Duration::from_secs(10)).await;
     let closed = CIRCUITS_CLOSED.lock().unwrap().iter().filter(|p| ids.contains(p)).count();
     assert_eq!(closed, 0, "an unbound peer was dialled at its LAN address");
+    a.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
+
+    // Bound, but neither side's read gate counts the other as a member (a
+    // non-member with the secret, or a kicked member): no LAN dial, relayed.
+    struct Nobody;
+    impl ReadGate for Nobody {
+        fn may_read(&self, _: &records::PublicKey, _: &ControlLog<'_>) -> bool {
+            false
+        }
+    }
+    let relay_key = identity::Keypair::generate_ed25519();
+    let port = free_port();
+    let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::from(relay_key.public())).parse().unwrap();
+    let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _relay = start_relay_counting(relay_key, port, circuits.clone(), true);
+    let a = bound_node("lan-nonmember-a", &relay, 3, true, Arc::new(Nobody)).await;
+    let b = bound_node("lan-nonmember-b", &relay, 4, true, Arc::new(Nobody)).await;
+    let ids = [a.peer_id(), b.peer_id()];
+    let start = Instant::now();
+    while !circuits.lock().unwrap().iter().any(|(p, ok)| *ok && ids.contains(p)) {
+        assert!(start.elapsed() < Duration::from_secs(30), "non-members never met through the relay");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let closed = CIRCUITS_CLOSED.lock().unwrap().iter().filter(|p| ids.contains(p)).count();
+    assert_eq!(closed, 0, "a bound non-member was dialled at its LAN address");
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
 }
