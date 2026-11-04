@@ -1164,10 +1164,14 @@ impl Task {
         let Some(listen_addrs) = self.direct_candidates.get(&peer) else { return };
         let addrs: Vec<Multiaddr> = listen_addrs.iter().filter(|a| dialable(a, lan)).cloned().collect();
         if addrs.is_empty() {
+            debug!(%peer, lan, candidates = listen_addrs.len(), "no direct address to try");
             return;
         }
+        debug!(%peer, lan, ?addrs, "trying a direct connection");
         let opts = DialOpts::peer_id(peer).addresses(addrs).condition(PeerCondition::Always).build();
-        let _ = self.swarm.dial(opts);
+        if let Err(err) = self.swarm.dial(opts) {
+            debug!(%peer, %err, "direct dial refused");
+        }
     }
 
     /// Pulls the logs we just wrote to, so receipt acks come back quickly.
@@ -1650,6 +1654,7 @@ impl Task {
                 // A member's direct addresses (F2): try a direct connection.
                 let addrs: Vec<Multiaddr> =
                     response.direct_addrs.iter().filter_map(|b| Multiaddr::try_from(b.to_vec()).ok()).collect();
+                debug!(peer = %key.0, ?addrs, relayed = self.relayed.contains_key(&key.0), "member offered direct addresses");
                 if !addrs.is_empty() && self.relayed.contains_key(&key.0) {
                     self.direct_candidates.insert(key.0, direct_candidates_of(addrs));
                     self.try_direct(key.0);

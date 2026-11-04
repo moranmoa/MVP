@@ -322,6 +322,11 @@ async fn bound_node(name: &str, relay: &Multiaddr, key: u8, allow_lan: bool, gat
 /// "LAN allowed" they stay relayed.
 #[tokio::test(flavor = "multi_thread")]
 async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
+    // Shown only if the test fails: what was offered, tried and refused.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("sync=debug,libp2p_swarm=debug,libp2p_tcp=debug")
+        .with_test_writer()
+        .try_init();
     for allow_lan in [true, false] {
         let relay_key = identity::Keypair::generate_ed25519();
         let port = free_port();
