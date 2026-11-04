@@ -218,6 +218,16 @@ fn the_background_sync_delivers_without_sync_now() {
             owner.core.list_members(&server.id).unwrap().len() == 2
         });
         let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+        // M2: the owner sees the guest online through sync's presence.
+        let guest_id = guest.core.get_identity().unwrap().unwrap().id;
+        eventually("the owner to see the guest online", || {
+            owner
+                .core
+                .list_members(&server.id)
+                .unwrap()
+                .iter()
+                .any(|m| m.id == guest_id && m.presence == Presence::Online)
+        });
         guest.events.take();
         let sent = owner.core.send_message(&channel, "no sync_now here", None).unwrap();
         eventually("the guest's loop to bring the message", || {

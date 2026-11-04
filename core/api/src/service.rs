@@ -92,6 +92,8 @@ struct Inner {
     announced: HashMap<ServerId, HashMap<RecordId, Announced>>,
     /// For my messages' send state (B6).
     net: Arc<dyn Network>,
+    /// The online members last reported per server (M2).
+    presence_seen: HashMap<ServerId, BTreeSet<PublicKey>>,
     /// Who each channel was last keyed for by our own rotation, so a
     /// moderator re-keys when members join (in memory: once after a restart).
     keyed_for: HashMap<(ServerId, ChannelId), BTreeSet<PublicKey>>,
@@ -143,6 +145,7 @@ impl Core {
             logs: HashMap::new(),
             announced: HashMap::new(),
             net: ports.network.clone(),
+            presence_seen: HashMap::new(),
             keyed_for: HashMap::new(),
             rekey_after: HashMap::new(),
         };
@@ -767,6 +770,14 @@ impl Core {
                     // A join re-key a batch window deferred: retried each round.
                     let _ = inner.rekey(ports, server, events);
                 }
+                // M2: someone came online or went offline (members only).
+                if inner.db.has_server(server)? && inner.presence_changed(server)? && !changed {
+                    let view = inner.view(server)?;
+                    events.push(Event::MembersChanged {
+                        server_id: model::hex_id(server.as_bytes()),
+                        members: inner.members_json(&view)?,
+                    });
+                }
             }
             Ok(())
         })
@@ -850,6 +861,15 @@ impl Core {
 }
 
 impl Inner {
+    /// Whether the online members of `server` changed since last reported
+    /// (and remembers the new set). Members only: authority's, not kicked.
+    fn presence_changed(&mut self, server: ServerId) -> CoreResult<bool> {
+        let view = self.view(server)?;
+        let mut online = self.net.online(server).unwrap_or_default();
+        online.retain(|key| view.state.members.contains(key) && !view.is_kicked(key));
+        Ok(self.presence_seen.insert(server, online.clone()) != Some(online))
+    }
+
     /// Whether we are a moderator or above in a loaded server.
     fn may_rotate(&self, server: ServerId) -> CoreResult<bool> {
         let Some(me) = self.me.as_ref().map(Me::key) else { return Ok(false) };
@@ -1387,6 +1407,9 @@ impl Inner {
 
     fn members_json(&self, view: &ServerView) -> CoreResult<Vec<Member>> {
         let me = self.me.as_ref().map(Me::key);
+        // M2: online from sync's presence; only authority's members are
+        // listed, so a bound non-member or a kicked key never shows.
+        let online = self.net.online(view.id).unwrap_or_default();
         let server_id = model::hex_id(view.id.as_bytes());
         let mut out = Vec::new();
         for member in view.members() {
@@ -1398,7 +1421,11 @@ impl Inner {
                 short_code: model::short_code(&member.key),
                 avatar_color: model::color_for(member.key.as_bytes()),
                 // TODO(sync): real presence from connections.
-                presence: if Some(member.key) == me { Presence::Online } else { Presence::Offline },
+                presence: if Some(member.key) == me || online.contains(&member.key) {
+                    Presence::Online
+                } else {
+                    Presence::Offline
+                },
                 is_owner: member.key == view.owner,
                 role: member.role,
                 blocked: blocked.then_some(true),
