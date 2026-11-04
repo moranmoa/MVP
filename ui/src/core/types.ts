@@ -93,7 +93,14 @@ export interface CoreError {
     | 'timeout'
     | 'core-unavailable'
     | 'core-restarted'
-    | 'too-large';
+    | 'too-large'
+    // In-app update (core/api CONFORMANCE "Updates")
+    | 'offline'
+    | 'invalid-update'
+    | 'check-clock'
+    | 'nothing-to-download'
+    | 'nothing-staged'
+    | 'disk-full';
   /** 1-based word positions that were not recognised (restore). */
   positions?: number[];
 }

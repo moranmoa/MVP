@@ -8,6 +8,7 @@
   "common.done": "סיום",
   "common.copy": "העתקה",
   "common.copied": "הועתק",
+  "common.copyFailed": "לא הצלחנו להעתיק. אפשר לסמן את הלינק וללחוץ <kbd>Ctrl+C</kbd>.",
   "common.retry": "לנסות שוב",
   "common.loading": "טוענים…",
   "error.generic": "משהו השתבש. אפשר לנסות שוב.",
@@ -106,6 +107,9 @@
   "mentions.label": "{count, plural, one {אזכור אחד} two {שני אזכורים} other {# אזכורים}}",
   "update.ready": "עדכון מוכן – הפעלה מחדש",
   "update.waitingForCall": "עדכון מוכן – יותקן כשהשיחה תסתיים",
+  "update.installed": "עודכן לגרסה \u2068{version}\u2069",
+  "update.whatsNew": "מה חדש",
+  "update.rolledBack": "העדכון לגרסה \u2068{failed}\u2069 לא עלה כמו שצריך, ולכן חזרה גרסה \u2068{running}\u2069.",
 
   "home.title": "ברוכים הבאים",
   "home.subtitle": "עוד אין לך שרתים. אפשר ליצור שרת חדש או להצטרף בלינק מחברים.",
@@ -147,7 +151,7 @@
   "age.18": "18+",
 
   "server.menu": "אפשרויות שרת",
-  "server.invite": "העתקת לינק ההזמנה",
+  "server.invite": "הצגת לינק ההזמנה",
   "channels.label": "ערוצים",
   "channel.adult": "ערוץ למבוגרים (18+)",
 

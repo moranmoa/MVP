@@ -8,6 +8,7 @@
   "common.done": "Done",
   "common.copy": "Copy",
   "common.copied": "Copied",
+  "common.copyFailed": "Couldn't copy. Select the link and press <kbd>Ctrl+C</kbd>.",
   "common.retry": "Try again",
   "common.loading": "Loading…",
   "error.generic": "Something went wrong. Please try again.",
@@ -106,6 +107,9 @@
   "mentions.label": "{count, plural, one {# mention} other {# mentions}}",
   "update.ready": "Update ready – restart",
   "update.waitingForCall": "Update ready – installs when the call ends",
+  "update.installed": "Updated to version \u2068{version}\u2069",
+  "update.whatsNew": "What’s new",
+  "update.rolledBack": "The update to \u2068{failed}\u2069 didn’t start properly, so version \u2068{running}\u2069 is back.",
 
   "home.title": "Welcome",
   "home.subtitle": "You're not in any servers yet. Create one, or join with a link from friends.",
@@ -147,7 +151,7 @@
   "age.18": "18+",
 
   "server.menu": "Server options",
-  "server.invite": "Copy invite link",
+  "server.invite": "Show the invite link",
   "channels.label": "Channels",
   "channel.adult": "Adults-only channel (18+)",
 
