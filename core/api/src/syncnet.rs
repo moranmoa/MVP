@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use libp2p::Multiaddr;
-use records::{ChannelId, Record, RecordId, Scope, ServerId};
+use records::{ChannelId, PublicKey, Record, RecordId, Scope, ServerId};
 use sync::{log_name, log_of, Access, Node, NodeConfig, NodeEvent, ServerSecret, Store};
 use tokio::runtime::Runtime;
 
@@ -45,6 +45,7 @@ pub fn relay_addr(text: &str) -> Result<Multiaddr, String> {
     }
 }
 type SendStates = Arc<Mutex<HashMap<RecordId, SendState>>>;
+type Online = Arc<Mutex<HashMap<ServerId, BTreeSet<PublicKey>>>>;
 
 /// Send states kept; past this the delivered ones are forgotten.
 const MAX_SEND_STATES: usize = 65_536;
@@ -77,6 +78,8 @@ pub struct SyncNetwork {
     binder: Arc<KeyBinder>,
     /// B6: where each record written here stands.
     send_states: SendStates,
+    /// M2: who of each server is online (bound identities).
+    online: Online,
     hints: Mutex<Option<Receiver<()>>>,
     waker: SyncSender<()>,
 }
@@ -112,6 +115,8 @@ impl SyncNetwork {
         // pending hint is enough) and drained, so the node never blocks.
         let send_states: SendStates = Arc::default();
         let states = send_states.clone();
+        let online: Online = Arc::default();
+        let presence = online.clone();
         let (hint, hints) = std::sync::mpsc::sync_channel(1);
         let waker = hint.clone();
         runtime.spawn(async move {
@@ -121,6 +126,16 @@ impl SyncNetwork {
                     // B6: my messages' send state moves on; a round re-announces.
                     NodeEvent::Sent { id } => advance(&states, id, SendState::Sent),
                     NodeEvent::Delivered { id } => advance(&states, id, SendState::Received),
+                    // M2: who is online; the core filters to members.
+                    NodeEvent::Presence { server, identity, online } => {
+                        let mut all = presence.lock().expect("not poisoned");
+                        let set = all.entry(server).or_default();
+                        if online {
+                            set.insert(identity)
+                        } else {
+                            set.remove(&identity)
+                        }
+                    }
                     _ => false,
                 };
                 if wake {
@@ -136,6 +151,7 @@ impl SyncNetwork {
             fetched: Mutex::new(HashSet::new()),
             binder,
             send_states,
+            online,
             hints: Mutex::new(Some(hints)),
             waker,
         })
@@ -204,6 +220,10 @@ impl Network for SyncNetwork {
 
     fn lock(&self) {
         self.binder.lock();
+    }
+
+    fn online(&self, server: ServerId) -> Option<BTreeSet<PublicKey>> {
+        Some(self.online.lock().expect("not poisoned").get(&server).cloned().unwrap_or_default())
     }
 
     fn send_state(&self, id: RecordId) -> Option<SendState> {
