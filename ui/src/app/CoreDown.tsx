@@ -18,7 +18,7 @@ const TEXT: Record<CoreDownDetail | 'unknown', string> = {
 };
 
 /** Shell actions for this screen (desktop/src/preload.js), when the shell has them. */
-type ShellActions = { retryCore?: () => Promise<void>; openLogsFolder?: () => Promise<boolean> };
+type ShellActions = { retryCore?: () => Promise<boolean>; openLogsFolder?: () => Promise<boolean> };
 export const shellActions = (): ShellActions => (window as { mvs?: ShellActions }).mvs ?? {};
 
 export function CoreDownScreen({ detail, onRetry }: { detail: CoreDownDetail | undefined; onRetry: () => void }) {

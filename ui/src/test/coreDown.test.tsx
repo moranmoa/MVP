@@ -48,7 +48,7 @@ describe('core unavailable', () => {
   });
 
   it('"Try again" asks the shell to restart the core, and the logs button opens its folder', async () => {
-    const retryCore = vi.fn(async () => {});
+    const retryCore = vi.fn(async () => true);
     const openLogsFolder = vi.fn(async () => true);
     (window as { mvs?: unknown }).mvs = { retryCore, openLogsFolder };
     try {
