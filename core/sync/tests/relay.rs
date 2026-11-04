@@ -26,6 +26,16 @@ struct RelayBehaviour {
 /// A relay like `infra/relay` (circuits, identify, `/mvs/kad/1.0.0`), on a
 /// fixed key and port so a restart looks the same to its clients.
 fn start_relay(key: identity::Keypair, port: u16) -> tokio::task::JoinHandle<()> {
+    start_relay_counting(key, port, Arc::default())
+}
+
+/// Also records the destination of every circuit request (accepted or
+/// denied), as the live relay's circuit counters do.
+fn start_relay_counting(
+    key: identity::Keypair,
+    port: u16,
+    circuits: Arc<std::sync::Mutex<Vec<PeerId>>>,
+) -> tokio::task::JoinHandle<()> {
     let mut swarm = SwarmBuilder::with_existing_identity(key)
         .with_tokio()
         .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)
@@ -54,12 +64,16 @@ fn start_relay(key: identity::Keypair, port: u16) -> tokio::task::JoinHandle<()>
     swarm.add_external_address(addr);
     tokio::spawn(async move {
         loop {
-            if let SwarmEvent::Behaviour(RelayBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) =
-                swarm.select_next_some().await
-            {
-                for addr in info.listen_addrs {
-                    swarm.behaviour_mut().kad.add_address(&peer_id, addr);
+            match swarm.select_next_some().await {
+                SwarmEvent::Behaviour(RelayBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
+                    for addr in info.listen_addrs {
+                        swarm.behaviour_mut().kad.add_address(&peer_id, addr);
+                    }
                 }
+                SwarmEvent::Behaviour(RelayBehaviourEvent::Relay(
+                    relay::Event::CircuitReqAccepted { dst_peer_id, .. } | relay::Event::CircuitReqDenied { dst_peer_id, .. },
+                )) => circuits.lock().unwrap().push(dst_peer_id),
+                _ => {}
             }
         }
     })
@@ -173,4 +187,34 @@ async fn a_node_reserves_again_within_a_minute_of_a_relay_restart() {
     let again = reserved_within(&mut reserved, Duration::from_secs(60)).await;
     eprintln!("reserved again {:?} after the relay came back", again - back);
     b.shutdown().await.unwrap();
+}
+
+/// The live relay saw circuits_denied climb: clients kept asking for
+/// circuits to peers whose reservation had ended. A peer that goes offline
+/// stays in the relay's DHT table, so every discovery round (Kademlia's own
+/// lookups included) asked for a circuit to it. Count those requests.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_offline_peer_is_not_asked_for_circuits_again_and_again() {
+    let relay_key = identity::Keypair::generate_ed25519();
+    let port = free_port();
+    let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::from(relay_key.public())).parse().unwrap();
+    let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _relay = start_relay_counting(relay_key, port, circuits.clone());
+
+    // C reserves, so the relay's table has its circuit address; then it goes.
+    let (c, mut c_reserved) = node("gone", &relay).await;
+    reserved_within(&mut c_reserved, Duration::from_secs(20)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await; // identify reaches the relay
+    let gone = c.peer_id();
+    c.shutdown().await.unwrap();
+
+    // A keeps discovering for 30 s.
+    let (a, mut a_reserved) = node("stays", &relay).await;
+    reserved_within(&mut a_reserved, Duration::from_secs(20)).await;
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let asked = circuits.lock().unwrap().iter().filter(|dst| **dst == gone).count();
+    eprintln!("circuit requests to the offline peer in 30 s: {asked}");
+    // A few tries are fine; one every discovery round (3 s) is not.
+    assert!(asked <= 3, "{asked} circuit requests to a peer that went offline");
+    a.shutdown().await.unwrap();
 }
