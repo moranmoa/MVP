@@ -1160,6 +1160,14 @@ impl Task {
         if self.direct.contains_key(&peer) || !self.relayed.contains_key(&peer) {
             return;
         }
+        // Only one side dials (the smaller peer ID; the other accepts): when
+        // both learn each other's addresses at once, two simultaneous dials
+        // to each other's listener left neither connection up (seen on
+        // Windows). The other side still answers our pulls with its addresses.
+        if *self.swarm.local_peer_id() > peer {
+            debug!(%peer, "the peer with the smaller ID dials the direct connection");
+            return;
+        }
         let lan = self.allow_lan && self.is_member(peer);
         let Some(listen_addrs) = self.direct_candidates.get(&peer) else { return };
         let addrs: Vec<Multiaddr> = listen_addrs.iter().filter(|a| dialable(a, lan)).cloned().collect();
@@ -1170,7 +1178,7 @@ impl Task {
         debug!(%peer, lan, ?addrs, "trying a direct connection");
         let opts = DialOpts::peer_id(peer).addresses(addrs).condition(PeerCondition::Always).build();
         if let Err(err) = self.swarm.dial(opts) {
-            debug!(%peer, %err, "direct dial refused");
+            debug!(%peer, ?err, "direct dial refused");
         }
     }
 
@@ -1383,7 +1391,7 @@ impl Task {
                         }
                     }
                 }
-                debug!(%peer, %error, "dial failed");
+                debug!(%peer, ?error, "dial failed");
             }
             SwarmEvent::Behaviour(BehaviourEvent::Kad(kad::Event::OutboundQueryProgressed {
                 result: kad::QueryResult::GetClosestPeers(Ok(ok)),
