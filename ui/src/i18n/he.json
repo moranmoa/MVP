@@ -107,6 +107,9 @@
   "mentions.label": "{count, plural, one {אזכור אחד} two {שני אזכורים} other {# אזכורים}}",
   "update.ready": "עדכון מוכן – הפעלה מחדש",
   "update.waitingForCall": "עדכון מוכן – יותקן כשהשיחה תסתיים",
+  "update.installed": "עודכן לגרסה \u2068{version}\u2069",
+  "update.whatsNew": "מה חדש",
+  "update.rolledBack": "העדכון לגרסה \u2068{failed}\u2069 לא עלה כמו שצריך, ולכן חזרה גרסה \u2068{running}\u2069.",
 
   "home.title": "ברוכים הבאים",
   "home.subtitle": "עוד אין לך שרתים. אפשר ליצור שרת חדש או להצטרף בלינק מחברים.",

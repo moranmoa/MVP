@@ -254,6 +254,13 @@ const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[
   'join.status': cleanJoin,
   'link.open': (p) => ({ link: cleanInviteLink(p?.link) }),
   'update.ready': (u) => ({ version: cleanName(u.version, 32), waitingForCall: u.waitingForCall === true }),
+  // Release notes come from the signed manifest, but they are still shown as
+  // plain text only, clipped like a message.
+  'update.installed': (u) => ({
+    version: cleanName(u.version, 32),
+    notes: typeof u.notes === 'string' ? cleanText(u.notes, 2000, 30).text : null,
+  }),
+  'update.rolledBack': (u) => ({ failed: cleanName(u.failed, 32), running: cleanName(u.running, 32) }),
 };
 
 /** The core as the UI sees it: same API, every peer-supplied value cleaned. */

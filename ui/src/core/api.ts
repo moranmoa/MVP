@@ -98,6 +98,10 @@ export interface CoreEvents {
   'message.updated': Message;
   'join.status': JoinStatus;
   'update.ready': UpdateInfo;
+  /** Once, after a new version committed. `notes` is plain text: render as text only. */
+  'update.installed': { version: string; notes: string | null };
+  /** Once, after the launcher went back to the previous version. */
+  'update.rolledBack': { failed: string; running: string };
   /** e.g. after a kick: the server's encryption was renewed. */
   'notice': { kind: 'encryption-renewed'; serverId: Id };
   /**
