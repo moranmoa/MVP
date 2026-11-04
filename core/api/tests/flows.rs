@@ -638,12 +638,9 @@ fn members_chat_through_the_group_cipher() {
     owner.core.sync_now().unwrap();
     let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
 
-    // No key yet, and a plain member can't make one.
+    // The owner's sync saw the join and keyed the channel for both (a plain
+    // member writing first: `a_joiner_can_write_first_once_the_owner_syncs`).
     guest.core.sync_now().unwrap();
-    assert_eq!(
-        guest.core.send_message(&channel, "first?", None).unwrap_err().code,
-        ErrorCode::NotAllowed
-    );
     // Bad input, and replies (not yet).
     assert_eq!(
         owner.core.send_message(&channel, "  ", None).unwrap_err().code,
@@ -1522,4 +1519,45 @@ fn send_states_survive_a_restart() {
     );
     drop(core);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// v0.2.0 smoke: a member who joins writes first, and the owner never
+/// sends. The owner's sync sees the join and keys the channel for the new
+/// member set, so the joiner can write (and the owner can read it).
+#[test]
+fn a_joiner_can_write_first_once_the_owner_syncs() {
+    use api::crypto::GroupKeysCipher;
+
+    let world = World::new();
+    let open = |words: &str, name: &str| {
+        let cipher = Arc::new(GroupKeysCipher::locked());
+        let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
+        peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        peer.core.update_profile(profile).unwrap();
+        peer
+    };
+    let owner = open(OWNER_WORDS, "Owner");
+    let guest = open(LEGAL, "Guest");
+    let server = owner.core.create_server("Smoke", AgeRestriction::None).unwrap();
+    guest.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    guest.core.sync_now().unwrap();
+    let channel = guest.core.list_channels(&server.id).unwrap().remove(0).id;
+    guest.core.send_message(&channel, "hello from B", None).unwrap();
+    owner.core.sync_now().unwrap();
+    let got = owner.core.get_messages(&channel, 0, 9).unwrap().messages;
+    assert_eq!(got.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(), ["hello from B"]);
+
+    // A second joiner after a key exists gets it too.
+    let third = open(
+        "letter advice cage absurd amount doctor acoustic avoid letter advice cage above",
+        "Third",
+    );
+    third.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    third.core.sync_now().unwrap();
+    third.core.send_message(&channel, "hi from C", None).unwrap();
+    guest.core.sync_now().unwrap();
+    assert_eq!(guest.core.get_message_count(&channel).unwrap(), 2);
 }

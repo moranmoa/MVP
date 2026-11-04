@@ -88,6 +88,9 @@ struct Inner {
     announced: HashMap<ServerId, HashMap<RecordId, Announced>>,
     /// For my messages' send state (B6).
     net: Arc<dyn Network>,
+    /// Who each channel was last keyed for by our own rotation, so a
+    /// moderator re-keys when members join (in memory: once after a restart).
+    keyed_for: HashMap<(ServerId, ChannelId), BTreeSet<PublicKey>>,
 }
 
 pub struct Core {
@@ -134,6 +137,7 @@ impl Core {
             logs: HashMap::new(),
             announced: HashMap::new(),
             net: ports.network.clone(),
+            keyed_for: HashMap::new(),
         };
         if inner.vault.state().map_err(vault_error)? == VaultState::Ready {
             let phrase = inner.vault.open().map_err(vault_error)?;
@@ -1145,6 +1149,7 @@ impl Inner {
             ports.network.publish(record);
         }
         chat::sync_cipher(cipher, server, log);
+        self.keyed_for.insert((server, channel), members.clone());
         Ok(())
     }
 
@@ -1168,7 +1173,18 @@ impl Inner {
         let server_id = model::hex_id(server.as_bytes());
         for channel in self.known(server)? {
             // A probe: an empty plaintext, never sent.
-            if cipher.encrypt(server, channel, b"") != Err(CipherError::RotationRequired) {
+            let probe = cipher.encrypt(server, channel, b"");
+            if probe != Err(CipherError::RotationRequired) {
+                // v0.2.0 smoke: no key yet, or members joined since we keyed it
+                // (unknown after a restart: once). A moderator or above keys the
+                // channel for everyone now, so a joiner can write and read
+                // without waiting for a moderator to send first. A failure only
+                // leaves things as they were: the next round tries again.
+                let stale = self.keyed_for.get(&(server, channel)) != Some(&members);
+                let needed = probe == Err(CipherError::NoKey) || (probe.is_ok() && stale);
+                if may_rotate && needed && members.len() > 1 {
+                    let _ = self.rotate_channel(ports, server, channel, &members, &auth_deps);
+                }
                 continue;
             }
             // Fail closed: a rotation that didn't happen is never announced as
