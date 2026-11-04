@@ -104,7 +104,7 @@ export function ChannelDialog({
               }}
             />
           </label>
-          <p id="channel-name-preview" className="muted small" dir="ltr">
+          <p id="channel-name-preview" className="muted small">
             #<bdi>{preview}</bdi>
           </p>
           {error && (
