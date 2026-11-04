@@ -2,7 +2,7 @@ import { useRef, type CSSProperties, type KeyboardEvent, type ReactNode } from '
 import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
-import { useCore, type Id, type ServerSummary } from '../../core';
+import { isCoreError, useCore, type Id, type ServerSummary } from '../../core';
 import { GearIcon, HomeIcon, PlusIcon, RefreshIcon } from '../../components/icons';
 
 export function ServerRail({
@@ -85,7 +85,8 @@ export function ServerRail({
           <button
             type="button"
             className="update-pill"
-            onClick={() => void core.restartToUpdate()}
+            // Refused in a call (wait for it to end) or with nothing staged (hide).
+            onClick={() => core.restartToUpdate().catch((e) => isCoreError(e) && store.updateRefused(e.code))}
             disabled={update.waitingForCall}
           >
             <RefreshIcon />

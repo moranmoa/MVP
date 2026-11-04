@@ -45,6 +45,10 @@ export interface MockOptions {
   simulateActivity?: boolean;
   /** Announce a ready update after this many ms (undefined = never). */
   updateAfterMs?: number;
+  /** Shortly after start: a new version was installed (with release notes). */
+  updateInstalled?: boolean;
+  /** Shortly after start: the last update failed and the previous version is back. */
+  updateRolledBack?: boolean;
   /** Add members and messages written the way an attacker would (see SECURITY.md). */
   hostile?: boolean;
   /** `getRecoveryWords()` fails, to show the load error state. */
@@ -145,6 +149,21 @@ export class MockCore implements CoreApi {
     if (options.simulateActivity) {
       this.timers.push(setInterval(() => this.simulateIncoming(), 4500));
       this.timers.push(setInterval(() => this.simulatePresence(), 9000));
+    }
+    if (options.updateInstalled) {
+      this.timers.push(
+        setTimeout(
+          () =>
+            this.emit('update.installed', {
+              version: '0.2.0',
+              notes: 'Faster server switching.\nInvite links now include the server secret.\nתיקוני באגים בהודעות.',
+            }),
+          800,
+        ),
+      );
+    }
+    if (options.updateRolledBack) {
+      this.timers.push(setTimeout(() => this.emit('update.rolledBack', { failed: '0.3.0', running: '0.2.0' }), 800));
     }
     if (options.updateAfterMs !== undefined) {
       this.timers.push(

@@ -18,6 +18,8 @@ export * from './types';
  *   ?demo=1          start signed in with sample servers
  *   ?demo=unchecked  same, but recovery words not checked yet
  *   ?update=<ms>     announce a ready update after <ms>
+ *   ?installed=1     a new version was just installed, with release notes
+ *   ?rolledBack=1    the last update failed and the previous version is back
  *   ?fresh=1         forget the stored mock account
  *   ?hostile=1       add attacker-style names and messages (security demo)
  *   ?wordsError=1    showing the recovery words fails (load error state)
@@ -38,6 +40,8 @@ export function createCore(search = typeof location !== 'undefined' ? location.s
     wordsError: params.has('wordsError'),
     bidi: params.has('bidi'),
     updateAfterMs: update !== null ? Number(update) || 0 : 45_000,
+    updateInstalled: params.has('installed'),
+    updateRolledBack: params.has('rolledBack'),
     storage,
   });
 }
