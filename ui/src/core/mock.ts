@@ -55,9 +55,9 @@ export interface MockOptions {
   storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 }
 
-/** Spaces become '-', runs of '-' collapse, at most 32 characters (B11c §4.1). */
+/** Spaces become '-', runs of '-' collapse, at most 32 characters, no '-' at either end (B11c §4.1, as the core). */
 export function normalizeChannelName(raw: string): string {
-  return raw.trim().replace(/\s+/g, '-').replace(/-{2,}/g, '-').slice(0, 32);
+  return raw.trim().replace(/\s+/g, '-').replace(/-{2,}/g, '-').slice(0, 32).replace(/^-|-$/g, '');
 }
 
 const STORAGE_KEY = 'mvp.mock.v1';
