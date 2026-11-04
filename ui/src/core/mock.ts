@@ -49,6 +49,8 @@ export interface MockOptions {
   updateInstalled?: boolean;
   /** Shortly after start: the last update failed and the previous version is back. */
   updateRolledBack?: boolean;
+  /** Act as if in a voice call: restartToUpdate is refused with not-allowed. */
+  inCall?: boolean;
   /** Add members and messages written the way an attacker would (see SECURITY.md). */
   hostile?: boolean;
   /** `getRecoveryWords()` fails, to show the load error state. */
@@ -846,6 +848,7 @@ export class MockCore implements CoreApi {
   }
 
   async restartToUpdate(): Promise<void> {
+    if (this.options.inCall) throw err({ code: 'not-allowed' });
     if (typeof location !== 'undefined') location.reload();
   }
 

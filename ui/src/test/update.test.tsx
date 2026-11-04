@@ -28,7 +28,8 @@ describe('update notes', () => {
     expect(status.textContent).toContain('1.3.0');
     fireEvent.click(screen.getByText('What’s new'));
     const notes = document.querySelector('.update-notes')!;
-    expect(notes.textContent).toBe('<img src=x onerror=alert(1)>\nSecond line');
+    // One line per paragraph, each with its own direction (B17), as plain text.
+    expect([...notes.querySelectorAll('.msg-line')].map((l) => l.textContent)).toEqual(['<img src=x onerror=alert(1)>', 'Second line']);
     expect(notes.querySelector('img')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     expect(screen.queryByText(/Updated to version/)).toBeNull();
@@ -51,12 +52,12 @@ describe('update notes', () => {
     const seen: unknown[] = [];
     core.on('update.installed', (p) => seen.push(p));
     core.on('update.rolledBack', (p) => seen.push(p));
-    handlers.get('update.installed')!({ version: '1.3.0‮evil' + 'x'.repeat(100), notes: 'n'.repeat(5000) });
+    handlers.get('update.installed')!({ version: '1.3.0' + String.fromCharCode(0x202e) + 'evil' + 'x'.repeat(100), notes: 'n'.repeat(5000) });
     handlers.get('update.installed')!({ version: '1.3.0', notes: 42 });
     handlers.get('update.rolledBack')!({ failed: 'y'.repeat(100), running: '1.2.0' });
     const [a, b, c] = seen as [{ version: string; notes: string }, { notes: unknown }, { failed: string; running: string }];
     expect(a.version.length).toBeLessThanOrEqual(32);
-    expect(a.version).not.toContain('‮');
+    expect(a.version).not.toContain(String.fromCharCode(0x202e));
     expect(a.notes.length).toBeLessThanOrEqual(2001);
     expect(b.notes).toBeNull();
     expect(c.failed.length).toBeLessThanOrEqual(32);

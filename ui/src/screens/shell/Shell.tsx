@@ -4,6 +4,7 @@ import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import { phoneQuery, useMediaQuery } from '../../app/media';
 import { useSettings } from '../../app/settings';
+import { paragraphs, useUiDir } from '../../app/textDir';
 import { useCore, useCoreEvent, type Id } from '../../core';
 import { Dialog } from '../../components/common';
 import { AlertIcon, CloseIcon, RefreshIcon, ShieldIcon } from '../../components/icons';
@@ -26,6 +27,7 @@ export function Shell() {
   const servers = useStore(store, (s) => s.servers);
   const notice = useStore(store, (s) => s.notice);
   const updateNote = useStore(store, (s) => s.updateNote);
+  const uiDir = useUiDir();
   const intl = useIntl();
   const { uiScale } = useSettings().settings;
 
@@ -282,8 +284,12 @@ export function Shell() {
                 <summary>
                   <FormattedMessage id="update.whatsNew" />
                 </summary>
-                <p className="update-notes" dir="auto">
-                  {updateNote.notes}
+                <p className="update-notes">
+                  {paragraphs(updateNote.notes, uiDir).map((l, i) => (
+                    <span key={i} className="msg-line user-text" dir={l.dir}>
+                      {l.text}
+                    </span>
+                  ))}
                 </p>
               </details>
             )}
