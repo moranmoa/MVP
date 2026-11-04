@@ -87,6 +87,7 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 - `grantRole(serverId, userId, role: 'admin' | 'moderator' | 'member')` and
   `revokeRole(serverId, userId)`.
 - `Member.role: 'owner' | 'admin' | 'moderator' | 'member'`.
+- `Member.connection: 'direct' | 'relay' | null` (#187): how we reach an online member, a direct connection (LAN) or through the relay; `null` for us and for members who are offline. A change fires `members.changed`.
 - `CoreError.code`: `'bad-request' | 'not-implemented' | 'internal'`.
 - `NoticeKind`: `'rekey-waiting'`, sent when removed members still hold a channel key and only a moderator can renew it. Until a moderator does, sending there answers `not-allowed`.
 - `syncNow()`: test-only until `sync` drives updates. It shouldn't ship in

@@ -180,6 +180,9 @@ pub struct Member {
     pub short_code: String,
     pub avatar_color: String,
     pub presence: Presence,
+    /// #187: how we reach this member while online: `direct` (LAN) or
+    /// `relay`; `null` for us and for members who are offline.
+    pub connection: Option<Connection>,
     pub is_owner: bool,
     /// Rust addition.
     pub role: Role,
@@ -383,4 +386,12 @@ pub struct RemovedMember {
     pub display_name: String,
     /// When it was kicked (the kick's claimed time).
     pub removed_at: Timestamp,
+}
+
+/// #187: a direct connection (LAN, later hole-punched) or through the relay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Connection {
+    Direct,
+    Relay,
 }

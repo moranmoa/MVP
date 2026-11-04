@@ -18,7 +18,7 @@ use zeroize::Zeroizing;
 use crate::chat;
 use crate::db::Db;
 use crate::model::{self, GenesisBody, Log, ServerView};
-use crate::ports::{CipherError, GroupCipher, Network, Ports, SharedSecrets};
+use crate::ports::{CipherError, GroupCipher, Network, Ports, Reach, SharedSecrets};
 use crate::types::*;
 
 const DEFAULT_STORAGE_LIMIT: u64 = 5 * 1024 * 1024 * 1024;
@@ -93,7 +93,7 @@ struct Inner {
     /// For my messages' send state (B6).
     net: Arc<dyn Network>,
     /// The online members last reported per server (M2).
-    presence_seen: HashMap<ServerId, BTreeSet<PublicKey>>,
+    presence_seen: HashMap<ServerId, Reach>,
     /// Who each channel was last keyed for by our own rotation, so a
     /// moderator re-keys when members join (in memory: once after a restart).
     keyed_for: HashMap<(ServerId, ChannelId), BTreeSet<PublicKey>>,
@@ -865,9 +865,11 @@ impl Inner {
     /// (and remembers the new set). Members only: authority's, not kicked.
     fn presence_changed(&mut self, server: ServerId) -> CoreResult<bool> {
         let view = self.view(server)?;
-        let mut online = self.net.online(server).unwrap_or_default();
-        online.retain(|key| view.state.members.contains(key) && !view.is_kicked(key));
-        Ok(self.presence_seen.insert(server, online.clone()) != Some(online))
+        let mut reach = self.net.presence(server).unwrap_or_default();
+        let member = |key: &PublicKey| view.state.members.contains(key) && !view.is_kicked(key);
+        reach.online.retain(member);
+        reach.direct.retain(|key| reach.online.contains(key));
+        Ok(self.presence_seen.insert(server, reach.clone()) != Some(reach))
     }
 
     /// Whether we are a moderator or above in a loaded server.
@@ -1409,7 +1411,7 @@ impl Inner {
         let me = self.me.as_ref().map(Me::key);
         // M2: online from sync's presence; only authority's members are
         // listed, so a bound non-member or a kicked key never shows.
-        let online = self.net.online(view.id).unwrap_or_default();
+        let reach = self.net.presence(view.id).unwrap_or_default();
         let server_id = model::hex_id(view.id.as_bytes());
         let mut out = Vec::new();
         for member in view.members() {
@@ -1421,11 +1423,17 @@ impl Inner {
                 short_code: model::short_code(&member.key),
                 avatar_color: model::color_for(member.key.as_bytes()),
                 // TODO(sync): real presence from connections.
-                presence: if Some(member.key) == me || online.contains(&member.key) {
+                presence: if Some(member.key) == me || reach.online.contains(&member.key) {
                     Presence::Online
                 } else {
                     Presence::Offline
                 },
+                connection: (Some(member.key) != me && reach.online.contains(&member.key)).then(
+                    || match reach.direct.contains(&member.key) {
+                        true => Connection::Direct,
+                        false => Connection::Relay,
+                    },
+                ),
                 is_owner: member.key == view.owner,
                 role: member.role,
                 blocked: blocked.then_some(true),

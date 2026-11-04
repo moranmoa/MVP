@@ -1710,6 +1710,7 @@ fn ten_joins_in_five_seconds_make_at_most_one_rotation() {
 struct PresenceNet {
     inner: Arc<LoopbackNetwork>,
     online: std::sync::Mutex<BTreeSet<PublicKey>>,
+    direct: std::sync::Mutex<BTreeSet<PublicKey>>,
 }
 
 impl Network for PresenceNet {
@@ -1724,6 +1725,11 @@ impl Network for PresenceNet {
     fn online(&self, _: ServerId) -> Option<BTreeSet<PublicKey>> {
         Some(self.online.lock().unwrap().clone())
     }
+
+    fn presence(&self, _: ServerId) -> Option<Reach> {
+        let online = self.online.lock().unwrap().clone();
+        Some(Reach { online, direct: self.direct.lock().unwrap().clone() })
+    }
 }
 
 /// M2: members show online from sync's presence; someone online who isn't
@@ -1731,7 +1737,11 @@ impl Network for PresenceNet {
 #[test]
 fn presence_shows_online_members_only() {
     let world = World::new();
-    let net = Arc::new(PresenceNet { inner: world.network.clone(), online: Default::default() });
+    let net = Arc::new(PresenceNet {
+        inner: world.network.clone(),
+        online: Default::default(),
+        direct: Default::default(),
+    });
     let events = Arc::new(CollectingSink::new());
     let owner = Core::open(
         Config { db_path: None, app_version: "test".into() },
@@ -1767,6 +1777,33 @@ fn presence_shows_online_members_only() {
     assert_eq!(presence(&guest_id), Some(Presence::Online));
     assert_eq!(presence(&hex::encode([0x55; 32])), None, "a non-member shows");
 
+    // #187: online through the relay, then direct; null for us and offline.
+    let connection = |id: &str| {
+        owner
+            .list_members(&server.id)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.id == id)
+            .and_then(|m| m.connection)
+    };
+    let me = owner.get_identity().unwrap().unwrap().id;
+    assert_eq!(connection(&guest_id), Some(Connection::Relay));
+    assert_eq!(connection(&me), None);
+    net.direct.lock().unwrap().insert(key(&guest_id));
+    events.take();
+    owner.sync_now().unwrap();
+    assert!(
+        events.take().iter().any(|e| matches!(e, Event::MembersChanged { .. })),
+        "relay to direct"
+    );
+    assert_eq!(connection(&guest_id), Some(Connection::Direct));
+    net.direct.lock().unwrap().clear();
+    owner.sync_now().unwrap();
+    assert!(
+        events.take().iter().any(|e| matches!(e, Event::MembersChanged { .. })),
+        "direct to relay"
+    );
+
     // Nothing changed: nothing announced. Then the guest goes offline.
     owner.sync_now().unwrap();
     assert!(!events.take().iter().any(|e| matches!(e, Event::MembersChanged { .. })));
@@ -1774,4 +1811,5 @@ fn presence_shows_online_members_only() {
     owner.sync_now().unwrap();
     assert!(events.take().iter().any(|e| matches!(e, Event::MembersChanged { .. })));
     assert_eq!(presence(&guest_id), Some(Presence::Offline));
+    assert_eq!(connection(&guest_id), None, "offline: no connection");
 }
