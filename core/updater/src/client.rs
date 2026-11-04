@@ -23,7 +23,7 @@ use crate::source::{SourceError, UpdateSource};
 use crate::unpack::unpack_zip;
 use crate::{
     store_artifact, Baseline, ClientPolicy, Decision, Error, Freshness, InstallState, SignedManifest, VerifiedManifest,
-    TrustRoot, Version,
+    TrustRoot, TrustRootFile, Version,
 };
 
 /// How long a facade call waits for the launcher to release the lock.
@@ -225,12 +225,33 @@ impl<S: UpdateSource> Updater<S> {
         ClientPolicy::restore(saved.as_deref(), &self.cfg.channel, self.cfg.installed, &self.cfg.baseline).0
     }
 
+    /// The newer of the shipped root and the newest root this client has
+    /// verified (`root.json`). A missing or unreadable file falls back to
+    /// the shipped root, never below it.
+    fn trusted_root(&self) -> TrustRoot {
+        read_state_file(&self.cfg.dirs.root_file())
+            .ok()
+            .flatten()
+            .and_then(|b| serde_json::from_slice::<TrustRootFile>(&b).ok())
+            .and_then(|f| TrustRoot::from_file(&f).ok())
+            .filter(|saved| saved.version() > self.root.version())
+            .unwrap_or_else(|| self.root.clone())
+    }
+
     /// Fetches and verifies; the policy is updated on disk.
     fn fetch_verified(&self, now: u64) -> Result<(Option<VerifiedManifest>, CheckResult), UpdateError> {
+        // Start from the newest root ever verified, so a source that withholds
+        // the rotation files cannot take the client back to a retired key.
+        let start = self.trusted_root();
         let rotations = parse_root_fetch(&self.source.root_updates()?).map_err(UpdateError::InvalidUpdate)?;
-        let chain = self.root.update_chain(&rotations);
+        let chain = start.update_chain(&rotations);
         if let Some(v) = chain.fork_at {
             return Err(UpdateError::InvalidUpdate(Error::InvalidTrustRoot(format!("two rotations to v{v}"))));
+        }
+        if chain.root.version() > start.version() {
+            let _lock = self.lock()?;
+            let json = serde_json::to_vec(&chain.root.to_file()).expect("root serialises");
+            write_atomic(&self.cfg.dirs.root_file(), &json).map_err(io_err)?;
         }
         let fetched = match self.source.manifest(&self.cfg.channel) {
             Ok(bytes) => Some(bytes),
@@ -465,6 +486,7 @@ mod tests {
         manifest: Option<Vec<u8>>,
         payload: Vec<u8>,
         offline: bool,
+        roots: Vec<Vec<u8>>,
         artifact_calls: Mutex<u32>,
     }
 
@@ -479,7 +501,7 @@ mod tests {
             if self.offline {
                 return Err(SourceError::Offline("test".into()));
             }
-            Ok(vec![])
+            Ok(self.roots.clone())
         }
         fn artifact(&self, _v: Version, _p: &str, max_len: u64, out: &mut dyn Write) -> Result<(), SourceError> {
             *self.artifact_calls.lock().unwrap() += 1;
@@ -523,6 +545,10 @@ mod tests {
 
         /// A signed 1.1.0 manifest for `payload`, plus a source serving it.
         fn release(&self, payload: Vec<u8>, unpacked: u64) -> Mock {
+            self.release_by(&self.key, payload, unpacked)
+        }
+
+        fn release_by(&self, signer: &SigningKey, payload: Vec<u8>, unpacked: u64) -> Mock {
             let (sha256, size) = crate::hash_reader(Cursor::new(&payload)).unwrap();
             let mut artifacts = BTreeMap::new();
             artifacts.insert(PLATFORM.to_string(), Artifact { sha256, size, unpacked_bytes: Some(unpacked) });
@@ -539,7 +565,7 @@ mod tests {
                 revoked: Default::default(),
                 notes,
             };
-            let manifest = signed_by(&body, &[&self.key]).to_json().into_bytes();
+            let manifest = signed_by(&body, &[signer]).to_json().into_bytes();
             Mock { manifest: Some(manifest), payload, ..Mock::default() }
         }
 
@@ -649,6 +675,30 @@ mod tests {
         assert!(matches!(w.launch(), Boot::RolledBack { .. }));
         assert_eq!(up.startup_events(), vec![UpdateEvent::RolledBack { failed: v("1.1.0"), running: v("1.0.0") }]);
         assert_eq!(up.startup_events(), vec![]);
+    }
+
+    #[test]
+    fn a_rotation_is_remembered_so_withholding_it_cannot_revive_the_old_key() {
+        let w = World::new("rotate");
+        let new_key = key();
+        let next = TrustRootFile { version: 2, threshold: 1, keys: vec![hex::encode(new_key.verifying_key().to_bytes())] };
+        let mut rotation = crate::SignedRoot::new(&next).unwrap();
+        rotation.sign(&w.key);
+        rotation.sign(&new_key);
+        let (zip, unpacked) = payload();
+
+        // A source with the rotation and a manifest signed by the new key.
+        let mut src = w.release_by(&new_key, zip.clone(), unpacked);
+        src.roots = vec![rotation.to_json().into_bytes()];
+        assert_eq!(w.updater("1.0.0", src).check(NOW).unwrap().status, CheckStatus::Available(v("1.1.0")));
+        assert!(w.dirs.root_file().exists());
+
+        // A source that withholds root-2 and serves a manifest by the retired key.
+        let replay = w.release(zip.clone(), unpacked);
+        assert_eq!(w.updater("1.0.0", replay).check(NOW).unwrap_err().code(), "invalid-update");
+
+        // The new key still works without root-2 being served again.
+        assert!(w.updater("1.0.0", w.release_by(&new_key, zip, unpacked)).check(NOW).is_ok());
     }
 
     #[test]
