@@ -45,6 +45,14 @@ export interface MockOptions {
   simulateActivity?: boolean;
   /** Announce a ready update after this many ms (undefined = never). */
   updateAfterMs?: number;
+  /** Shortly after start: a new version was installed (with release notes). */
+  updateInstalled?: boolean;
+  /** Shortly after start: the last update failed and the previous version is back. */
+  updateRolledBack?: boolean;
+  /** Act as if in a voice call: restartToUpdate is refused with not-allowed. */
+  inCall?: boolean;
+  /** As the desktop shell would: report the core down, for the T8-01 screen. */
+  coreDown?: 'missing' | 'start-failed' | 'crashed' | 'crash-loop' | 'keyring';
   /** Add members and messages written the way an attacker would (see SECURITY.md). */
   hostile?: boolean;
   /** `getRecoveryWords()` fails, to show the load error state. */
@@ -145,6 +153,25 @@ export class MockCore implements CoreApi {
     if (options.simulateActivity) {
       this.timers.push(setInterval(() => this.simulateIncoming(), 4500));
       this.timers.push(setInterval(() => this.simulatePresence(), 9000));
+    }
+    if (options.updateInstalled) {
+      this.timers.push(
+        setTimeout(
+          () =>
+            this.emit('update.installed', {
+              version: '0.2.0',
+              notes: 'Faster server switching.\nInvite links now include the server secret.\nתיקוני באגים בהודעות.',
+            }),
+          800,
+        ),
+      );
+    }
+    if (options.coreDown) {
+      const detail = options.coreDown;
+      this.timers.push(setTimeout(() => this.emit('core.status', { state: 'down', detail }), 300));
+    }
+    if (options.updateRolledBack) {
+      this.timers.push(setTimeout(() => this.emit('update.rolledBack', { failed: '0.3.0', running: '0.2.0' }), 800));
     }
     if (options.updateAfterMs !== undefined) {
       this.timers.push(
@@ -827,6 +854,7 @@ export class MockCore implements CoreApi {
   }
 
   async restartToUpdate(): Promise<void> {
+    if (this.options.inCall) throw err({ code: 'not-allowed' });
     if (typeof location !== 'undefined') location.reload();
   }
 
