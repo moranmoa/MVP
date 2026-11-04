@@ -397,4 +397,31 @@ async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
     assert_eq!(closed, 0, "a bound non-member was dialled at its LAN address");
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
+
+    // "Relay only" (GAP-6) on one side: even two members on one LAN, with
+    // LAN allowed, stay relayed, and that side listens on its circuit only.
+    let relay_key = identity::Keypair::generate_ed25519();
+    let port = free_port();
+    let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::from(relay_key.public())).parse().unwrap();
+    let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _relay = start_relay_counting(relay_key, port, circuits.clone(), true);
+    let a = bound_node("relay-only-a", &relay, 5, true, Arc::new(AcceptAll)).await;
+    a.set_relay_only(true).unwrap();
+    let b = bound_node("relay-only-b", &relay, 6, true, Arc::new(AcceptAll)).await;
+    let ids = [a.peer_id(), b.peer_id()];
+    let start = Instant::now();
+    while !circuits.lock().unwrap().iter().any(|(p, ok)| *ok && ids.contains(p)) {
+        assert!(start.elapsed() < Duration::from_secs(30), "relay-only peers never met through the relay");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let closed = CIRCUITS_CLOSED.lock().unwrap().iter().filter(|p| ids.contains(p)).count();
+    assert_eq!(closed, 0, "a relay-only peer went direct");
+    let listening = a.listen_addrs().await.unwrap();
+    assert!(
+        listening.iter().all(|addr| addr.iter().any(|p| p == libp2p::multiaddr::Protocol::P2pCircuit)),
+        "relay only, yet listening directly: {listening:?}"
+    );
+    a.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
 }

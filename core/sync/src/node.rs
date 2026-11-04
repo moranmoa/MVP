@@ -267,6 +267,7 @@ enum Command {
     Presence { server: ServerId, reply: oneshot::Sender<PresenceState> },
     Peers { reply: oneshot::Sender<Vec<PeerId>> },
     ListenAddrs { reply: oneshot::Sender<Vec<Multiaddr>> },
+    RelayOnly { on: bool },
     #[cfg(test)]
     Served { peer: PeerId, log: String, reply: oneshot::Sender<usize> },
     Prune { id: RecordId, reply: oneshot::Sender<Result<bool>> },
@@ -455,7 +456,7 @@ impl Node {
         let backoff: SharedBackoff =
             Arc::new(Mutex::new(DialBackoff::new(DIAL_BACKOFF_MIN, DIAL_BACKOFF_MAX, MAX_TRACKED_PEERS)));
         let mut swarm = build_swarm(key, config.relay.clone(), backoff.clone()).await?;
-        swarm.listen_on(config.listen.clone())?;
+        let listener = swarm.listen_on(config.listen.clone())?;
         for addr in &config.bootstrap {
             let _ = swarm.dial(DialOpts::unknown_peer_id().address(addr.clone()).build());
         }
@@ -508,6 +509,9 @@ impl Node {
             acks: Acks::new(ACKS_PER_AUTHOR, MAX_ACK_AUTHORS, ACK_TTL),
             soon: HashSet::new(),
             direct_candidates: HashMap::new(),
+            relay_only: false,
+            listen: config.listen.clone(),
+            listener: Some(listener),
             dial_backoff: backoff,
             #[cfg(test)]
             served: HashMap::new(),
@@ -599,6 +603,15 @@ impl Node {
         let (reply, rx) = oneshot::channel();
         self.send(Command::Served { peer, log: log.into(), reply }).unwrap();
         rx.await.unwrap()
+    }
+
+    /// "Relay only" (GAP-6, a user setting): when on, the node stops listening
+    /// for direct connections, never dials or upgrades to a direct one, and
+    /// never shares direct addresses; peers reach it only through the relay,
+    /// and nobody but the relay learns its IP. Connections that are already
+    /// direct stay until they close.
+    pub fn set_relay_only(&self, on: bool) -> Result<()> {
+        self.send(Command::RelayOnly { on })
     }
 
     pub async fn listen_addrs(&self) -> Result<Vec<Multiaddr>> {
@@ -863,6 +876,12 @@ struct Task {
     /// Addresses relayed peers reported (identify): tried for a direct
     /// connection; LAN ones only once the peer is bound (F2).
     direct_candidates: HashMap<PeerId, Vec<Multiaddr>>,
+    /// "Relay only" (GAP-6): no direct listener, no direct dials or upgrades,
+    /// no direct addresses to members. Everything goes through the relay.
+    relay_only: bool,
+    /// The direct listener (`NodeConfig::listen`), removed while relay-only.
+    listen: Multiaddr,
+    listener: Option<ListenerId>,
     /// Peers from the DHT whose dials failed, and when to try them again.
     /// Shared with the swarm's `DialGuard`, which refuses any dial (Kademlia's
     /// included) to a peer still backing off.
@@ -1001,6 +1020,7 @@ impl Task {
             Command::Served { peer, log, reply } => {
                 let _ = reply.send(self.served.get(&(peer, log)).copied().unwrap_or(0));
             }
+            Command::RelayOnly { on } => self.set_relay_only(on),
             Command::ListenAddrs { reply } => {
                 let _ = reply.send(self.swarm.listeners().cloned().collect());
             }
@@ -1136,8 +1156,30 @@ impl Task {
             .any(|((p, server), (_, identity))| *p == peer && gate.may_read(identity, &self.store.control_log(*server)))
     }
 
+    /// "Relay only" on: drop the direct listener (identify then announces
+    /// only our relay circuit), and stop every direct path. Off: listen
+    /// directly again.
+    fn set_relay_only(&mut self, on: bool) {
+        if on == self.relay_only {
+            return;
+        }
+        self.relay_only = on;
+        if on {
+            if let Some(id) = self.listener.take() {
+                self.swarm.remove_listener(id);
+            }
+            self.direct_candidates.clear();
+        } else {
+            match self.swarm.listen_on(self.listen.clone()) {
+                Ok(id) => self.listener = Some(id),
+                Err(err) => warn!(%err, "listening again failed"),
+            }
+        }
+        info!(on, "relay only");
+    }
+
     fn try_direct(&mut self, peer: PeerId) {
-        if self.direct.contains_key(&peer) || !self.relayed.contains_key(&peer) {
+        if self.relay_only || self.direct.contains_key(&peer) || !self.relayed.contains_key(&peer) {
             return;
         }
         let lan = self.allow_lan && self.is_member(peer);
@@ -1374,7 +1416,7 @@ impl Task {
                     }
                     // Peer-supplied addresses: never let them point us into our own LAN.
                     let addrs: Vec<Multiaddr> =
-                        peer.addrs.into_iter().filter(|a| self.reachable(a)).collect();
+                        peer.addrs.into_iter().filter(|a| self.reachable(a) && (!self.relay_only || via_relay(a, &self.relay_addr))).collect();
                     if addrs.is_empty() {
                         continue;
                     }
@@ -1465,6 +1507,7 @@ impl Task {
             _ => None,
         };
         let allow_lan = self.allow_lan;
+        let relay_only = self.relay_only;
         let mine: Vec<Multiaddr> = direct_candidates_of(self.swarm.listeners().cloned().collect());
         let store = self.reader.clone();
         let answers = self.answers.clone();
@@ -1480,7 +1523,7 @@ impl Task {
             for_members_only(&mut response, ours, &acks, &store);
             // Our direct (LAN) addresses go only where our binding went: to a
             // member (F2; identify announces global ones only).
-            if response.binding.is_some() && allow_lan {
+            if response.binding.is_some() && allow_lan && !relay_only {
                 response.direct_addrs = mine.iter().map(|a| ByteBuf::from(a.to_vec())).collect();
             }
             let _ = answers.send((peer, channel, response, max_bytes, ids, log));
