@@ -23,6 +23,7 @@ on:
     paths:
       - .github/workflows/release.yml
       - .github/scripts/collect-release.sh
+      - .github/scripts/write-relay-config.mjs
       - .github/scripts/manifest-body.mjs
       - desktop/package.json
       - desktop/package-lock.json
@@ -173,23 +174,29 @@ jobs:
       # contains the owner's domain. Without it the app runs offline.
       # Only a tag build reads it: pull-request dry runs (public artifacts on
       # a public repo) always get {}, and the dry-run job asserts that.
+      #
+      # MSYS2_ENV_CONV_EXCL / MSYS_NO_PATHCONV: on the Windows runner, Git Bash
+      # would otherwise rewrite "/dns4/..." into "C:/Program Files/Git/dns4/..."
+      # before node.exe sees it (this broke the first v0.2.0 tag build).
+      - name: Relay config survives this runner's shell (self-test, dry runs)
+        if: github.event_name != 'push'
+        env:
+          RELAY: /dns4/relay.example.invalid/tcp/443/wss/p2p/12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc
+          MSYS2_ENV_CONV_EXCL: RELAY
+          MSYS_NO_PATHCONV: "1"
+        run: |
+          node .github/scripts/write-relay-config.mjs "$RUNNER_TEMP/relay-selftest.json"
+          want='{"relay":"/dns4/relay.example.invalid/tcp/443/wss/p2p/12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc"}'
+          got=$(cat "$RUNNER_TEMP/relay-selftest.json")
+          [ "$got" = "$want" ] || { echo "::error::relay config was altered on the way: $got"; exit 1; }
+          echo "ok: the relay address reaches the config unchanged"
       - name: Build-time config (relay)
         env:
           RELAY: ${{ github.event_name == 'push' && vars.MVS_RELAY_ADDR || '' }}
+          MSYS2_ENV_CONV_EXCL: RELAY
+          MSYS_NO_PATHCONV: "1"
         run: |
-          node -e '
-            const relay = process.env.RELAY || "";
-            if (relay && (!relay.startsWith("/") || /\s/.test(relay) || relay.length > 512)) {
-              console.error("::error::MVS_RELAY_ADDR is not a multiaddr"); process.exit(1);
-            }
-            // The relay must be pinned by its peer ID: without /p2p/<id>, Noise
-            // would accept whoever answers at that address (behind Cloudflare).
-            if (relay && !/\/p2p\/[1-9A-HJ-NP-Za-km-z]{46,60}$/.test(relay)) {
-              console.error("::error::MVS_RELAY_ADDR must end in /p2p/<relay peer id>"); process.exit(1);
-            }
-            require("fs").writeFileSync("desktop/build/mvs-config.json", JSON.stringify(relay ? { relay } : {}));
-            console.log(relay ? "relay configured" : "::warning::no relay address in this build: the app will run offline");
-          '
+          node .github/scripts/write-relay-config.mjs desktop/build/mvs-config.json
           if [ "$GITHUB_EVENT_NAME" != push ] && [ "$(cat desktop/build/mvs-config.json)" != "{}" ]; then
             echo "::error::a non-tag build must not carry a relay address"; exit 1
           fi
