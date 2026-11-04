@@ -80,3 +80,10 @@ test('joinServer happens only when the UI calls it (the user pressed Join)', asy
   await page.evaluate((link) => window.mvs.invoke('joinServer', [link]), A);
   assert.deepEqual(joins(), [A]);
 });
+
+test('the page gets the core status at load, and its change to up (T8-01)', async () => {
+  const first = await page.evaluate(() => window.__status[0]);
+  assert.ok(first && ['starting', 'up'].includes(first.state), JSON.stringify(first));
+  await page.evaluate(() => window.mvs.invoke('getAppInfo', []));
+  assert.ok(await until(async () => (await page.evaluate(() => window.__status.at(-1)?.state)) === 'up'), 'no core.status up');
+});

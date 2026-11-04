@@ -23,6 +23,7 @@ import type {
   StorageUsage,
   UpdateChannel,
   UpdateInfo,
+  CoreStatus,
 } from './types';
 
 export interface CoreCommands {
@@ -110,6 +111,8 @@ export interface CoreEvents {
    * when the person presses Join; nothing joins on its own.
    */
   'link.open': { link: string };
+  /** Desktop shell (T8-01): sent on every change and on every page load. */
+  'core.status': CoreStatus;
 }
 
 export type CoreEventName = keyof CoreEvents;

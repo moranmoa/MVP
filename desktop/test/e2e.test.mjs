@@ -91,7 +91,7 @@ test('permissions are refused', async () => {
 
 test('the page sees only copyText, invoke and onEvent', async () => {
   const keys = await page.evaluate(() => Object.keys(window.mvs).sort());
-  assert.deepEqual(keys, ['copyText', 'invoke', 'onEvent']);
+  assert.deepEqual(keys, ['copyText', 'invoke', 'onEvent', 'openLogsFolder', 'retryCore']);
   assert.equal(await page.evaluate(() => typeof window.ipcRenderer), 'undefined');
 });
 
@@ -126,7 +126,9 @@ test('core events reach the page', async () => {
   const got = await page.evaluate(
     () =>
       new Promise((resolve) => {
+        // The shell's own core.status may come first; wait for the core's event.
         const off = window.mvs.onEvent((name, payload) => {
+          if (name !== 'join.status') return;
           off();
           resolve([name, payload]);
         });
@@ -134,4 +136,15 @@ test('core events reach the page', async () => {
       }),
   );
   assert.deepEqual(got, ['join.status', { link: 'mvs://test', state: 'searching' }]);
+});
+
+test('retryCore restarts the core, at most once in 5 s; the log file exists (T8-01)', async () => {
+  assert.equal(await page.evaluate(() => window.mvs.retryCore()), true);
+  assert.equal(await page.evaluate(() => window.mvs.retryCore()), false, 'second try within 5 s is refused');
+  // The fresh core answers again.
+  const res = await page.evaluate(() => window.mvs.invoke('getAppInfo', []));
+  assert.ok(res.ok, JSON.stringify(res));
+  const dir = await app.evaluate(({ app: a }) => a.getPath('logs'));
+  const { readdirSync } = await import('node:fs');
+  assert.ok(readdirSync(dir).includes('mvs.log'), 'mvs.log in the logs folder');
 });

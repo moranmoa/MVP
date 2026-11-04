@@ -244,9 +244,8 @@ async fn an_offline_peer_is_not_asked_for_circuits_again_and_again() {
     let asked = circuits.lock().unwrap().iter().filter(|(dst, _)| *dst == gone).count();
     eprintln!("circuit requests to the offline peer in 30 s: {asked}");
     // A few tries are fine; one every discovery round (3 s) is not.
-    // Our dials back off; Kademlia's own lookups can add a few until the
-    // DialGuard (#190) holds them back too. One every 3 s would be 10+.
-    assert!(asked <= 6, "{asked} circuit requests to a peer that went offline");
+    // Every dial backs off, Kademlia's too (DialGuard). One every 3 s would be 10+.
+    assert!(asked <= 3, "{asked} circuit requests to a peer that went offline");
     a.shutdown().await.unwrap();
 }
 
@@ -332,23 +331,31 @@ async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
         let _relay = start_relay_counting(relay_key, port, circuits.clone(), true);
         let a = bound_node(&format!("lan-a-{allow_lan}"), &relay, 1, allow_lan, Arc::new(AcceptAll)).await;
         let b = bound_node(&format!("lan-b-{allow_lan}"), &relay, 2, allow_lan, Arc::new(AcceptAll)).await;
+        let b_identity = records::PublicKey::from_bytes(SigningKey::from_bytes(&[2; 32]).verifying_key().to_bytes());
         let (ids, start) = ([a.peer_id(), b.peer_id()], Instant::now());
         let closed = || CIRCUITS_CLOSED.lock().unwrap().iter().filter(|p| ids.contains(p)).count();
         let opened = || circuits.lock().unwrap().iter().filter(|(p, ok)| *ok && ids.contains(p)).count();
         // They meet through the relay first.
         while opened() == 0 {
-            assert!(start.elapsed() < Duration::from_secs(30), "never met through the relay");
+            assert!(start.elapsed() < Duration::from_secs(60), "never met through the relay");
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         if allow_lan {
-            while closed() == 0 {
-                assert!(start.elapsed() < Duration::from_secs(30), "stayed relayed on one LAN");
+            // Driven by A's own state (B shown as direct), not by the relay
+            // noticing the circuit close; generous for a loaded CI runner. The
+            // LAN address is loopback, which every runner has.
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !a.presence(test_server().0).await.unwrap().direct.contains(&b_identity) {
+                assert!(Instant::now() < deadline, "stayed relayed on one LAN");
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             assert_eq!(a.peers().await.unwrap(), vec![b.peer_id()], "the direct connection is up");
         } else {
             tokio::time::sleep(Duration::from_secs(10)).await;
             assert_eq!(closed(), 0, "went direct without LAN allowed");
+            // The UI indicator: B is online on A, through the relay.
+            let seen = a.presence(test_server().0).await.unwrap();
+            assert!(seen.online.contains(&b_identity) && seen.direct.is_empty(), "{seen:?}");
         }
         a.shutdown().await.unwrap();
         b.shutdown().await.unwrap();

@@ -6,13 +6,15 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 const listeners = new Set();
-// A `link.open` (an mvs:// invite) can arrive before the UI has subscribed,
-// e.g. on the first launch; the latest one is kept for the first subscriber.
-let pendingLink = null;
+// Shell events can arrive before the UI has subscribed: `link.open` (an
+// mvs:// invite, e.g. on the first launch) and `core.status` (sent at load).
+// The latest of each is kept for the first subscriber.
+const KEPT = new Set(['link.open', 'core.status']);
+const pending = new Map();
 
 ipcRenderer.on('core:event', (_e, name, payload) => {
-  if (name === 'link.open' && listeners.size === 0) {
-    pendingLink = payload;
+  if (KEPT.has(name) && listeners.size === 0) {
+    pending.set(name, payload);
     return;
   }
   for (const cb of listeners) cb(name, payload);
@@ -28,14 +30,15 @@ contextBridge.exposeInMainWorld('mvs', {
    */
   /** Puts plain text on the clipboard (e.g. an invite link). Resolves true if it did. */
   copyText: (text) => ipcRenderer.invoke('clipboard:write', String(text)),
+  /** "Core unavailable" screen: start the core again now. Status follows as core.status. */
+  retryCore: () => ipcRenderer.invoke('core:retry'),
+  /** Opens the shell's logs folder (no words, no message content). Resolves true if it did. */
+  openLogsFolder: () => ipcRenderer.invoke('logs:open'),
   onEvent: (callback) => {
     if (typeof callback !== 'function') return () => {};
     listeners.add(callback);
-    if (pendingLink) {
-      const p = pendingLink;
-      pendingLink = null;
-      setTimeout(() => callback('link.open', p), 0);
-    }
+    for (const [name, payload] of pending) setTimeout(() => callback(name, payload), 0);
+    pending.clear();
     return () => listeners.delete(callback);
   },
 });

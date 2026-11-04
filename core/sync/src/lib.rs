@@ -26,6 +26,7 @@ pub mod access;
 pub mod node;
 pub mod store;
 
+mod announce;
 mod keyfile;
 mod limits;
 mod presence;
