@@ -1916,7 +1916,10 @@ fn dialable(addr: &Multiaddr, allow_lan: bool) -> bool {
 /// direct ones only (no circuits), at most [`MAX_DIRECT_CANDIDATES`], so a
 /// peer can't make us dial dozens of addresses.
 fn direct_candidates_of(listen_addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
-    listen_addrs.into_iter().filter(|a| dialable(a, true)).take(MAX_DIRECT_CANDIDATES).collect()
+    let specified = |a: &Multiaddr| {
+        !a.iter().any(|p| matches!(p, Protocol::Ip4(ip) if ip.is_unspecified()) || matches!(p, Protocol::Ip6(ip) if ip.is_unspecified()))
+    };
+    listen_addrs.into_iter().filter(|a| dialable(a, true) && specified(a)).take(MAX_DIRECT_CANDIDATES).collect()
 }
 
 /// Whether `addr` is a circuit through our configured relay: everything
@@ -2231,9 +2234,35 @@ mod tests {
         let mut addrs: Vec<Multiaddr> =
             (0..30).map(|i| format!("/ip4/192.168.1.{i}/tcp/4001").parse().unwrap()).collect();
         addrs.insert(0, format!("/ip4/1.2.3.4/tcp/1/p2p/{}/p2p-circuit", PeerId::random()).parse().unwrap());
+        addrs.insert(0, "/ip4/0.0.0.0/tcp/4001".parse().unwrap());
         let kept = direct_candidates_of(addrs);
         assert_eq!(kept.len(), MAX_DIRECT_CANDIDATES);
         assert!(kept.iter().all(|a| !a.iter().any(|p| p == Protocol::P2pCircuit)));
+        assert!(!kept.iter().any(|a| a.to_string().starts_with("/ip4/0.0.0.0")));
+    }
+
+    /// What we send members as our direct addresses comes from
+    /// `swarm.listeners()`: listening on 0.0.0.0 gives one address per
+    /// interface there, never 0.0.0.0 itself.
+    #[tokio::test]
+    async fn listening_on_all_interfaces_lists_each_interface() {
+        let dir = std::env::temp_dir().join(format!("sync-listen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = NodeConfig {
+            relay: format!("/ip4/127.0.0.1/tcp/9/p2p/{}", PeerId::random()).parse().unwrap(),
+            data_dir: dir,
+            logs: Vec::new(),
+            authorizer: Arc::new(AcceptAll),
+            listen: "/ip4/0.0.0.0/tcp/0".parse().unwrap(),
+            bootstrap: Vec::new(),
+            allow_lan: true,
+        };
+        let (node, _events) = Node::start(config).await.unwrap();
+        port_of(&node).await;
+        let addrs = node.listen_addrs().await.unwrap();
+        assert!(addrs.iter().any(|a| a.to_string().starts_with("/ip4/127.0.0.1/")), "{addrs:?}");
+        assert!(!addrs.iter().any(|a| a.to_string().starts_with("/ip4/0.0.0.0/")), "{addrs:?}");
+        node.shutdown().await.unwrap();
     }
 
     /// Only a circuit through exactly our configured relay address passes;
