@@ -83,8 +83,6 @@ function serveCoreIpc() {
     if (!frame || frame !== event.sender.mainFrame || !sec.isInternalUrl(frame.url)) return { error: { code: 'not-allowed' } };
     const req = toRequest(cmd, args);
     if (req.error) return { error: { code: req.error } };
-    // Restarting into a new version goes through the launcher, which starts
-    // the staged version; the core is not involved.
     if (!core) return { error: { code: 'core-unavailable' } };
     // "Restart to update": the core's applyUpdate (refused during a call),
     // then a relaunch through the launcher, which starts the staged version.
