@@ -104,8 +104,12 @@ function serveCoreIpc() {
     const frame = event.senderFrame;
     return !!frame && frame === event.sender.mainFrame && sec.isInternalUrl(frame.url);
   };
+  let lastRetry = 0;
   ipcMain.handle('core:retry', (event) => {
     if (!fromUs(event)) return false;
+    // At most once every 5 s, whatever the page does.
+    if (Date.now() - lastRetry < 5000) return false;
+    lastRetry = Date.now();
     if (core) return core.retryNow();
     startCore(); // the binary may have been put back since
     return !!core;

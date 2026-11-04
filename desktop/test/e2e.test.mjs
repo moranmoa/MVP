@@ -138,8 +138,12 @@ test('core events reach the page', async () => {
   assert.deepEqual(got, ['join.status', { link: 'mvs://test', state: 'searching' }]);
 });
 
-test('retryCore with the core up does nothing; the log file exists (T8-01)', async () => {
-  assert.equal(await page.evaluate(() => window.mvs.retryCore()), false);
+test('retryCore restarts the core, at most once in 5 s; the log file exists (T8-01)', async () => {
+  assert.equal(await page.evaluate(() => window.mvs.retryCore()), true);
+  assert.equal(await page.evaluate(() => window.mvs.retryCore()), false, 'second try within 5 s is refused');
+  // The fresh core answers again.
+  const res = await page.evaluate(() => window.mvs.invoke('getAppInfo', []));
+  assert.ok(res.ok, JSON.stringify(res));
   const dir = await app.evaluate(({ app: a }) => a.getPath('logs'));
   const { readdirSync } = await import('node:fs');
   assert.ok(readdirSync(dir).includes('mvs.log'), 'mvs.log in the logs folder');

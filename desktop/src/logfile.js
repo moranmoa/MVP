@@ -10,6 +10,19 @@ const path = require('node:path');
 
 const MAX_BYTES = 1024 * 1024;
 
+/** Nothing that says where someone is or who they are reaches the file. */
+function redact(text) {
+  return text
+    .replace(/\b[0-9a-f]{64}\b/gi, '<id>')
+    .replace(/\b(?:12D3KooW|Qm)[1-9A-HJ-NP-Za-km-z]{40,60}\b/g, '<peer>')
+    .replace(/\/(dns|dns4|dns6|dnsaddr)\/[^/\s]+/g, '/$1/<host>')
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '<ip>')
+    // IPv6: the full eight-group form, and any compressed form with "::"
+    // (not plain "12:30:45" clock times).
+    .replace(/\b(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}\b/gi, '<ip>')
+    .replace(/(?:\b[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})?::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6}\b)?/gi, '<ip>');
+}
+
 function createLog(dir, { maxBytes = MAX_BYTES } = {}) {
   const file = path.join(dir, 'mvs.log');
   try {
@@ -19,7 +32,7 @@ function createLog(dir, { maxBytes = MAX_BYTES } = {}) {
   }
   return function log(line) {
     try {
-      const text = `${new Date().toISOString()} ${String(line).replace(/[\r\n]+/g, ' ').slice(0, 2000)}\n`;
+      const text = `${new Date().toISOString()} ${redact(String(line).replace(/[\r\n]+/g, ' ')).slice(0, 2000)}\n`;
       if (fs.existsSync(file) && fs.statSync(file).size + text.length > maxBytes) fs.renameSync(file, `${file}.1`);
       fs.appendFileSync(file, text, { mode: 0o600 });
     } catch {
@@ -28,4 +41,4 @@ function createLog(dir, { maxBytes = MAX_BYTES } = {}) {
   };
 }
 
-module.exports = { createLog, MAX_BYTES };
+module.exports = { createLog, redact, MAX_BYTES };

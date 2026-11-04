@@ -183,9 +183,6 @@ test('retryNow: from down, start again at once with a fresh backoff', async () =
   assert.deepEqual(statuses.at(-1), { state: 'starting' });
   await until(() => statuses.at(-1).state === 'down');
   core.stop();
-  const running = start().core;
-  assert.equal(running.retryNow(), false, 'nothing to do while it runs');
-  running.stop();
 });
 
 test('the log file is capped, rotates to .1, and keeps one line per entry', () => {
@@ -197,4 +194,29 @@ test('the log file is capped, rotates to .1, and keeps one line per entry', () =
   assert.ok(fs.statSync(path.join(dir, 'mvs.log')).size <= 300);
   assert.ok(fs.existsSync(path.join(dir, 'mvs.log.1')));
   assert.ok(!/with a break\n(?!\d)/.test(text.replace(/\n$/, '')) || text.split('\n').every((l) => !l || /^\d{4}-/.test(l)));
+});
+
+test('retryNow also replaces a running core (up but failing, QA-20)', async () => {
+  const statuses = [];
+  const { core } = start({ onStatus: (s) => statuses.push(s) });
+  await core.request('getIdentity', {});
+  const first = core.child;
+  assert.equal(core.retryNow(), true);
+  assert.notEqual(core.child, first);
+  assert.deepEqual(statuses.at(-1), { state: 'starting' });
+  assert.deepEqual(await core.request('getIdentity', {}), { ok: {} });
+  assert.deepEqual(statuses.at(-1), { state: 'up' });
+  core.stop();
+});
+
+test('the log file never holds addresses, peer IDs or 64-hex IDs', () => {
+  const { redact } = require('../src/logfile');
+  const peer = '12D3KooW' + 'A'.repeat(44);
+  const line = `dial /dns4/relay.example.org/tcp/443/wss/p2p/${peer} from 192.0.2.7 and 2001:db8::1:2:3 for mvs://join/${'a'.repeat(64)}/${'b'.repeat(64)}`;
+  const out = redact(line);
+  for (const leak of ['relay.example.org', peer, '192.0.2.7', '2001:db8', 'a'.repeat(64)]) assert.ok(!out.includes(leak), leak);
+  assert.match(out, /\/dns4\/<host>/);
+  assert.match(out, /<peer>/);
+  assert.match(out, /<ip>/);
+  assert.match(out, /<id>/);
 });
