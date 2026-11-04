@@ -1971,7 +1971,27 @@ fn direct_candidates_of(listen_addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
     let specified = |a: &Multiaddr| {
         !a.iter().any(|p| matches!(p, Protocol::Ip4(ip) if ip.is_unspecified()) || matches!(p, Protocol::Ip6(ip) if ip.is_unspecified()))
     };
-    listen_addrs.into_iter().filter(|a| dialable(a, true) && specified(a)).take(MAX_DIRECT_CANDIDATES).collect()
+    // Machines with VPN, Hyper-V or Docker adapters list many addresses:
+    // drop link-local ones (never routable between hosts), and try private
+    // LAN addresses first, loopback last, before the cap.
+    let link_local = |a: &Multiaddr| {
+        a.iter().any(|p| match p {
+            Protocol::Ip4(ip) => ip.is_link_local(),
+            Protocol::Ip6(ip) => (ip.segments()[0] & 0xffc0) == 0xfe80,
+            _ => false,
+        })
+    };
+    let rank = |a: &Multiaddr| match a.iter().next() {
+        Some(Protocol::Ip4(ip)) if ip.is_private() => 0,
+        Some(Protocol::Ip4(ip)) if ip.is_loopback() => 2,
+        Some(Protocol::Ip6(ip)) if ip.is_loopback() => 2,
+        _ => 1,
+    };
+    let mut addrs: Vec<Multiaddr> =
+        listen_addrs.into_iter().filter(|a| dialable(a, true) && specified(a) && !link_local(a)).collect();
+    addrs.sort_by_key(rank);
+    addrs.truncate(MAX_DIRECT_CANDIDATES);
+    addrs
 }
 
 /// Whether `addr` is a circuit through our configured relay: everything
@@ -2297,6 +2317,25 @@ mod tests {
             // It's the one dialled by the smaller peer ID.
             assert_eq!(a_keeps_x, a < b);
         }
+    }
+
+    /// A Windows PC with Hyper-V, Docker and VPN adapters: link-local ones
+    /// are dropped, and the real LAN address survives the cap, ahead of the
+    /// rest, with loopback last.
+    #[test]
+    fn lan_addresses_come_first_and_link_local_ones_never() {
+        let mut addrs: Vec<Multiaddr> = Vec::new();
+        for i in 0..10 {
+            addrs.push(format!("/ip4/169.254.{i}.1/tcp/4001").parse().unwrap());
+            addrs.push(format!("/ip4/100.64.0.{i}/tcp/4001").parse().unwrap()); // CGNAT / VPN
+        }
+        addrs.push("/ip6/fe80::1/tcp/4001".parse().unwrap());
+        addrs.push("/ip4/127.0.0.1/tcp/4001".parse().unwrap());
+        addrs.push("/ip4/192.168.1.20/tcp/4001".parse().unwrap()); // the real LAN, listed last
+        let kept = direct_candidates_of(addrs);
+        assert_eq!(kept.len(), MAX_DIRECT_CANDIDATES);
+        assert_eq!(kept[0].to_string(), "/ip4/192.168.1.20/tcp/4001");
+        assert!(!kept.iter().any(|a| a.to_string().contains("169.254") || a.to_string().contains("fe80")));
     }
 
     /// F2: a peer reporting dozens of addresses gets at most 8 tried, and

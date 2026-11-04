@@ -346,7 +346,10 @@ async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
             // LAN address is loopback, which every runner has.
             let deadline = Instant::now() + Duration::from_secs(60);
             while !a.presence(test_server().0).await.unwrap().direct.contains(&b_identity) {
-                assert!(Instant::now() < deadline, "stayed relayed on one LAN");
+                if Instant::now() >= deadline {
+                    let (la, lb) = (a.listen_addrs().await.unwrap(), b.listen_addrs().await.unwrap());
+                    panic!("stayed relayed on one LAN; A listens on {la:?}, B on {lb:?}, A has {:?}", a.peers().await.unwrap());
+                }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             assert_eq!(a.peers().await.unwrap(), vec![b.peer_id()], "the direct connection is up");
