@@ -125,7 +125,7 @@ QA לא יכול להריץ את ה-UI על שני מחשבים אמיתיים. 
 | `manifest-body.json` | קריאה | `version` 0.2.1, ערוץ `alpha`. ה-sha256 של linux tar.gz ושל windows zip תואמים ל-`SHA256SUMS`. תוקף 14 יום (עד 2026-11-18) |
 | חבילת Linux | פתיחת `tar.gz` | יש `resources/mvs-core`, `resources/app.asar` ו-`resources/mvs-config.json`. ה-relay בפורמט `/dns4/<relay-domain>/tcp/443/wss/p2p/<peer id>`, כלומר ה-peer ID נעוץ (#114) |
 | core: שני משתמשים דרך relay | `core/api/tests/two_peers.sh` ב-`fe8e4be` (= `v0.2.1`), עם relay זמני ב-Docker (לא ה-relay החי) | **3/3 עברו** (14.5 ש'): `a_joiner_writes_first_through_a_relay` (R4 ברמת ה-core), `the_background_sync_delivers_without_sync_now` (R6), `two_users_chat_through_a_relay` (R3 + הודעות בשני הכיוונים) |
-| `mvs-core` מהחבילה, בלי ממשק | הרצת `resources/mvs-core --data-dir` ב-`debian:bookworm-slim` בלי רשת | נעצר עם `can't open the core: Internal`, כנראה כי אין keyring של המערכת (Secret Service) בקונטיינר. בשולחן עבודה רגיל זה לא אמור לקרות, אבל ההודעה לא אומרת מה חסר → **QA-20** (Low) |
+| `mvs-core` מהחבילה, בלי ממשק | הרצת `resources/mvs-core --data-dir` ב-`debian:bookworm-slim` בלי רשת | נעצר עם `can't open the core: Internal`, כנראה כי אין keyring של המערכת (Secret Service) בקונטיינר. בשולחן עבודה רגיל זה לא אמור לקרות, אבל ההודעה לא אומרת מה חסר → **QA-20** (Medium: ב-Linux בלי keyring האפליקציה לא עולה בכלל) |
 
 **מסקנה:** אין סימן לרגרסיה בבנייה עצמה. התיקונים של 0.2.1 (המצטרף כותב ראשון, השלמה מ-offline) עוברים ברמת ה-core דרך relay אמיתי.
 עדיין לא נבדקו: R1 (התקנה מעל 0.2.0 עם נתונים אמיתיים), R2 (העתקה בחלון Windows המותקן) וזמני הרשת האמיתיים. הם מחכים להרצה של הבעלים.
