@@ -322,6 +322,11 @@ async fn bound_node(name: &str, relay: &Multiaddr, key: u8, allow_lan: bool, gat
 /// "LAN allowed" they stay relayed.
 #[tokio::test(flavor = "multi_thread")]
 async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
+    // Shown only if the test fails: what was offered, tried and refused.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("sync=debug,libp2p_swarm=debug,libp2p_tcp=debug")
+        .with_test_writer()
+        .try_init();
     for allow_lan in [true, false] {
         let relay_key = identity::Keypair::generate_ed25519();
         let port = free_port();
@@ -346,7 +351,10 @@ async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
             // LAN address is loopback, which every runner has.
             let deadline = Instant::now() + Duration::from_secs(60);
             while !a.presence(test_server().0).await.unwrap().direct.contains(&b_identity) {
-                assert!(Instant::now() < deadline, "stayed relayed on one LAN");
+                if Instant::now() >= deadline {
+                    let (la, lb) = (a.listen_addrs().await.unwrap(), b.listen_addrs().await.unwrap());
+                    panic!("stayed relayed on one LAN; A listens on {la:?}, B on {lb:?}, A has {:?}", a.peers().await.unwrap());
+                }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             assert_eq!(a.peers().await.unwrap(), vec![b.peer_id()], "the direct connection is up");
