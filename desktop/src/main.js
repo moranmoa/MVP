@@ -43,10 +43,25 @@ const CORE_EXE = app.isPackaged
   ? path.join(process.resourcesPath, process.platform === 'win32' ? 'mvs-core.exe' : 'mvs-core')
   : process.env.MVS_CORE_PATH;
 let core = null;
+/** Where the core stands, for the "core unavailable" screen (T8-01). */
+let coreStatus = { state: 'starting' };
+
+/** Sends a shell event (not from the core) to our own windows. */
+function toPages(name, payload) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (sec.isInternalUrl(win.webContents.getURL())) win.webContents.send('core:event', name, payload);
+  }
+}
+
+function setCoreStatus(status) {
+  coreStatus = status;
+  toPages('core.status', status);
+}
 
 function startCore() {
   if (!CORE_EXE || !path.isAbsolute(CORE_EXE) || !fs.existsSync(CORE_EXE)) {
     console.warn('mvs-core not found; core commands answer core-unavailable');
+    setCoreStatus({ state: 'down', detail: 'missing' });
     return;
   }
   // The core's folder is the user's only (0700); on Windows the per-user
@@ -59,11 +74,8 @@ function startCore() {
     dataDir,
     // Without a relay the core runs offline (no invites, no chat with others).
     relay: relayFor({ packaged: app.isPackaged, resourcesPath: process.resourcesPath }),
-    onEvent: (name, payload) => {
-      for (const win of BrowserWindow.getAllWindows()) {
-        if (sec.isInternalUrl(win.webContents.getURL())) win.webContents.send('core:event', name, payload);
-      }
-    },
+    onEvent: toPages,
+    onStatus: setCoreStatus,
     // stderr only (counts and error kinds); stdout is never logged.
     log: (line) => console.log(line),
   }).start();
@@ -77,7 +89,7 @@ function serveCoreIpc() {
     if (!frame || frame !== event.sender.mainFrame || !sec.isInternalUrl(frame.url)) return { error: { code: 'not-allowed' } };
     const req = toRequest(cmd, args);
     if (req.error) return { error: { code: req.error } };
-    if (!core) return { error: { code: 'core-unavailable' } };
+    if (!core) return { error: { code: 'core-unavailable', detail: 'missing' } };
     return core.request(req.cmd, req.args);
   });
   // Copy text for the user (an invite link). Web clipboard permissions stay
@@ -201,7 +213,12 @@ function createWindow() {
     webPreferences: { ...sec.WEB_PREFERENCES, preload: path.join(__dirname, 'preload.js'), devTools: !app.isPackaged },
   });
   win.once('ready-to-show', () => win.show());
-  win.webContents.once('did-finish-load', flushInvite);
+  // Every load (a reload too) gets the current core status.
+  win.webContents.on('did-finish-load', () => {
+    flushInvite();
+    // The page may have missed earlier changes; the preload keeps this for the UI.
+    win.webContents.send('core:event', 'core.status', coreStatus);
+  });
   // The mock demo (?demo) is for checkouts only, never a release build.
   const demo = !app.isPackaged && process.env.MVS_DEMO ? `?demo=${encodeURIComponent(process.env.MVS_DEMO)}` : '';
   win.loadURL(`${sec.ORIGIN}/index.html${demo}`);

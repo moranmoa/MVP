@@ -178,3 +178,19 @@ The address is never in git:
 `--relay` is passed to mvs-core only when there is one (`src/sidecar.js`,
 which also takes `extraArgs` for other parts of the shell). Tests:
 `test/config.test.js`.
+
+## Core status (T8-01)
+
+For the "core unavailable" screen. While mvs-core is not running, every
+command answers `{ code: 'core-unavailable', detail }`, with `detail` one of:
+- `missing`: the binary is not there;
+- `start-failed`: it could not be started (e.g. not executable);
+- `crashed`: it exited and is being restarted;
+- `crash-loop`: five failures in a row without ever answering. It keeps retrying, every 30 s at most.
+
+The page also gets `core.status` events, `{ state: 'starting' | 'up' | 'down', detail? }`,
+on every change and on every page load. The preload keeps the latest one
+for the first subscriber, like `link.open`. The core counts as `up` once it
+answers or prints `mvs-core: ready`. Core error codes (e.g. a missing
+keyring, QA-20) pass through unchanged. Tests: `test/sidecar.test.js`,
+`test/deeplink.e2e.test.mjs`.
