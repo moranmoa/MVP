@@ -147,6 +147,9 @@ const ACK_PULL: Duration = Duration::from_secs(1);
 /// How long the larger peer ID waits for the smaller one to make the direct
 /// connection before dialling itself (once).
 const DIRECT_FALLBACK: Duration = Duration::from_secs(10);
+/// Retries of a busy saved listen port before a random one (about 2 s).
+const SAVED_PORT_TRIES: u32 = 8;
+const SAVED_PORT_WAIT: Duration = Duration::from_millis(250);
 /// Reachability is `Connecting` at most this long after starting.
 const CONNECTING: Duration = Duration::from_secs(10);
 /// Peers' stubs waiting for the delete or edit that replaced them.
@@ -474,13 +477,24 @@ impl Node {
         // one, and the saved one is kept for next time.
         let port_file = config.data_dir.join("listen.port");
         let listen = with_saved_port(&config.listen, &port_file);
-        let (listener, listen) = match swarm.listen_on(listen.clone()) {
-            Ok(id) => (id, listen),
-            Err(err) if listen != config.listen => {
-                warn!(%err, "the saved listen port is taken: listening on a random one this time");
-                (swarm.listen_on(config.listen.clone())?, config.listen.clone())
+        // After a quick restart (Windows especially) the old process may still
+        // hold the port for a moment: try it for about 2 s before giving up on
+        // it, so the port the user allowed in the firewall is kept.
+        let mut attempt = 0;
+        let (listener, listen) = loop {
+            match swarm.listen_on(listen.clone()) {
+                Ok(id) => break (id, listen),
+                Err(err) if listen != config.listen && attempt < SAVED_PORT_TRIES => {
+                    attempt += 1;
+                    debug!(%err, attempt, "the saved listen port is busy; trying again");
+                    tokio::time::sleep(SAVED_PORT_WAIT).await;
+                }
+                Err(err) if listen != config.listen => {
+                    warn!(%err, "the saved listen port is taken: listening on a random one this time");
+                    break (swarm.listen_on(config.listen.clone())?, config.listen.clone());
+                }
+                Err(err) => return Err(err.into()),
             }
-            Err(err) => return Err(err.into()),
         };
         for addr in &config.bootstrap {
             let _ = swarm.dial(DialOpts::unknown_peer_id().address(addr.clone()).build());
@@ -2537,7 +2551,17 @@ mod tests {
         assert_eq!(port_of(&again).await, port, "a new port after a restart");
         again.shutdown().await.unwrap();
         // Something else holds the port now: a random one, the saved one kept.
-        let taken = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        // (Windows may take a moment to release it after the shutdown.)
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let taken = loop {
+            match std::net::TcpListener::bind(("127.0.0.1", port)) {
+                Ok(l) => break l,
+                Err(err) => {
+                    assert!(Instant::now() < deadline, "port {port} never released: {err}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        };
         let (moved, _) = Node::start(config()).await.unwrap();
         assert_ne!(port_of(&moved).await, port);
         assert_eq!(std::fs::read_to_string(dir.join("listen.port")).unwrap(), port.to_string());
