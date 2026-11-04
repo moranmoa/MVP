@@ -1015,6 +1015,19 @@ impl Task {
         }
     }
 
+    /// [`reachable`], plus: a circuit through our own relay is always fine
+    /// (we dial that relay anyway, whatever its address).
+    fn reachable(&self, addr: &Multiaddr) -> bool {
+        let mut parts = addr.iter().peekable();
+        let mut via_our_relay = false;
+        while let Some(p) = parts.next() {
+            if p == Protocol::P2p(self.relay_peer) && parts.peek() == Some(&Protocol::P2pCircuit) {
+                via_our_relay = true;
+            }
+        }
+        via_our_relay || reachable(addr, self.allow_lan)
+    }
+
     fn listen_on_circuit(&mut self) {
         let circuit = self.relay_addr.clone().with(Protocol::P2pCircuit);
         match self.swarm.listen_on(circuit) {
@@ -1200,8 +1213,9 @@ impl Task {
                 } else {
                     // Only addresses we would dial ourselves go into our DHT
                     // table (which, in server mode, we also serve to others).
-                    for addr in info.listen_addrs.iter().filter(|a| reachable(a, self.allow_lan)) {
-                        self.swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
+                    let known: Vec<Multiaddr> = info.listen_addrs.iter().filter(|a| self.reachable(a)).cloned().collect();
+                    for addr in known {
+                        self.swarm.behaviour_mut().kad.add_address(&peer_id, addr);
                     }
                     if self.relayed.contains_key(&peer_id) {
                         self.try_direct(peer_id, info.listen_addrs);
@@ -1251,7 +1265,7 @@ impl Task {
                     }
                     // Peer-supplied addresses: never let them point us into our own LAN.
                     let addrs: Vec<Multiaddr> =
-                        peer.addrs.into_iter().filter(|a| reachable(a, self.allow_lan)).collect();
+                        peer.addrs.into_iter().filter(|a| self.reachable(a)).collect();
                     if addrs.is_empty() {
                         continue;
                     }

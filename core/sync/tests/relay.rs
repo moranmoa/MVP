@@ -26,7 +26,7 @@ struct RelayBehaviour {
 /// A relay like `infra/relay` (circuits, identify, `/mvs/kad/1.0.0`), on a
 /// fixed key and port so a restart looks the same to its clients.
 fn start_relay(key: identity::Keypair, port: u16) -> tokio::task::JoinHandle<()> {
-    start_relay_counting(key, port, Arc::default())
+    start_relay_counting(key, port, Arc::default(), false)
 }
 
 /// Also records the destination of every circuit request (accepted or
@@ -34,7 +34,8 @@ fn start_relay(key: identity::Keypair, port: u16) -> tokio::task::JoinHandle<()>
 fn start_relay_counting(
     key: identity::Keypair,
     port: u16,
-    circuits: Arc<std::sync::Mutex<Vec<PeerId>>>,
+    circuits: Arc<std::sync::Mutex<Vec<(PeerId, bool)>>>,
+    circuits_only: bool,
 ) -> tokio::task::JoinHandle<()> {
     let mut swarm = SwarmBuilder::with_existing_identity(key)
         .with_tokio()
@@ -49,7 +50,16 @@ fn start_relay_counting(
             );
             kad.set_mode(Some(kad::Mode::Server));
             RelayBehaviour {
-                relay: relay::Behaviour::new(peer_id, relay::Config::default()),
+                relay: relay::Behaviour::new(
+                    peer_id,
+                    // R11, as on the live relay.
+                    relay::Config {
+                        max_circuits_per_peer: 8,
+                        max_circuit_duration: Duration::from_secs(3600),
+                        max_circuit_bytes: 32 << 20,
+                        ..relay::Config::default()
+                    },
+                ),
                 identify: identify::Behaviour::new(identify::Config::new("/mvs/0.1.0".into(), key.public())),
                 ping: ping::Behaviour::new(ping::Config::new()),
                 kad,
@@ -67,12 +77,18 @@ fn start_relay_counting(
             match swarm.select_next_some().await {
                 SwarmEvent::Behaviour(RelayBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
                     for addr in info.listen_addrs {
+                        if circuits_only && !addr.iter().any(|p| p == libp2p::multiaddr::Protocol::P2pCircuit) {
+                            continue;
+                        }
                         swarm.behaviour_mut().kad.add_address(&peer_id, addr);
                     }
                 }
                 SwarmEvent::Behaviour(RelayBehaviourEvent::Relay(
-                    relay::Event::CircuitReqAccepted { dst_peer_id, .. } | relay::Event::CircuitReqDenied { dst_peer_id, .. },
-                )) => circuits.lock().unwrap().push(dst_peer_id),
+                    relay::Event::CircuitReqAccepted { dst_peer_id, .. },
+                )) => circuits.lock().unwrap().push((dst_peer_id, true)),
+                SwarmEvent::Behaviour(RelayBehaviourEvent::Relay(relay::Event::CircuitReqDenied { dst_peer_id, .. })) => {
+                    circuits.lock().unwrap().push((dst_peer_id, false))
+                }
                 _ => {}
             }
         }
@@ -111,6 +127,12 @@ fn messages(n: u64) -> Vec<Record> {
 /// A node that knows only the relay, plus a channel of the times it got a
 /// relay reservation.
 async fn node(name: &str, relay: &Multiaddr) -> (Node, mpsc::UnboundedReceiver<Instant>) {
+    node_lan(name, relay, true).await
+}
+
+/// Like [`node`]; with `allow_lan` off, peers on this host only meet through
+/// relay circuits, as two users behind NAT do.
+async fn node_lan(name: &str, relay: &Multiaddr, allow_lan: bool) -> (Node, mpsc::UnboundedReceiver<Instant>) {
     let (server, channel) = test_server();
     let dir = std::env::temp_dir().join(format!("sync-relay-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -121,7 +143,7 @@ async fn node(name: &str, relay: &Multiaddr) -> (Node, mpsc::UnboundedReceiver<I
         authorizer: Arc::new(AcceptAll),
         listen: "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
         bootstrap: vec![],
-        allow_lan: true,
+        allow_lan,
     };
     let (node, mut events) = Node::start(config).await.unwrap();
     let (tx, rx) = mpsc::unbounded_channel();
@@ -199,7 +221,7 @@ async fn an_offline_peer_is_not_asked_for_circuits_again_and_again() {
     let port = free_port();
     let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::from(relay_key.public())).parse().unwrap();
     let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let _relay = start_relay_counting(relay_key, port, circuits.clone());
+    let _relay = start_relay_counting(relay_key, port, circuits.clone(), false);
 
     // C reserves, so the relay's table has its circuit address; then it goes.
     let (c, mut c_reserved) = node("gone", &relay).await;
@@ -212,9 +234,50 @@ async fn an_offline_peer_is_not_asked_for_circuits_again_and_again() {
     let (a, mut a_reserved) = node("stays", &relay).await;
     reserved_within(&mut a_reserved, Duration::from_secs(20)).await;
     tokio::time::sleep(Duration::from_secs(30)).await;
-    let asked = circuits.lock().unwrap().iter().filter(|dst| **dst == gone).count();
+    let asked = circuits.lock().unwrap().iter().filter(|(dst, _)| *dst == gone).count();
     eprintln!("circuit requests to the offline peer in 30 s: {asked}");
     // A few tries are fine; one every discovery round (3 s) is not.
     assert!(asked <= 3, "{asked} circuit requests to a peer that went offline");
     a.shutdown().await.unwrap();
+}
+
+/// v0.2.0's live smoke: two users behind NAT couldn't chat, and the relay
+/// denied circuits by the thousand while accepting only a few. Two peers
+/// that can only meet through relay circuits must sync, and keep using the
+/// circuits they have: a handful of circuit requests in total, none denied,
+/// over many discovery and pull rounds.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_peers_behind_nat_reuse_their_circuits() {
+    let relay_key = identity::Keypair::generate_ed25519();
+    let port = free_port();
+    let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::from(relay_key.public())).parse().unwrap();
+    let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
+    // Hands out only circuit addresses, as for users behind NAT (their own
+    // addresses are private and unreachable).
+    let _relay = start_relay_counting(relay_key, port, circuits.clone(), true);
+
+    let (a, mut a_reserved) = node_lan("nat-a", &relay, false).await;
+    let (b, mut b_reserved) = node_lan("nat-b", &relay, false).await;
+    reserved_within(&mut a_reserved, Duration::from_secs(20)).await;
+    reserved_within(&mut b_reserved, Duration::from_secs(20)).await;
+    for record in messages(10) {
+        a.append(record).await.unwrap();
+    }
+    let (server, channel) = test_server();
+    let log = log_name(server, Scope::Channel(channel));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while b.state(&log).await.unwrap().count < 10 {
+        assert!(Instant::now() < deadline, "no sync through the relay");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // 90 s: 30 discovery rounds and 18 pull rounds on each side.
+    tokio::time::sleep(Duration::from_secs(90)).await;
+    let all = circuits.lock().unwrap().clone();
+    let accepted = all.iter().filter(|(_, ok)| *ok).count();
+    let denied = all.len() - accepted;
+    eprintln!("circuits accepted {accepted}, denied {denied}");
+    assert_eq!(denied, 0, "the relay denied {denied} circuits");
+    assert!(accepted <= 4, "{accepted} circuits opened between two peers");
+    a.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
 }
