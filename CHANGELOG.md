@@ -6,6 +6,34 @@ fails if its version has no section here. Write a section before tagging:
 `## [X.Y.Z] - YYYY-MM-DD`, then Hebrew and English (Fixed / New / Known).
 Never put the relay domain or any IP address here.
 
+## [0.2.3] - 2026-11-04
+
+### מה חדש
+- **פורט האזנה קבוע:** בהפעלה הראשונה האפליקציה בוחרת פורט ושומרת אותו גם אחרי הפעלה מחדש. כך אפשר לאשר אותו פעם אחת ב-Windows Firewall או בראוטר.
+- **ניסיון חיבור ישיר משני הצדדים:** אם החיבור הישיר מהצד הראשון נכשל, הצד השני מנסה בעצמו. מספיק שאחד משני המחשבים יקבל חיבורים נכנסים.
+
+### מה תוקן
+- אין תיקונים גלויים מעבר לשיפורי החיבור שלמעלה.
+
+### ידוע
+- עדיין אין "ניקוב" חיבור דרך NAT בין רשתות שונות (hole punching); זה הבא בתור. עד אז, בין ראוטרים שונים החיבור עובר דרך ה-relay.
+- עוד אין באפליקציה סימון אם החיבור ישיר או דרך ה-relay.
+- העדכון האוטומטי בתוך האפליקציה עוד לא פעיל: מתקינים את הגרסה החדשה ידנית מעל הקיימת.
+
+---
+
+### New
+- **A stable listening port:** the app picks a port on first start and keeps it across restarts, so you can allow it once in Windows Firewall or on your router.
+- **Direct connection tried from both sides:** if the first side's direct connection fails, the other side tries too. Only one of the two computers needs to accept incoming connections.
+
+### Fixed
+- Nothing user-visible beyond the connection improvements above.
+
+### Known
+- No NAT hole punching between different networks yet; that's next. Until then, computers behind different routers connect through the relay.
+- The app doesn't show yet whether a connection is direct or through the relay.
+- In-app auto-update isn't active yet: install the new version manually over the old one.
+
 ## [0.2.2] - 2026-11-04
 
 ### מה חדש
