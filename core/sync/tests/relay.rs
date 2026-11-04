@@ -468,3 +468,40 @@ async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
 }
+
+/// v0.2.3 smoke regression: with a direct LAN link up, a message must arrive
+/// by live push (well under the 5 s pull), not on the next pull.
+#[tokio::test(flavor = "multi_thread")]
+async fn messages_arrive_live_over_a_direct_link() {
+    let relay_key = identity::Keypair::generate_ed25519();
+    let port = free_port();
+    let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::from(relay_key.public())).parse().unwrap();
+    let _relay = start_relay_counting(relay_key, port, Arc::new(std::sync::Mutex::new(Vec::new())), true);
+    let a = bound_node("live-a", &relay, 11, true, Arc::new(AcceptAll)).await;
+    let b = bound_node("live-b", &relay, 12, true, Arc::new(AcceptAll)).await;
+    let b_id = records::PublicKey::from_bytes(SigningKey::from_bytes(&[12; 32]).verifying_key().to_bytes());
+    // Also over the fallback path (the larger side dials): set FALLBACK=1.
+    if std::env::var("FALLBACK").is_ok() {
+        let smaller = if a.peer_id() < b.peer_id() { &a } else { &b };
+        smaller.test_no_direct_dials().unwrap();
+    }
+    let start = Instant::now();
+    while !a.presence(test_server().0).await.unwrap().direct.contains(&b_id) {
+        assert!(start.elapsed() < Duration::from_secs(60), "never went direct");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (server, channel) = test_server();
+    let log = log_name(server, Scope::Channel(channel));
+    tokio::time::sleep(Duration::from_secs(2)).await; // the gossip mesh forms
+    for (i, record) in messages(5).into_iter().enumerate() {
+        let sent = Instant::now();
+        a.append(record).await.unwrap();
+        while b.state(&log).await.unwrap().count < i as u64 + 1 {
+            assert!(sent.elapsed() < Duration::from_secs(1), "message {i} not live after 1 s (pull is every 5 s)");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        eprintln!("message {i}: {:?}", sent.elapsed());
+    }
+    a.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
+}
