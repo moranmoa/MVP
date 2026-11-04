@@ -442,4 +442,29 @@ async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
     );
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
+
+    // The other side's turn: the smaller peer ID dials first, but here it
+    // can't (as if a firewall blocked it). The larger one dials once after
+    // waiting its turn, and the connection still goes direct.
+    let relay_key = identity::Keypair::generate_ed25519();
+    let port = free_port();
+    let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::from(relay_key.public())).parse().unwrap();
+    let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _relay = start_relay_counting(relay_key, port, circuits.clone(), true);
+    let a = bound_node("turn-a", &relay, 9, true, Arc::new(AcceptAll)).await;
+    let b = bound_node("turn-b", &relay, 10, true, Arc::new(AcceptAll)).await;
+    let id = |n: u8| records::PublicKey::from_bytes(SigningKey::from_bytes(&[n; 32]).verifying_key().to_bytes());
+    let ((smaller, _), (larger, smaller_id)) =
+        if a.peer_id() < b.peer_id() { ((&a, id(10)), (&b, id(9))) } else { ((&b, id(9)), (&a, id(10))) };
+    smaller.test_no_direct_dials().unwrap();
+    let start = Instant::now();
+    // The larger side shows the smaller one as direct: its own dial worked.
+    while !larger.presence(test_server().0).await.unwrap().direct.contains(&smaller_id) {
+        assert!(start.elapsed() < Duration::from_secs(60), "the larger side never took its turn");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(start.elapsed() >= Duration::from_secs(5), "went direct before the larger side's turn");
+    assert_eq!(larger.peers().await.unwrap(), vec![smaller.peer_id()]);
+    a.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
 }
