@@ -184,6 +184,10 @@ impl InstallState {
         Ok(())
     }
 
+    pub fn platform(&self) -> &str {
+        &self.platform
+    }
+
     pub fn current(&self) -> Version {
         self.current
     }

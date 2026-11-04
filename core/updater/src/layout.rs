@@ -96,6 +96,14 @@ impl UpdateDirs {
     pub fn lock_file(&self) -> PathBuf {
         self.state.join("lock")
     }
+    /// Written by the launcher on a rollback, read once by the core.
+    pub fn rollback_notice(&self) -> PathBuf {
+        self.state.join("rollback.json")
+    }
+    /// The staged version's signed notes, kept for `update.installed`.
+    pub fn staged_notes(&self) -> PathBuf {
+        self.state.join("staged-notes.json")
+    }
     pub fn downloads(&self) -> PathBuf {
         self.state.join("downloads")
     }
