@@ -17,6 +17,7 @@ const path = require('node:path');
 const MAX_OUT_LINE = 1024 * 1024;
 const MAX_IN_LINE = 16 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
+const CRASH_LOOP = 5;
 /** Commands that legitimately take long (key generation, OS auth prompts). */
 const SLOW = { createIdentity: 120_000, restoreIdentity: 120_000, getRecoveryWords: 120_000 };
 
@@ -46,7 +47,7 @@ class Sidecar {
    * @param {(name: string, payload: unknown) => void} o.onEvent
    * @param {(line: string) => void} [o.log] for stderr lines and lifecycle notes
    */
-  constructor({ exe, dataDir, relay = null, extraArgs = [], onEvent, log = () => {}, timeouts = {}, spawnImpl = spawn }) {
+  constructor({ exe, dataDir, relay = null, extraArgs = [], onEvent, onStatus = () => {}, log = () => {}, timeouts = {}, backoffBase = 500, spawnImpl = spawn }) {
     if (!path.isAbsolute(exe)) throw new Error('mvs-core must be given by an absolute path');
     if (!path.isAbsolute(dataDir)) throw new Error('the data folder must be an absolute path');
     this.exe = exe;
@@ -65,6 +66,29 @@ class Sidecar {
     this.child = null;
     this.stopped = false;
     this.restarts = 0;
+    // For the "core unavailable" screen (T8-01): starting, up, or down with a reason.
+    this.onStatus = onStatus;
+    this.backoffBase = backoffBase;
+    this.status = { state: 'starting' };
+  }
+
+  setStatus(state, detail) {
+    if (this.status.state === state && this.status.detail === detail) return;
+    this.status = detail ? { state, detail } : { state };
+    this.onStatus(this.status);
+  }
+
+  /** The child is gone (exit, or it never started): fail what waits, retry later. */
+  lost(child, detail) {
+    if (this.child !== child) return;
+    this.child = null;
+    this.failAll('core-restarted');
+    if (this.stopped) return;
+    this.restarts += 1;
+    // Five failures in a row without ever answering: it will not come up by itself.
+    this.setStatus('down', this.restarts >= CRASH_LOOP ? 'crash-loop' : detail);
+    const delay = Math.min(30_000, this.backoffBase * 2 ** Math.min(this.restarts - 1, 6));
+    this.restartTimer = setTimeout(() => this.start(), delay);
   }
 
   start() {
@@ -94,18 +118,20 @@ class Sidecar {
       errBuf += chunk.toString('utf8');
       const lines = errBuf.split('\n');
       errBuf = lines.pop().slice(-4096);
-      for (const l of lines) if (l) this.log(`core: ${l.slice(0, 1000)}`);
+      for (const l of lines) {
+        if (!l) continue;
+        if (l.trim() === 'mvs-core: ready') this.up();
+        this.log(`core: ${l.slice(0, 1000)}`);
+      }
     });
-    child.on('error', (e) => this.log(`core failed to start: ${e.code || e.message}`));
+    // A spawn failure (not found, not executable) may come without an exit.
+    child.on('error', (e) => {
+      this.log(`core failed to start: ${e.code || e.message}`);
+      this.lost(child, 'start-failed');
+    });
     child.on('exit', (code, signal) => {
-      if (this.child !== child) return;
-      this.child = null;
-      this.failAll('core-restarted');
-      if (this.stopped) return;
-      this.log(`core exited (${code ?? signal}); restarting`);
-      const delay = Math.min(30_000, 500 * 2 ** Math.min(this.restarts, 6));
-      this.restarts += 1;
-      this.restartTimer = setTimeout(() => this.start(), delay);
+      if (this.child === child && !this.stopped) this.log(`core exited (${code ?? signal}); restarting`);
+      this.lost(child, 'crashed');
     });
     return this;
   }
@@ -118,10 +144,10 @@ class Sidecar {
       return this.log('core wrote a line that is not JSON');
     }
     if (msg && msg.type === 'event' && typeof msg.event === 'string') {
-      this.restarts = 0;
+      this.up();
       this.onEvent(msg.event, msg.payload);
     } else if (msg && msg.type === 'response') {
-      this.restarts = 0;
+      this.up();
       const p = this.pending.get(msg.id);
       if (!p) return;
       this.pending.delete(msg.id);
@@ -133,7 +159,7 @@ class Sidecar {
   /** Resolves with { ok } or { error: { code, positions? } }; never rejects. */
   request(cmd, args) {
     return new Promise((resolve) => {
-      if (!this.child) return resolve({ error: { code: 'core-unavailable' } });
+      if (!this.child) return resolve({ error: this.unavailable() });
       const id = this.nextId++;
       const line = `${JSON.stringify({ id, cmd, args })}\n`;
       if (Buffer.byteLength(line) > MAX_OUT_LINE) return resolve({ error: { code: 'too-large' } });
@@ -145,6 +171,16 @@ class Sidecar {
       this.pending.set(id, { resolve, timer });
       this.child.stdin.write(line);
     });
+  }
+
+  up() {
+    this.restarts = 0;
+    this.setStatus('up');
+  }
+
+  /** The error every request gets while the core is not running. */
+  unavailable() {
+    return this.status.detail ? { code: 'core-unavailable', detail: this.status.detail } : { code: 'core-unavailable' };
   }
 
   failAll(code) {

@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use libp2p::Multiaddr;
-use records::{ChannelId, Record, RecordId, Scope, ServerId};
+use records::{ChannelId, PublicKey, Record, RecordId, Scope, ServerId};
 use sync::{log_name, log_of, Access, Node, NodeConfig, NodeEvent, ServerSecret, Store};
 use tokio::runtime::Runtime;
 
@@ -123,6 +123,9 @@ impl SyncNetwork {
                     // B6: my messages' send state moves on; a round re-announces.
                     NodeEvent::Sent { id } => advance(&states, id, SendState::Sent),
                     NodeEvent::Delivered { id } => advance(&states, id, SendState::Received),
+                    // M2: someone came online or left: a hint only; the core asks
+                    // the node (`online`), so a dropped event loses nothing.
+                    NodeEvent::Presence { .. } => true,
                     _ => false,
                 };
                 if wake {
@@ -206,6 +209,15 @@ impl Network for SyncNetwork {
 
     fn lock(&self) {
         self.binder.lock();
+    }
+
+    /// Asked of the node each time (never mirrored from events, which can be
+    /// dropped): who of `server` is bound and online now.
+    fn online(&self, server: ServerId) -> Option<BTreeSet<PublicKey>> {
+        match self.runtime.block_on(self.node.presence(server)) {
+            Ok(state) => Some(state.online.into_iter().collect()),
+            Err(_) => Some(BTreeSet::new()),
+        }
     }
 
     fn send_state(&self, id: RecordId) -> Option<SendState> {

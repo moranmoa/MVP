@@ -126,7 +126,9 @@ test('core events reach the page', async () => {
   const got = await page.evaluate(
     () =>
       new Promise((resolve) => {
+        // The shell's own core.status may come first; wait for the core's event.
         const off = window.mvs.onEvent((name, payload) => {
+          if (name !== 'join.status') return;
           off();
           resolve([name, payload]);
         });

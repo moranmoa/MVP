@@ -127,3 +127,50 @@ test('no core: requests answer core-unavailable', async () => {
   const core = new Sidecar({ exe: FAKE, dataDir: DATA, onEvent() {} });
   assert.deepEqual(await core.request('getIdentity', {}), { error: { code: 'core-unavailable' } });
 });
+
+// ---- status for the "core unavailable" screen (T8-01) ----------------------
+
+const { EventEmitter } = require('node:events');
+
+/** A child that fails the way `how` says, every time it is started. */
+function failing(how) {
+  return () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = { write() {}, end() {} };
+    child.kill = () => {};
+    setImmediate(() => (how === 'spawn' ? child.emit('error', Object.assign(new Error('x'), { code: 'ENOENT' })) : child.emit('exit', 1, null)));
+    return child;
+  };
+}
+
+test('status goes up once the core answers, or says it is ready', async () => {
+  const statuses = [];
+  const { core } = start({ onStatus: (s) => statuses.push(s) });
+  await core.request('getIdentity', {});
+  core.stop();
+  assert.deepEqual(statuses.at(-1), { state: 'up' });
+  const ready = new Sidecar({ exe: FAKE, dataDir: DATA, onEvent() {} });
+  ready.child = {};
+  ready.onLine('{"type":"event","event":"x","payload":null}');
+  assert.deepEqual(ready.status, { state: 'up' });
+});
+
+test('a core that cannot be started: down, start-failed, and requests say why', async () => {
+  const statuses = [];
+  const core = new Sidecar({ exe: FAKE, dataDir: DATA, onEvent() {}, onStatus: (s) => statuses.push(s), backoffBase: 50, spawnImpl: failing('spawn') }).start();
+  await until(() => statuses.length > 0);
+  assert.deepEqual(statuses[0], { state: 'down', detail: 'start-failed' });
+  assert.deepEqual(await core.request('getIdentity', {}), { error: { code: 'core-unavailable', detail: 'start-failed' } });
+  core.stop();
+});
+
+test('five crashes in a row without an answer: crash-loop', async () => {
+  const statuses = [];
+  const core = new Sidecar({ exe: FAKE, dataDir: DATA, onEvent() {}, onStatus: (s) => statuses.push(s), backoffBase: 1, spawnImpl: failing('exit') }).start();
+  await until(() => statuses.some((s) => s.detail === 'crash-loop'));
+  core.stop();
+  assert.deepEqual(statuses[0], { state: 'down', detail: 'crashed' });
+  assert.deepEqual(statuses.at(-1), { state: 'down', detail: 'crash-loop' });
+});

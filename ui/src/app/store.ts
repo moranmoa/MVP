@@ -57,6 +57,10 @@ export class MessageWindow {
   }
 }
 
+export type UpdateNote =
+  | { kind: 'installed'; version: string; notes: string | null }
+  | { kind: 'rolledBack'; failed: string; running: string };
+
 export interface StoreState {
   identity: Identity | null;
   servers: ServerSummary[];
@@ -64,6 +68,8 @@ export interface StoreState {
   members: Record<Id, Member[]>;
   update: UpdateInfo | null;
   notice: { kind: 'encryption-renewed'; serverId: Id; at: number } | null;
+  /** Shown once: a new version was installed, or the previous one is back. */
+  updateNote: UpdateNote | null;
   /** Bumped when any message window changes, so readers re-render. */
   messagesVersion: number;
 }
@@ -76,6 +82,7 @@ export class Store {
     members: {},
     update: null,
     notice: null,
+    updateNote: null,
     messagesVersion: 0,
   };
   private listeners = new Set<() => void>();
@@ -113,6 +120,8 @@ export class Store {
       on('message.added', (m) => this.windows.get(m.channelId)?.apply(m)),
       on('message.updated', (m) => this.windows.get(m.channelId)?.apply(m)),
       on('update.ready', (update) => this.set({ update })),
+      on('update.installed', (u) => this.set({ updateNote: { kind: 'installed', ...u } })),
+      on('update.rolledBack', (u) => this.set({ updateNote: { kind: 'rolledBack', ...u } })),
       on('notice', (n) => this.set({ notice: { ...n, at: Date.now() } })),
     );
     return () => {
@@ -158,6 +167,20 @@ export class Store {
 
   clearNotice(): void {
     this.set({ notice: null });
+  }
+
+  clearUpdateNote(): void {
+    this.set({ updateNote: null });
+  }
+
+  /**
+   * restartToUpdate was refused. In a call (not-allowed) the update waits for
+   * the call to end, and the core sends update.ready again then. With
+   * nothing staged there is nothing to restart into.
+   */
+  updateRefused(code: string): void {
+    if (code === 'not-allowed' && this.state.update) this.set({ update: { ...this.state.update, waitingForCall: true } });
+    else if (code === 'nothing-staged') this.set({ update: null });
   }
 
   getState = (): StoreState => this.state;
