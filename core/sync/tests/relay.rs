@@ -398,6 +398,7 @@ async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
 
+
     // "Relay only" (GAP-6) on one side: even two members on one LAN, with
     // LAN allowed, stay relayed, and that side listens on its circuit only.
     let relay_key = identity::Keypair::generate_ed25519();

@@ -1118,7 +1118,8 @@ impl Task {
             self.relay_next_dial = Instant::now() + jittered(self.relay_backoff, OsRng.next_u32());
             self.relay_backoff = (self.relay_backoff * 2).min(RELAY_BACKOFF_MAX);
         }
-        for (addr, peer) in self.bootstrap.clone() {
+        // Bootstrap peers are dialled directly: not while relay-only.
+        for (addr, peer) in if self.relay_only { Vec::new() } else { self.bootstrap.clone() } {
             if peer.is_none_or(|p| !self.direct.contains_key(&p)) {
                 let _ = self.swarm.dial(DialOpts::unknown_peer_id().address(addr).build());
             }
@@ -1520,12 +1521,7 @@ impl Task {
                 Some(gate) if !gate.allows(&store) => (empty_response(), Vec::new()),
                 _ => answer_with_ids(&store, &log, &request.have, max_bytes),
             };
-            for_members_only(&mut response, ours, &acks, &store);
-            // Our direct (LAN) addresses go only where our binding went: to a
-            // member (F2; identify announces global ones only).
-            if response.binding.is_some() && allow_lan && !relay_only {
-                response.direct_addrs = mine.iter().map(|a| ByteBuf::from(a.to_vec())).collect();
-            }
+            member_extras(&mut response, ours, &acks, &mine, allow_lan && !relay_only, &store);
             let _ = answers.send((peer, channel, response, max_bytes, ids, log));
         });
     }
@@ -2087,6 +2083,24 @@ fn decode_page(log: &str, page: &[WireEntry]) -> Vec<Incoming> {
 
 fn empty_response() -> SyncResponse {
     SyncResponse { records: Vec::new(), more: false, acks: Vec::new(), binding: None, direct_addrs: Vec::new() }
+}
+
+/// What a pull answer carries beyond the page: our binding and the
+/// requester's acks for a member ([`for_members_only`]), and our direct
+/// (LAN) addresses only where the binding went, and only when
+/// `share_direct` (LAN allowed, not relay-only). Identify never carries them.
+fn member_extras(
+    response: &mut SyncResponse,
+    ours: Option<(ReadCheck, Binding)>,
+    acks: &[RecordId],
+    direct: &[Multiaddr],
+    share_direct: bool,
+    store: &Store,
+) {
+    for_members_only(response, ours, acks, store);
+    if response.binding.is_some() && share_direct {
+        response.direct_addrs = direct.iter().map(|a| ByteBuf::from(a.to_vec())).collect();
+    }
 }
 
 /// Adds our binding (presence) and the requester's receipt acks to an
@@ -2784,6 +2798,27 @@ mod tests {
         assert!(online(&owner).await.last_seen.is_some());
         owner.shutdown().await.unwrap();
         stranger.shutdown().await.unwrap();
+    }
+
+    /// Direct (LAN) addresses go only to a member, and never in relay-only
+    /// mode or without LAN allowed (`share_direct` false).
+    #[test]
+    fn direct_addresses_go_to_members_only_and_never_when_relay_only() {
+        use crate::testutil::test_key;
+        let store = Store::in_memory().unwrap();
+        let control = ServerSecret::from_bytes([9; 32]).handle(Scope::Control);
+        let binding = Binding::sign(&test_key(0), &PeerId::random(), &control, unix_now() + 3600);
+        let direct: Vec<Multiaddr> = vec!["/ip4/192.168.1.5/tcp/4001".parse().unwrap()];
+        let gate: Arc<dyn ReadGate> = Arc::new(OnlyReader(test_key(1).identity()));
+        let answer = |n: u8, share_direct: bool| {
+            let mut response = empty_response();
+            let check = ReadCheck { gate: gate.clone(), identity: test_key(n).identity(), server: server() };
+            member_extras(&mut response, Some((check, binding.clone())), &[], &direct, share_direct, &store);
+            response.direct_addrs
+        };
+        assert_eq!(answer(1, true).len(), 1, "a member gets our direct addresses");
+        assert!(answer(1, false).is_empty(), "relay-only (or LAN off): none, even to a member");
+        assert!(answer(2, true).is_empty(), "a non-member: none");
     }
 
     /// The answer side of presence: our binding and acks go only to a
