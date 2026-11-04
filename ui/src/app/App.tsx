@@ -1,7 +1,9 @@
-import { createContext, useContext, useEffect, useState } from 'react';
+import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { FormattedMessage } from 'react-intl';
 import { CoreContext, type CoreApi } from '../core';
 import { guardCore } from '../core/sanitize';
+import type { CoreDownDetail } from '../core/types';
+import { CoreDownScreen, watchUnavailable } from './CoreDown';
 import { Onboarding, resumeStep } from '../screens/onboarding/Onboarding';
 import { Shell } from '../screens/shell/Shell';
 import { SettingsProvider, type Settings } from './settings';
@@ -16,22 +18,37 @@ export function useAppStore(): Store {
 }
 
 export function App({ core: rawCore, initialSettings }: { core: CoreApi; initialSettings?: Settings }) {
+  // T8-01: the core is down (shell status, or a command refused with
+  // core-unavailable). `false` = up as far as we know.
+  const [down, setDown] = useState<{ detail?: CoreDownDetail } | false>(false);
+  const reportDown = useRef((detail: CoreDownDetail | undefined) => setDown({ detail }));
   // Every value from the core passes through the cleaners once, here.
-  const [core] = useState(() => guardCore(rawCore));
+  const [core] = useState(() => watchUnavailable(guardCore(rawCore), (d) => reportDown.current(d)));
   const [store] = useState(() => new Store(core));
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
     const stop = store.start();
-    void store.init().then(() => setReady(true));
-    return stop;
-  }, [store]);
+    const load = () => store.init().then(() => setReady(true), () => {});
+    void load();
+    const off = core.on('core.status', (s) => {
+      if (s.state === 'down') setDown({ detail: s.detail });
+      else if (s.state === 'up') {
+        setDown(false);
+        void load(); // the first load may have failed while the core was down
+      }
+    });
+    return () => {
+      off();
+      stop();
+    };
+  }, [store, core]);
 
   return (
     <CoreContext.Provider value={core}>
       <StoreContext.Provider value={store}>
         <SettingsProvider initial={initialSettings}>
-          {ready ? <Root /> : <Splash />}
+          {down ? <CoreDownScreen detail={down.detail} /> : ready ? <Root /> : <Splash />}
         </SettingsProvider>
       </StoreContext.Provider>
     </CoreContext.Provider>

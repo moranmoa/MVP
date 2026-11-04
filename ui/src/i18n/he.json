@@ -11,6 +11,12 @@
   "common.copyFailed": "לא הצלחנו להעתיק. אפשר לסמן את הלינק וללחוץ <kbd>Ctrl+C</kbd>.",
   "common.retry": "לנסות שוב",
   "common.loading": "טוענים…",
+  "core.down.title": "MVS לא מצליח לפעול כרגע",
+  "core.down.missing": "חלק מההתקנה חסר. התקנה מחדש של MVS אמורה לפתור את זה.",
+  "core.down.startFailed": "לא הצלחנו להפעיל את המנוע של MVS. מנסים שוב אוטומטית.",
+  "core.down.crashed": "MVS נתקל בבעיה ומופעל מחדש. זה ייקח רגע.",
+  "core.down.crashLoop": "MVS נכשל כמה פעמים ברצף. מנסים שוב כל 30 שניות. אם זה נמשך, התקנה מחדש עשויה לעזור.",
+  "core.down.unknown": "מנסים להתחבר שוב אוטומטית.",
   "error.generic": "משהו השתבש. אפשר לנסות שוב.",
   "a11y.skipToChat": "דילוג לצ׳אט",
 
