@@ -2,11 +2,10 @@
 // rejects commands with core-unavailable while the core is down.
 
 import { act, render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { App } from '../app/App';
 import type { Settings } from '../app/settings';
 import type { CoreEvents } from '../core/api';
-import { createIpcCore, type DesktopBridge } from '../core/ipc';
 import { MockCore } from '../core/mock';
 
 const settings: Settings = { locale: 'en', theme: 'light', uiScale: 1, fontSize: 15 };
@@ -37,16 +36,5 @@ describe('core unavailable', () => {
     };
     render(<App core={core} initialSettings={settings} />);
     expect((await screen.findByRole('alert')).textContent).toContain('Reinstalling MVS should fix it.');
-  });
-
-  it('ipc.ts hands the latest core.status to a subscriber that comes late', async () => {
-    let send: (event: string, payload: unknown) => void = () => {};
-    const bridge: DesktopBridge = { invoke: async () => ({ ok: null }), onEvent: (cb) => ((send = cb), () => {}) };
-    const core = createIpcCore(bridge);
-    send('core.status', { state: 'down', detail: 'crashed' });
-    const seen = vi.fn();
-    core.on('core.status', seen);
-    await new Promise((r) => setTimeout(r, 0));
-    expect(seen).toHaveBeenCalledWith({ state: 'down', detail: 'crashed' });
   });
 });

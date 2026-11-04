@@ -37,11 +37,7 @@ export function createIpcCore(bridge: DesktopBridge = window.mvs as DesktopBridg
   // on the first launch, or during onboarding before the shell is mounted.
   // The latest one waits for the first listener.
   let pendingLink: unknown = null;
-  // core.status is a state, not a one-off: whoever subscribes gets the latest
-  // one right away (the shell may have sent it before the UI listened).
-  let lastStatus: unknown = null;
   bridge.onEvent((event, payload) => {
-    if (event === 'core.status') lastStatus = payload;
     const set = handlers.get(event);
     if (event === 'link.open' && !set?.size) {
       pendingLink = payload;
@@ -54,10 +50,6 @@ export function createIpcCore(bridge: DesktopBridge = window.mvs as DesktopBridg
     let set = handlers.get(event);
     if (!set) handlers.set(event, (set = new Set()));
     set.add(handler as (payload: never) => void);
-    if ((event as string) === 'core.status' && lastStatus !== null) {
-      const p = lastStatus;
-      setTimeout(() => (handler as (payload: unknown) => void)(p), 0);
-    }
     if ((event as string) === 'link.open' && pendingLink !== null) {
       const p = pendingLink;
       pendingLink = null;
