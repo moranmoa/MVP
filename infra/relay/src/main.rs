@@ -11,7 +11,8 @@ use std::{
     collections::HashSet,
     env, fs,
     io::Write,
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream},
+    num::NonZeroU32,
     path::Path,
     process::ExitCode,
     time::{Duration, Instant},
@@ -166,7 +167,67 @@ fn relay_config() -> Result<relay::Config> {
     config.max_circuit_duration =
         Duration::from_secs(env_num("MAX_CIRCUIT_SECS", config.max_circuit_duration.as_secs())?);
     config.max_circuit_bytes = env_num("MAX_CIRCUIT_BYTES", config.max_circuit_bytes)?;
+
+    // libp2p's default rate limits, rebuilt so the per-IP ones can skip the
+    // reverse proxy: every wss client arrives from the proxy's address, and one
+    // shared per-IP bucket (60, then one a minute) would starve them all. The
+    // per-peer limits and the direct 4001 listeners keep their full protection.
+    let proxies = proxy_ips()?;
+    let per_peer = Duration::from_secs(120);
+    let per_ip = Duration::from_secs(60);
+    let mut limits = relay::Config::default();
+    limits.reservation_rate_limiters.clear();
+    limits.circuit_src_rate_limiters.clear();
+    let mut limits = limits
+        .reservation_rate_per_peer(NonZeroU32::new(30).unwrap(), per_peer)
+        .reservation_rate_per_ip(NonZeroU32::new(60).unwrap(), per_ip)
+        .circuit_src_per_peer(NonZeroU32::new(30).unwrap(), per_peer)
+        .circuit_src_per_ip(NonZeroU32::new(60).unwrap(), per_ip);
+    let ip_reservations = limits.reservation_rate_limiters.pop().expect("per-IP limiter");
+    let ip_circuits = limits.circuit_src_rate_limiters.pop().expect("per-IP limiter");
+    config.reservation_rate_limiters = vec![
+        limits.reservation_rate_limiters.pop().expect("per-peer limiter"),
+        Box::new(SkipProxies { inner: ip_reservations, proxies: proxies.clone() }),
+    ];
+    config.circuit_src_rate_limiters = vec![
+        limits.circuit_src_rate_limiters.pop().expect("per-peer limiter"),
+        Box::new(SkipProxies { inner: ip_circuits, proxies }),
+    ];
     Ok(config)
+}
+
+/// PROXY_IPS: comma-separated addresses of the reverse-proxy hop the relay
+/// sees (from infra/.env, never committed). Empty = no exemption.
+fn proxy_ips() -> Result<Vec<IpAddr>> {
+    let raw = env::var("PROXY_IPS").unwrap_or_default();
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse().with_context(|| format!("PROXY_IPS: {s:?} is not an IP address")))
+        .collect()
+}
+
+/// A per-IP rate limiter that lets the reverse proxy's address through.
+struct SkipProxies {
+    inner: Box<dyn relay::RateLimiter>,
+    proxies: Vec<IpAddr>,
+}
+
+impl relay::RateLimiter for SkipProxies {
+    fn try_next(&mut self, peer: PeerId, addr: &Multiaddr, now: Instant) -> bool {
+        if source_ip(addr).is_some_and(|ip| self.proxies.contains(&ip)) {
+            return true;
+        }
+        self.inner.try_next(peer, addr, now)
+    }
+}
+
+fn source_ip(addr: &Multiaddr) -> Option<IpAddr> {
+    addr.iter().find_map(|p| match p {
+        Protocol::Ip4(ip) => Some(IpAddr::V4(ip)),
+        Protocol::Ip6(ip) => Some(IpAddr::V6(ip)),
+        _ => None,
+    })
 }
 
 fn healthcheck() -> ExitCode {
@@ -395,6 +456,18 @@ fn circuit_addrs<'a>(external: impl Iterator<Item = &'a Multiaddr>, relay_id: Pe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_proxy_skips_the_per_ip_limit() {
+        use libp2p::relay::RateLimiter as _;
+        let refuse_all: Box<dyn relay::RateLimiter> = Box::new(|_: PeerId, _: &Multiaddr, _: Instant| false);
+        let mut limiter = SkipProxies { inner: refuse_all, proxies: vec!["10.0.0.5".parse().unwrap()] };
+        let peer = PeerId::random();
+        let now = Instant::now();
+        assert!(limiter.try_next(peer, &"/ip4/10.0.0.5/tcp/51000".parse().unwrap(), now));
+        assert!(!limiter.try_next(peer, &"/ip4/10.0.0.6/tcp/51000".parse().unwrap(), now));
+        assert!(!limiter.try_next(peer, &"/ip6/::1/tcp/51000".parse().unwrap(), now));
+    }
 
     #[test]
     fn circuit_addresses_go_through_the_relay() {

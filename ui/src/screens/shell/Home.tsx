@@ -3,7 +3,7 @@ import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import { isCoreError, useCore, useCoreEvent, type AgeRestriction, type Id, type JoinStatus, type ServerSummary } from '../../core';
-import { Code, Dialog } from '../../components/common';
+import { Dialog, InviteBox } from '../../components/common';
 import { LinkIcon, PlusIcon, ShieldIcon, WifiOffIcon } from '../../components/icons';
 import { useUserTextProps } from '../../app/textDir';
 import { LINK_MAX } from '../../core/sanitize';
@@ -69,7 +69,6 @@ export function CreateServerDialog({
   const [errors, setErrors] = useState<{ name?: boolean; nameChars?: boolean; age?: boolean }>({});
   const [created, setCreated] = useState<ServerSummary | null>(null);
   const [busy, setBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (!open) {
@@ -77,7 +76,6 @@ export function CreateServerDialog({
       setAge(null);
       setErrors({});
       setCreated(null);
-      setCopied(false);
     }
   }, [open]);
 
@@ -124,19 +122,7 @@ export function CreateServerDialog({
           <p>
             <FormattedMessage id="create.done.body" />
           </p>
-          <div className="invite-box">
-            <Code value={created.inviteLink} />
-            <button
-              type="button"
-              className="secondary small"
-              onClick={async () => {
-                await navigator.clipboard?.writeText(created.inviteLink).catch(() => undefined);
-                setCopied(true);
-              }}
-            >
-              <FormattedMessage id={copied ? 'common.copied' : 'common.copy'} />
-            </button>
-          </div>
+          <InviteBox link={created.inviteLink} />
           <div className="actions">
             <button type="button" className="primary" onClick={() => onOpenServer(created.id)}>
               <FormattedMessage id="create.done.open" />

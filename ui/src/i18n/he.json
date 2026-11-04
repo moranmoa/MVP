@@ -8,6 +8,7 @@
   "common.done": "סיום",
   "common.copy": "העתקה",
   "common.copied": "הועתק",
+  "common.copyFailed": "לא הצלחנו להעתיק. אפשר לסמן את הלינק וללחוץ <kbd>Ctrl+C</kbd>.",
   "common.retry": "לנסות שוב",
   "common.loading": "טוענים…",
   "error.generic": "משהו השתבש. אפשר לנסות שוב.",
@@ -147,7 +148,7 @@
   "age.18": "18+",
 
   "server.menu": "אפשרויות שרת",
-  "server.invite": "העתקת לינק ההזמנה",
+  "server.invite": "הצגת לינק ההזמנה",
   "channels.label": "ערוצים",
   "channel.adult": "ערוץ למבוגרים (18+)",
 

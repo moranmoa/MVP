@@ -638,12 +638,9 @@ fn members_chat_through_the_group_cipher() {
     owner.core.sync_now().unwrap();
     let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
 
-    // No key yet, and a plain member can't make one.
+    // The owner's sync saw the join and keyed the channel for both (a plain
+    // member writing first: `a_joiner_can_write_first_once_the_owner_syncs`).
     guest.core.sync_now().unwrap();
-    assert_eq!(
-        guest.core.send_message(&channel, "first?", None).unwrap_err().code,
-        ErrorCode::NotAllowed
-    );
     // Bad input, and replies (not yet).
     assert_eq!(
         owner.core.send_message(&channel, "  ", None).unwrap_err().code,
@@ -1522,4 +1519,189 @@ fn send_states_survive_a_restart() {
     );
     drop(core);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// v0.2.0 smoke: a member who joins writes first, and the owner never
+/// sends. The owner's sync sees the join and keys the channel for the new
+/// member set, so the joiner can write (and the owner can read it).
+#[test]
+fn a_joiner_can_write_first_once_the_owner_syncs() {
+    use api::crypto::GroupKeysCipher;
+
+    let world = World::new();
+    let open = |words: &str, name: &str| {
+        let cipher = Arc::new(GroupKeysCipher::locked());
+        let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
+        peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        peer.core.update_profile(profile).unwrap();
+        peer
+    };
+    let owner = open(OWNER_WORDS, "Owner");
+    let guest = open(LEGAL, "Guest");
+    let server = owner.core.create_server("Smoke", AgeRestriction::None).unwrap();
+    guest.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    guest.core.sync_now().unwrap();
+    let channel = guest.core.list_channels(&server.id).unwrap().remove(0).id;
+    guest.core.send_message(&channel, "hello from B", None).unwrap();
+    owner.core.sync_now().unwrap();
+    let got = owner.core.get_messages(&channel, 0, 9).unwrap().messages;
+    assert_eq!(got.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(), ["hello from B"]);
+
+    // A second joiner after a key exists gets it too.
+    let third = open(
+        "letter advice cage absurd amount doctor acoustic avoid letter advice cage above",
+        "Third",
+    );
+    third.core.join_server(&server.invite_link).unwrap();
+    // Join re-keys are batched (GAP-8): past the window, the next round keys C.
+    *world.clock.0.lock().unwrap() += 31_000;
+    owner.core.sync_now().unwrap();
+    third.core.sync_now().unwrap();
+    third.core.send_message(&channel, "hi from C", None).unwrap();
+    guest.core.sync_now().unwrap();
+    assert_eq!(guest.core.get_message_count(&channel).unwrap(), 2);
+}
+
+/// The join re-key fails closed too: a failed rotation gives
+/// `rekey-waiting`, never `encryption-renewed`, and the joiner can't write.
+#[test]
+fn a_failed_join_re_key_fails_closed() {
+    use api::crypto::GroupKeysCipher;
+    use std::sync::atomic::Ordering;
+
+    let world = World::new();
+    let open = |words: &str, name: &str, cipher: Arc<dyn GroupCipher>| {
+        let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
+        peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        peer.core.update_profile(profile).unwrap();
+        peer
+    };
+    let spy = Arc::new(Spy::new());
+    let owner = open(OWNER_WORDS, "Owner", spy.clone());
+    let guest = open(LEGAL, "Guest", Arc::new(GroupKeysCipher::locked()));
+    let server = owner.core.create_server("Closed", AgeRestriction::None).unwrap();
+    spy.fail_rotate.store(true, Ordering::SeqCst);
+    guest.core.join_server(&server.invite_link).unwrap();
+    owner.events.take();
+    owner.core.sync_now().unwrap();
+    let got = notices(&owner);
+    assert!(
+        got.contains(&NoticeKind::RekeyWaiting) && !got.contains(&NoticeKind::EncryptionRenewed)
+    );
+    guest.core.sync_now().unwrap();
+    let channel = guest.core.list_channels(&server.id).unwrap().remove(0).id;
+    assert_eq!(
+        guest.core.send_message(&channel, "x", None).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+}
+
+/// The security lead's rules for the join re-key: batched (one per channel
+/// per 10-30 s window, covering everyone who joined meanwhile), and the
+/// new key only, so a joiner can't open what was written before the join.
+#[test]
+fn join_re_keys_are_batched_and_cover_only_new_messages() {
+    use api::crypto::GroupKeysCipher;
+
+    let world = World::new();
+    let open = |words: &str, name: &str| {
+        let cipher = Arc::new(GroupKeysCipher::locked());
+        let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
+        peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        peer.core.update_profile(profile).unwrap();
+        peer
+    };
+    let owner = open(OWNER_WORDS, "Owner");
+    let server = owner.core.create_server("Batch", AgeRestriction::None).unwrap();
+    let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    owner.core.send_message(&channel, "before anyone joined", None).unwrap();
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let rotations =
+        || world.network.fetch(server_key).iter().filter(|r| r.kind() == Kind::KeyRotation).count();
+
+    // The first joiner: keyed at once; the message from before doesn't open.
+    let b = open(LEGAL, "B");
+    b.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    b.core.sync_now().unwrap();
+    assert_eq!(b.core.get_message_count(&channel).unwrap(), 0, "a pre-join message opened");
+    b.core.send_message(&channel, "B here", None).unwrap();
+
+    // A second joiner inside the window: no new rotation yet, C waits.
+    let after_b = rotations();
+    let c = open(
+        "letter advice cage absurd amount doctor acoustic avoid letter advice cage above",
+        "C",
+    );
+    c.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    assert_eq!(rotations(), after_b, "a second re-key inside the window");
+    c.core.sync_now().unwrap();
+    assert_eq!(
+        c.core.send_message(&channel, "too soon", None).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+
+    // Past the window, one round keys C (no new records needed).
+    *world.clock.0.lock().unwrap() += 31_000;
+    owner.core.sync_now().unwrap();
+    assert!(rotations() > after_b);
+    c.core.sync_now().unwrap();
+    c.core.send_message(&channel, "C here", None).unwrap();
+    owner.core.sync_now().unwrap();
+    assert_eq!(owner.core.get_message_count(&channel).unwrap(), 3);
+}
+
+/// GAP-8 amplification: 10 joins in 5 s, with the owner syncing every
+/// 500 ms, give at most one rotation; once the window has passed, one more
+/// round keys everyone, and all 10 can write.
+#[test]
+fn ten_joins_in_five_seconds_make_at_most_one_rotation() {
+    use api::crypto::GroupKeysCipher;
+
+    let world = World::new();
+    let owner =
+        world.peer_with(Arc::new(MemoryStore::new()), None, Arc::new(GroupKeysCipher::locked()));
+    owner.core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
+    let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None };
+    owner.core.update_profile(profile).unwrap();
+    let server = owner.core.create_server("Flood", AgeRestriction::None).unwrap();
+    let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    // One rotation's parts share their deps; count rotations, not parts.
+    let rotations = || {
+        let mut seen = BTreeSet::new();
+        for r in world.network.fetch(server_key).iter().filter(|r| r.kind() == Kind::KeyRotation) {
+            seen.insert(r.deps().to_vec());
+        }
+        seen.len()
+    };
+    let joiners: Vec<Peer> = (0..10)
+        .map(|i| {
+            let peer = world.peer_with(
+                Arc::new(MemoryStore::new()),
+                None,
+                Arc::new(GroupKeysCipher::locked()),
+            );
+            sign_up(&peer, &format!("J{i}"));
+            peer.core.join_server(&server.invite_link).unwrap();
+            *world.clock.0.lock().unwrap() += 500;
+            owner.core.sync_now().unwrap();
+            peer
+        })
+        .collect();
+    assert!(rotations() <= 1, "{} rotations for 10 joins in 5 s", rotations());
+
+    *world.clock.0.lock().unwrap() += 20_000;
+    owner.core.sync_now().unwrap();
+    for (i, joiner) in joiners.iter().enumerate() {
+        joiner.core.sync_now().unwrap();
+        joiner.core.send_message(&channel, &format!("hi {i}"), None).unwrap();
+    }
+    owner.core.sync_now().unwrap();
+    assert_eq!(owner.core.get_message_count(&channel).unwrap(), 10);
 }
