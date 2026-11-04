@@ -86,6 +86,24 @@ And in the relay itself (`relay/src/main.rs`):
   low on purpose: until sync pulls are gated on membership (GAP-4), the
   relay carries circuits for any peer. Review after the alpha using the
   `stats` line (`circuits_denied`, `circuits_open`).
+- **Rate limits and the reverse proxy (`PROXY_IPS`).** libp2p limits
+  reservations and new circuits per peer (30, then one every 2 minutes) and
+  per source IP (60, then one a minute). Every wss client reaches the relay
+  through the reverse proxy, so the relay sees them all as **one IP**. A
+  shared per-IP bucket then starves everyone, and joins between testers fail
+  once it's empty. Put the proxy hop's address, as the relay sees it (on this
+  PC: the NPM host on the LAN), in `PROXY_IPS` in `.env`. Only those
+  addresses skip the **per-IP** limits. The per-peer limits, the global
+  circuit limits above, the connection limits and the memory cap all still
+  apply, and so does the per-IP limit for everything on the direct 4001
+  ports. Leave it empty if no proxy sits in front of the relay.
+
+  The per-IP protection for wss then has to come from the edge. **Owner
+  step:** in Cloudflare, add a rate-limiting rule on `<relay-domain>` for
+  WebSocket upgrades per client IP (e.g. 20 per minute, block for 10
+  minutes), then check that the app still connects (`wss`) afterwards.
+  After a deploy, watch the `stats` line: `circuits_denied` climbing again
+  means a flood or a too-tight limit.
 - When the relay accepts a reservation, it puts the peer's circuit address
   (`<external>/p2p/<relay>/p2p-circuit`) into the DHT. Without this, a peer
   reachable only through the relay was usually not findable: the DHT only
