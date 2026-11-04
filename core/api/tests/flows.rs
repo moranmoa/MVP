@@ -55,6 +55,8 @@ fn names(events: &[Event]) -> Vec<&'static str> {
             Event::ServerUpdated(_) => "server.updated",
             Event::ServerRemoved { .. } => "server.removed",
             Event::ChannelUpdated(_) => "channel.updated",
+            Event::ChannelAdded(_) => "channel.added",
+            Event::ChannelRemoved { .. } => "channel.removed",
             Event::MembersChanged { .. } => "members.changed",
             Event::JoinStatus(_) => "join.status",
             Event::UpdateReady(_) => "update.ready",
@@ -1704,4 +1706,58 @@ fn ten_joins_in_five_seconds_make_at_most_one_rotation() {
     }
     owner.core.sync_now().unwrap();
     assert_eq!(owner.core.get_message_count(&channel).unwrap(), 10);
+}
+
+/// B11: the owner's channel commands, with names normalised and checked,
+/// #general (`isDefault`) undeletable, and the channel events.
+#[test]
+fn channel_commands() {
+    let world = World::new();
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let guest = world.peer();
+    sign_up(&guest, "Guest");
+    let server = owner.core.create_server("Rooms", AgeRestriction::None).unwrap();
+    guest.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    let general = owner.core.list_channels(&server.id).unwrap().remove(0);
+    assert!(general.is_default);
+
+    owner.events.take();
+    let room = owner.core.create_channel(&server.id, "  my   big room ", false).unwrap();
+    assert_eq!((room.name.as_str(), room.is_default, room.adult), ("my-big-room", false, false));
+    assert!(names(&owner.events.take()).contains(&"channel.added"));
+    assert_eq!(
+        owner.core.create_channel(&server.id, "my big room", false).unwrap_err().code,
+        ErrorCode::NameTaken
+    );
+    assert_eq!(
+        owner.core.create_channel(&server.id, "a\u{202E}b", false).unwrap_err().code,
+        ErrorCode::BadRequest
+    );
+    guest.core.sync_now().unwrap();
+    assert_eq!(
+        guest.core.create_channel(&server.id, "mine", false).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+
+    let renamed = owner.core.update_channel(&room.id, Some("lounge"), None).unwrap();
+    assert_eq!((renamed.name.as_str(), renamed.id.as_str()), ("lounge", room.id.as_str()));
+    assert!(names(&owner.events.take()).contains(&"channel.updated"));
+    assert_eq!(
+        owner.core.update_channel(&room.id, Some(&general.name), None).unwrap_err().code,
+        ErrorCode::NameTaken
+    );
+
+    assert_eq!(owner.core.delete_channel(&general.id).unwrap_err().code, ErrorCode::NotAllowed);
+    owner.core.delete_channel(&room.id).unwrap();
+    let removed = owner.events.take().into_iter().find_map(|e| match e {
+        Event::ChannelRemoved { channel_id, name, .. } => Some((channel_id, name)),
+        _ => None,
+    });
+    assert_eq!(removed, Some((room.id.clone(), "lounge".to_owned())));
+    let left: Vec<String> =
+        owner.core.list_channels(&server.id).unwrap().into_iter().map(|c| c.id).collect();
+    assert_eq!(left.as_slice(), std::slice::from_ref(&general.id));
+    assert_eq!(owner.core.get_message_count(&room.id).unwrap_err().code, ErrorCode::NotFound);
 }

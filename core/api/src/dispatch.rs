@@ -77,6 +77,29 @@ struct ServerUserArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ChannelInput {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    adult: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateChannelArgs {
+    server_id: String,
+    input: ChannelInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateChannelArgs {
+    channel_id: String,
+    input: ChannelInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GrantArgs {
     server_id: String,
     user_id: String,
@@ -215,6 +238,16 @@ impl Core {
                 let a: ServerUserArgs = args(raw)?;
                 ok(self.undo_kick(&a.server_id, &a.user_id))
             }
+            "createChannel" => {
+                let a: CreateChannelArgs = args(raw)?;
+                let name = a.input.name.ok_or(ErrorCode::BadRequest)?;
+                ok(self.create_channel(&a.server_id, &name, a.input.adult.unwrap_or(false)))
+            }
+            "updateChannel" => {
+                let a: UpdateChannelArgs = args(raw)?;
+                ok(self.update_channel(&a.channel_id, a.input.name.as_deref(), a.input.adult))
+            }
+            "deleteChannel" => ok(self.delete_channel(&args::<ChannelIdArg>(raw)?.channel_id)),
             "listRemovedMembers" => {
                 ok(self.list_removed_members(&args::<ServerArg>(raw)?.server_id))
             }

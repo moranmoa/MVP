@@ -540,7 +540,10 @@ impl Core {
         Ok(())
     }
 
-    fn live_channel(&self, channel_id: &str) -> CoreResult<(ServerId, ChannelId, authority::Channel)> {
+    fn live_channel(
+        &self,
+        channel_id: &str,
+    ) -> CoreResult<(ServerId, ChannelId, authority::Channel)> {
         let mut inner = self.lock();
         let (server, channel) = inner.find_channel(channel_id)?;
         let view = inner.view(server)?;
@@ -548,7 +551,12 @@ impl Core {
         Ok((server, channel, current))
     }
 
-    fn check_name_free(&self, server: ServerId, name: &str, except: Option<ChannelId>) -> CoreResult<()> {
+    fn check_name_free(
+        &self,
+        server: ServerId,
+        name: &str,
+        except: Option<ChannelId>,
+    ) -> CoreResult<()> {
         let mut inner = self.lock();
         let server = inner.load_mine(server)?;
         let view = inner.view(server)?;
@@ -560,7 +568,7 @@ impl Core {
     }
 
     fn channel_json(&self, server: ServerId, channel: ChannelId) -> CoreResult<Channel> {
-        let mut inner = self.lock();
+        let inner = self.lock();
         inner.open_sync(&self.ports, server)?;
         let me = inner.me.as_ref().map(Me::key);
         let id = model::hex_id(channel.as_bytes());
