@@ -109,8 +109,10 @@ const MAX_INCOMING_CONNECTIONS: u32 = 256;
 const MAX_OUTGOING_CONNECTIONS: u32 = 128;
 const MAX_CONNECTIONS: u32 = 384;
 const MAX_PENDING_INCOMING: u32 = 64;
-/// A direct and a relayed connection to the same peer can briefly coexist.
-const MAX_CONNECTIONS_PER_PEER: u32 = 2;
+/// A direct and a relayed connection to the same peer briefly coexist (the
+/// relayed one is closed once the direct one is up), and two simultaneous
+/// dials can add one more for a moment.
+const MAX_CONNECTIONS_PER_PEER: u32 = 3;
 /// Direct incoming connections from one IP address (IPv6: one /64). PeerIds are free to
 /// make, so the per-peer cap alone doesn't stop one machine taking every
 /// incoming slot. Relayed connections all come from the relay and aren't counted.
@@ -1776,7 +1778,10 @@ impl Task {
             }
         }
         if is_relayed(endpoint) {
-            if self.direct.contains_key(&peer) {
+            // One relayed connection per peer is enough: both sides often dial
+            // each other's circuit at once, and a second one would use up the
+            // per-peer limit and keep a direct connection out.
+            if self.direct.contains_key(&peer) || self.relayed.contains_key(&peer) {
                 self.swarm.close_connection(id);
             } else {
                 let first = !self.relayed.contains_key(&peer);
