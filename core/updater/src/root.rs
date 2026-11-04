@@ -50,6 +50,20 @@ fn first_version() -> u64 {
     1
 }
 
+/// The public update root every release embeds (`trust/root.json`, see
+/// `trust/README.md`). Newer roots are reached from it with
+/// [`TrustRoot::update_chain`].
+pub const EMBEDDED_ROOT_JSON: &str = include_str!("../trust/root.json");
+
+/// [`EMBEDDED_ROOT_JSON`], parsed. Its validity is a test, so this cannot
+/// fail in a built release.
+pub fn embedded_root() -> TrustRoot {
+    serde_json::from_str::<TrustRootFile>(EMBEDDED_ROOT_JSON)
+        .ok()
+        .and_then(|f| TrustRoot::from_file(&f).ok())
+        .expect("trust/root.json is a valid trust root (tested)")
+}
+
 impl TrustRoot {
     pub fn new(keys: Vec<VerifyingKey>, threshold: usize) -> Result<Self, Error> {
         TrustRoot::with_version(1, keys, threshold)
@@ -543,5 +557,16 @@ mod tests {
         let at_cap = vec![b"{}".to_vec(); MAX_ROOT_UPDATES_PER_FETCH];
         assert!(parse_root_fetch(&at_cap).unwrap().is_empty());
         assert!(parse_root_fetch::<Vec<u8>>(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn embedded_root_is_the_owners_v1_key() {
+        // Changing the shipped root changes who can ship code to every user:
+        // this value must only change together with trust/root.json, in a PR
+        // reviewed by the tech lead and the security lead.
+        let root = embedded_root();
+        assert_eq!(root.version(), 1);
+        assert_eq!(root.threshold(), 1);
+        assert_eq!(root.to_file().keys, vec!["b0f1a3b768f3d2f270d4755bf00f819711dc1f2329113192949911e3fa66293e"]);
     }
 }
