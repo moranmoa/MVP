@@ -244,9 +244,8 @@ async fn an_offline_peer_is_not_asked_for_circuits_again_and_again() {
     let asked = circuits.lock().unwrap().iter().filter(|(dst, _)| *dst == gone).count();
     eprintln!("circuit requests to the offline peer in 30 s: {asked}");
     // A few tries are fine; one every discovery round (3 s) is not.
-    // Our dials back off; Kademlia's own lookups can add a few until the
-    // DialGuard (#190) holds them back too. One every 3 s would be 10+.
-    assert!(asked <= 6, "{asked} circuit requests to a peer that went offline");
+    // Every dial backs off, Kademlia's too (DialGuard). One every 3 s would be 10+.
+    assert!(asked <= 3, "{asked} circuit requests to a peer that went offline");
     a.shutdown().await.unwrap();
 }
 
