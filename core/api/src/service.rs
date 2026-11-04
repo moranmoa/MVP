@@ -62,9 +62,9 @@ pub const MAX_CHECK_FAILURES: u8 = 5;
 /// How often the background sync runs without a hint.
 pub const SYNC_EVERY: Duration = Duration::from_secs(2);
 /// Join re-keys are batched: at least this long apart per channel, plus
-/// up to `JOIN_REKEY_JITTER_MS` (10-30 s).
-pub const JOIN_REKEY_MIN_MS: u64 = 10_000;
-const JOIN_REKEY_JITTER_MS: u64 = 20_001;
+/// up to `JOIN_REKEY_JITTER_MS`: 15 s ± 20% (12-18 s). Kicks stay immediate.
+pub const JOIN_REKEY_MIN_MS: u64 = 12_000;
+const JOIN_REKEY_JITTER_MS: u64 = 6_001;
 
 struct Me {
     /// Held only until the recovery check passes, so the UI can show and
@@ -1200,7 +1200,7 @@ impl Inner {
                 let no_key = probe == Err(CipherError::NoKey);
                 if may_rotate && (no_key || (probe.is_ok() && stale)) && members.len() > 1 {
                     // Batched (GAP-8): at most one join re-key per channel every
-                    // 10-30 s (jitter), covering everyone who joined meanwhile;
+                    // 12-18 s (jitter), covering everyone who joined meanwhile;
                     // later rounds pick up what this one defers.
                     let now = ports.clock.now_ms();
                     let due = self.rekey_after.get(&(server, channel)).is_none_or(|t| now >= *t);

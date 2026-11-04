@@ -1655,3 +1655,53 @@ fn join_re_keys_are_batched_and_cover_only_new_messages() {
     owner.core.sync_now().unwrap();
     assert_eq!(owner.core.get_message_count(&channel).unwrap(), 3);
 }
+
+/// GAP-8 amplification: 10 joins in 5 s, with the owner syncing every
+/// 500 ms, give at most one rotation; once the window has passed, one more
+/// round keys everyone, and all 10 can write.
+#[test]
+fn ten_joins_in_five_seconds_make_at_most_one_rotation() {
+    use api::crypto::GroupKeysCipher;
+
+    let world = World::new();
+    let owner =
+        world.peer_with(Arc::new(MemoryStore::new()), None, Arc::new(GroupKeysCipher::locked()));
+    owner.core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
+    let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None };
+    owner.core.update_profile(profile).unwrap();
+    let server = owner.core.create_server("Flood", AgeRestriction::None).unwrap();
+    let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    // One rotation's parts share their deps; count rotations, not parts.
+    let rotations = || {
+        let mut seen = BTreeSet::new();
+        for r in world.network.fetch(server_key).iter().filter(|r| r.kind() == Kind::KeyRotation) {
+            seen.insert(r.deps().to_vec());
+        }
+        seen.len()
+    };
+    let joiners: Vec<Peer> = (0..10)
+        .map(|i| {
+            let peer = world.peer_with(
+                Arc::new(MemoryStore::new()),
+                None,
+                Arc::new(GroupKeysCipher::locked()),
+            );
+            sign_up(&peer, &format!("J{i}"));
+            peer.core.join_server(&server.invite_link).unwrap();
+            *world.clock.0.lock().unwrap() += 500;
+            owner.core.sync_now().unwrap();
+            peer
+        })
+        .collect();
+    assert!(rotations() <= 1, "{} rotations for 10 joins in 5 s", rotations());
+
+    *world.clock.0.lock().unwrap() += 20_000;
+    owner.core.sync_now().unwrap();
+    for (i, joiner) in joiners.iter().enumerate() {
+        joiner.core.sync_now().unwrap();
+        joiner.core.send_message(&channel, &format!("hi {i}"), None).unwrap();
+    }
+    owner.core.sync_now().unwrap();
+    assert_eq!(owner.core.get_message_count(&channel).unwrap(), 10);
+}
