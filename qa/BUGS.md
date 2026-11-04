@@ -56,6 +56,7 @@ The backlog tasks (B-numbers) are from the product owner's review
 | QA-17 | Low | open – narrowed after PR #34: no more silent cut, but the limit counts UTF-16 units, not code points (lowered to Low; product lead to confirm) | B6 (one limit of 4,000 code points for composer, display and core; counter from 3,800) |
 | QA-18 | Medium | **closed with PR #28** (B19; the check fits 375 px, verified on its branch 2026-11-03) | B12 / UX-05; the fix ships with B19 |
 | QA-19 | Low | open – new | B12 |
+| QA-20 | Low | open – new (v0.2.1 regression run, 2026-11-04) | #64 (core start failures as a UI notice) |
 
 ## Bugs
 
@@ -80,6 +81,7 @@ The backlog tasks (B-numbers) are from the product owner's review
 | QA-17 | Low | ui, records | The 4,000 limit counts UTF-16 units, not code points (until PR #34: a 4,001–16,384-byte message was shown cut, silently) | Type 2,100 emoji (2,100 code points, 4,200 UTF-16 units). Also: 5,000 × "a". | Decided: one limit of 4,000 code points everywhere (composer, display, core), with a visible counter from 3,800; nothing is cut silently. | Since PR #34, 5,000 × "a" is refused with "ההודעה ארוכה מדי" and the counter shows from 3,800 (good). But the composer counts `text.length` (UTF-16 units): 2,100 emoji show "4,200 / 4,000" and cannot be sent. Emoji-heavy or non-BMP text gets about half the limit. | `QA-17` |
 | QA-18 | Medium | ui | The recovery-word check does not fit a 375 px phone; "בדיקה" is off-screen | Phone 375×812: onboarding to "בדיקה קצרה". | The step fits the width; the button can be tapped. | Page is 516 px wide (141 px sideways overflow); "בדיקה" is at x = 416, outside the screen, and the hint text is cut on the left. Phone onboarding cannot be finished without sideways scrolling. Same root as UX-05. Screenshot `test-results/explore-shots/phone-word-check.png`. | `QA-18` |
 | QA-19 | Low | ui | Reply reference is a 19 px tap target on phones | Phone 375×812, demo server, a message that replies to another. | Every control ≥ 44×44 px (PR #10 goal). | "ההודעה המקורית" button is about 212×19 px. | `QA-19` |
+| QA-20 | Low | core | Packaged `mvs-core` stops with only "can't open the core: Internal" when the OS keyring is missing | v0.2.1 `linux-x86_64.tar.gz` → `resources/mvs-core --data-dir /tmp/d` in `debian:bookworm-slim` (no Secret Service / D-Bus), stdin `{"id":1,"cmd":"getIdentity"}`. | A clear error that names the missing keyring, and that the UI can show (#64). | Exit 1 with `mvs-core: can't open the core: Internal`. `core.db` is created, so storage opens and the keyring (`OsKeychain`) is the likely cause. A normal Linux desktop has a keyring; minimal or headless setups don't. | 100% |
 
 ### Seen in code, not reproduced through the mock
 
