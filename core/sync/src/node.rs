@@ -225,6 +225,9 @@ pub enum NodeEvent {
     /// opened with its secret (M2). Anyone holding the secret can be bound:
     /// the app shows only members. Sent on changes only.
     Presence { server: ServerId, identity: PublicKey, online: bool },
+    /// A peer's connection became direct, or relayed (a new relayed one
+    /// while no direct one exists). Ask [`Node::presence`] again for the UI.
+    Link { peer: PeerId, direct: bool },
 }
 
 /// Presence on one server (M2). `online` holds bound identities (anyone
@@ -232,6 +235,10 @@ pub enum NodeEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresenceState {
     pub online: Vec<PublicKey>,
+    /// Those of `online` we reach over a direct connection (LAN or, later,
+    /// hole punching); the rest go through the relay. For the UI's
+    /// connection-type indicator.
+    pub direct: Vec<PublicKey>,
     /// The last time anyone of the server was seen online here.
     pub last_seen: Option<SystemTime>,
     pub reachability: Reachability,
@@ -906,7 +913,15 @@ impl Task {
                 } else {
                     Reachability::Connecting
                 };
-                let _ = reply.send(PresenceState { online, last_seen: self.last_seen.get(&server).copied(), reachability });
+                let direct = self
+                    .presence
+                    .peers(&server)
+                    .into_iter()
+                    .filter(|(_, peers)| peers.iter().any(|p| self.direct.contains_key(p)))
+                    .map(|(k, _)| k)
+                    .collect();
+                let last_seen = self.last_seen.get(&server).copied();
+                let _ = reply.send(PresenceState { online, direct, last_seen, reachability });
             }
             Command::Prune { id, reply } => {
                 let _ = reply.send(self.store.prune(&id, &*self.stub_gate).map_err(Into::into));
@@ -1750,9 +1765,16 @@ impl Task {
             if self.direct.contains_key(&peer) {
                 self.swarm.close_connection(id);
             } else {
+                let first = !self.relayed.contains_key(&peer);
                 self.relayed.entry(peer).or_default().insert(id);
+                if first {
+                    self.emit(NodeEvent::Link { peer, direct: false });
+                }
             }
         } else {
+            if !self.direct.contains_key(&peer) {
+                self.emit(NodeEvent::Link { peer, direct: true });
+            }
             self.direct.entry(peer).or_default().insert(id);
             for old in self.relayed.remove(&peer).unwrap_or_default() {
                 debug!(%peer, "direct connection replaces the relayed one");
