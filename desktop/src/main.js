@@ -18,6 +18,7 @@ const { toRequest } = require('./commands');
 const { Sidecar } = require('./sidecar');
 const deeplink = require('./deeplink');
 const { relayFor } = require('./config');
+const update = require('./update');
 
 // One instance only: a second launch (e.g. an mvs:// link, B1-3) focuses this one.
 if (!app.requestSingleInstanceLock()) {
@@ -44,6 +45,10 @@ const CORE_EXE = app.isPackaged
   : process.env.MVS_CORE_PATH;
 let core = null;
 
+// In-app update (B8): on only in an installed copy that has mvs-launcher; the
+// root is derived from this exe's location, never trusted from argv (update.js).
+const UPDATE = update.resolveUpdate({ packaged: app.isPackaged, execPath: process.execPath, argv: process.argv });
+
 function startCore() {
   if (!CORE_EXE || !path.isAbsolute(CORE_EXE) || !fs.existsSync(CORE_EXE)) {
     console.warn('mvs-core not found; core commands answer core-unavailable');
@@ -59,6 +64,7 @@ function startCore() {
     dataDir,
     // Without a relay the core runs offline (no invites, no chat with others).
     relay: relayFor({ packaged: app.isPackaged, resourcesPath: process.resourcesPath }),
+    extraArgs: update.coreArgs(UPDATE),
     onEvent: (name, payload) => {
       for (const win of BrowserWindow.getAllWindows()) {
         if (sec.isInternalUrl(win.webContents.getURL())) win.webContents.send('core:event', name, payload);
@@ -77,6 +83,13 @@ function serveCoreIpc() {
     if (!frame || frame !== event.sender.mainFrame || !sec.isInternalUrl(frame.url)) return { error: { code: 'not-allowed' } };
     const req = toRequest(cmd, args);
     if (req.error) return { error: { code: req.error } };
+    // Restarting into a new version goes through the launcher, which starts
+    // the staged version; the core is not involved.
+    if (req.cmd === 'restartToUpdate' && UPDATE) {
+      app.relaunch({ execPath: UPDATE.launcher, args: [] });
+      app.quit();
+      return { ok: null };
+    }
     if (!core) return { error: { code: 'core-unavailable' } };
     return core.request(req.cmd, req.args);
   });
@@ -201,7 +214,11 @@ function createWindow() {
     webPreferences: { ...sec.WEB_PREFERENCES, preload: path.join(__dirname, 'preload.js'), devTools: !app.isPackaged },
   });
   win.once('ready-to-show', () => win.show());
-  win.webContents.once('did-finish-load', flushInvite);
+  win.webContents.once('did-finish-load', () => {
+    flushInvite();
+    // Commit this version once the UI is up and the core answers (main only).
+    update.reportHealthy(UPDATE, (cmd, args) => (core ? core.request(cmd, args) : Promise.resolve({ error: { code: 'core-unavailable' } })));
+  });
   // The mock demo (?demo) is for checkouts only, never a release build.
   const demo = !app.isPackaged && process.env.MVS_DEMO ? `?demo=${encodeURIComponent(process.env.MVS_DEMO)}` : '';
   win.loadURL(`${sec.ORIGIN}/index.html${demo}`);
@@ -218,7 +235,8 @@ app.whenReady().then(() => {
   serveCoreIpc();
   // The OS sends mvs:// links to the installed app only; a checkout never registers.
   // `--` before the link: whatever the link holds can never become a switch.
-  if (app.isPackaged) app.setAsDefaultProtocolClient(deeplink.SCHEME, process.execPath, ['--']);
+  // With updates on, links go to the launcher, which starts the healthy version.
+  if (app.isPackaged) app.setAsDefaultProtocolClient(deeplink.SCHEME, UPDATE ? UPDATE.launcher : process.execPath, ['--']);
   startCore();
   createWindow();
   const first = deeplink.inviteFromArgv(process.argv);

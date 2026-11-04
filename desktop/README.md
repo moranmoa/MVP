@@ -178,3 +178,19 @@ The address is never in git:
 `--relay` is passed to mvs-core only when there is one (`src/sidecar.js`,
 which also takes `extraArgs` for other parts of the shell). Tests:
 `test/config.test.js`.
+
+### update.js (B8-6)
+
+`src/update.js` turns updates on only in an installed copy with
+`mvs-launcher` next to it. The update root is derived from where the exe is
+(`<root>/MVS.exe` or `<root>/versions/<ver>/MVS.exe`); a
+`--mvs-update-root=` argument that names another folder turns updates off for
+the run. With updates on, main:
+- gives the core `--update-root <root>`;
+- registers `mvs://` to the launcher, still with `--` before the link;
+- handles `restartToUpdate` itself (relaunch through the launcher);
+- after the window has loaded and the core answers `getAppInfo`, tells the
+  core `markHealthy`.
+
+`markHealthy`, `checkForUpdate`, `downloadUpdate` and `applyUpdate` are
+core-only and not on the allow-list (GAP-17). Tests: `test/update.test.js`.
