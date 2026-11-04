@@ -52,7 +52,7 @@ export interface MockOptions {
   /** Act as if in a voice call: restartToUpdate is refused with not-allowed. */
   inCall?: boolean;
   /** As the desktop shell would: report the core down, for the T8-01 screen. */
-  coreDown?: 'missing' | 'start-failed' | 'crashed' | 'crash-loop';
+  coreDown?: 'missing' | 'start-failed' | 'crashed' | 'crash-loop' | 'keyring';
   /** Add members and messages written the way an attacker would (see SECURITY.md). */
   hostile?: boolean;
   /** `getRecoveryWords()` fails, to show the load error state. */

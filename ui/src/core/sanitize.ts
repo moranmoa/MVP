@@ -255,7 +255,7 @@ const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[
   'link.open': (p) => ({ link: cleanInviteLink(p?.link) }),
   'core.status': (s) => ({
     state: s?.state === 'up' || s?.state === 'down' ? s.state : 'starting',
-    detail: (['missing', 'start-failed', 'crashed', 'crash-loop'] as const).find((d) => d === s?.detail),
+    detail: (['missing', 'start-failed', 'crashed', 'crash-loop', 'keyring'] as const).find((d) => d === s?.detail),
   }),
   'update.ready': (u) => ({ version: cleanName(u.version, 32), waitingForCall: u.waitingForCall === true }),
   // Release notes come from the signed manifest, but they are still shown as

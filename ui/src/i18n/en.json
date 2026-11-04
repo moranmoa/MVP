@@ -17,6 +17,8 @@
   "core.down.crashed": "MVS hit a problem and is restarting. This takes a moment.",
   "core.down.crashLoop": "MVS failed several times in a row. Trying again every 30 seconds; if it keeps happening, reinstalling may help.",
   "core.down.unknown": "Trying to reconnect automatically.",
+  "core.down.keyring": "No system keyring found. On Linux, MVS needs a service like gnome-keyring or KWallet.",
+  "core.down.openLogs": "Open the logs folder",
   "error.generic": "Something went wrong. Please try again.",
   "a11y.skipToChat": "Skip to chat",
 

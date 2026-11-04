@@ -3,7 +3,10 @@ import { FormattedMessage } from 'react-intl';
 import { CoreContext, type CoreApi } from '../core';
 import { guardCore } from '../core/sanitize';
 import type { CoreDownDetail } from '../core/types';
-import { CoreDownScreen, watchUnavailable } from './CoreDown';
+import { CoreDownScreen, shellActions, watchUnavailable } from './CoreDown';
+
+/** No answer from the core this long after start: show the screen (cause unknown). */
+const START_TIMEOUT_MS = 10_000;
 import { Onboarding, resumeStep } from '../screens/onboarding/Onboarding';
 import { Shell } from '../screens/shell/Shell';
 import { SettingsProvider, type Settings } from './settings';
@@ -27,28 +30,45 @@ export function App({ core: rawCore, initialSettings }: { core: CoreApi; initial
   const [store] = useState(() => new Store(core));
   const [ready, setReady] = useState(false);
 
+  const load = useRef(() => store.init().then(() => setReady(true), () => {}));
+
   useEffect(() => {
     const stop = store.start();
-    const load = () => store.init().then(() => setReady(true), () => {});
-    void load();
+    let answered = false;
+    void load.current().then(() => (answered = true));
+    const hang = setTimeout(() => {
+      if (!answered) setDown((d) => d || {});
+    }, START_TIMEOUT_MS);
     const off = core.on('core.status', (s) => {
       if (s.state === 'down') setDown({ detail: s.detail });
       else if (s.state === 'up') {
         setDown(false);
-        void load(); // the first load may have failed while the core was down
+        void load.current(); // the first load may have failed while the core was down
       }
     });
     return () => {
+      clearTimeout(hang);
       off();
       stop();
     };
   }, [store, core]);
 
+  // "Try again": the shell restarts the core now (its core.status then hides
+  // the screen); without a shell, just try loading again.
+  const retry = () => {
+    const { retryCore } = shellActions();
+    if (retryCore) void retryCore();
+    else {
+      setDown(false);
+      void load.current();
+    }
+  };
+
   return (
     <CoreContext.Provider value={core}>
       <StoreContext.Provider value={store}>
         <SettingsProvider initial={initialSettings}>
-          {down ? <CoreDownScreen detail={down.detail} /> : ready ? <Root /> : <Splash />}
+          {down ? <CoreDownScreen detail={down.detail} onRetry={retry} /> : ready ? <Root /> : <Splash />}
         </SettingsProvider>
       </StoreContext.Provider>
     </CoreContext.Provider>

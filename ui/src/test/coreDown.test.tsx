@@ -1,8 +1,8 @@
 // T8-01: "core unavailable" screen. The desktop shell reports core.status and
 // rejects commands with core-unavailable while the core is down.
 
-import { act, render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { act, fireEvent, render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
 import { App } from '../app/App';
 import type { Settings } from '../app/settings';
 import type { CoreEvents } from '../core/api';
@@ -36,5 +36,52 @@ describe('core unavailable', () => {
     };
     render(<App core={core} initialSettings={settings} />);
     expect((await screen.findByRole('alert')).textContent).toContain('Reinstalling MVS should fix it.');
+  });
+
+  it('names a missing system keyring (QA-20)', async () => {
+    const core = new MockCore({ demo: true, speed: 0, simulateActivity: false });
+    core.getIdentity = async () => {
+      throw { code: 'keyring-unavailable' };
+    };
+    render(<App core={core} initialSettings={settings} />);
+    expect((await screen.findByRole('alert')).textContent).toContain('gnome-keyring or KWallet');
+  });
+
+  it('"Try again" asks the shell to restart the core, and the logs button opens its folder', async () => {
+    const retryCore = vi.fn(async () => {});
+    const openLogsFolder = vi.fn(async () => true);
+    (window as { mvs?: unknown }).mvs = { retryCore, openLogsFolder };
+    try {
+      const core = new MockCore({ demo: true, speed: 0, simulateActivity: false });
+      core.getIdentity = async () => {
+        throw { code: 'core-unavailable', detail: 'crashed' };
+      };
+      render(<App core={core} initialSettings={settings} />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
+      expect(retryCore).toHaveBeenCalledTimes(1);
+      fireEvent.click(screen.getByRole('button', { name: 'Open the logs folder' }));
+      expect(openLogsFolder).toHaveBeenCalledTimes(1);
+    } finally {
+      delete (window as { mvs?: unknown }).mvs;
+    }
+  });
+
+  it('shows the screen when the core has not answered within 10 s of start', async () => {
+    vi.useFakeTimers();
+    try {
+      const core = new MockCore({ demo: true, speed: 0, simulateActivity: false });
+      core.getIdentity = () => new Promise(() => {}); // never answers
+      render(<App core={core} initialSettings={settings} />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9_000);
+      });
+      expect(screen.queryByRole('alert')).toBeNull();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_500);
+      });
+      expect(screen.getByRole('alert').textContent).toContain('Trying to reconnect automatically.');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

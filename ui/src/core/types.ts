@@ -77,7 +77,8 @@ export interface Member {
   bio?: string;
 }
 
-export type CoreDownDetail = 'missing' | 'start-failed' | 'crashed' | 'crash-loop';
+/** `keyring`: the OS keychain is missing or unusable (QA-20; core code `keyring-unavailable`). */
+export type CoreDownDetail = 'missing' | 'start-failed' | 'crashed' | 'crash-loop' | 'keyring';
 
 /** The desktop shell's view of the core process (T8-01). */
 export interface CoreStatus {
@@ -102,6 +103,7 @@ export interface CoreError {
     | 'core-unavailable'
     | 'core-restarted'
     | 'too-large'
+    | 'keyring-unavailable'
     // In-app update (core/api CONFORMANCE "Updates")
     | 'offline'
     | 'invalid-update'
