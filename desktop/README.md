@@ -188,7 +188,9 @@ which also takes `extraArgs` for other parts of the shell). Tests:
 the run. With updates on, main:
 - gives the core `--update-root <root>`;
 - registers `mvs://` to the launcher, still with `--` before the link;
-- handles `restartToUpdate` itself (relaunch through the launcher);
+- handles `restartToUpdate` itself: the core's `applyUpdate` first (refused
+  during a call; the error goes back to the UI), then a relaunch through the
+  launcher;
 - after the window has loaded and the core answers `getAppInfo`, tells the
   core `markHealthy`.
 

@@ -14,7 +14,8 @@
 // Updates are on only in an installed copy that has the launcher. Then:
 //   - the core gets --update-root <root> (it stages updates there);
 //   - mvs:// is registered to the launcher, so a link starts the healthy version;
-//   - restartToUpdate relaunches through the launcher (it picks the new version);
+//   - restartToUpdate asks the core to applyUpdate (refused during a call),
+//     then relaunches through the launcher, which starts the staged version;
 //   - after a good start main tells the core `markHealthy`, which commits the
 //     version. The renderer can never do this (not on the allow-list, GAP-17):
 //     a broken UI must not declare itself healthy.
@@ -81,11 +82,25 @@ async function reportHealthy(upd, request, log = (m) => console.log(m)) {
     return false;
   }
   const res = await request('markHealthy', {});
+  // not-allowed: this version was already committed (not a trial boot).
   if (res.error) {
-    log(`markHealthy: ${res.error.code}`);
+    if (res.error.code !== 'not-allowed') log(`markHealthy: ${res.error.code}`);
     return false;
   }
   return true;
 }
 
-module.exports = { ARG, VERSION_DIR, launcherName, deriveRoot, resolveUpdate, coreArgs, reportHealthy };
+/**
+ * The renderer's restartToUpdate (core/api CONFORMANCE "Updates"): the core's
+ * applyUpdate first; only when it agrees, relaunch through the launcher.
+ * Its errors (`nothing-staged`, `not-allowed` during a call) go back to the UI.
+ */
+async function restartToUpdate(upd, request, relaunch) {
+  if (!upd) return { error: { code: 'not-implemented' } };
+  const res = await request('applyUpdate', {});
+  if (res.error) return res;
+  relaunch();
+  return { ok: null };
+}
+
+module.exports = { ARG, VERSION_DIR, launcherName, deriveRoot, resolveUpdate, coreArgs, reportHealthy, restartToUpdate };

@@ -4,7 +4,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { resolveUpdate, deriveRoot, coreArgs, reportHealthy } = require('../src/update');
+const { resolveUpdate, deriveRoot, coreArgs, reportHealthy, restartToUpdate } = require('../src/update');
 const { toRequest } = require('../src/commands');
 
 const ROOT = path.resolve('/apps/MVS');
@@ -75,6 +75,26 @@ test('markHealthy only after the core answers, and only with updates on', async 
   calls.length = 0;
   assert.equal(await reportHealthy({ root: ROOT }, down, () => {}), false);
   assert.deepEqual(calls, ['getAppInfo'], 'no markHealthy when the core is not up');
+});
+
+test('restartToUpdate: applyUpdate first, relaunch only when the core agrees', async () => {
+  const calls = [];
+  let relaunched = 0;
+  const relaunch = () => relaunched++;
+  const answer = (res) => (cmd) => {
+    calls.push(cmd);
+    return Promise.resolve(res);
+  };
+  assert.deepEqual(await restartToUpdate({ root: ROOT }, answer({ ok: { version: '1.3.0' } }), relaunch), { ok: null });
+  assert.deepEqual(calls, ['applyUpdate']);
+  assert.equal(relaunched, 1);
+  // In a call, or nothing staged: the error goes back to the UI, no relaunch.
+  for (const code of ['not-allowed', 'nothing-staged']) {
+    assert.deepEqual(await restartToUpdate({ root: ROOT }, answer({ error: { code } }), relaunch), { error: { code } });
+  }
+  assert.equal(relaunched, 1);
+  assert.deepEqual(await restartToUpdate(null, answer({ ok: {} }), relaunch), { error: { code: 'not-implemented' } });
+  assert.equal(relaunched, 1);
 });
 
 test('the renderer cannot reach the update commands (GAP-17)', () => {

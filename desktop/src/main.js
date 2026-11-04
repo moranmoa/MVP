@@ -85,12 +85,15 @@ function serveCoreIpc() {
     if (req.error) return { error: { code: req.error } };
     // Restarting into a new version goes through the launcher, which starts
     // the staged version; the core is not involved.
-    if (req.cmd === 'restartToUpdate' && UPDATE) {
-      app.relaunch({ execPath: UPDATE.launcher, args: [] });
-      app.quit();
-      return { ok: null };
-    }
     if (!core) return { error: { code: 'core-unavailable' } };
+    // "Restart to update": the core's applyUpdate (refused during a call),
+    // then a relaunch through the launcher, which starts the staged version.
+    if (req.cmd === 'restartToUpdate' && UPDATE) {
+      return update.restartToUpdate(UPDATE, (c, a) => core.request(c, a), () => {
+        app.relaunch({ execPath: UPDATE.launcher, args: [] });
+        app.quit();
+      });
+    }
     return core.request(req.cmd, req.args);
   });
   // Copy text for the user (an invite link). Web clipboard permissions stay
