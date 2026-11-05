@@ -4,7 +4,7 @@ import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import type { Channel, Id, ServerSummary } from '../../core';
 import { Avatar, Badge, Code, InviteBox, Name } from '../../components/common';
-import { GearIcon, HashIcon, LinkIcon } from '../../components/icons';
+import { GearIcon, HashIcon, LinkIcon, PlusIcon } from '../../components/icons';
 
 const NO_CHANNELS: Channel[] = [];
 
@@ -13,11 +13,16 @@ export function ChannelSidebar({
   channelId,
   onSelectChannel,
   onOpenSettings,
+  onCreateChannel,
+  onEditChannel,
 }: {
   server: ServerSummary;
   channelId: Id;
   onSelectChannel: (id: Id) => void;
   onOpenSettings: () => void;
+  /** Owner only (B11c). */
+  onCreateChannel: () => void;
+  onEditChannel: (channel: Channel) => void;
 }) {
   const store = useAppStore();
   const channels = useStore(store, (s) => s.channels[server.id] ?? NO_CHANNELS);
@@ -26,6 +31,7 @@ export function ChannelSidebar({
   // The invite link, shown selectable with a Copy button (P0 from v0.2.0: the
   // desktop page can't write the clipboard by itself, see app/clipboard.ts).
   const [showInvite, setShowInvite] = useState(false);
+  const owner = server.ownerId === identity.id;
 
   return (
     <aside className="sidebar" aria-label={intl.formatMessage({ id: 'channels.label' })}>
@@ -53,6 +59,22 @@ export function ChannelSidebar({
         </div>
       )}
       <nav className="channel-list" aria-label={intl.formatMessage({ id: 'channels.label' })}>
+        {owner && (
+          <div className="channel-list-header">
+            <span>
+              <FormattedMessage id="channels.label" />
+            </span>
+            <button
+              type="button"
+              className="icon-button small"
+              onClick={onCreateChannel}
+              aria-label={intl.formatMessage({ id: 'channel.create' })}
+              title={intl.formatMessage({ id: 'channel.create' })}
+            >
+              <PlusIcon />
+            </button>
+          </div>
+        )}
         <ul>
           {channels.map((c) => {
             const active = c.id === channelId;
@@ -63,7 +85,7 @@ export function ChannelSidebar({
               c.unread && !active ? intl.formatMessage({ id: 'unread.label' }) : null,
             ];
             return (
-              <li key={c.id}>
+              <li key={c.id} className="channel-row">
                 <button
                   type="button"
                   className={`channel ${active ? 'active' : ''} ${c.unread && !active ? 'unread' : ''}`}
@@ -83,6 +105,16 @@ export function ChannelSidebar({
                   {c.unread && !active && !c.mentions && <span className="unread-dot" aria-hidden="true" />}
                   <Badge count={c.mentions} label={intl.formatMessage({ id: 'mentions.label' }, { count: c.mentions })} />
                 </button>
+                {owner && (
+                  <button
+                    type="button"
+                    className="icon-button small channel-edit"
+                    onClick={() => onEditChannel(c)}
+                    aria-label={`${intl.formatMessage({ id: 'channel.edit' })}: ${c.name}`}
+                  >
+                    <GearIcon />
+                  </button>
+                )}
               </li>
             );
           })}

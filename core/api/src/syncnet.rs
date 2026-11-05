@@ -18,14 +18,14 @@ use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use libp2p::Multiaddr;
-use records::{ChannelId, Record, RecordId, Scope, ServerId};
+use libp2p::{Multiaddr, PeerId};
+use records::{ChannelId, PublicKey, Record, RecordId, Scope, ServerId};
 use sync::{log_name, log_of, Access, Node, NodeConfig, NodeEvent, ServerSecret, Store};
 use tokio::runtime::Runtime;
 
 use crate::access::{KeyBinder, MemberReadGate, MemberStubGate};
 use crate::gate::MemberGate;
-use crate::ports::Network;
+use crate::ports::{Network, Reach};
 use crate::types::SendState;
 
 /// How long `fetch` waits for a server it has never seen to arrive, so a
@@ -94,7 +94,9 @@ impl SyncNetwork {
             authorizer: gate,
             listen: "/ip4/0.0.0.0/tcp/0".parse().expect("valid multiaddr"),
             bootstrap: Vec::new(),
-            allow_lan: false,
+            // F2: a direct LAN connection to a peer that proved it shares a
+            // server with us (sync never takes LAN addresses from the DHT).
+            allow_lan: true,
         };
         // GAP-4: our pulls carry bindings signed with the identity key (once
         // unlocked), and channel logs are served to members only.
@@ -121,6 +123,9 @@ impl SyncNetwork {
                     // B6: my messages' send state moves on; a round re-announces.
                     NodeEvent::Sent { id } => advance(&states, id, SendState::Sent),
                     NodeEvent::Delivered { id } => advance(&states, id, SendState::Received),
+                    // M2: someone came online or left: a hint only; the core asks
+                    // the node (`online`), so a dropped event loses nothing.
+                    NodeEvent::Presence { .. } => true,
                     _ => false,
                 };
                 if wake {
@@ -144,6 +149,22 @@ impl SyncNetwork {
     /// The hints for `Core::run_sync_loop` (once; `None` after).
     pub fn take_hints(&self) -> Option<Receiver<()>> {
         self.hints.lock().expect("not poisoned").take()
+    }
+
+    pub fn peer_id(&self) -> PeerId {
+        self.node.peer_id()
+    }
+
+    /// Peers with a direct (not relayed) connection.
+    pub fn direct_peers(&self) -> Vec<PeerId> {
+        self.runtime.block_on(self.node.direct_peers()).unwrap_or_default()
+    }
+
+    /// Tests only: this node never dials a direct connection itself, so the
+    /// other side's fallback dial makes the link.
+    #[doc(hidden)]
+    pub fn test_no_direct_dials(&self) {
+        let _ = self.node.test_no_direct_dials();
     }
 
     /// Wakes the sync loop now, e.g. so it sees its stop flag.
@@ -204,6 +225,24 @@ impl Network for SyncNetwork {
 
     fn lock(&self) {
         self.binder.lock();
+    }
+
+    /// Asked of the node each time (never mirrored from events, which can be
+    /// dropped): who of `server` is bound and online now.
+    fn online(&self, server: ServerId) -> Option<BTreeSet<PublicKey>> {
+        self.presence(server).map(|reach| reach.online)
+    }
+
+    /// One node query for both: who is online, and whom we reach directly
+    /// (#187).
+    fn presence(&self, server: ServerId) -> Option<Reach> {
+        match self.runtime.block_on(self.node.presence(server)) {
+            Ok(state) => Some(Reach {
+                online: state.online.into_iter().collect(),
+                direct: state.direct.into_iter().collect(),
+            }),
+            Err(_) => Some(Reach::default()),
+        }
     }
 
     fn send_state(&self, id: RecordId) -> Option<SendState> {

@@ -55,6 +55,39 @@ describe('ipc core', () => {
     expect(second).toEqual([{ link: 'mvs://join/c' }]);
   });
 
+  it('gives the latest core.status to every listener, also ones that come late (T8-01)', async () => {
+    const { bridge, emit } = fakeBridge(() => ({ ok: null }));
+    const core = createIpcCore(bridge);
+    emit('core.status', { state: 'starting' });
+    emit('core.status', { state: 'down', detail: 'crashed' });
+    const a: unknown[] = [];
+    const b: unknown[] = [];
+    core.on('core.status' as never, (p: unknown) => a.push(p));
+    core.on('core.status' as never, (p: unknown) => b.push(p));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(a).toEqual([{ state: 'down', detail: 'crashed' }]);
+    expect(b).toEqual([{ state: 'down', detail: 'crashed' }]);
+    emit('core.status', { state: 'up' });
+    expect(a.at(-1)).toEqual({ state: 'up' });
+    expect(b.at(-1)).toEqual({ state: 'up' });
+    // A listener added later still learns the current state.
+    const c: unknown[] = [];
+    core.on('core.status' as never, (p: unknown) => c.push(p));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(c).toEqual([{ state: 'up' }]);
+  });
+
+  it('does not replay a stale core.status after a newer one arrived', async () => {
+    const { bridge, emit } = fakeBridge(() => ({ ok: null }));
+    const core = createIpcCore(bridge);
+    emit('core.status', { state: 'down', detail: 'crashed' });
+    const seen: unknown[] = [];
+    core.on('core.status' as never, (p: unknown) => seen.push(p));
+    emit('core.status', { state: 'up' });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(seen).toEqual([{ state: 'up' }]);
+  });
+
   it('is not a thenable', () => {
     const { bridge } = fakeBridge(() => ({ ok: null }));
     expect((createIpcCore(bridge) as unknown as { then?: unknown }).then).toBeUndefined();

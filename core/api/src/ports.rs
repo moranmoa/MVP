@@ -105,6 +105,20 @@ pub trait Network: Send + Sync {
 
     fn lock(&self) {}
 
+    /// M2: who of `server` is online now (bound identities, members or
+    /// not: the core shows members only). `None` if not tracked.
+    fn online(&self, server: ServerId) -> Option<BTreeSet<PublicKey>> {
+        let _ = server;
+        None
+    }
+
+    /// M2 + #187: who of `server` is online, and which of them we reach
+    /// directly (the rest go through the relay). One query where the network
+    /// can; by default from `online` with nobody direct.
+    fn presence(&self, server: ServerId) -> Option<Reach> {
+        self.online(server).map(|online| Reach { online, direct: BTreeSet::new() })
+    }
+
     /// B6: where a record written here stands; `None` if not tracked.
     fn send_state(&self, id: records::RecordId) -> Option<crate::types::SendState> {
         let _ = id;
@@ -365,4 +379,11 @@ pub struct Ports {
     pub events: Arc<dyn EventSink>,
     pub clock: Arc<dyn Clock>,
     pub cipher: Arc<dyn GroupCipher>,
+}
+
+/// Who of a server is online, and which of them over a direct connection.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Reach {
+    pub online: BTreeSet<PublicKey>,
+    pub direct: BTreeSet<PublicKey>,
 }

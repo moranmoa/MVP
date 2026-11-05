@@ -20,6 +20,9 @@ const COMMANDS = Object.freeze({
   // Servers and channels
   listServers: [],
   listChannels: ['serverId'],
+  createChannel: ['serverId', 'input'],
+  updateChannel: ['channelId', 'input'],
+  deleteChannel: ['channelId'],
   listMembers: ['serverId'],
   createServer: ['input'],
   joinServer: ['link'],

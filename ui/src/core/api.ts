@@ -23,6 +23,7 @@ import type {
   StorageUsage,
   UpdateChannel,
   UpdateInfo,
+  CoreStatus,
 } from './types';
 
 export interface CoreCommands {
@@ -56,6 +57,12 @@ export interface CoreCommands {
   // Servers and channels
   listServers(): Promise<ServerSummary[]>;
   listChannels(serverId: Id): Promise<Channel[]>;
+  /** Owner only (B11c). The core normalises the name; rejects `name-taken` or `bad-request`. */
+  createChannel(serverId: Id, input: { name: string; adult: boolean }): Promise<Channel>;
+  /** Owner only. Same name rules as createChannel. */
+  updateChannel(channelId: Id, input: { name?: string; adult?: boolean }): Promise<Channel>;
+  /** Owner only; `not-allowed` for the default channel. */
+  deleteChannel(channelId: Id): Promise<void>;
   listMembers(serverId: Id): Promise<Member[]>;
   createServer(input: { name: string; ageRestriction: AgeRestriction }): Promise<ServerSummary>;
   /** Progress arrives as `join.status` events; resolves with the first status. */
@@ -93,11 +100,17 @@ export interface CoreEvents {
   'server.updated': ServerSummary;
   'server.removed': { serverId: Id };
   'channel.updated': Channel;
+  'channel.added': Channel;
+  'channel.removed': { serverId: Id; channelId: Id; name: string };
   'members.changed': { serverId: Id; members: Member[] };
   'message.added': Message;
   'message.updated': Message;
   'join.status': JoinStatus;
   'update.ready': UpdateInfo;
+  /** Once, after a new version committed. `notes` is plain text: render as text only. */
+  'update.installed': { version: string; notes: string | null };
+  /** Once, after the launcher went back to the previous version. */
+  'update.rolledBack': { failed: string; running: string };
   /** e.g. after a kick: the server's encryption was renewed. */
   'notice': { kind: 'encryption-renewed'; serverId: Id };
   /**
@@ -106,6 +119,8 @@ export interface CoreEvents {
    * when the person presses Join; nothing joins on its own.
    */
   'link.open': { link: string };
+  /** Desktop shell (T8-01): sent on every change and on every page load. */
+  'core.status': CoreStatus;
 }
 
 export type CoreEventName = keyof CoreEvents;

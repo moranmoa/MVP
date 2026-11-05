@@ -127,3 +127,107 @@ test('no core: requests answer core-unavailable', async () => {
   const core = new Sidecar({ exe: FAKE, dataDir: DATA, onEvent() {} });
   assert.deepEqual(await core.request('getIdentity', {}), { error: { code: 'core-unavailable' } });
 });
+
+// ---- status for the "core unavailable" screen (T8-01) ----------------------
+
+const { EventEmitter } = require('node:events');
+
+/** A child that fails the way `how` says, every time it is started. */
+function failing(how) {
+  return () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = { write() {}, end() {} };
+    child.kill = () => {};
+    setImmediate(() => (how === 'spawn' ? child.emit('error', Object.assign(new Error('x'), { code: 'ENOENT' })) : child.emit('exit', 1, null)));
+    return child;
+  };
+}
+
+test('status goes up once the core answers, or says it is ready', async () => {
+  const statuses = [];
+  const { core } = start({ onStatus: (s) => statuses.push(s) });
+  await core.request('getIdentity', {});
+  core.stop();
+  assert.deepEqual(statuses.at(-1), { state: 'up' });
+  const ready = new Sidecar({ exe: FAKE, dataDir: DATA, onEvent() {} });
+  ready.child = {};
+  ready.onLine('{"type":"event","event":"x","payload":null}');
+  assert.deepEqual(ready.status, { state: 'up' });
+});
+
+test('a core that cannot be started: down, start-failed, and requests say why', async () => {
+  const statuses = [];
+  const core = new Sidecar({ exe: FAKE, dataDir: DATA, onEvent() {}, onStatus: (s) => statuses.push(s), backoffBase: 50, spawnImpl: failing('spawn') }).start();
+  await until(() => statuses.length > 0);
+  assert.deepEqual(statuses[0], { state: 'down', detail: 'start-failed' });
+  assert.deepEqual(await core.request('getIdentity', {}), { error: { code: 'core-unavailable', detail: 'start-failed' } });
+  core.stop();
+});
+
+test('five crashes in a row without an answer: crash-loop', async () => {
+  const statuses = [];
+  const core = new Sidecar({ exe: FAKE, dataDir: DATA, onEvent() {}, onStatus: (s) => statuses.push(s), backoffBase: 1, spawnImpl: failing('exit') }).start();
+  await until(() => statuses.some((s) => s.detail === 'crash-loop'));
+  core.stop();
+  assert.deepEqual(statuses[0], { state: 'down', detail: 'crashed' });
+  assert.deepEqual(statuses.at(-1), { state: 'down', detail: 'crash-loop' });
+});
+
+test('retryNow: from down, start again at once with a fresh backoff', async () => {
+  const statuses = [];
+  const core = new Sidecar({ exe: FAKE, dataDir: DATA, onEvent() {}, onStatus: (s) => statuses.push(s), backoffBase: 60_000, spawnImpl: failing('exit') }).start();
+  await until(() => statuses.some((s) => s.state === 'down'));
+  assert.equal(core.retryNow(), true);
+  assert.deepEqual(statuses.at(-1), { state: 'starting' });
+  await until(() => statuses.at(-1).state === 'down');
+  core.stop();
+});
+
+test('the log file is capped, rotates to .1, and keeps one line per entry', () => {
+  const { createLog } = require('../src/logfile');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mvs-logs-'));
+  const log = createLog(dir, { maxBytes: 300 });
+  for (let i = 0; i < 20; i++) log(`line ${i}\nwith a break`);
+  const text = fs.readFileSync(path.join(dir, 'mvs.log'), 'utf8');
+  assert.ok(fs.statSync(path.join(dir, 'mvs.log')).size <= 300);
+  assert.ok(fs.existsSync(path.join(dir, 'mvs.log.1')));
+  assert.ok(!/with a break\n(?!\d)/.test(text.replace(/\n$/, '')) || text.split('\n').every((l) => !l || /^\d{4}-/.test(l)));
+});
+
+test('retryNow also replaces a running core (up but failing, QA-20)', async () => {
+  const statuses = [];
+  const { core } = start({ onStatus: (s) => statuses.push(s) });
+  await core.request('getIdentity', {});
+  const first = core.child;
+  assert.equal(core.retryNow(), true);
+  assert.notEqual(core.child, first);
+  assert.deepEqual(statuses.at(-1), { state: 'starting' });
+  assert.deepEqual(await core.request('getIdentity', {}), { ok: {} });
+  assert.deepEqual(statuses.at(-1), { state: 'up' });
+  core.stop();
+});
+
+test('the log file never holds addresses, peer IDs or 64-hex IDs', () => {
+  const { redact } = require('../src/logfile');
+  const peer = '12D3KooW' + 'A'.repeat(44);
+  const line = `dial /dns4/relay.example.org/tcp/443/wss/p2p/${peer} from 192.0.2.7 and 2001:db8::1:2:3 for mvs://join/${'a'.repeat(64)}/${'b'.repeat(64)}`;
+  const out = redact(line);
+  for (const leak of ['relay.example.org', peer, '192.0.2.7', '2001:db8', 'a'.repeat(64)]) assert.ok(!out.includes(leak), leak);
+  assert.match(out, /\/dns4\/<host>/);
+  assert.match(out, /<peer>/);
+  assert.match(out, /<ip>/);
+  assert.match(out, /<id>/);
+});
+
+test('the configured relay host is hidden even as a bare name, any case', () => {
+  const { createLog } = require('../src/logfile');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mvs-logs-'));
+  const log = createLog(dir);
+  log.hide('relay.example.org');
+  log('connect to relay.example.org:443 failed; RELAY.Example.ORG unreachable');
+  const text = fs.readFileSync(path.join(dir, 'mvs.log'), 'utf8');
+  assert.ok(!/relay\.example\.org/i.test(text), text);
+  assert.match(text, /<host>:443 failed; <host> unreachable/);
+});
