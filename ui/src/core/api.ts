@@ -23,6 +23,7 @@ import type {
   StorageUsage,
   UpdateChannel,
   UpdateInfo,
+  CoreStatus,
 } from './types';
 
 export interface CoreCommands {
@@ -98,6 +99,10 @@ export interface CoreEvents {
   'message.updated': Message;
   'join.status': JoinStatus;
   'update.ready': UpdateInfo;
+  /** Once, after a new version committed. `notes` is plain text: render as text only. */
+  'update.installed': { version: string; notes: string | null };
+  /** Once, after the launcher went back to the previous version. */
+  'update.rolledBack': { failed: string; running: string };
   /** e.g. after a kick: the server's encryption was renewed. */
   'notice': { kind: 'encryption-renewed'; serverId: Id };
   /**
@@ -106,6 +111,8 @@ export interface CoreEvents {
    * when the person presses Join; nothing joins on its own.
    */
   'link.open': { link: string };
+  /** Desktop shell (T8-01): sent on every change and on every page load. */
+  'core.status': CoreStatus;
 }
 
 export type CoreEventName = keyof CoreEvents;

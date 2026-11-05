@@ -2097,3 +2097,63 @@ kbd {
   unicode-bidi: isolate;
   font-variant-numeric: tabular-nums;
 }
+
+/* In-app update notes (B8): a toast that may hold release notes. */
+.update-note {
+  align-items: flex-start;
+  max-inline-size: min(32rem, calc(100vw - 2rem));
+}
+
+.update-note-body {
+  display: grid;
+  gap: 0.375rem;
+}
+
+.update-note details summary {
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.update-notes {
+  margin: 0.25rem 0 0;
+  max-block-size: 40vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-weight: 400;
+}
+
+.toast-close {
+  display: inline-flex;
+  min-inline-size: 2rem;
+  min-block-size: 2rem;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-s, 4px);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+/* T8-01: the core is not answering. */
+.core-down {
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 0.75rem;
+  min-height: 100dvh;
+  padding: 2rem;
+  text-align: center;
+  background: var(--bg-app);
+}
+
+.core-down svg {
+  width: 2.5rem;
+  height: 2.5rem;
+  color: var(--warning, var(--text-muted));
+}
+
+.core-down p {
+  max-width: 32rem;
+  color: var(--text-muted);
+}

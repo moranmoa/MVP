@@ -85,6 +85,8 @@ struct Inner {
     db: Db,
     vault: Vault<SharedSecrets>,
     me: Option<Me>,
+    /// The OS keychain failed at startup (QA-20).
+    keyring_unavailable: bool,
     /// Loaded on first use per server, then kept current record by record.
     logs: HashMap<ServerId, Log>,
     /// Messages already announced to the UI, per server, with what was
@@ -92,6 +94,8 @@ struct Inner {
     announced: HashMap<ServerId, HashMap<RecordId, Announced>>,
     /// For my messages' send state (B6).
     net: Arc<dyn Network>,
+    /// The online members last reported per server (M2).
+    presence_seen: HashMap<ServerId, BTreeSet<PublicKey>>,
     /// Who each channel was last keyed for by our own rotation, so a
     /// moderator re-keys when members join (in memory: once after a restart).
     keyed_for: HashMap<(ServerId, ChannelId), BTreeSet<PublicKey>>,
@@ -110,6 +114,8 @@ type Events = Vec<Event>;
 
 fn vault_error(e: VaultError) -> CoreError {
     match e {
+        // QA-20: the OS keychain failed (no Secret Service, locked, denied).
+        VaultError::Store(_) => ErrorCode::KeyringUnavailable.into(),
         VaultError::AlreadyExists => ErrorCode::NotAllowed.into(),
         VaultError::NotFound => ErrorCode::NotFound.into(),
         VaultError::RecoveryCheckRequired => ErrorCode::RecoveryCheckRequired.into(),
@@ -140,13 +146,26 @@ impl Core {
             db,
             vault,
             me: None,
+            keyring_unavailable: false,
             logs: HashMap::new(),
             announced: HashMap::new(),
             net: ports.network.clone(),
+            presence_seen: HashMap::new(),
             keyed_for: HashMap::new(),
             rekey_after: HashMap::new(),
         };
-        if inner.vault.state().map_err(vault_error)? == VaultState::Ready {
+        // QA-20: without a usable keychain the core still starts, and says so
+        // (`keyring-unavailable`) instead of crashing or looking empty.
+        let state = match inner.vault.state() {
+            Ok(state) => Some(state),
+            Err(VaultError::Store(e)) => {
+                eprintln!("mvs-core: the OS keychain is unavailable: {}", e.0);
+                inner.keyring_unavailable = true;
+                None
+            }
+            Err(e) => return Err(vault_error(e)),
+        };
+        if state == Some(VaultState::Ready) {
             let phrase = inner.vault.open().map_err(vault_error)?;
             inner.me = Some(inner.load_me(phrase)?);
             unlock_cipher(&ports, inner.me.as_ref());
@@ -198,6 +217,9 @@ impl Core {
 
     pub fn get_identity(&self) -> CoreResult<Option<Identity>> {
         let inner = self.lock();
+        if inner.keyring_unavailable {
+            return Err(ErrorCode::KeyringUnavailable.into());
+        }
         inner.me.as_ref().map(|me| inner.identity_json(me)).transpose()
     }
 
@@ -875,6 +897,14 @@ impl Core {
                     // A join re-key a batch window deferred: retried each round.
                     let _ = inner.rekey(ports, server, events);
                 }
+                // M2: someone came online or went offline (members only).
+                if inner.db.has_server(server)? && inner.presence_changed(server)? && !changed {
+                    let view = inner.view(server)?;
+                    events.push(Event::MembersChanged {
+                        server_id: model::hex_id(server.as_bytes()),
+                        members: inner.members_json(&view)?,
+                    });
+                }
             }
             Ok(())
         })
@@ -958,6 +988,15 @@ impl Core {
 }
 
 impl Inner {
+    /// Whether the online members of `server` changed since last reported
+    /// (and remembers the new set). Members only: authority's, not kicked.
+    fn presence_changed(&mut self, server: ServerId) -> CoreResult<bool> {
+        let view = self.view(server)?;
+        let mut online = self.net.online(server).unwrap_or_default();
+        online.retain(|key| view.state.members.contains(key) && !view.is_kicked(key));
+        Ok(self.presence_seen.insert(server, online.clone()) != Some(online))
+    }
+
     /// Whether we are a moderator or above in a loaded server.
     fn may_rotate(&self, server: ServerId) -> CoreResult<bool> {
         let Some(me) = self.me.as_ref().map(Me::key) else { return Ok(false) };
@@ -1495,6 +1534,9 @@ impl Inner {
 
     fn members_json(&self, view: &ServerView) -> CoreResult<Vec<Member>> {
         let me = self.me.as_ref().map(Me::key);
+        // M2: online from sync's presence; only authority's members are
+        // listed, so a bound non-member or a kicked key never shows.
+        let online = self.net.online(view.id).unwrap_or_default();
         let server_id = model::hex_id(view.id.as_bytes());
         let mut out = Vec::new();
         for member in view.members() {
@@ -1506,7 +1548,11 @@ impl Inner {
                 short_code: model::short_code(&member.key),
                 avatar_color: model::color_for(member.key.as_bytes()),
                 // TODO(sync): real presence from connections.
-                presence: if Some(member.key) == me { Presence::Online } else { Presence::Offline },
+                presence: if Some(member.key) == me || online.contains(&member.key) {
+                    Presence::Online
+                } else {
+                    Presence::Offline
+                },
                 is_owner: member.key == view.owner,
                 role: member.role,
                 blocked: blocked.then_some(true),

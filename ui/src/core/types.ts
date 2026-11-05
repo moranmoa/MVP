@@ -77,6 +77,15 @@ export interface Member {
   bio?: string;
 }
 
+/** `keyring`: the OS keychain is missing or unusable (QA-20; core code `keyring-unavailable`). */
+export type CoreDownDetail = 'missing' | 'start-failed' | 'crashed' | 'crash-loop' | 'keyring';
+
+/** The desktop shell's view of the core process (T8-01). */
+export interface CoreStatus {
+  state: 'starting' | 'up' | 'down';
+  detail?: CoreDownDetail;
+}
+
 /** Commands reject with this shape; `code` maps to a translated message. */
 export interface CoreError {
   code:
@@ -93,7 +102,17 @@ export interface CoreError {
     | 'timeout'
     | 'core-unavailable'
     | 'core-restarted'
-    | 'too-large';
+    | 'too-large'
+    | 'keyring-unavailable'
+    // In-app update (core/api CONFORMANCE "Updates")
+    | 'offline'
+    | 'invalid-update'
+    | 'check-clock'
+    | 'nothing-to-download'
+    | 'nothing-staged'
+    | 'disk-full';
+  /** With `core-unavailable` (desktop shell, T8-01): why the core is not answering. */
+  detail?: CoreDownDetail;
   /** 1-based word positions that were not recognised (restore). */
   positions?: number[];
 }

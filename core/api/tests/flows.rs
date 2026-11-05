@@ -1790,3 +1790,112 @@ fn an_owner_without_an_adult_claim_cannot_make_adult_channels() {
         owner.core.create_channel(&server.id, &format!("{}-x", "a".repeat(31)), false).unwrap();
     assert_eq!(long.name, format!("{}", "a".repeat(31)));
 }
+
+/// The in-process network, plus a presence set the test controls.
+struct PresenceNet {
+    inner: Arc<LoopbackNetwork>,
+    online: std::sync::Mutex<BTreeSet<PublicKey>>,
+}
+
+impl Network for PresenceNet {
+    fn publish(&self, record: &records::Record) {
+        self.inner.publish(record)
+    }
+
+    fn fetch(&self, server: ServerId) -> Vec<records::Record> {
+        self.inner.fetch(server)
+    }
+
+    fn online(&self, _: ServerId) -> Option<BTreeSet<PublicKey>> {
+        Some(self.online.lock().unwrap().clone())
+    }
+}
+
+/// M2: members show online from sync's presence; someone online who isn't
+/// a member never shows; a change in who is online is `members.changed`.
+#[test]
+fn presence_shows_online_members_only() {
+    let world = World::new();
+    let net = Arc::new(PresenceNet { inner: world.network.clone(), online: Default::default() });
+    let events = Arc::new(CollectingSink::new());
+    let owner = Core::open(
+        Config { db_path: None, app_version: "test".into() },
+        Ports {
+            secrets: Arc::new(MemoryStore::new()),
+            network: net.clone(),
+            events: events.clone(),
+            clock: world.clock.clone(),
+            cipher: Arc::new(PendingGroupKeys),
+        },
+    )
+    .unwrap();
+    owner.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
+    let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None };
+    owner.update_profile(profile).unwrap();
+    let server = owner.create_server("Here", AgeRestriction::None).unwrap();
+    let guest = world.peer();
+    let guest_id = sign_up(&guest, "Guest").id;
+    guest.core.join_server(&server.invite_link).unwrap();
+    owner.sync_now().unwrap();
+    let key = |id: &str| PublicKey::from_bytes(hex::decode(id).unwrap().try_into().unwrap());
+    let presence = |id: &str| {
+        owner.list_members(&server.id).unwrap().into_iter().find(|m| m.id == id).map(|m| m.presence)
+    };
+    assert_eq!(presence(&guest_id), Some(Presence::Offline));
+
+    // The guest and a stranger with the secret come online.
+    let stranger = PublicKey::from_bytes([0x55; 32]);
+    net.online.lock().unwrap().extend([key(&guest_id), stranger]);
+    events.take();
+    owner.sync_now().unwrap();
+    assert!(events.take().iter().any(|e| matches!(e, Event::MembersChanged { .. })));
+    assert_eq!(presence(&guest_id), Some(Presence::Online));
+    assert_eq!(presence(&hex::encode([0x55; 32])), None, "a non-member shows");
+
+    // Nothing changed: nothing announced. Then the guest goes offline.
+    owner.sync_now().unwrap();
+    assert!(!events.take().iter().any(|e| matches!(e, Event::MembersChanged { .. })));
+    net.online.lock().unwrap().remove(&key(&guest_id));
+    owner.sync_now().unwrap();
+    assert!(events.take().iter().any(|e| matches!(e, Event::MembersChanged { .. })));
+    assert_eq!(presence(&guest_id), Some(Presence::Offline));
+}
+
+/// A secret store that always fails, like Linux without a Secret Service.
+struct NoKeyring;
+
+impl identity::SecretStore for NoKeyring {
+    fn load(&self, _: &str) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, identity::StoreError> {
+        Err(identity::StoreError("no Secret Service".into()))
+    }
+
+    fn save(&self, _: &str, _: &[u8]) -> Result<(), identity::StoreError> {
+        Err(identity::StoreError("no Secret Service".into()))
+    }
+
+    fn delete(&self, _: &str) -> Result<(), identity::StoreError> {
+        Err(identity::StoreError("no Secret Service".into()))
+    }
+}
+
+/// QA-20: no usable OS keychain. The core still starts, and says
+/// `keyring-unavailable` instead of crashing or looking like a fresh install.
+#[test]
+fn no_keyring_is_its_own_error() {
+    let core = Core::open(
+        Config { db_path: None, app_version: "test".into() },
+        Ports {
+            secrets: Arc::new(NoKeyring),
+            network: Arc::new(LoopbackNetwork::new()),
+            events: Arc::new(CollectingSink::new()),
+            clock: Arc::new(SystemClock),
+            cipher: Arc::new(PendingGroupKeys),
+        },
+    )
+    .expect("the core starts without a keychain");
+    assert_eq!(core.get_identity().unwrap_err().code, ErrorCode::KeyringUnavailable);
+    assert_eq!(core.create_identity(adult()).unwrap_err().code, ErrorCode::KeyringUnavailable);
+    let reply = core.handle(r#"{"cmd":"getIdentity"}"#);
+    assert_eq!(reply, r#"{"error":{"code":"keyring-unavailable"}}"#);
+    assert!(core.get_app_info().is_ok(), "the rest of the core still answers");
+}
