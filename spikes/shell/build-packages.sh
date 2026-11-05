@@ -38,23 +38,30 @@ docker run --rm -v "$REPO":/repo -v shell-tauri-target-trixie:/repo/spikes/shell
     cp target/release/bundle/appimage/*.AppImage $S/shell-tauri-linux-amd64.AppImage
     cp target/x86_64-pc-windows-gnu/release/bundle/nsis/*-setup.exe $S/shell-tauri-windows-x64-setup.exe'
 
-echo "== Electron (Linux deb + AppImage, Windows NSIS)"
+# ELECTRON_WINDOWS=0 skips the Windows NSIS build here (it needs wine, which
+# GitHub runners' Docker refuses); CI builds that one natively on Windows.
+ELECTRON_WINDOWS=${ELECTRON_WINDOWS:-1}
+win_target=""
+[ "$ELECTRON_WINDOWS" = 0 ] || win_target="--win nsis"
+
+echo "== Electron (Linux deb + AppImage${win_target:+, Windows NSIS})"
 docker run --rm -v "$REPO":/repo -v shell-electron-node-modules:/repo/spikes/shell/electron/node_modules \
-  -v shell-electron-cache:/root/.cache -w /repo/spikes/shell/electron -e HOST_IDS="$(id -u):$(id -g)" \
+  -v shell-electron-cache:/root/.cache -w /repo/spikes/shell/electron -e HOST_IDS="$(id -u):$(id -g)" -e WIN_TARGET="$win_target" \
   electronuserland/builder:wine@sha256:f3a8d451994c881d0972e7b1846ee4d4fdc15eb41fc6b1f350b38cbf99ca90fe sh -c '
     set -e
     npm install --no-audit --no-fund
     rm -rf dist
     # Full output: in CI this is the only trace when a download or wine fails.
-    npx electron-builder --linux AppImage deb --win nsis
+    npx electron-builder --linux AppImage deb $WIN_TARGET
     S=../out/stage
     cp dist/*.deb $S/shell-electron-linux-amd64.deb
     cp dist/*.AppImage $S/shell-electron-linux-amd64.AppImage
-    cp dist/*Setup*.exe $S/shell-electron-windows-x64-setup.exe
+    [ -z "$WIN_TARGET" ] || cp dist/*Setup*.exe $S/shell-electron-windows-x64-setup.exe
     chown -R $HOST_IDS dist $S'
 
 missing=0
 for f in shell-{tauri,electron}-windows-x64-setup.exe shell-{tauri,electron}-linux-amd64.{deb,AppImage}; do
+  [ "$ELECTRON_WINDOWS" = 0 ] && [ "$f" = shell-electron-windows-x64-setup.exe ] && continue
   if [ -s "$STAGE/$f" ]; then
     [ "$STAGE" = "$OUT" ] || cp "$STAGE/$f" "$OUT/$f"
     printf '%10d  %s\n' "$(stat -c %s "$OUT/$f")" "$f"
