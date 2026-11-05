@@ -200,6 +200,10 @@
   "members.online": "Online – {count}",
   "members.offline": "Offline – {count}",
   "members.owner": "Owner",
+  "connection.direct": "Direct",
+  "connection.relay": "Relay",
+  "connection.direct.title": "Connected directly (for example, on the same network)",
+  "connection.relay.title": "Connected through the relay server",
   "members.me": "(you)",
   "members.open": "\u2068{name}\u2069's profile",
 

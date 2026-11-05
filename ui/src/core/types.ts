@@ -64,6 +64,9 @@ export interface Channel {
 
 export type Presence = 'online' | 'offline';
 
+/** How we reach an online member: directly (e.g. same network) or through the relay. */
+export type Connection = 'direct' | 'relay';
+
 export interface Member {
   id: Id;
   serverId: Id;
@@ -71,6 +74,8 @@ export interface Member {
   shortCode: string;
   avatarColor: string;
   presence: Presence;
+  /** Online members only (#196); `null` for me and for members who are offline. */
+  connection?: Connection | null;
   isOwner: boolean;
   /** Blocked by me: their messages are collapsed on this device only. */
   blocked?: boolean;
