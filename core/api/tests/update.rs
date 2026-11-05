@@ -284,6 +284,29 @@ fn beta_gets_pre_releases_and_stable_does_not() {
 }
 
 #[test]
+fn switching_back_to_stable_never_downgrades() {
+    // A beta user on 0.3.0 switches to stable, which is still at 0.2.5.
+    let i = install("no-downgrade", "0.3.0");
+    i.host.publish(release("beta", "0.3.0", &key(1)), "beta");
+    i.host.publish(release("alpha", "0.2.5", &key(1)), "alpha");
+    i.peer.core.set_update_channel(UpdateChannel::Beta).unwrap();
+    assert_eq!(call(&i.peer, "checkForUpdate").unwrap()["status"], "up-to-date");
+
+    i.peer.core.set_update_channel(UpdateChannel::Stable).unwrap();
+    // The running version is the floor: the older stable is refused (logged
+    // only), never offered, downloaded or staged.
+    assert_eq!(call(&i.peer, "checkForUpdate"), Err(ErrorCode::InvalidUpdate));
+    assert_eq!(call(&i.peer, "downloadUpdate"), Err(ErrorCode::InvalidUpdate));
+    assert!(ready_events(&i.peer).is_empty());
+    assert!(!i.dir.join("install/versions/0.2.5").exists());
+    assert_eq!(call(&i.peer, "applyUpdate"), Err(ErrorCode::NothingStaged));
+
+    // Once stable passes 0.3.0, it updates as usual.
+    i.host.publish(release("alpha", "0.4.0", &key(1)), "alpha");
+    assert_eq!(call(&i.peer, "checkForUpdate").unwrap()["available"], "0.4.0");
+}
+
+#[test]
 fn ui_channels_map_to_manifest_channels() {
     // Closed alpha: the UI's "stable" is the `alpha` manifest (§0).
     assert_eq!(manifest_channel(UpdateChannel::Stable), "alpha");
