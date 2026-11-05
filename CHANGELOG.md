@@ -6,6 +6,42 @@ fails if its version has no section here. Write a section before tagging:
 `## [X.Y.Z] - YYYY-MM-DD`, then Hebrew and English (Fixed / New / Known).
 Never put the relay domain or any IP address here.
 
+## [0.2.4] - 2026-11-05
+
+### מה חדש
+- **סימון "ישיר" / "דרך relay":** ברשימת החברים, ליד כל חבר מחובר מופיע איך אתם מחוברים אליו.
+- **פורט האזנה קבוע:** האפליקציה בוחרת פורט בהפעלה הראשונה ושומרת אותו גם אחרי הפעלה מחדש, כך שאפשר לאשר אותו פעם אחת ב-Firewall או בראוטר.
+- **ניסיון חיבור ישיר משני הצדדים:** אם החיבור הישיר מהצד הראשון נכשל, הצד השני מנסה בעצמו.
+- **מצב "relay בלבד" בליבה:** אפשר להפעיל אותו כבר עכשיו, אבל עוד אין לו הגדרה באפליקציה.
+- **לוג מפורט לפתרון תקלות:** זמין כשצריך לאבחן בעיה.
+
+### מה תוקן
+- **הודעות מגיעות שוב מיד.** בטיוטה של 0.2.3 (שלא פורסמה) הייתה השהיה של כ-5 שניות בכל הודעה.
+- **הצטרפות לשרת מיידית שוב:** אפשר לכתוב מיד אחרי ההצטרפות.
+
+### ידוע
+- עדיין אין "ניקוב" חיבור דרך NAT בין רשתות שונות (hole punching); זה הבא בתור.
+- יצירת ערוצים, שינוי שם ומחיקה יגיעו לאפליקציה בגרסה הבאה (הליבה כבר מוכנה).
+- העדכון האוטומטי בתוך האפליקציה עוד לא פעיל: מתקינים את הגרסה החדשה ידנית מעל הקיימת.
+
+---
+
+### New
+- **"Direct" / "Via relay" tag:** in the member list, each online member shows how you're connected to them.
+- **A stable listening port:** the app picks a port on first start and keeps it across restarts, so you can allow it once in your firewall or router.
+- **Direct connection tried from both sides:** if the first side's direct connection fails, the other side tries.
+- **A "relay only" mode in the core:** it can be switched on already, but there's no setting for it in the app yet.
+- **Detailed logging for troubleshooting:** available when a problem needs diagnosing.
+
+### Fixed
+- **Messages arrive instantly again.** The 0.2.3 draft, which was never published, delayed every message by about 5 seconds.
+- **Joining a server is immediate again:** you can write right after joining.
+
+### Known
+- No NAT hole punching between different networks yet; that's next.
+- Creating, renaming and deleting channels arrives in the app in the next version (the core is ready).
+- In-app auto-update isn't active yet: install the new version manually over the old one.
+
 ## [0.2.3] - 2026-11-04
 
 ### מה חדש
