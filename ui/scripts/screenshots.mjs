@@ -332,6 +332,55 @@ for (const [section, name] of [
   await p.close();
 }
 
+// ---- B8: in-app update notes (190-193) ------------------------------------------
+{
+  const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999&installed=1', 'x');
+  await p.getByText(/עודכן לגרסה/).waitFor();
+  await shot(p, '190-update-installed-notes-collapsed');
+  await p.getByText('מה חדש').click();
+  await shot(p, '191-update-installed-notes-expanded');
+  await p.close();
+}
+
+{
+  const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999&rolledBack=1', 'x');
+  await p.getByText(/לא עלה כמו שצריך/).waitFor();
+  await shot(p, '192-update-rolled-back');
+  await p.close();
+}
+
+{
+  const p = await chat('?demo=1&still=1&lang=he&theme=light&update=300&inCall=1', 'x');
+  await p.getByRole('button', { name: /עדכון מוכן – הפעלה מחדש/ }).click();
+  await p.getByText('עדכון מוכן – יותקן כשהשיחה תסתיים').waitFor();
+  await shot(p, '193-update-pill-after-call');
+  await p.close();
+}
+
+// ---- T8-01: the core is not answering (220-222) -----------------------------------
+for (const [detail, name] of [
+  ['crash-loop', '220-core-down-crash-loop-he'],
+  ['missing', '221-core-down-missing-he'],
+  ['keyring', '222-core-down-keyring-he'],
+]) {
+  const p = await page(`?demo=1&still=1&lang=he&theme=light&update=999999&coreDown=${detail}`);
+  await p.getByRole('heading', { name: 'MVS לא מצליחה לפעול כרגע' }).waitFor();
+  await shot(p, name);
+  await p.close();
+}
+
+// ---- connection type per online member (#196) -----------------------------------
+{
+  const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999', 'x');
+  const list = p.locator('.members');
+  if ((await list.locator('.connection-tag').count()) === 0) problems.push('230: no connection tags in the member list');
+  const box = await list.boundingBox();
+  await p.waitForTimeout(250);
+  await p.screenshot({ path: `${OUT}/230-member-connection-he.png`, clip: box });
+  console.log('saved', '230-member-connection-he');
+  await p.close();
+}
+
 // ---- security demo: what other people could send ---------------------------
 {
   const p = await chat('?demo=1&hostile=1&still=1&lang=he&theme=light&update=999999', 'x');

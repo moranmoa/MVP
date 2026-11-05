@@ -78,7 +78,12 @@ export function MemberList({ server, onClose }: { server: ServerSummary; onClose
                 type="button"
                 className={`member ${m.presence}`}
                 onClick={() => setOpenId(m.id)}
-                aria-label={intl.formatMessage({ id: 'members.open' }, { name: displayName(m) })}
+                aria-label={[
+                  intl.formatMessage({ id: 'members.open' }, { name: displayName(m) }),
+                  m.connection ? intl.formatMessage({ id: `connection.${m.connection}.title` }) : null,
+                ]
+                  .filter(Boolean)
+                  .join(', ')}
               >
                 <Avatar name={displayName(m)} color={m.avatarColor} size={32} presence={m.presence} />
                 <Name>{displayName(m)}</Name>
@@ -88,6 +93,11 @@ export function MemberList({ server, onClose }: { server: ServerSummary; onClose
                   </span>
                 )}
                 {flagged.has(m.id) && <LookalikeTag />}
+                {m.connection && (
+                  <span className={`connection-tag ${m.connection}`} title={intl.formatMessage({ id: `connection.${m.connection}.title` })}>
+                    <FormattedMessage id={`connection.${m.connection}`} />
+                  </span>
+                )}
                 {m.isOwner && (
                   <span className="owner-tag" title={intl.formatMessage({ id: 'members.owner' })}>
                     <FormattedMessage id="members.owner" />

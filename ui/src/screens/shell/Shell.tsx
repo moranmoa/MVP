@@ -4,9 +4,10 @@ import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import { phoneQuery, useMediaQuery } from '../../app/media';
 import { useSettings } from '../../app/settings';
+import { paragraphs, useUiDir } from '../../app/textDir';
 import { useCore, useCoreEvent, type Channel, type Id } from '../../core';
 import { Dialog } from '../../components/common';
-import { ShieldIcon } from '../../components/icons';
+import { AlertIcon, CloseIcon, RefreshIcon, ShieldIcon } from '../../components/icons';
 import { RecoveryCheck, RecoveryWordsPanel } from '../onboarding/RecoveryWords';
 import { SettingsScreen } from '../settings/SettingsScreen';
 import { ChannelDialog } from './ChannelDialog';
@@ -26,6 +27,8 @@ export function Shell() {
   const identity = useStore(store, (s) => s.identity)!;
   const servers = useStore(store, (s) => s.servers);
   const notice = useStore(store, (s) => s.notice);
+  const updateNote = useStore(store, (s) => s.updateNote);
+  const uiDir = useUiDir();
   const intl = useIntl();
   const { uiScale } = useSettings().settings;
 
@@ -103,6 +106,13 @@ export function Shell() {
     const t = setTimeout(() => store.clearNotice(), 6000);
     return () => clearTimeout(t);
   }, [notice, store]);
+
+  // Update notes stay until closed when there are release notes to read.
+  useEffect(() => {
+    if (!updateNote || (updateNote.kind === 'installed' && updateNote.notes)) return;
+    const t = setTimeout(() => store.clearUpdateNote(), 6000);
+    return () => clearTimeout(t);
+  }, [updateNote, store]);
 
   // Alt+Up / Alt+Down move between channels, Ctrl+Alt+Up / Down between servers.
   useEffect(() => {
@@ -280,17 +290,56 @@ export function Shell() {
       </Dialog>
       <SettingsScreen open={settingsOpen} onClose={() => setSettingsOpen(false)} onCheckWords={() => setDialog('check')} />
 
-      {channelGone && (
-        <div className="toast" role="status">
-          <FormattedMessage id="channel.deletedNotice" values={{ channel: channelGone }} />
-        </div>
-      )}
-      {notice && (
-        <div className="toast" role="status">
-          <ShieldIcon />
-          <FormattedMessage id="notice.encryptionRenewed" />
-        </div>
-      )}
+      {/* Toasts stack in one column, so two at once never overlap. */}
+      <div className="toasts">
+        {channelGone && (
+          <div className="toast" role="status">
+            <FormattedMessage id="channel.deletedNotice" values={{ channel: channelGone }} />
+          </div>
+        )}
+        {notice && (
+          <div className="toast" role="status">
+            <ShieldIcon />
+            <FormattedMessage id="notice.encryptionRenewed" />
+          </div>
+        )}
+
+        {updateNote && (
+          <div className="toast update-note" role="status">
+            {updateNote.kind === 'installed' ? <RefreshIcon /> : <AlertIcon />}
+            <div className="update-note-body">
+              {updateNote.kind === 'installed' ? (
+                <FormattedMessage id="update.installed" values={{ version: updateNote.version }} />
+              ) : (
+                <FormattedMessage id="update.rolledBack" values={{ failed: updateNote.failed, running: updateNote.running }} />
+              )}
+              {updateNote.kind === 'installed' && updateNote.notes && (
+                // Plain text from the release manifest: rendered as text only.
+                <details>
+                  <summary>
+                    <FormattedMessage id="update.whatsNew" />
+                  </summary>
+                  <p className="update-notes">
+                    {paragraphs(updateNote.notes, uiDir).map((l, i) => (
+                      <span key={i} className="msg-line user-text" dir={l.dir}>
+                        {l.text}
+                      </span>
+                    ))}
+                  </p>
+                </details>
+              )}
+            </div>
+            <button
+              type="button"
+              className="toast-close"
+              aria-label={intl.formatMessage({ id: 'common.close' })}
+              onClick={() => store.clearUpdateNote()}
+            >
+              <CloseIcon />
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

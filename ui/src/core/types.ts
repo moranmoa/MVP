@@ -66,6 +66,9 @@ export interface Channel {
 
 export type Presence = 'online' | 'offline';
 
+/** How we reach an online member: directly (e.g. same network) or through the relay. */
+export type Connection = 'direct' | 'relay';
+
 export interface Member {
   id: Id;
   serverId: Id;
@@ -73,10 +76,21 @@ export interface Member {
   shortCode: string;
   avatarColor: string;
   presence: Presence;
+  /** Online members only (#196); `null` for me and for members who are offline. */
+  connection?: Connection | null;
   isOwner: boolean;
   /** Blocked by me: their messages are collapsed on this device only. */
   blocked?: boolean;
   bio?: string;
+}
+
+/** `keyring`: the OS keychain is missing or unusable (QA-20; core code `keyring-unavailable`). */
+export type CoreDownDetail = 'missing' | 'start-failed' | 'crashed' | 'crash-loop' | 'keyring';
+
+/** The desktop shell's view of the core process (T8-01). */
+export interface CoreStatus {
+  state: 'starting' | 'up' | 'down';
+  detail?: CoreDownDetail;
 }
 
 /** Commands reject with this shape; `code` maps to a translated message. */
@@ -96,7 +110,17 @@ export interface CoreError {
     | 'timeout'
     | 'core-unavailable'
     | 'core-restarted'
-    | 'too-large';
+    | 'too-large'
+    | 'keyring-unavailable'
+    // In-app update (core/api CONFORMANCE "Updates")
+    | 'offline'
+    | 'invalid-update'
+    | 'check-clock'
+    | 'nothing-to-download'
+    | 'nothing-staged'
+    | 'disk-full';
+  /** With `core-unavailable` (desktop shell, T8-01): why the core is not answering. */
+  detail?: CoreDownDetail;
   /** 1-based word positions that were not recognised (restore). */
   positions?: number[];
 }

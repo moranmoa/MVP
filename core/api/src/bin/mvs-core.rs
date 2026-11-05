@@ -36,7 +36,26 @@ fn args() -> Option<Args> {
     Some(Args { data_dir: data_dir?, relay })
 }
 
+/// Logs to stderr only when RUST_LOG is set (the desktop captures and
+/// redacts stderr); without it nothing is logged. A bad filter is reported
+/// and ignored. Our own lines never hold IPs or IDs below debug.
+fn init_logging() {
+    let Ok(spec) = std::env::var("RUST_LOG") else { return };
+    match tracing_subscriber::EnvFilter::try_new(&spec) {
+        Ok(filter) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(io::stderr)
+                .with_ansi(false)
+                .init();
+            tracing::info!(version = env!("CARGO_PKG_VERSION"), "mvs-core: logging on");
+        }
+        Err(_) => eprintln!("mvs-core: RUST_LOG isn't a valid filter; not logging"),
+    }
+}
+
 fn main() -> ExitCode {
+    init_logging();
     let Some(args) = args() else {
         eprintln!("usage: mvs-core --data-dir <dir> [--relay <multiaddr>]");
         return ExitCode::from(2);

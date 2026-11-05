@@ -92,6 +92,8 @@ pub struct Channel {
     pub adult: bool,
     pub unread: bool,
     pub mentions: u32,
+    /// #general, the first channel (#150): it can't be deleted.
+    pub is_default: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +182,9 @@ pub struct Member {
     pub short_code: String,
     pub avatar_color: String,
     pub presence: Presence,
+    /// #187: how we reach this member while online: `direct` (LAN) or
+    /// `relay`; `null` for us and for members who are offline.
+    pub connection: Option<Connection>,
     pub is_owner: bool,
     /// Rust addition.
     pub role: Role,
@@ -210,6 +215,11 @@ pub enum ErrorCode {
     AuthCancelled,
     /// The recovery-word challenge is burned (B19 §6).
     TooManyAttempts,
+    /// Another channel of the server has this name (B11).
+    NameTaken,
+    /// The OS keychain (Secret Service on Linux) is missing or unusable
+    /// (QA-20): the core runs, but nothing that needs the identity works.
+    KeyringUnavailable,
     /// Rust addition: malformed command JSON or arguments.
     BadRequest,
     /// Rust addition: in the contract, not done by this core yet.
@@ -357,6 +367,10 @@ pub enum Event {
     ServerUpdated(ServerSummary),
     #[serde(rename = "server.removed", rename_all = "camelCase")]
     ServerRemoved { server_id: Id },
+    #[serde(rename = "channel.added")]
+    ChannelAdded(Channel),
+    #[serde(rename = "channel.removed", rename_all = "camelCase")]
+    ChannelRemoved { server_id: Id, channel_id: Id, name: String },
     #[serde(rename = "channel.updated")]
     ChannelUpdated(Channel),
     #[serde(rename = "members.changed", rename_all = "camelCase")]
@@ -383,4 +397,12 @@ pub struct RemovedMember {
     pub display_name: String,
     /// When it was kicked (the kick's claimed time).
     pub removed_at: Timestamp,
+}
+
+/// #187: a direct connection (LAN, later hole-punched) or through the relay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Connection {
+    Direct,
+    Relay,
 }
