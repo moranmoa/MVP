@@ -369,11 +369,11 @@ for (const [detail, name] of [
   await p.close();
 }
 
-// ---- connection type per online member (#196) -----------------------------------
+// ---- connection type per online member (#196, T20) --------------------------------
 {
   const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999', 'x');
   const list = p.locator('.members');
-  if ((await list.locator('.connection-tag').count()) === 0) problems.push('230: no connection tags in the member list');
+  if ((await list.locator('.connection-icon').count()) === 0) problems.push('230: no connection icons in the member list');
   const box = await list.boundingBox();
   await p.waitForTimeout(250);
   await p.screenshot({ path: `${OUT}/230-member-connection-he.png`, clip: box });
