@@ -202,8 +202,8 @@
   "members.owner": "בעלים",
   "connection.direct": "ישיר",
   "connection.relay": "דרך ממסר",
-  "connection.direct.title": "מחובר ישירות (למשל באותה רשת)",
-  "connection.relay.title": "מחובר דרך שרת הממסר",
+  "connection.direct.title": "יש חיבור ישיר (למשל באותה רשת)",
+  "connection.relay.title": "החיבור עובר דרך שרת הממסר",
   "members.me": "(אני)",
   "members.open": "הפרופיל של \u2068{name}\u2069",
 
