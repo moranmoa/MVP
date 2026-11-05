@@ -149,3 +149,39 @@ fn the_binary_refuses_a_relay_without_a_peer_id() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("/p2p/"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Runs the binary on an empty stdin; returns its exit code and stderr.
+fn run_binary(name: &str, rust_log: Option<&str>) -> (Option<i32>, String) {
+    let dir = std::env::temp_dir().join(format!("mvs-{name}-{}", std::process::id()));
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_mvs-core"));
+    cmd.arg("--data-dir").arg(&dir).stdin(std::process::Stdio::null());
+    cmd.env_remove("RUST_LOG");
+    if let Some(spec) = rust_log {
+        cmd.env("RUST_LOG", spec);
+    }
+    let out = cmd.output().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+#[test]
+fn the_binary_starts_with_rust_log_set() {
+    let (code, stderr) = run_binary("rust-log", Some("debug"));
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stderr.contains("logging on"), "{stderr}");
+    assert!(stderr.contains("mvs-core: ready"), "{stderr}");
+}
+
+#[test]
+fn the_binary_logs_nothing_without_rust_log() {
+    let (code, stderr) = run_binary("no-rust-log", None);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(!stderr.contains("logging on"), "{stderr}");
+}
+
+#[test]
+fn a_bad_rust_log_is_ignored() {
+    let (code, stderr) = run_binary("bad-rust-log", Some("api=nope=x"));
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stderr.contains("isn't a valid filter"), "{stderr}");
+}
