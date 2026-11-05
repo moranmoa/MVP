@@ -47,7 +47,7 @@ describe('connection type', () => {
     const card = await screen.findByRole('dialog');
     const line = card.querySelector('.connection-icon.relay')!;
     expect(line.textContent).toBe('Via relay');
-    expect(line.getAttribute('title')).toBe('Connected through the relay server');
+    expect(line.getAttribute('title')).toBe("Connected through an MVS relay. It passes encrypted messages along and can't read them.");
     const offline = members.find((m) => m.presence === 'offline')!;
     fireEvent.click(within(card).getByRole('button', { name: /close/i }));
     fireEvent.click(within(list).getByRole('button', { name: `⁨${offline.displayName}⁩'s profile` }));
