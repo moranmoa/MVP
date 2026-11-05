@@ -23,7 +23,9 @@ function isAdult(birthDate: string | undefined): boolean {
   return age >= 18;
 }
 
-type Mode = { kind: 'create'; serverId: Id } | { kind: 'edit'; channel: Channel };
+/** `startDelete`: opened from the channel menu straight on the delete confirmation (B25 §3). */
+export type ChannelDialogMode = { kind: 'create'; serverId: Id } | { kind: 'edit'; channel: Channel; startDelete?: boolean };
+type Mode = ChannelDialogMode;
 
 export function ChannelDialog({
   mode,
@@ -52,6 +54,8 @@ export function ChannelDialog({
     setError(null);
     setConfirmDelete(false);
   }, [mode, editing]);
+  const deleting = confirmDelete || (mode?.kind === 'edit' && !!mode.startDelete);
+  const cancelDelete = () => (mode?.kind === 'edit' && mode.startDelete ? onClose() : setConfirmDelete(false));
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -81,7 +85,7 @@ export function ChannelDialog({
   return (
     <>
       <Dialog
-        open={!!mode && !confirmDelete}
+        open={!!mode && !deleting}
         onClose={onClose}
         title={intl.formatMessage({ id: editing ? 'channel.edit' : 'channel.create' })}
       >
@@ -144,8 +148,8 @@ export function ChannelDialog({
         </form>
       </Dialog>
       <Dialog
-        open={!!editing && confirmDelete}
-        onClose={() => setConfirmDelete(false)}
+        open={!!editing && deleting}
+        onClose={cancelDelete}
         title={intl.formatMessage({ id: 'channel.delete.title' }, { channel: editing?.name ?? '' })}
       >
         <p>
@@ -155,7 +159,7 @@ export function ChannelDialog({
           <button type="button" className="danger" autoFocus onClick={() => void remove()}>
             <FormattedMessage id="channel.delete" />
           </button>
-          <button type="button" className="secondary" onClick={() => setConfirmDelete(false)}>
+          <button type="button" className="secondary" onClick={cancelDelete}>
             <FormattedMessage id="common.cancel" />
           </button>
         </div>

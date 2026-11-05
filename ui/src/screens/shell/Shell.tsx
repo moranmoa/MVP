@@ -5,17 +5,18 @@ import { useStore } from '../../app/store';
 import { phoneQuery, useMediaQuery } from '../../app/media';
 import { useSettings } from '../../app/settings';
 import { paragraphs, useUiDir } from '../../app/textDir';
-import { useCore, useCoreEvent, type Channel, type Id } from '../../core';
+import { useCore, useCoreEvent, type Id } from '../../core';
 import { Dialog } from '../../components/common';
 import { AlertIcon, CloseIcon, RefreshIcon, ShieldIcon } from '../../components/icons';
 import { RecoveryCheck, RecoveryWordsPanel } from '../onboarding/RecoveryWords';
 import { SettingsScreen } from '../settings/SettingsScreen';
-import { ChannelDialog } from './ChannelDialog';
+import { ChannelDialog, type ChannelDialogMode } from './ChannelDialog';
 import { ChannelSidebar } from './ChannelSidebar';
 import { ChatView } from './ChatView';
 import { CreateServerDialog, Home, JoinDialog } from './Home';
 import { MemberList } from './MemberList';
 import { ServerRail } from './ServerRail';
+import { ServerSettings } from './ServerSettings';
 
 const MEMBERS_KEY = 'mvp.ui.membersOpen';
 
@@ -28,6 +29,7 @@ export function Shell() {
   const servers = useStore(store, (s) => s.servers);
   const notice = useStore(store, (s) => s.notice);
   const updateNote = useStore(store, (s) => s.updateNote);
+  const flash = useStore(store, (s) => s.flash);
   const uiDir = useUiDir();
   const intl = useIntl();
   const { uiScale } = useSettings().settings;
@@ -83,7 +85,9 @@ export function Shell() {
         ? chosen
         : (channels?.find((c) => c.isDefault) ?? channels?.[0])?.id;
   // B11c: the owner's channel dialog, and a notice when the open channel is deleted.
-  const [channelDialog, setChannelDialog] = useState<{ kind: 'create'; serverId: Id } | { kind: 'edit'; channel: Channel } | null>(null);
+  const [channelDialog, setChannelDialog] = useState<ChannelDialogMode | null>(null);
+  // B11: the owner's server settings screen, for the open server.
+  const [serverSettingsOpen, setServerSettingsOpen] = useState(false);
   const [channelGone, setChannelGone] = useState<string | null>(null);
   const openChannel = useRef(channelId);
   openChannel.current = channelId;
@@ -100,6 +104,12 @@ export function Shell() {
   useEffect(() => {
     if (serverId !== 'home' && !servers.some((s) => s.id === serverId)) setServerId(servers[0]?.id ?? 'home');
   }, [servers, serverId]);
+
+  useEffect(() => {
+    if (!flash) return;
+    const t = setTimeout(() => store.clearFlash(), 3000);
+    return () => clearTimeout(t);
+  }, [flash, store]);
 
   useEffect(() => {
     if (!notice) return;
@@ -214,6 +224,10 @@ export function Shell() {
         onSelect={selectServer}
         onAdd={() => selectServer('home')}
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenServerSettings={(id) => {
+          selectServer(id);
+          setServerSettingsOpen(true);
+        }}
       />
       {server && channelId && (
         <ChannelSidebar
@@ -224,6 +238,17 @@ export function Shell() {
             goPhone('chat');
           }}
           onOpenSettings={() => setSettingsOpen(true)}
+          onCreateChannel={() => setChannelDialog({ kind: 'create', serverId: server.id })}
+          onEditChannel={(channel) => setChannelDialog({ kind: 'edit', channel })}
+          onDeleteChannel={(channel) => setChannelDialog({ kind: 'edit', channel, startDelete: true })}
+          onOpenServerSettings={() => setServerSettingsOpen(true)}
+        />
+      )}
+      {server && server.ownerId === identity.id && (
+        <ServerSettings
+          server={server}
+          open={serverSettingsOpen}
+          onClose={() => setServerSettingsOpen(false)}
           onCreateChannel={() => setChannelDialog({ kind: 'create', serverId: server.id })}
           onEditChannel={(channel) => setChannelDialog({ kind: 'edit', channel })}
         />
@@ -292,6 +317,11 @@ export function Shell() {
 
       {/* Toasts stack in one column, so two at once never overlap. */}
       <div className="toasts">
+        {flash && (
+          <div className="toast" role="status" key={flash.at}>
+            <FormattedMessage id={flash.id} />
+          </div>
+        )}
         {channelGone && (
           <div className="toast" role="status">
             <FormattedMessage id="channel.deletedNotice" values={{ channel: channelGone }} />
