@@ -169,8 +169,15 @@ impl UpdateSource for HttpsSource {
     }
 }
 
-/// rustls with ring and the OS certificate store; redirects handled by
-/// `get` (never automatically); no cookies; bounded timeouts.
+/// rustls with ring; certificates checked by `rustls-platform-verifier`,
+/// i.e. the OS verifier and trust store on Windows, macOS, Linux, Android
+/// and iOS (every target in `core/deny.toml`). Only on other targets
+/// (e.g. the BSDs) does that crate fall back to a bundled root list
+/// (`webpki-root-certs`, CDLA-Permissive-2.0), which is why that crate is
+/// in the lockfile but not in any build we ship; cargo-deny, which checks
+/// the deny.toml targets only, never sees it.
+/// Redirects are handled by `get` (never automatically); no cookies;
+/// bounded timeouts.
 fn agent() -> ureq::Agent {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let tls = ureq::tls::TlsConfig::builder()
