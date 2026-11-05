@@ -11,6 +11,8 @@ groupkeys = { path = "../groupkeys" }
 authority = { path = "../authority" }
 # The P2P layer; core/api is its integration layer (T1).
 sync = { path = "../sync" }
+# In-app update (B8-5): every verification stays in that crate.
+updater = { path = "../updater" }
 # Same versions as `sync`: its runtime and its address type.
 anyhow = "1"
 libp2p = { version = "0.54", default-features = false }
@@ -41,3 +43,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
 ] }
+
+[dev-dependencies]
+# MIT. Same version and features as `updater`: builds test update payloads.
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
