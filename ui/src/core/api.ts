@@ -57,6 +57,12 @@ export interface CoreCommands {
   // Servers and channels
   listServers(): Promise<ServerSummary[]>;
   listChannels(serverId: Id): Promise<Channel[]>;
+  /** Owner only (B11c). The core normalises the name; rejects `name-taken` or `bad-request`. */
+  createChannel(serverId: Id, input: { name: string; adult: boolean }): Promise<Channel>;
+  /** Owner only. Same name rules as createChannel. */
+  updateChannel(channelId: Id, input: { name?: string; adult?: boolean }): Promise<Channel>;
+  /** Owner only; `not-allowed` for the default channel. */
+  deleteChannel(channelId: Id): Promise<void>;
   listMembers(serverId: Id): Promise<Member[]>;
   createServer(input: { name: string; ageRestriction: AgeRestriction }): Promise<ServerSummary>;
   /** Progress arrives as `join.status` events; resolves with the first status. */
@@ -94,6 +100,8 @@ export interface CoreEvents {
   'server.updated': ServerSummary;
   'server.removed': { serverId: Id };
   'channel.updated': Channel;
+  'channel.added': Channel;
+  'channel.removed': { serverId: Id; channelId: Id; name: string };
   'members.changed': { serverId: Id; members: Member[] };
   'message.added': Message;
   'message.updated': Message;

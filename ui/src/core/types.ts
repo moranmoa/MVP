@@ -58,6 +58,8 @@ export interface Channel {
   name: string;
   /** Adults-only channel: needs 18+ even on a server without a limit. */
   adult: boolean;
+  /** The server's first channel (#general): it can be renamed but not deleted. */
+  isDefault: boolean;
   unread: boolean;
   mentions: number;
 }
@@ -100,6 +102,7 @@ export interface CoreError {
     | 'recovery-check-required'
     | 'auth-cancelled'
     | 'too-many-attempts'
+    | 'name-taken'
     // From the real core (core/api) and the desktop shell (desktop/src/sidecar.js):
     | 'not-implemented'
     | 'bad-request'

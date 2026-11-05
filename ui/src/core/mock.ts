@@ -63,6 +63,11 @@ export interface MockOptions {
   storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 }
 
+/** Spaces become '-', runs of '-' collapse, at most 32 characters, no '-' at either end (B11c §4.1, as the core). */
+export function normalizeChannelName(raw: string): string {
+  return raw.trim().replace(/\s+/g, '-').replace(/-{2,}/g, '-').slice(0, 32).replace(/^-|-$/g, '');
+}
+
 const STORAGE_KEY = 'mvp.mock.v1';
 /** Failed word checks before the challenge is burned (B19 spec §6). */
 const MAX_CHECK_FAILURES = 5;
@@ -142,7 +147,7 @@ export class MockCore implements CoreApi {
   private challenge: { positions: number[]; failures: number; burned: boolean } | null = null;
   private persisted: Persisted | null = null;
   private storageLimit = 5 * 1024 ** 3;
-  private updateChannel: UpdateChannel = 'stable';
+  private releaseChannel: UpdateChannel = 'stable';
   private pendingJoins = new Map<string, ReturnType<typeof setTimeout>>();
   private timers: ReturnType<typeof setTimeout | typeof setInterval>[] = [];
   private speed: number;
@@ -406,7 +411,7 @@ export class MockCore implements CoreApi {
     const now = Date.now();
     seed.channels.forEach((c, ci) => {
       const ch: ChannelState = {
-        channel: { id: c.id, serverId: seed.id, name: c.name, adult: !!c.adult, unread: false, mentions: 0 },
+        channel: { id: c.id, serverId: seed.id, name: c.name, adult: !!c.adult, isDefault: ci === 0, unread: false, mentions: 0 },
         baseCount: c.count,
         baseStart: now - 3_600_000 - c.count * MESSAGE_GAP_MS,
         seedOffset: hashString(c.id),
@@ -455,7 +460,7 @@ export class MockCore implements CoreApi {
       channels: [],
     };
     const ch: ChannelState = {
-      channel: { id: `${id}-general`, serverId: id, name: 'general', adult: false, unread: false, mentions: 0 },
+      channel: { id: `${id}-general`, serverId: id, name: 'general', adult: false, isDefault: true, unread: false, mentions: 0 },
       baseCount: 0,
       baseStart: Date.now(),
       seedOffset: 0,
@@ -657,6 +662,65 @@ export class MockCore implements CoreApi {
     return s.channels.map((c) => c.channel);
   }
 
+  // ---- channels (B11c, owner only) ----------------------------------------------
+
+  private ownedServer(serverId: Id): ServerState {
+    const s = this.servers.get(serverId);
+    if (!s) throw err({ code: 'not-found' });
+    if (s.summary.ownerId !== this.identity?.id) throw err({ code: 'not-allowed' });
+    return s;
+  }
+
+  /** The core's channel-name rule: spaces become '-', runs of '-' collapse. */
+  private channelName(s: ServerState, raw: string, except?: Id): string {
+    const name = normalizeChannelName(raw);
+    if (!name || /[\u0000-\u001f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/.test(name)) throw err({ code: 'bad-request' });
+    if (s.channels.some((c) => c.channel.id !== except && c.channel.name === name)) throw err({ code: 'name-taken' });
+    return name;
+  }
+
+  async createChannel(serverId: Id, input: { name: string; adult: boolean }): Promise<Channel> {
+    await this.wait(200);
+    const s = this.ownedServer(serverId);
+    const name = this.channelName(s, input.name);
+    const id = `${serverId}-c${Date.now().toString(36)}${s.channels.length}`;
+    const ch: ChannelState = {
+      channel: { id, serverId, name, adult: input.adult === true, isDefault: false, unread: false, mentions: 0 },
+      baseCount: 0,
+      baseStart: Date.now(),
+      seedOffset: 0,
+      memberIds: s.members.filter((m) => m.id !== this.identity!.id).map((m) => m.id),
+      overrides: new Map(),
+      appendedCount: 0,
+    };
+    s.channels.push(ch);
+    this.channelIndex.set(id, ch);
+    this.emit('channel.added', ch.channel);
+    return ch.channel;
+  }
+
+  async updateChannel(channelId: Id, input: { name?: string; adult?: boolean }): Promise<Channel> {
+    await this.wait(200);
+    const ch = this.channelIndex.get(channelId);
+    if (!ch) throw err({ code: 'not-found' });
+    const s = this.ownedServer(ch.channel.serverId);
+    const name = input.name === undefined ? ch.channel.name : this.channelName(s, input.name, channelId);
+    ch.channel = { ...ch.channel, name, adult: input.adult ?? ch.channel.adult };
+    this.emit('channel.updated', ch.channel);
+    return ch.channel;
+  }
+
+  async deleteChannel(channelId: Id): Promise<void> {
+    await this.wait(200);
+    const ch = this.channelIndex.get(channelId);
+    if (!ch) throw err({ code: 'not-found' });
+    const s = this.ownedServer(ch.channel.serverId);
+    if (ch.channel.isDefault) throw err({ code: 'not-allowed' });
+    s.channels = s.channels.filter((c) => c !== ch);
+    this.channelIndex.delete(channelId);
+    this.emit('channel.removed', { serverId: s.summary.id, channelId, name: ch.channel.name });
+  }
+
   async listMembers(serverId: Id): Promise<Member[]> {
     const s = this.servers.get(serverId);
     if (!s) throw err({ code: 'not-found' });
@@ -848,11 +912,11 @@ export class MockCore implements CoreApi {
   }
 
   async getAppInfo(): Promise<AppInfo> {
-    return { version: '0.1.0-alpha', updateChannel: this.updateChannel };
+    return { version: '0.1.0-alpha', updateChannel: this.releaseChannel };
   }
 
   async setUpdateChannel(channel: UpdateChannel): Promise<void> {
-    this.updateChannel = channel;
+    this.releaseChannel = channel;
   }
 
   async restartToUpdate(): Promise<void> {

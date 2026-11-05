@@ -114,6 +114,19 @@ export class Store {
           },
         }),
       ),
+      on('channel.added', (c) =>
+        this.set({
+          channels: {
+            ...this.state.channels,
+            [c.serverId]: [...(this.state.channels[c.serverId] ?? []).filter((x) => x.id !== c.id), c],
+          },
+        }),
+      ),
+      on('channel.removed', ({ serverId, channelId }) =>
+        this.set({
+          channels: { ...this.state.channels, [serverId]: (this.state.channels[serverId] ?? []).filter((x) => x.id !== channelId) },
+        }),
+      ),
       on('members.changed', ({ serverId, members }) =>
         this.set({ members: { ...this.state.members, [serverId]: members } }),
       ),
