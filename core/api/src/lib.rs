@@ -28,7 +28,7 @@ pub use dispatch::NOT_YET;
 pub use gate::MemberGate;
 pub use ports::{
     CipherError, CipherOutcome, Clock, CollectingSink, EventSink, FixedClock, GroupCipher,
-    LoopbackNetwork, Network, Opened, PendingGroupKeys, Ports, SharedSecrets, SystemClock,
+    LoopbackNetwork, Network, Opened, PendingGroupKeys, Ports, Reach, SharedSecrets, SystemClock,
 };
 pub use service::{
     Config, Core, CHALLENGE_POSITIONS, JOIN_REKEY_MIN_MS, MAX_CHECK_FAILURES, SYNC_EVERY,
