@@ -135,7 +135,9 @@ function GeneralPage({ server }: { server: ServerSummary }) {
         <FormattedMessage id="server.settings.age" />
       </dt>
       <dd>
-        <FormattedMessage id={`age.${age}`} />
+        <bdi>
+          <FormattedMessage id={`age.${age}`} />
+        </bdi>
       </dd>
     </dl>
   );
@@ -157,7 +159,11 @@ function ChannelsPage({ server, onCreate, onEdit }: { server: ServerSummary; onC
           <li key={c.id}>
             <HashIcon />
             <bdi className="grow">{c.name}</bdi>
-            {c.adult && <span className="adult-tag">18+</span>}
+            {c.adult && (
+              <span className="adult-tag">
+                18+
+              </span>
+            )}
             <button
               type="button"
               className="icon-button small"
