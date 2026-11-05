@@ -3,9 +3,10 @@ import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import { useCore, type Member, type ServerSummary } from '../../core';
+import type { Connection } from '../../core/types';
 import { Avatar, Code, Dialog, Name } from '../../components/common';
 import { textDir, useUiDir } from '../../app/textDir';
-import { CloseIcon } from '../../components/icons';
+import { CloseIcon, CloudIcon, LinkIcon } from '../../components/icons';
 import { nameSkeleton } from '../../core/sanitize';
 
 const NO_MEMBERS: Member[] = [];
@@ -38,6 +39,23 @@ export function LookalikeTag() {
   return (
     <span className="lookalike-tag" title={intl.formatMessage({ id: 'members.lookalikeHint' })}>
       <FormattedMessage id="members.lookalike" />
+    </span>
+  );
+}
+
+/**
+ * Direct or through the relay (T20). In the list it is the icon alone with a
+ * tooltip (the row's aria-label says it in words); `withLabel` is the
+ * profile card's one-line summary, with the longer explanation as its tooltip.
+ */
+export function ConnectionIcon({ connection, withLabel }: { connection: Connection; withLabel?: boolean }) {
+  const intl = useIntl();
+  const Glyph = connection === 'direct' ? LinkIcon : CloudIcon;
+  const title = intl.formatMessage({ id: withLabel ? `connection.${connection}.title` : `connection.${connection}` });
+  return (
+    <span className={`connection-icon ${connection}`} title={title}>
+      <Glyph />
+      {withLabel && <FormattedMessage id={`connection.${connection}`} />}
     </span>
   );
 }
@@ -80,12 +98,13 @@ export function MemberList({ server, onClose }: { server: ServerSummary; onClose
                 onClick={() => setOpenId(m.id)}
                 aria-label={[
                   intl.formatMessage({ id: 'members.open' }, { name: displayName(m) }),
-                  m.connection ? intl.formatMessage({ id: `connection.${m.connection}.title` }) : null,
+                  m.connection ? intl.formatMessage({ id: `connection.${m.connection}` }) : null,
                 ]
                   .filter(Boolean)
                   .join(', ')}
               >
                 <Avatar name={displayName(m)} color={m.avatarColor} size={32} presence={m.presence} />
+                {m.connection && <ConnectionIcon connection={m.connection} />}
                 <Name>{displayName(m)}</Name>
                 {m.id === myId && (
                   <span className="muted small">
@@ -93,11 +112,6 @@ export function MemberList({ server, onClose }: { server: ServerSummary; onClose
                   </span>
                 )}
                 {flagged.has(m.id) && <LookalikeTag />}
-                {m.connection && (
-                  <span className={`connection-tag ${m.connection}`} title={intl.formatMessage({ id: `connection.${m.connection}.title` })}>
-                    <FormattedMessage id={`connection.${m.connection}`} />
-                  </span>
-                )}
                 {m.isOwner && (
                   <span className="owner-tag" title={intl.formatMessage({ id: 'members.owner' })}>
                     <FormattedMessage id="members.owner" />
@@ -189,6 +203,7 @@ export function ProfileCard({
             </span>
           )}
         </div>
+        {member.connection && <ConnectionIcon connection={member.connection} withLabel />}
         {lookalike && (
           <p className="warning-text" role="note">
             <FormattedMessage id="members.lookalikeHint" />
