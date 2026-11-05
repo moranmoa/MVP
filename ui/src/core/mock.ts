@@ -386,6 +386,8 @@ export class MockCore implements CoreApi {
         shortCode: shortCodeFor(this.personId(p)),
         avatarColor: AVATAR_COLORS[p % AVATAR_COLORS.length],
         presence: k < seed.online ? 'online' : 'offline',
+        // A few on the same network, the rest through the relay (demo only).
+        connection: k < seed.online ? (k % 3 === 0 ? 'direct' : 'relay') : null,
         isOwner: seed.owner === p,
       });
     }
@@ -898,7 +900,11 @@ export class MockCore implements CoreApi {
       if (!others.length) continue;
       const m = others[Math.floor(Math.random() * others.length)];
       s.members = s.members.map((x) =>
-        x.id === m.id ? { ...x, presence: x.presence === 'online' ? 'offline' : 'online' } : x,
+        x.id === m.id
+          ? x.presence === 'online'
+            ? { ...x, presence: 'offline', connection: null }
+            : { ...x, presence: 'online', connection: 'relay' }
+          : x,
       );
       this.emit('members.changed', { serverId: s.summary.id, members: s.members });
     }

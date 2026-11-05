@@ -203,6 +203,7 @@ export function cleanMember(m: Member): Member {
     shortCode: cleanCode(m.shortCode),
     avatarColor: safeColor(m.avatarColor),
     presence: oneOf(m.presence, ['online', 'offline'] as const, 'offline'),
+    connection: m.presence === 'online' ? (['direct', 'relay'] as const).find((c) => c === m.connection) ?? null : null,
     isOwner: m.isOwner === true,
     blocked: m.blocked === true,
     bio: m.bio === undefined ? undefined : cleanText(m.bio, BIO_MAX, BIO_MAX_LINES).text,
