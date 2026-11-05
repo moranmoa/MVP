@@ -39,7 +39,7 @@ libp2p = { version = "0.54", features = [
 ] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 records = { path = "../records" }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
 serde_json = "1"
