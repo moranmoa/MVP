@@ -25,7 +25,7 @@ use tokio::runtime::Runtime;
 
 use crate::access::{KeyBinder, MemberReadGate, MemberStubGate};
 use crate::gate::MemberGate;
-use crate::ports::Network;
+use crate::ports::{Network, Reach};
 use crate::types::SendState;
 
 /// How long `fetch` waits for a server it has never seen to arrive, so a
@@ -230,9 +230,18 @@ impl Network for SyncNetwork {
     /// Asked of the node each time (never mirrored from events, which can be
     /// dropped): who of `server` is bound and online now.
     fn online(&self, server: ServerId) -> Option<BTreeSet<PublicKey>> {
+        self.presence(server).map(|reach| reach.online)
+    }
+
+    /// One node query for both: who is online, and whom we reach directly
+    /// (#187).
+    fn presence(&self, server: ServerId) -> Option<Reach> {
         match self.runtime.block_on(self.node.presence(server)) {
-            Ok(state) => Some(state.online.into_iter().collect()),
-            Err(_) => Some(BTreeSet::new()),
+            Ok(state) => Some(Reach {
+                online: state.online.into_iter().collect(),
+                direct: state.direct.into_iter().collect(),
+            }),
+            Err(_) => Some(Reach::default()),
         }
     }
 
