@@ -28,6 +28,9 @@ hex = "0.4"
 zeroize = "1"
 # MIT. SQLite itself is public domain. Same version and features as `sync`.
 rusqlite = { version = "0.32", features = ["bundled"] }
+# MIT. Same versions as `sync`; RUST_LOG for the binary (stderr only).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # MIT OR Apache-2.0. Sets the data dir's ACL through its handle (as `sync`'s
 # key file does).

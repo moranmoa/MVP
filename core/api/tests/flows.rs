@@ -1813,3 +1813,42 @@ fn presence_shows_online_members_only() {
     assert_eq!(presence(&guest_id), Some(Presence::Offline));
     assert_eq!(connection(&guest_id), None, "offline: no connection");
 }
+
+/// A secret store that always fails, like Linux without a Secret Service.
+struct NoKeyring;
+
+impl identity::SecretStore for NoKeyring {
+    fn load(&self, _: &str) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, identity::StoreError> {
+        Err(identity::StoreError("no Secret Service".into()))
+    }
+
+    fn save(&self, _: &str, _: &[u8]) -> Result<(), identity::StoreError> {
+        Err(identity::StoreError("no Secret Service".into()))
+    }
+
+    fn delete(&self, _: &str) -> Result<(), identity::StoreError> {
+        Err(identity::StoreError("no Secret Service".into()))
+    }
+}
+
+/// QA-20: no usable OS keychain. The core still starts, and says
+/// `keyring-unavailable` instead of crashing or looking like a fresh install.
+#[test]
+fn no_keyring_is_its_own_error() {
+    let core = Core::open(
+        Config { db_path: None, app_version: "test".into() },
+        Ports {
+            secrets: Arc::new(NoKeyring),
+            network: Arc::new(LoopbackNetwork::new()),
+            events: Arc::new(CollectingSink::new()),
+            clock: Arc::new(SystemClock),
+            cipher: Arc::new(PendingGroupKeys),
+        },
+    )
+    .expect("the core starts without a keychain");
+    assert_eq!(core.get_identity().unwrap_err().code, ErrorCode::KeyringUnavailable);
+    assert_eq!(core.create_identity(adult()).unwrap_err().code, ErrorCode::KeyringUnavailable);
+    let reply = core.handle(r#"{"cmd":"getIdentity"}"#);
+    assert_eq!(reply, r#"{"error":{"code":"keyring-unavailable"}}"#);
+    assert!(core.get_app_info().is_ok(), "the rest of the core still answers");
+}

@@ -6,6 +6,66 @@ fails if its version has no section here. Write a section before tagging:
 `## [X.Y.Z] - YYYY-MM-DD`, then Hebrew and English (Fixed / New / Known).
 Never put the relay domain or any IP address here.
 
+## [0.2.3] - 2026-11-04
+
+### מה חדש
+- **פורט האזנה קבוע:** בהפעלה הראשונה האפליקציה בוחרת פורט ושומרת אותו גם אחרי הפעלה מחדש. כך אפשר לאשר אותו פעם אחת ב-Windows Firewall או בראוטר.
+- **ניסיון חיבור ישיר משני הצדדים:** אם החיבור הישיר מהצד הראשון נכשל, הצד השני מנסה בעצמו. מספיק שאחד משני המחשבים יקבל חיבורים נכנסים.
+
+### מה תוקן
+- אין תיקונים גלויים מעבר לשיפורי החיבור שלמעלה.
+
+### ידוע
+- עדיין אין "ניקוב" חיבור דרך NAT בין רשתות שונות (hole punching); זה הבא בתור. עד אז, בין ראוטרים שונים החיבור עובר דרך ה-relay.
+- עוד אין באפליקציה סימון אם החיבור ישיר או דרך ה-relay.
+- העדכון האוטומטי בתוך האפליקציה עוד לא פעיל: מתקינים את הגרסה החדשה ידנית מעל הקיימת.
+
+---
+
+### New
+- **A stable listening port:** the app picks a port on first start and keeps it across restarts, so you can allow it once in Windows Firewall or on your router.
+- **Direct connection tried from both sides:** if the first side's direct connection fails, the other side tries too. Only one of the two computers needs to accept incoming connections.
+
+### Fixed
+- Nothing user-visible beyond the connection improvements above.
+
+### Known
+- No NAT hole punching between different networks yet; that's next. Until then, computers behind different routers connect through the relay.
+- The app doesn't show yet whether a connection is direct or through the relay.
+- In-app auto-update isn't active yet: install the new version manually over the old one.
+
+## [0.2.2] - 2026-11-04
+
+### מה חדש
+- **חיבור ישיר באותה רשת ביתית:** חברים שמחוברים לאותה רשת (אותו ראוטר) מדברים ישירות זה עם זה, בלי לעבור דרך שרת ה-relay. זה מהיר יותר ופחות תלוי בשרת.
+- **מסך "הליבה לא זמינה":** אם חלק הרקע של האפליקציה לא עולה, מופיע מסך עם **לנסות שוב** ו**פתיחת הלוגים**. הלוג מסתיר כתובות רשת.
+- **Linux בלי מחזיק מפתחות (keyring):** הודעת שגיאה ברורה שמסבירה מה חסר, במקום כשל לא מובן.
+
+### מה תוקן
+- **פרטיות:** כתובות הרשת הביתית נשלחות רק לחברי השרת, ולא לכל מי שמחובר.
+- **חיבור:** כששני חיבורים דרך ה-relay נפתחו בו-זמנית, הם חסמו את החיבור הישיר. תוקן.
+
+### ידוע
+- עדיין אין חיבור ישיר בין רשתות שונות (ראוטרים שונים); שם ממשיכים דרך ה-relay. זה הבא בתור.
+- עוד אין באפליקציה סימון אם החיבור ישיר או דרך ה-relay.
+- העדכון האוטומטי בתוך האפליקציה עוד לא פעיל: מתקינים את הגרסה החדשה ידנית מעל הקיימת. הנתונים והזהות נשמרים.
+
+---
+
+### New
+- **Direct connection on the same home network:** members on the same network (behind the same router) talk to each other directly instead of through the relay. That's faster and depends less on the server.
+- **"Core unavailable" screen:** if the app's background part doesn't start, a screen offers **Try again** and **Open logs**. The log hides network addresses.
+- **Linux without a keyring:** a clear error that says what's missing, instead of an unexplained failure.
+
+### Fixed
+- **Privacy:** home-network addresses are sent only to the server's members, not to everyone who's connected.
+- **Connection:** two relay connections opened at the same time blocked the direct one. Fixed.
+
+### Known
+- No direct connection between different networks (different routers) yet; those still go through the relay. That's next.
+- The app doesn't show yet whether a connection is direct or through the relay.
+- In-app auto-update isn't active yet: install the new version manually over the old one. Your data and identity are kept.
+
 ## [0.2.1] - 2026-11-04
 
 ### מה תוקן

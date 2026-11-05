@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect } from 'react';
 import type { CoreApi, CoreEventName, CoreEvents } from './api';
 import { createIpcCore, hasDesktopBridge } from './ipc';
-import { MockCore } from './mock';
+import { MockCore, type MockOptions } from './mock';
 
 export type { CoreApi } from './api';
 export * from './types';
@@ -20,6 +20,7 @@ export * from './types';
  *   ?update=<ms>     announce a ready update after <ms>
  *   ?installed=1     a new version was just installed, with release notes
  *   ?rolledBack=1    the last update failed and the previous version is back
+ *   ?coreDown=<detail> the desktop shell reports the core down (missing, start-failed, crashed, crash-loop)
  *   ?inCall=1        restartToUpdate is refused as during a call (not-allowed)
  *   ?fresh=1         forget the stored mock account
  *   ?hostile=1       add attacker-style names and messages (security demo)
@@ -44,6 +45,7 @@ export function createCore(search = typeof location !== 'undefined' ? location.s
     updateInstalled: params.has('installed'),
     updateRolledBack: params.has('rolledBack'),
     inCall: params.has('inCall'),
+    coreDown: (params.get('coreDown') as MockOptions['coreDown']) ?? undefined,
     storage,
   });
 }

@@ -30,6 +30,10 @@ contextBridge.exposeInMainWorld('mvs', {
    */
   /** Puts plain text on the clipboard (e.g. an invite link). Resolves true if it did. */
   copyText: (text) => ipcRenderer.invoke('clipboard:write', String(text)),
+  /** "Core unavailable" screen: start the core again now. Status follows as core.status. */
+  retryCore: () => ipcRenderer.invoke('core:retry'),
+  /** Opens the shell's logs folder (no words, no message content). Resolves true if it did. */
+  openLogsFolder: () => ipcRenderer.invoke('logs:open'),
   onEvent: (callback) => {
     if (typeof callback !== 'function') return () => {};
     listeners.add(callback);

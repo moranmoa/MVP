@@ -173,6 +173,25 @@ class Sidecar {
     });
   }
 
+  /**
+   * The user pressed "try again": start now, with a fresh backoff. A running
+   * core is replaced too (it may be up but failing, e.g. no keyring, QA-20).
+   */
+  retryNow() {
+    if (this.stopped) return false;
+    clearTimeout(this.restartTimer);
+    if (this.child) {
+      const old = this.child;
+      this.child = null; // its exit is then ignored by lost()
+      this.failAll('core-restarted');
+      old.kill();
+    }
+    this.restarts = 0;
+    this.setStatus('starting');
+    this.start();
+    return true;
+  }
+
   up() {
     this.restarts = 0;
     this.setStatus('up');

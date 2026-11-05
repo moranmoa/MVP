@@ -85,6 +85,8 @@ struct Inner {
     db: Db,
     vault: Vault<SharedSecrets>,
     me: Option<Me>,
+    /// The OS keychain failed at startup (QA-20).
+    keyring_unavailable: bool,
     /// Loaded on first use per server, then kept current record by record.
     logs: HashMap<ServerId, Log>,
     /// Messages already announced to the UI, per server, with what was
@@ -112,6 +114,8 @@ type Events = Vec<Event>;
 
 fn vault_error(e: VaultError) -> CoreError {
     match e {
+        // QA-20: the OS keychain failed (no Secret Service, locked, denied).
+        VaultError::Store(_) => ErrorCode::KeyringUnavailable.into(),
         VaultError::AlreadyExists => ErrorCode::NotAllowed.into(),
         VaultError::NotFound => ErrorCode::NotFound.into(),
         VaultError::RecoveryCheckRequired => ErrorCode::RecoveryCheckRequired.into(),
@@ -142,6 +146,7 @@ impl Core {
             db,
             vault,
             me: None,
+            keyring_unavailable: false,
             logs: HashMap::new(),
             announced: HashMap::new(),
             net: ports.network.clone(),
@@ -149,7 +154,18 @@ impl Core {
             keyed_for: HashMap::new(),
             rekey_after: HashMap::new(),
         };
-        if inner.vault.state().map_err(vault_error)? == VaultState::Ready {
+        // QA-20: without a usable keychain the core still starts, and says so
+        // (`keyring-unavailable`) instead of crashing or looking empty.
+        let state = match inner.vault.state() {
+            Ok(state) => Some(state),
+            Err(VaultError::Store(e)) => {
+                eprintln!("mvs-core: the OS keychain is unavailable: {}", e.0);
+                inner.keyring_unavailable = true;
+                None
+            }
+            Err(e) => return Err(vault_error(e)),
+        };
+        if state == Some(VaultState::Ready) {
             let phrase = inner.vault.open().map_err(vault_error)?;
             inner.me = Some(inner.load_me(phrase)?);
             unlock_cipher(&ports, inner.me.as_ref());
@@ -201,6 +217,9 @@ impl Core {
 
     pub fn get_identity(&self) -> CoreResult<Option<Identity>> {
         let inner = self.lock();
+        if inner.keyring_unavailable {
+            return Err(ErrorCode::KeyringUnavailable.into());
+        }
         inner.me.as_ref().map(|me| inner.identity_json(me)).transpose()
     }
 

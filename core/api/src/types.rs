@@ -213,6 +213,9 @@ pub enum ErrorCode {
     AuthCancelled,
     /// The recovery-word challenge is burned (B19 §6).
     TooManyAttempts,
+    /// The OS keychain (Secret Service on Linux) is missing or unusable
+    /// (QA-20): the core runs, but nothing that needs the identity works.
+    KeyringUnavailable,
     /// Rust addition: malformed command JSON or arguments.
     BadRequest,
     /// Rust addition: in the contract, not done by this core yet.

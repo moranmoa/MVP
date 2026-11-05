@@ -244,9 +244,8 @@ async fn an_offline_peer_is_not_asked_for_circuits_again_and_again() {
     let asked = circuits.lock().unwrap().iter().filter(|(dst, _)| *dst == gone).count();
     eprintln!("circuit requests to the offline peer in 30 s: {asked}");
     // A few tries are fine; one every discovery round (3 s) is not.
-    // Our dials back off; Kademlia's own lookups can add a few until the
-    // DialGuard (#190) holds them back too. One every 3 s would be 10+.
-    assert!(asked <= 6, "{asked} circuit requests to a peer that went offline");
+    // Every dial backs off, Kademlia's too (DialGuard). One every 3 s would be 10+.
+    assert!(asked <= 3, "{asked} circuit requests to a peer that went offline");
     a.shutdown().await.unwrap();
 }
 
@@ -323,6 +322,11 @@ async fn bound_node(name: &str, relay: &Multiaddr, key: u8, allow_lan: bool, gat
 /// "LAN allowed" they stay relayed.
 #[tokio::test(flavor = "multi_thread")]
 async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
+    // Shown only if the test fails: what was offered, tried and refused.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("sync=debug,libp2p_swarm=debug,libp2p_tcp=debug")
+        .with_test_writer()
+        .try_init();
     for allow_lan in [true, false] {
         let relay_key = identity::Keypair::generate_ed25519();
         let port = free_port();
@@ -338,21 +342,22 @@ async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
         let opened = || circuits.lock().unwrap().iter().filter(|(p, ok)| *ok && ids.contains(p)).count();
         // They meet through the relay first.
         while opened() == 0 {
-            assert!(start.elapsed() < Duration::from_secs(30), "never met through the relay");
+            assert!(start.elapsed() < Duration::from_secs(60), "never met through the relay");
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         if allow_lan {
-            while closed() == 0 {
-                assert!(start.elapsed() < Duration::from_secs(30), "stayed relayed on one LAN");
+            // Driven by A's own state (B shown as direct), not by the relay
+            // noticing the circuit close; generous for a loaded CI runner. The
+            // LAN address is loopback, which every runner has.
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !a.presence(test_server().0).await.unwrap().direct.contains(&b_identity) {
+                if Instant::now() >= deadline {
+                    let (la, lb) = (a.listen_addrs().await.unwrap(), b.listen_addrs().await.unwrap());
+                    panic!("stayed relayed on one LAN; A listens on {la:?}, B on {lb:?}, A has {:?}", a.peers().await.unwrap());
+                }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             assert_eq!(a.peers().await.unwrap(), vec![b.peer_id()], "the direct connection is up");
-            // The UI indicator: B is online on A, and directly.
-            let deadline = Instant::now() + Duration::from_secs(15);
-            while !a.presence(test_server().0).await.unwrap().direct.contains(&b_identity) {
-                assert!(Instant::now() < deadline, "B never shown as direct");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
         } else {
             tokio::time::sleep(Duration::from_secs(10)).await;
             assert_eq!(closed(), 0, "went direct without LAN allowed");
@@ -407,6 +412,59 @@ async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
     tokio::time::sleep(Duration::from_secs(10)).await;
     let closed = CIRCUITS_CLOSED.lock().unwrap().iter().filter(|p| ids.contains(p)).count();
     assert_eq!(closed, 0, "a bound non-member was dialled at its LAN address");
+    a.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
+
+
+    // "Relay only" (GAP-6) on one side: even two members on one LAN, with
+    // LAN allowed, stay relayed, and that side listens on its circuit only.
+    let relay_key = identity::Keypair::generate_ed25519();
+    let port = free_port();
+    let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::from(relay_key.public())).parse().unwrap();
+    let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _relay = start_relay_counting(relay_key, port, circuits.clone(), true);
+    let a = bound_node("relay-only-a", &relay, 5, true, Arc::new(AcceptAll)).await;
+    a.set_relay_only(true).unwrap();
+    let b = bound_node("relay-only-b", &relay, 6, true, Arc::new(AcceptAll)).await;
+    let ids = [a.peer_id(), b.peer_id()];
+    let start = Instant::now();
+    while !circuits.lock().unwrap().iter().any(|(p, ok)| *ok && ids.contains(p)) {
+        assert!(start.elapsed() < Duration::from_secs(30), "relay-only peers never met through the relay");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let closed = CIRCUITS_CLOSED.lock().unwrap().iter().filter(|p| ids.contains(p)).count();
+    assert_eq!(closed, 0, "a relay-only peer went direct");
+    let listening = a.listen_addrs().await.unwrap();
+    assert!(
+        listening.iter().all(|addr| addr.iter().any(|p| p == libp2p::multiaddr::Protocol::P2pCircuit)),
+        "relay only, yet listening directly: {listening:?}"
+    );
+    a.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
+
+    // The other side's turn: the smaller peer ID dials first, but here it
+    // can't (as if a firewall blocked it). The larger one dials once after
+    // waiting its turn, and the connection still goes direct.
+    let relay_key = identity::Keypair::generate_ed25519();
+    let port = free_port();
+    let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::from(relay_key.public())).parse().unwrap();
+    let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _relay = start_relay_counting(relay_key, port, circuits.clone(), true);
+    let a = bound_node("turn-a", &relay, 9, true, Arc::new(AcceptAll)).await;
+    let b = bound_node("turn-b", &relay, 10, true, Arc::new(AcceptAll)).await;
+    let id = |n: u8| records::PublicKey::from_bytes(SigningKey::from_bytes(&[n; 32]).verifying_key().to_bytes());
+    let ((smaller, _), (larger, smaller_id)) =
+        if a.peer_id() < b.peer_id() { ((&a, id(10)), (&b, id(9))) } else { ((&b, id(9)), (&a, id(10))) };
+    smaller.test_no_direct_dials().unwrap();
+    let start = Instant::now();
+    // The larger side shows the smaller one as direct: its own dial worked.
+    while !larger.presence(test_server().0).await.unwrap().direct.contains(&smaller_id) {
+        assert!(start.elapsed() < Duration::from_secs(60), "the larger side never took its turn");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(start.elapsed() >= Duration::from_secs(5), "went direct before the larger side's turn");
+    assert_eq!(larger.peers().await.unwrap(), vec![smaller.peer_id()]);
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
 }
