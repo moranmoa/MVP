@@ -189,18 +189,38 @@ fn two_users_chat_through_a_relay() {
 
 /// The app's background sync (`Core::run_sync_loop`, as mvs-core runs it):
 /// the guest gets the owner's message, with `message.added`, and nobody
-/// calls `sync_now`.
+/// calls `sync_now`. Over the direct link, messages arrive live (gossip),
+/// not on the next 5 s pull (the v0.2.3 regression).
 #[test]
 #[ignore = "needs a relay: set RELAY and run with --ignored"]
 fn the_background_sync_delivers_without_sync_now() {
+    background_delivery("Loop", false);
+}
+
+/// The same, when the smaller peer ID can't dial and the larger side's
+/// fallback dial makes the direct link (as in devops' v0.2.3 smoke).
+#[test]
+#[ignore = "needs a relay: set RELAY and run with --ignored"]
+fn the_background_sync_delivers_live_over_the_fallback_link() {
+    background_delivery("Fallback", true);
+}
+
+/// Live delivery: well under the 5 s pull.
+const LIVE: Duration = Duration::from_secs(1);
+
+fn background_delivery(name: &str, fallback: bool) {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let Ok(relay) = std::env::var("RELAY") else {
         eprintln!("RELAY not set; skipped");
         return;
     };
-    let owner = peer("LoopOwner", OWNER, &relay);
-    let guest = peer("LoopGuest", GUEST, &relay);
+    let owner = peer(&format!("{name}Owner"), OWNER, &relay);
+    let guest = peer(&format!("{name}Guest"), GUEST, &relay);
+    if fallback {
+        let smaller = if owner.net.peer_id() < guest.net.peer_id() { &owner } else { &guest };
+        smaller.net.test_no_direct_dials();
+    }
     let stop = AtomicBool::new(false);
     std::thread::scope(|scope| {
         for p in [&owner, &guest] {
@@ -228,11 +248,21 @@ fn the_background_sync_delivers_without_sync_now() {
                 .iter()
                 .any(|m| m.id == guest_id && m.presence == Presence::Online)
         });
-        guest.events.take();
-        let sent = owner.core.send_message(&channel, "no sync_now here", None).unwrap();
-        eventually("the guest's loop to bring the message", || {
-            guest.core.get_message_count(&channel).unwrap_or(0) == 1
+        // The regression showed only once the link went direct.
+        eventually("a direct link", || {
+            owner.net.direct_peers().contains(&guest.net.peer_id())
+                && guest.net.direct_peers().contains(&owner.net.peer_id())
         });
+        guest.events.take();
+        let start = Instant::now();
+        let sent = owner.core.send_message(&channel, "no sync_now here", None).unwrap();
+        while guest.core.get_message_count(&channel).unwrap_or(0) != 1 {
+            assert!(start.elapsed() < Duration::from_secs(90), "the guest's loop never brought the message");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let took = start.elapsed();
+        eprintln!("{name}: owner to guest in {took:?}");
+        assert!(took < LIVE, "owner to guest took {took:?}: not live, only on a pull");
         let added: Vec<_> = guest
             .events
             .take()
@@ -252,12 +282,22 @@ fn the_background_sync_delivers_without_sync_now() {
             owner.core.get_messages(&channel, 0, 1).unwrap().messages[0].send_state
                 == Some(SendState::Received)
         });
+        // And back: the guest's post reaches the owner live too.
+        let start = Instant::now();
+        guest.core.send_message(&channel, "and back", None).unwrap();
+        while owner.core.get_message_count(&channel).unwrap_or(0) != 2 {
+            assert!(start.elapsed() < Duration::from_secs(90), "the owner's loop never brought the reply");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let took = start.elapsed();
+        eprintln!("{name}: guest to owner in {took:?}");
+        assert!(took < LIVE, "guest to owner took {took:?}: not live, only on a pull");
 
         stop.store(true, Ordering::SeqCst);
         owner.net.wake();
         guest.net.wake();
     });
-    eprintln!("background sync: done");
+    eprintln!("background sync ({name}): done");
 }
 
 /// v0.2.0 live smoke: B joins A's server by invite and writes first; A never

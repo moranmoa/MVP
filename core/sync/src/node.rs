@@ -109,9 +109,9 @@ const MAX_INCOMING_CONNECTIONS: u32 = 256;
 const MAX_OUTGOING_CONNECTIONS: u32 = 128;
 const MAX_CONNECTIONS: u32 = 384;
 const MAX_PENDING_INCOMING: u32 = 64;
-/// A direct and a relayed connection to the same peer briefly coexist (the
-/// relayed one is closed once the direct one is up), and two simultaneous
-/// dials can add one more for a moment.
+/// A direct and a relayed connection to the same peer coexist until the
+/// relayed one ends (see `track_connection`), and two simultaneous dials can
+/// add one more for a moment.
 const MAX_CONNECTIONS_PER_PEER: u32 = 3;
 /// Direct incoming connections from one IP address (IPv6: one /64). PeerIds are free to
 /// make, so the per-peer cap alone doesn't stop one machine taking every
@@ -281,6 +281,7 @@ enum Command {
     State { log: String, reply: oneshot::Sender<Result<LogState>> },
     Presence { server: ServerId, reply: oneshot::Sender<PresenceState> },
     Peers { reply: oneshot::Sender<Vec<PeerId>> },
+    DirectPeers { reply: oneshot::Sender<Vec<PeerId>> },
     ListenAddrs { reply: oneshot::Sender<Vec<Multiaddr>> },
     RelayOnly { on: bool },
     NoDirectDials,
@@ -537,6 +538,7 @@ impl Node {
             allow_lan: config.allow_lan,
             relayed: HashMap::new(),
             direct: HashMap::new(),
+            parked: HashMap::new(),
             secrets: HashMap::new(),
             sealing: Sealing::default(),
             stub_gate: access.stub_gate.clone().unwrap_or_else(|| Arc::new(NoStubs)),
@@ -674,6 +676,13 @@ impl Node {
     pub async fn peers(&self) -> Result<Vec<PeerId>> {
         let (reply, rx) = oneshot::channel();
         self.send(Command::Peers { reply })?;
+        Ok(rx.await?)
+    }
+
+    /// Peers with a direct (not relayed) connection.
+    pub async fn direct_peers(&self) -> Result<Vec<PeerId>> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::DirectPeers { reply })?;
         Ok(rx.await?)
     }
 
@@ -903,11 +912,14 @@ struct Task {
     /// Bootstrap addresses and the peer each one turned out to be.
     bootstrap: Vec<(Multiaddr, Option<PeerId>)>,
     allow_lan: bool,
-    /// Open connections per peer, through the relay and direct. Requests
-    /// should not run over a relay circuit (it is capped at 128 KiB and
-    /// 2 minutes), so a relayed connection is closed once a direct one exists.
+    /// Open connections per peer, through the relay and direct. A peer with
+    /// a direct connection is not in `relayed`, even while its old relayed
+    /// connection is still open.
     relayed: HashMap<PeerId, HashSet<ConnectionId>>,
     direct: HashMap<PeerId, HashSet<ConnectionId>>,
+    /// Relayed connections still open alongside a direct one: the link
+    /// again if the direct one closes first.
+    parked: HashMap<PeerId, HashSet<ConnectionId>>,
     /// Servers opened with their secret.
     secrets: HashMap<ServerId, ServerSecret>,
     sealing: Sealing,
@@ -1099,6 +1111,9 @@ impl Task {
             }
             Command::Peers { reply } => {
                 let _ = reply.send(self.connected.iter().copied().collect());
+            }
+            Command::DirectPeers { reply } => {
+                let _ = reply.send(self.direct.keys().copied().collect());
             }
             Command::Shutdown { .. } => unreachable!(),
         }
@@ -1429,12 +1444,20 @@ impl Task {
             SwarmEvent::ConnectionClosed { peer_id, connection_id, num_established, .. } => {
                 self.per_ip.release(connection_id);
                 self.relayed_preferred.remove(&connection_id);
-                for conns in [&mut self.relayed, &mut self.direct] {
+                let had_direct = self.direct.contains_key(&peer_id);
+                for conns in [&mut self.relayed, &mut self.direct, &mut self.parked] {
                     if let Some(set) = conns.get_mut(&peer_id) {
                         set.remove(&connection_id);
                         if set.is_empty() {
                             conns.remove(&peer_id);
                         }
+                    }
+                }
+                if had_direct && !self.direct.contains_key(&peer_id) {
+                    if let Some(parked) = self.parked.remove(&peer_id) {
+                        debug!(%peer_id, "direct connection gone: relayed again");
+                        self.relayed.insert(peer_id, parked);
+                        self.emit(NodeEvent::Link { peer: peer_id, direct: false });
                     }
                 }
                 if num_established > 0 {
@@ -2010,8 +2033,8 @@ impl Task {
         }
     }
 
-    /// Records a new connection, and keeps at most one kind per peer: a
-    /// direct connection replaces any relayed one.
+    /// Records a new connection: a direct connection replaces any relayed
+    /// one as the peer's link.
     fn track_connection(&mut self, peer: PeerId, id: ConnectionId, endpoint: &ConnectedPoint) {
         if let ConnectedPoint::Dialer { address, .. } = endpoint {
             for (addr, known) in &mut self.bootstrap {
@@ -2052,9 +2075,14 @@ impl Task {
                 self.emit(NodeEvent::Link { peer, direct: true });
             }
             self.direct.entry(peer).or_default().insert(id);
-            for old in self.relayed.remove(&peer).unwrap_or_default() {
-                debug!(%peer, "direct connection replaces the relayed one");
-                self.swarm.close_connection(old);
+            // The old relayed connection is no longer tracked, but stays open
+            // until it idles out (IDLE_TIMEOUT) or the relay ends the circuit.
+            // v0.2.3: closing the relayed connection the gossip mesh was built
+            // on left gossip dead over the new direct one (delivery only on
+            // the 5 s pull).
+            if let Some(old) = self.relayed.remove(&peer) {
+                debug!(%peer, "direct connection replaces the relayed one (left open)");
+                self.parked.entry(peer).or_default().extend(old);
             }
         }
     }

@@ -18,7 +18,7 @@ use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use libp2p::Multiaddr;
+use libp2p::{Multiaddr, PeerId};
 use records::{ChannelId, PublicKey, Record, RecordId, Scope, ServerId};
 use sync::{log_name, log_of, Access, Node, NodeConfig, NodeEvent, ServerSecret, Store};
 use tokio::runtime::Runtime;
@@ -149,6 +149,22 @@ impl SyncNetwork {
     /// The hints for `Core::run_sync_loop` (once; `None` after).
     pub fn take_hints(&self) -> Option<Receiver<()>> {
         self.hints.lock().expect("not poisoned").take()
+    }
+
+    pub fn peer_id(&self) -> PeerId {
+        self.node.peer_id()
+    }
+
+    /// Peers with a direct (not relayed) connection.
+    pub fn direct_peers(&self) -> Vec<PeerId> {
+        self.runtime.block_on(self.node.direct_peers()).unwrap_or_default()
+    }
+
+    /// Tests only: this node never dials a direct connection itself, so the
+    /// other side's fallback dial makes the link.
+    #[doc(hidden)]
+    pub fn test_no_direct_dials(&self) {
+        let _ = self.node.test_no_direct_dials();
     }
 
     /// Wakes the sync loop now, e.g. so it sees its stop flag.

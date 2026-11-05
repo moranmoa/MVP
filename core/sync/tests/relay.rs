@@ -13,10 +13,6 @@ use libp2p::{
 };
 use records::{ChannelId, Draft, Kind, RecordId, Scope, ServerId, SigningKey};
 use sync::{log_name, AcceptAll, Access, ControlLog, Node, NodeConfig, NodeEvent, ReadGate, Record, ServerSecret};
-
-/// Destinations of circuits the test relays saw close (all tests in this
-/// binary; filter by peer).
-static CIRCUITS_CLOSED: std::sync::Mutex<Vec<PeerId>> = std::sync::Mutex::new(Vec::new());
 use tokio::sync::mpsc;
 
 #[derive(NetworkBehaviour)]
@@ -90,9 +86,6 @@ fn start_relay_counting(
                 SwarmEvent::Behaviour(RelayBehaviourEvent::Relay(
                     relay::Event::CircuitReqAccepted { dst_peer_id, .. },
                 )) => circuits.lock().unwrap().push((dst_peer_id, true)),
-                SwarmEvent::Behaviour(RelayBehaviourEvent::Relay(relay::Event::CircuitClosed { dst_peer_id, .. })) => {
-                    CIRCUITS_CLOSED.lock().unwrap().push(dst_peer_id)
-                }
                 SwarmEvent::Behaviour(RelayBehaviourEvent::Relay(relay::Event::CircuitReqDenied { dst_peer_id, .. })) => {
                     circuits.lock().unwrap().push((dst_peer_id, false))
                 }
@@ -318,7 +311,7 @@ async fn bound_node(name: &str, relay: &Multiaddr, key: u8, allow_lan: bool, gat
 
 /// F2: two bound peers on one LAN, which first meet through the relay
 /// (the DHT never carries LAN addresses), switch to a direct connection:
-/// the relay sees their circuit close while both keep running. Without
+/// both see the other as direct while both keep running. Without
 /// "LAN allowed" they stay relayed.
 #[tokio::test(flavor = "multi_thread")]
 async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
@@ -338,7 +331,6 @@ async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
         let b = bound_node(&format!("lan-b-{allow_lan}"), &relay, 2, allow_lan, Arc::new(AcceptAll)).await;
         let b_identity = records::PublicKey::from_bytes(SigningKey::from_bytes(&[2; 32]).verifying_key().to_bytes());
         let (ids, start) = ([a.peer_id(), b.peer_id()], Instant::now());
-        let closed = || CIRCUITS_CLOSED.lock().unwrap().iter().filter(|p| ids.contains(p)).count();
         let opened = || circuits.lock().unwrap().iter().filter(|(p, ok)| *ok && ids.contains(p)).count();
         // They meet through the relay first.
         while opened() == 0 {
@@ -360,7 +352,7 @@ async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
             assert_eq!(a.peers().await.unwrap(), vec![b.peer_id()], "the direct connection is up");
         } else {
             tokio::time::sleep(Duration::from_secs(10)).await;
-            assert_eq!(closed(), 0, "went direct without LAN allowed");
+            assert!(a.direct_peers().await.unwrap().is_empty(), "went direct without LAN allowed");
             // The UI indicator: B is online on A, through the relay.
             let seen = a.presence(test_server().0).await.unwrap();
             assert!(seen.online.contains(&b_identity) && seen.direct.is_empty(), "{seen:?}");
@@ -383,8 +375,7 @@ async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     tokio::time::sleep(Duration::from_secs(10)).await;
-    let closed = CIRCUITS_CLOSED.lock().unwrap().iter().filter(|p| ids.contains(p)).count();
-    assert_eq!(closed, 0, "an unbound peer was dialled at its LAN address");
+    assert!(a.direct_peers().await.unwrap().is_empty() && b.direct_peers().await.unwrap().is_empty(), "an unbound peer was dialled at its LAN address");
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
 
@@ -410,8 +401,7 @@ async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     tokio::time::sleep(Duration::from_secs(10)).await;
-    let closed = CIRCUITS_CLOSED.lock().unwrap().iter().filter(|p| ids.contains(p)).count();
-    assert_eq!(closed, 0, "a bound non-member was dialled at its LAN address");
+    assert!(a.direct_peers().await.unwrap().is_empty() && b.direct_peers().await.unwrap().is_empty(), "a bound non-member was dialled at its LAN address");
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
 
@@ -433,8 +423,7 @@ async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     tokio::time::sleep(Duration::from_secs(10)).await;
-    let closed = CIRCUITS_CLOSED.lock().unwrap().iter().filter(|p| ids.contains(p)).count();
-    assert_eq!(closed, 0, "a relay-only peer went direct");
+    assert!(a.direct_peers().await.unwrap().is_empty() && b.direct_peers().await.unwrap().is_empty(), "a relay-only peer went direct");
     let listening = a.listen_addrs().await.unwrap();
     assert!(
         listening.iter().all(|addr| addr.iter().any(|p| p == libp2p::multiaddr::Protocol::P2pCircuit)),
