@@ -55,6 +55,8 @@ fn names(events: &[Event]) -> Vec<&'static str> {
             Event::ServerUpdated(_) => "server.updated",
             Event::ServerRemoved { .. } => "server.removed",
             Event::ChannelUpdated(_) => "channel.updated",
+            Event::ChannelAdded(_) => "channel.added",
+            Event::ChannelRemoved { .. } => "channel.removed",
             Event::MembersChanged { .. } => "members.changed",
             Event::JoinStatus(_) => "join.status",
             Event::UpdateReady(_) => "update.ready",
@@ -1704,6 +1706,89 @@ fn ten_joins_in_five_seconds_make_at_most_one_rotation() {
     }
     owner.core.sync_now().unwrap();
     assert_eq!(owner.core.get_message_count(&channel).unwrap(), 10);
+}
+
+/// B11: the owner's channel commands, with names normalised and checked,
+/// #general (`isDefault`) undeletable, and the channel events.
+#[test]
+fn channel_commands() {
+    let world = World::new();
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let guest = world.peer();
+    sign_up(&guest, "Guest");
+    let server = owner.core.create_server("Rooms", AgeRestriction::None).unwrap();
+    guest.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    let general = owner.core.list_channels(&server.id).unwrap().remove(0);
+    assert!(general.is_default);
+
+    owner.events.take();
+    let room = owner.core.create_channel(&server.id, "  my   big room ", false).unwrap();
+    assert_eq!((room.name.as_str(), room.is_default, room.adult), ("my-big-room", false, false));
+    assert!(names(&owner.events.take()).contains(&"channel.added"));
+    assert_eq!(
+        owner.core.create_channel(&server.id, "my big room", false).unwrap_err().code,
+        ErrorCode::NameTaken
+    );
+    assert_eq!(
+        owner.core.create_channel(&server.id, "a\u{202E}b", false).unwrap_err().code,
+        ErrorCode::BadRequest
+    );
+    guest.core.sync_now().unwrap();
+    assert_eq!(
+        guest.core.create_channel(&server.id, "mine", false).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+
+    let renamed = owner.core.update_channel(&room.id, Some("lounge"), None).unwrap();
+    assert_eq!((renamed.name.as_str(), renamed.id.as_str()), ("lounge", room.id.as_str()));
+    assert!(names(&owner.events.take()).contains(&"channel.updated"));
+    assert_eq!(
+        owner.core.update_channel(&room.id, Some(&general.name), None).unwrap_err().code,
+        ErrorCode::NameTaken
+    );
+
+    assert_eq!(owner.core.delete_channel(&general.id).unwrap_err().code, ErrorCode::NotAllowed);
+    owner.core.delete_channel(&room.id).unwrap();
+    let removed = owner.events.take().into_iter().find_map(|e| match e {
+        Event::ChannelRemoved { channel_id, name, .. } => Some((channel_id, name)),
+        _ => None,
+    });
+    assert_eq!(removed, Some((room.id.clone(), "lounge".to_owned())));
+    let left: Vec<String> =
+        owner.core.list_channels(&server.id).unwrap().into_iter().map(|c| c.id).collect();
+    assert_eq!(left.as_slice(), std::slice::from_ref(&general.id));
+    assert_eq!(owner.core.get_message_count(&room.id).unwrap_err().code, ErrorCode::NotFound);
+}
+
+/// #185 review: an owner without an 18+ claim can't make or mark an 18+
+/// channel: `not-allowed`, and nothing is signed or published.
+#[test]
+fn an_owner_without_an_adult_claim_cannot_make_adult_channels() {
+    let world = World::new();
+    let owner = world.peer();
+    // Restored: no birth date, so the age claim says "not 18+".
+    owner.core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
+    let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None };
+    owner.core.update_profile(profile).unwrap();
+    let server = owner.core.create_server("Minors", AgeRestriction::None).unwrap();
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let room = owner.core.create_channel(&server.id, "room", false).unwrap();
+    let held = world.network.fetch(server_key).len();
+    assert_eq!(
+        owner.core.create_channel(&server.id, "night", true).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+    assert_eq!(
+        owner.core.update_channel(&room.id, None, Some(true)).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+    assert_eq!(world.network.fetch(server_key).len(), held, "something was published");
+    // A long name is cut to 32 before trimming its dashes.
+    let long =
+        owner.core.create_channel(&server.id, &format!("{}-x", "a".repeat(31)), false).unwrap();
+    assert_eq!(long.name, format!("{}", "a".repeat(31)));
 }
 
 /// The in-process network, plus a presence set the test controls.

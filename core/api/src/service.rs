@@ -508,6 +508,114 @@ impl Core {
         self.control_action(server_id, Action::kick(parse_user(user_id)?))
     }
 
+    /// B11: the owner creates a channel. `name-taken` if another channel of
+    /// the server has the name; `bad-request` for a name authority refuses.
+    pub fn create_channel(&self, server_id: &str, name: &str, adult: bool) -> CoreResult<Channel> {
+        let name = model::channel_name(name).ok_or(ErrorCode::BadRequest)?;
+        let server = parse_server(server_id)?;
+        self.check_name_free(server, &name, None)?;
+        self.check_may_mark_adult(server, adult)?;
+        let mut id = [0u8; 32];
+        OsRng.fill_bytes(&mut id);
+        let channel = ChannelId::from_bytes(id);
+        self.control_action(server_id, Action::ChannelCreate { channel, adult, name })?;
+        let json = self.channel_json(server, channel)?;
+        self.ports.events.emit(&Event::ChannelAdded(json.clone()));
+        Ok(json)
+    }
+
+    /// B11: the owner renames a channel or changes its 18+ flag.
+    pub fn update_channel(
+        &self,
+        channel_id: &str,
+        name: Option<&str>,
+        adult: Option<bool>,
+    ) -> CoreResult<Channel> {
+        let (server, channel, current) = self.live_channel(channel_id)?;
+        let name = match name {
+            Some(raw) => model::channel_name(raw).ok_or(ErrorCode::BadRequest)?,
+            None => current.name.clone(),
+        };
+        self.check_name_free(server, &name, Some(channel))?;
+        let adult = adult.unwrap_or(current.adult);
+        self.check_may_mark_adult(server, adult)?;
+        let server_id = model::hex_id(server.as_bytes());
+        self.control_action(&server_id, Action::ChannelEdit { channel, adult, name })?;
+        let json = self.channel_json(server, channel)?;
+        self.ports.events.emit(&Event::ChannelUpdated(json.clone()));
+        Ok(json)
+    }
+
+    /// B11: the owner deletes a channel; never #general (`not-allowed`).
+    /// TODO(sync): close its log in sync; until then it is only no longer
+    /// opened (the next `open_server` leaves it out).
+    pub fn delete_channel(&self, channel_id: &str) -> CoreResult<()> {
+        let (server, channel, current) = self.live_channel(channel_id)?;
+        if current.general {
+            return Err(ErrorCode::NotAllowed.into());
+        }
+        let server_id = model::hex_id(server.as_bytes());
+        self.control_action(&server_id, Action::ChannelDelete { channel })?;
+        self.ports.events.emit(&Event::ChannelRemoved {
+            server_id,
+            channel_id: model::hex_id(channel.as_bytes()),
+            name: current.name,
+        });
+        Ok(())
+    }
+
+    fn live_channel(
+        &self,
+        channel_id: &str,
+    ) -> CoreResult<(ServerId, ChannelId, authority::Channel)> {
+        let mut inner = self.lock();
+        let (server, channel) = inner.find_channel(channel_id)?;
+        let view = inner.view(server)?;
+        let current = view.state.channels.get(&channel).cloned().ok_or(ErrorCode::NotFound)?;
+        Ok((server, channel, current))
+    }
+
+    /// An 18+ channel only from someone whose own age claim says 18+: else
+    /// they couldn't see the channel they made (B7). `not-allowed` before
+    /// anything is signed or sent.
+    fn check_may_mark_adult(&self, server: ServerId, adult: bool) -> CoreResult<()> {
+        if !adult {
+            return Ok(());
+        }
+        let mut inner = self.lock();
+        let server = inner.load_mine(server)?;
+        let me = inner.me.as_ref().map(Me::key).ok_or(ErrorCode::NotFound)?;
+        if !inner.view(server)?.state.adults.contains(&me) {
+            return Err(ErrorCode::NotAllowed.into());
+        }
+        Ok(())
+    }
+
+    fn check_name_free(
+        &self,
+        server: ServerId,
+        name: &str,
+        except: Option<ChannelId>,
+    ) -> CoreResult<()> {
+        let mut inner = self.lock();
+        let server = inner.load_mine(server)?;
+        let view = inner.view(server)?;
+        let taken = view.state.channels.iter().any(|(id, c)| Some(*id) != except && c.name == name);
+        if taken {
+            return Err(ErrorCode::NameTaken.into());
+        }
+        Ok(())
+    }
+
+    fn channel_json(&self, server: ServerId, channel: ChannelId) -> CoreResult<Channel> {
+        let inner = self.lock();
+        inner.open_sync(&self.ports, server)?;
+        let me = inner.me.as_ref().map(Me::key);
+        let id = model::hex_id(channel.as_bytes());
+        let view = inner.view(server)?;
+        view.channels(me).into_iter().find(|c| c.id == id).ok_or_else(|| ErrorCode::Internal.into())
+    }
+
     /// Rust addition (`undoKick`, B4 kick-undo): the owner lets a kicked
     /// account back. It isn't made a member: it may join again through an
     /// invite. `not-allowed` for anyone but the owner, or someone not kicked.
@@ -1570,16 +1678,17 @@ impl ServerView<'_> {
     /// TODO(#116): hide 18+ channels from members without an 18+ claim.
     fn channels(&self, me: Option<PublicKey>) -> Vec<Channel> {
         let server_id = model::hex_id(self.id.as_bytes());
-        let channel = |id: ChannelId, name: &str, adult: bool| Channel {
+        let channel = |id: ChannelId, name: &str, adult: bool, general: bool| Channel {
             id: model::hex_id(id.as_bytes()),
             server_id: server_id.clone(),
             name: name.to_owned(),
             adult,
             unread: false,
             mentions: 0,
+            is_default: general,
         };
-        if self.state.channels.is_empty() {
-            return vec![channel(model::default_channel(self.id), model::GENERAL, false)];
+        if self.state.channels.is_empty() && self.state.deleted_channels.is_empty() {
+            return vec![channel(model::default_channel(self.id), model::GENERAL, false, true)];
         }
         // B7: 18+ channels only for members with an accepted 18+ claim.
         let adult = me.is_some_and(|me| self.state.adults.contains(&me));
@@ -1587,7 +1696,7 @@ impl ServerView<'_> {
             .channels
             .iter()
             .filter(|(_, c)| adult || !c.adult)
-            .map(|(id, c)| channel(*id, &c.name, c.adult))
+            .map(|(id, c)| channel(*id, &c.name, c.adult, c.general))
             .collect()
     }
 }

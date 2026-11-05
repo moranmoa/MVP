@@ -92,6 +92,8 @@ pub struct Channel {
     pub adult: bool,
     pub unread: bool,
     pub mentions: u32,
+    /// #general, the first channel (#150): it can't be deleted.
+    pub is_default: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,6 +215,8 @@ pub enum ErrorCode {
     AuthCancelled,
     /// The recovery-word challenge is burned (B19 §6).
     TooManyAttempts,
+    /// Another channel of the server has this name (B11).
+    NameTaken,
     /// The OS keychain (Secret Service on Linux) is missing or unusable
     /// (QA-20): the core runs, but nothing that needs the identity works.
     KeyringUnavailable,
@@ -363,6 +367,10 @@ pub enum Event {
     ServerUpdated(ServerSummary),
     #[serde(rename = "server.removed", rename_all = "camelCase")]
     ServerRemoved { server_id: Id },
+    #[serde(rename = "channel.added")]
+    ChannelAdded(Channel),
+    #[serde(rename = "channel.removed", rename_all = "camelCase")]
+    ChannelRemoved { server_id: Id, channel_id: Id, name: String },
     #[serde(rename = "channel.updated")]
     ChannelUpdated(Channel),
     #[serde(rename = "members.changed", rename_all = "camelCase")]
