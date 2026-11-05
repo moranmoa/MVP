@@ -191,6 +191,7 @@ export function cleanChannel(c: Channel): Channel {
     ...c,
     name: cleanName(c.name, CHANNEL_NAME_MAX) || '…',
     adult: c.adult === true,
+    isDefault: c.isDefault === true,
     unread: c.unread === true,
     mentions: count(c.mentions),
   };
@@ -203,6 +204,7 @@ export function cleanMember(m: Member): Member {
     shortCode: cleanCode(m.shortCode),
     avatarColor: safeColor(m.avatarColor),
     presence: oneOf(m.presence, ['online', 'offline'] as const, 'offline'),
+    connection: m.presence === 'online' ? (['direct', 'relay'] as const).find((c) => c === m.connection) ?? null : null,
     isOwner: m.isOwner === true,
     blocked: m.blocked === true,
     bio: m.bio === undefined ? undefined : cleanText(m.bio, BIO_MAX, BIO_MAX_LINES).text,
@@ -248,12 +250,25 @@ const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[
   'server.added': cleanServer,
   'server.updated': cleanServer,
   'channel.updated': cleanChannel,
+  'channel.added': cleanChannel,
+  'channel.removed': (p) => ({ serverId: p.serverId, channelId: p.channelId, name: cleanName(p.name, CHANNEL_NAME_MAX) || '…' }),
   'members.changed': (p) => ({ ...p, members: p.members.map(cleanMember) }),
   'message.added': cleanMessage,
   'message.updated': cleanMessage,
   'join.status': cleanJoin,
   'link.open': (p) => ({ link: cleanInviteLink(p?.link) }),
+  'core.status': (s) => ({
+    state: s?.state === 'up' || s?.state === 'down' ? s.state : 'starting',
+    detail: (['missing', 'start-failed', 'crashed', 'crash-loop', 'keyring'] as const).find((d) => d === s?.detail),
+  }),
   'update.ready': (u) => ({ version: cleanName(u.version, 32), waitingForCall: u.waitingForCall === true }),
+  // Release notes come from the signed manifest, but they are still shown as
+  // plain text only, clipped like a message.
+  'update.installed': (u) => ({
+    version: cleanName(u.version, 32),
+    notes: typeof u.notes === 'string' ? cleanText(u.notes, 2000, 30).text : null,
+  }),
+  'update.rolledBack': (u) => ({ failed: cleanName(u.failed, 32), running: cleanName(u.running, 32) }),
 };
 
 /** The core as the UI sees it: same API, every peer-supplied value cleaned. */
@@ -271,6 +286,8 @@ export function guardCore(core: CoreApi): CoreApi {
     updateProfile: wrap(core.updateProfile, cleanIdentity),
     listServers: wrap(core.listServers, (l) => l.map(cleanServer)),
     listChannels: wrap(core.listChannels, (l) => l.map(cleanChannel)),
+    createChannel: wrap(core.createChannel, cleanChannel),
+    updateChannel: wrap(core.updateChannel, cleanChannel),
     listMembers: wrap(core.listMembers, (l) => l.map(cleanMember)),
     createServer: wrap(core.createServer, cleanServer),
     joinServer: wrap(core.joinServer, cleanJoin),

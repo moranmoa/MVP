@@ -171,6 +171,12 @@ What this does and doesn't cover:
 
 PowerShell on your normal (online) PC, in the repo:
 
+0. **Write the release notes** first: a `## [X.Y.Z] - YYYY-MM-DD` section in
+   [`CHANGELOG.md`](../../CHANGELOG.md), in Hebrew and English (Fixed / New
+   / Known), merged to `main`. The draft's release notes are that section
+   plus the install and verify text, and **a tag without a section fails**
+   at "check tag", before anything builds.
+
 1. **Tag and push** the reviewed commit on `main`:
 
    ```powershell

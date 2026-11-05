@@ -19,6 +19,7 @@ const { Sidecar } = require('./sidecar');
 const deeplink = require('./deeplink');
 const { relayFor } = require('./config');
 const update = require('./update');
+const { createLog } = require('./logfile');
 
 // One instance only: a second launch (e.g. an mvs:// link, B1-3) focuses this one.
 if (!app.requestSingleInstanceLock()) {
@@ -44,6 +45,26 @@ const CORE_EXE = app.isPackaged
   ? path.join(process.resourcesPath, process.platform === 'win32' ? 'mvs-core.exe' : 'mvs-core')
   : process.env.MVS_CORE_PATH;
 let core = null;
+/** Main's log: the console and a capped file in the OS logs folder (T8-01). */
+const fileLog = createLog(app.getPath('logs'));
+const log = (line) => {
+  console.log(line);
+  fileLog(line);
+};
+/** Where the core stands, for the "core unavailable" screen (T8-01). */
+let coreStatus = { state: 'starting' };
+
+/** Sends a shell event (not from the core) to our own windows. */
+function toPages(name, payload) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (sec.isInternalUrl(win.webContents.getURL())) win.webContents.send('core:event', name, payload);
+  }
+}
+
+function setCoreStatus(status) {
+  coreStatus = status;
+  toPages('core.status', status);
+}
 
 // In-app update (B8): on only in an installed copy that has mvs-launcher; the
 // root is derived from this exe's location, never trusted from argv (update.js).
@@ -51,7 +72,8 @@ const UPDATE = update.resolveUpdate({ packaged: app.isPackaged, execPath: proces
 
 function startCore() {
   if (!CORE_EXE || !path.isAbsolute(CORE_EXE) || !fs.existsSync(CORE_EXE)) {
-    console.warn('mvs-core not found; core commands answer core-unavailable');
+    log('mvs-core not found; core commands answer core-unavailable');
+    setCoreStatus({ state: 'down', detail: 'missing' });
     return;
   }
   // The core's folder is the user's only (0700); on Windows the per-user
@@ -59,19 +81,20 @@ function startCore() {
   const dataDir = path.join(app.getPath('userData'), 'core');
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   if (process.platform !== 'win32') fs.chmodSync(dataDir, 0o700);
+  const relay = relayFor({ packaged: app.isPackaged, resourcesPath: process.resourcesPath });
+  // The relay's host must never reach the log, not even as a bare name.
+  const host = relay && /^\/dns(?:4|6|addr)?\/([^/]+)/.exec(relay);
+  if (host) fileLog.hide(host[1]);
   core = new Sidecar({
     exe: CORE_EXE,
     dataDir,
     // Without a relay the core runs offline (no invites, no chat with others).
-    relay: relayFor({ packaged: app.isPackaged, resourcesPath: process.resourcesPath }),
+    relay,
     extraArgs: update.coreArgs(UPDATE),
-    onEvent: (name, payload) => {
-      for (const win of BrowserWindow.getAllWindows()) {
-        if (sec.isInternalUrl(win.webContents.getURL())) win.webContents.send('core:event', name, payload);
-      }
-    },
+    onEvent: toPages,
+    onStatus: setCoreStatus,
     // stderr only (counts and error kinds); stdout is never logged.
-    log: (line) => console.log(line),
+    log,
   }).start();
 }
 
@@ -83,7 +106,7 @@ function serveCoreIpc() {
     if (!frame || frame !== event.sender.mainFrame || !sec.isInternalUrl(frame.url)) return { error: { code: 'not-allowed' } };
     const req = toRequest(cmd, args);
     if (req.error) return { error: { code: req.error } };
-    if (!core) return { error: { code: 'core-unavailable' } };
+    if (!core) return { error: { code: 'core-unavailable', detail: 'missing' } };
     // "Restart to update": the core's applyUpdate (refused during a call),
     // then a relaunch through the launcher, which starts the staged version.
     if (req.cmd === 'restartToUpdate' && UPDATE) {
@@ -93,6 +116,25 @@ function serveCoreIpc() {
       });
     }
     return core.request(req.cmd, req.args);
+  });
+  // The "core unavailable" screen (T8-01): try again now, and open the logs.
+  const fromUs = (event) => {
+    const frame = event.senderFrame;
+    return !!frame && frame === event.sender.mainFrame && sec.isInternalUrl(frame.url);
+  };
+  let lastRetry = 0;
+  ipcMain.handle('core:retry', (event) => {
+    if (!fromUs(event)) return false;
+    // At most once every 5 s, whatever the page does.
+    if (Date.now() - lastRetry < 5000) return false;
+    lastRetry = Date.now();
+    if (core) return core.retryNow();
+    startCore(); // the binary may have been put back since
+    return !!core;
+  });
+  ipcMain.handle('logs:open', async (event) => {
+    if (!fromUs(event)) return false;
+    return (await shell.openPath(app.getPath('logs'))) === '';
   });
   // Copy text for the user (an invite link). Web clipboard permissions stay
   // denied; this writes plain text only, from our own top frame, up to 4 KiB.
@@ -172,6 +214,7 @@ function lockDownSession(ses) {
  * calls joinServer only when the user presses Join.
  */
 let pendingInvite = null;
+let healthReported = false;
 let uiReady = false;
 
 function openInvite(raw) {
@@ -215,10 +258,16 @@ function createWindow() {
     webPreferences: { ...sec.WEB_PREFERENCES, preload: path.join(__dirname, 'preload.js'), devTools: !app.isPackaged },
   });
   win.once('ready-to-show', () => win.show());
-  win.webContents.once('did-finish-load', () => {
+  // Every load (a reload too) gets the current core status.
+  win.webContents.on('did-finish-load', () => {
     flushInvite();
-    // Commit this version once the UI is up and the core answers (main only).
-    update.reportHealthy(UPDATE, (cmd, args) => (core ? core.request(cmd, args) : Promise.resolve({ error: { code: 'core-unavailable' } })));
+    // The page may have missed earlier changes; the preload keeps this for the UI.
+    if (sec.isInternalUrl(win.webContents.getURL())) win.webContents.send('core:event', 'core.status', coreStatus);
+    // Commit this version once the UI is up and the core answers (main only, once).
+    if (!healthReported) {
+      healthReported = true;
+      update.reportHealthy(UPDATE, (cmd, args) => (core ? core.request(cmd, args) : Promise.resolve({ error: { code: 'core-unavailable' } })));
+    }
   });
   // The mock demo (?demo) is for checkouts only, never a release build.
   const demo = !app.isPackaged && process.env.MVS_DEMO ? `?demo=${encodeURIComponent(process.env.MVS_DEMO)}` : '';

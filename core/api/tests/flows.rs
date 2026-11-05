@@ -55,6 +55,8 @@ fn names(events: &[Event]) -> Vec<&'static str> {
             Event::ServerUpdated(_) => "server.updated",
             Event::ServerRemoved { .. } => "server.removed",
             Event::ChannelUpdated(_) => "channel.updated",
+            Event::ChannelAdded(_) => "channel.added",
+            Event::ChannelRemoved { .. } => "channel.removed",
             Event::MembersChanged { .. } => "members.changed",
             Event::JoinStatus(_) => "join.status",
             Event::UpdateReady(_) => "update.ready",
@@ -1704,4 +1706,234 @@ fn ten_joins_in_five_seconds_make_at_most_one_rotation() {
     }
     owner.core.sync_now().unwrap();
     assert_eq!(owner.core.get_message_count(&channel).unwrap(), 10);
+}
+
+/// B11: the owner's channel commands, with names normalised and checked,
+/// #general (`isDefault`) undeletable, and the channel events.
+#[test]
+fn channel_commands() {
+    let world = World::new();
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let guest = world.peer();
+    sign_up(&guest, "Guest");
+    let server = owner.core.create_server("Rooms", AgeRestriction::None).unwrap();
+    guest.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    let general = owner.core.list_channels(&server.id).unwrap().remove(0);
+    assert!(general.is_default);
+
+    owner.events.take();
+    let room = owner.core.create_channel(&server.id, "  my   big room ", false).unwrap();
+    assert_eq!((room.name.as_str(), room.is_default, room.adult), ("my-big-room", false, false));
+    assert!(names(&owner.events.take()).contains(&"channel.added"));
+    assert_eq!(
+        owner.core.create_channel(&server.id, "my big room", false).unwrap_err().code,
+        ErrorCode::NameTaken
+    );
+    assert_eq!(
+        owner.core.create_channel(&server.id, "a\u{202E}b", false).unwrap_err().code,
+        ErrorCode::BadRequest
+    );
+    guest.core.sync_now().unwrap();
+    assert_eq!(
+        guest.core.create_channel(&server.id, "mine", false).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+
+    let renamed = owner.core.update_channel(&room.id, Some("lounge"), None).unwrap();
+    assert_eq!((renamed.name.as_str(), renamed.id.as_str()), ("lounge", room.id.as_str()));
+    assert!(names(&owner.events.take()).contains(&"channel.updated"));
+    assert_eq!(
+        owner.core.update_channel(&room.id, Some(&general.name), None).unwrap_err().code,
+        ErrorCode::NameTaken
+    );
+
+    assert_eq!(owner.core.delete_channel(&general.id).unwrap_err().code, ErrorCode::NotAllowed);
+    owner.core.delete_channel(&room.id).unwrap();
+    let removed = owner.events.take().into_iter().find_map(|e| match e {
+        Event::ChannelRemoved { channel_id, name, .. } => Some((channel_id, name)),
+        _ => None,
+    });
+    assert_eq!(removed, Some((room.id.clone(), "lounge".to_owned())));
+    let left: Vec<String> =
+        owner.core.list_channels(&server.id).unwrap().into_iter().map(|c| c.id).collect();
+    assert_eq!(left.as_slice(), std::slice::from_ref(&general.id));
+    assert_eq!(owner.core.get_message_count(&room.id).unwrap_err().code, ErrorCode::NotFound);
+}
+
+/// #185 review: an owner without an 18+ claim can't make or mark an 18+
+/// channel: `not-allowed`, and nothing is signed or published.
+#[test]
+fn an_owner_without_an_adult_claim_cannot_make_adult_channels() {
+    let world = World::new();
+    let owner = world.peer();
+    // Restored: no birth date, so the age claim says "not 18+".
+    owner.core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
+    let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None };
+    owner.core.update_profile(profile).unwrap();
+    let server = owner.core.create_server("Minors", AgeRestriction::None).unwrap();
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let room = owner.core.create_channel(&server.id, "room", false).unwrap();
+    let held = world.network.fetch(server_key).len();
+    assert_eq!(
+        owner.core.create_channel(&server.id, "night", true).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+    assert_eq!(
+        owner.core.update_channel(&room.id, None, Some(true)).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+    assert_eq!(world.network.fetch(server_key).len(), held, "something was published");
+    // A long name is cut to 32 before trimming its dashes.
+    let long =
+        owner.core.create_channel(&server.id, &format!("{}-x", "a".repeat(31)), false).unwrap();
+    assert_eq!(long.name, format!("{}", "a".repeat(31)));
+}
+
+/// The in-process network, plus a presence set the test controls.
+struct PresenceNet {
+    inner: Arc<LoopbackNetwork>,
+    online: std::sync::Mutex<BTreeSet<PublicKey>>,
+    direct: std::sync::Mutex<BTreeSet<PublicKey>>,
+}
+
+impl Network for PresenceNet {
+    fn publish(&self, record: &records::Record) {
+        self.inner.publish(record)
+    }
+
+    fn fetch(&self, server: ServerId) -> Vec<records::Record> {
+        self.inner.fetch(server)
+    }
+
+    fn online(&self, _: ServerId) -> Option<BTreeSet<PublicKey>> {
+        Some(self.online.lock().unwrap().clone())
+    }
+
+    fn presence(&self, _: ServerId) -> Option<Reach> {
+        let online = self.online.lock().unwrap().clone();
+        Some(Reach { online, direct: self.direct.lock().unwrap().clone() })
+    }
+}
+
+/// M2: members show online from sync's presence; someone online who isn't
+/// a member never shows; a change in who is online is `members.changed`.
+#[test]
+fn presence_shows_online_members_only() {
+    let world = World::new();
+    let net = Arc::new(PresenceNet {
+        inner: world.network.clone(),
+        online: Default::default(),
+        direct: Default::default(),
+    });
+    let events = Arc::new(CollectingSink::new());
+    let owner = Core::open(
+        Config { db_path: None, app_version: "test".into() },
+        Ports {
+            secrets: Arc::new(MemoryStore::new()),
+            network: net.clone(),
+            events: events.clone(),
+            clock: world.clock.clone(),
+            cipher: Arc::new(PendingGroupKeys),
+        },
+    )
+    .unwrap();
+    owner.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
+    let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None };
+    owner.update_profile(profile).unwrap();
+    let server = owner.create_server("Here", AgeRestriction::None).unwrap();
+    let guest = world.peer();
+    let guest_id = sign_up(&guest, "Guest").id;
+    guest.core.join_server(&server.invite_link).unwrap();
+    owner.sync_now().unwrap();
+    let key = |id: &str| PublicKey::from_bytes(hex::decode(id).unwrap().try_into().unwrap());
+    let presence = |id: &str| {
+        owner.list_members(&server.id).unwrap().into_iter().find(|m| m.id == id).map(|m| m.presence)
+    };
+    assert_eq!(presence(&guest_id), Some(Presence::Offline));
+
+    // The guest and a stranger with the secret come online.
+    let stranger = PublicKey::from_bytes([0x55; 32]);
+    net.online.lock().unwrap().extend([key(&guest_id), stranger]);
+    events.take();
+    owner.sync_now().unwrap();
+    assert!(events.take().iter().any(|e| matches!(e, Event::MembersChanged { .. })));
+    assert_eq!(presence(&guest_id), Some(Presence::Online));
+    assert_eq!(presence(&hex::encode([0x55; 32])), None, "a non-member shows");
+
+    // #187: online through the relay, then direct; null for us and offline.
+    let connection = |id: &str| {
+        owner
+            .list_members(&server.id)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.id == id)
+            .and_then(|m| m.connection)
+    };
+    let me = owner.get_identity().unwrap().unwrap().id;
+    assert_eq!(connection(&guest_id), Some(Connection::Relay));
+    assert_eq!(connection(&me), None);
+    net.direct.lock().unwrap().insert(key(&guest_id));
+    events.take();
+    owner.sync_now().unwrap();
+    assert!(
+        events.take().iter().any(|e| matches!(e, Event::MembersChanged { .. })),
+        "relay to direct"
+    );
+    assert_eq!(connection(&guest_id), Some(Connection::Direct));
+    net.direct.lock().unwrap().clear();
+    owner.sync_now().unwrap();
+    assert!(
+        events.take().iter().any(|e| matches!(e, Event::MembersChanged { .. })),
+        "direct to relay"
+    );
+
+    // Nothing changed: nothing announced. Then the guest goes offline.
+    owner.sync_now().unwrap();
+    assert!(!events.take().iter().any(|e| matches!(e, Event::MembersChanged { .. })));
+    net.online.lock().unwrap().remove(&key(&guest_id));
+    owner.sync_now().unwrap();
+    assert!(events.take().iter().any(|e| matches!(e, Event::MembersChanged { .. })));
+    assert_eq!(presence(&guest_id), Some(Presence::Offline));
+    assert_eq!(connection(&guest_id), None, "offline: no connection");
+}
+
+/// A secret store that always fails, like Linux without a Secret Service.
+struct NoKeyring;
+
+impl identity::SecretStore for NoKeyring {
+    fn load(&self, _: &str) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, identity::StoreError> {
+        Err(identity::StoreError("no Secret Service".into()))
+    }
+
+    fn save(&self, _: &str, _: &[u8]) -> Result<(), identity::StoreError> {
+        Err(identity::StoreError("no Secret Service".into()))
+    }
+
+    fn delete(&self, _: &str) -> Result<(), identity::StoreError> {
+        Err(identity::StoreError("no Secret Service".into()))
+    }
+}
+
+/// QA-20: no usable OS keychain. The core still starts, and says
+/// `keyring-unavailable` instead of crashing or looking like a fresh install.
+#[test]
+fn no_keyring_is_its_own_error() {
+    let core = Core::open(
+        Config { db_path: None, app_version: "test".into() },
+        Ports {
+            secrets: Arc::new(NoKeyring),
+            network: Arc::new(LoopbackNetwork::new()),
+            events: Arc::new(CollectingSink::new()),
+            clock: Arc::new(SystemClock),
+            cipher: Arc::new(PendingGroupKeys),
+        },
+    )
+    .expect("the core starts without a keychain");
+    assert_eq!(core.get_identity().unwrap_err().code, ErrorCode::KeyringUnavailable);
+    assert_eq!(core.create_identity(adult()).unwrap_err().code, ErrorCode::KeyringUnavailable);
+    let reply = core.handle(r#"{"cmd":"getIdentity"}"#);
+    assert_eq!(reply, r#"{"error":{"code":"keyring-unavailable"}}"#);
+    assert!(core.get_app_info().is_ok(), "the rest of the core still answers");
 }

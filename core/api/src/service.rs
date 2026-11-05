@@ -18,7 +18,7 @@ use zeroize::Zeroizing;
 use crate::chat;
 use crate::db::Db;
 use crate::model::{self, GenesisBody, Log, ServerView};
-use crate::ports::{CipherError, GroupCipher, Network, Ports, SharedSecrets};
+use crate::ports::{CipherError, GroupCipher, Network, Ports, Reach, SharedSecrets};
 use crate::types::*;
 
 const DEFAULT_STORAGE_LIMIT: u64 = 5 * 1024 * 1024 * 1024;
@@ -85,6 +85,8 @@ struct Inner {
     db: Db,
     vault: Vault<SharedSecrets>,
     me: Option<Me>,
+    /// The OS keychain failed at startup (QA-20).
+    keyring_unavailable: bool,
     /// Loaded on first use per server, then kept current record by record.
     logs: HashMap<ServerId, Log>,
     /// Messages already announced to the UI, per server, with what was
@@ -92,6 +94,8 @@ struct Inner {
     announced: HashMap<ServerId, HashMap<RecordId, Announced>>,
     /// For my messages' send state (B6).
     net: Arc<dyn Network>,
+    /// The online members last reported per server (M2).
+    presence_seen: HashMap<ServerId, Reach>,
     /// Who each channel was last keyed for by our own rotation, so a
     /// moderator re-keys when members join (in memory: once after a restart).
     keyed_for: HashMap<(ServerId, ChannelId), BTreeSet<PublicKey>>,
@@ -110,6 +114,8 @@ type Events = Vec<Event>;
 
 fn vault_error(e: VaultError) -> CoreError {
     match e {
+        // QA-20: the OS keychain failed (no Secret Service, locked, denied).
+        VaultError::Store(_) => ErrorCode::KeyringUnavailable.into(),
         VaultError::AlreadyExists => ErrorCode::NotAllowed.into(),
         VaultError::NotFound => ErrorCode::NotFound.into(),
         VaultError::RecoveryCheckRequired => ErrorCode::RecoveryCheckRequired.into(),
@@ -140,13 +146,26 @@ impl Core {
             db,
             vault,
             me: None,
+            keyring_unavailable: false,
             logs: HashMap::new(),
             announced: HashMap::new(),
             net: ports.network.clone(),
+            presence_seen: HashMap::new(),
             keyed_for: HashMap::new(),
             rekey_after: HashMap::new(),
         };
-        if inner.vault.state().map_err(vault_error)? == VaultState::Ready {
+        // QA-20: without a usable keychain the core still starts, and says so
+        // (`keyring-unavailable`) instead of crashing or looking empty.
+        let state = match inner.vault.state() {
+            Ok(state) => Some(state),
+            Err(VaultError::Store(e)) => {
+                eprintln!("mvs-core: the OS keychain is unavailable: {}", e.0);
+                inner.keyring_unavailable = true;
+                None
+            }
+            Err(e) => return Err(vault_error(e)),
+        };
+        if state == Some(VaultState::Ready) {
             let phrase = inner.vault.open().map_err(vault_error)?;
             inner.me = Some(inner.load_me(phrase)?);
             unlock_cipher(&ports, inner.me.as_ref());
@@ -198,6 +217,9 @@ impl Core {
 
     pub fn get_identity(&self) -> CoreResult<Option<Identity>> {
         let inner = self.lock();
+        if inner.keyring_unavailable {
+            return Err(ErrorCode::KeyringUnavailable.into());
+        }
         inner.me.as_ref().map(|me| inner.identity_json(me)).transpose()
     }
 
@@ -486,6 +508,114 @@ impl Core {
         self.control_action(server_id, Action::kick(parse_user(user_id)?))
     }
 
+    /// B11: the owner creates a channel. `name-taken` if another channel of
+    /// the server has the name; `bad-request` for a name authority refuses.
+    pub fn create_channel(&self, server_id: &str, name: &str, adult: bool) -> CoreResult<Channel> {
+        let name = model::channel_name(name).ok_or(ErrorCode::BadRequest)?;
+        let server = parse_server(server_id)?;
+        self.check_name_free(server, &name, None)?;
+        self.check_may_mark_adult(server, adult)?;
+        let mut id = [0u8; 32];
+        OsRng.fill_bytes(&mut id);
+        let channel = ChannelId::from_bytes(id);
+        self.control_action(server_id, Action::ChannelCreate { channel, adult, name })?;
+        let json = self.channel_json(server, channel)?;
+        self.ports.events.emit(&Event::ChannelAdded(json.clone()));
+        Ok(json)
+    }
+
+    /// B11: the owner renames a channel or changes its 18+ flag.
+    pub fn update_channel(
+        &self,
+        channel_id: &str,
+        name: Option<&str>,
+        adult: Option<bool>,
+    ) -> CoreResult<Channel> {
+        let (server, channel, current) = self.live_channel(channel_id)?;
+        let name = match name {
+            Some(raw) => model::channel_name(raw).ok_or(ErrorCode::BadRequest)?,
+            None => current.name.clone(),
+        };
+        self.check_name_free(server, &name, Some(channel))?;
+        let adult = adult.unwrap_or(current.adult);
+        self.check_may_mark_adult(server, adult)?;
+        let server_id = model::hex_id(server.as_bytes());
+        self.control_action(&server_id, Action::ChannelEdit { channel, adult, name })?;
+        let json = self.channel_json(server, channel)?;
+        self.ports.events.emit(&Event::ChannelUpdated(json.clone()));
+        Ok(json)
+    }
+
+    /// B11: the owner deletes a channel; never #general (`not-allowed`).
+    /// TODO(sync): close its log in sync; until then it is only no longer
+    /// opened (the next `open_server` leaves it out).
+    pub fn delete_channel(&self, channel_id: &str) -> CoreResult<()> {
+        let (server, channel, current) = self.live_channel(channel_id)?;
+        if current.general {
+            return Err(ErrorCode::NotAllowed.into());
+        }
+        let server_id = model::hex_id(server.as_bytes());
+        self.control_action(&server_id, Action::ChannelDelete { channel })?;
+        self.ports.events.emit(&Event::ChannelRemoved {
+            server_id,
+            channel_id: model::hex_id(channel.as_bytes()),
+            name: current.name,
+        });
+        Ok(())
+    }
+
+    fn live_channel(
+        &self,
+        channel_id: &str,
+    ) -> CoreResult<(ServerId, ChannelId, authority::Channel)> {
+        let mut inner = self.lock();
+        let (server, channel) = inner.find_channel(channel_id)?;
+        let view = inner.view(server)?;
+        let current = view.state.channels.get(&channel).cloned().ok_or(ErrorCode::NotFound)?;
+        Ok((server, channel, current))
+    }
+
+    /// An 18+ channel only from someone whose own age claim says 18+: else
+    /// they couldn't see the channel they made (B7). `not-allowed` before
+    /// anything is signed or sent.
+    fn check_may_mark_adult(&self, server: ServerId, adult: bool) -> CoreResult<()> {
+        if !adult {
+            return Ok(());
+        }
+        let mut inner = self.lock();
+        let server = inner.load_mine(server)?;
+        let me = inner.me.as_ref().map(Me::key).ok_or(ErrorCode::NotFound)?;
+        if !inner.view(server)?.state.adults.contains(&me) {
+            return Err(ErrorCode::NotAllowed.into());
+        }
+        Ok(())
+    }
+
+    fn check_name_free(
+        &self,
+        server: ServerId,
+        name: &str,
+        except: Option<ChannelId>,
+    ) -> CoreResult<()> {
+        let mut inner = self.lock();
+        let server = inner.load_mine(server)?;
+        let view = inner.view(server)?;
+        let taken = view.state.channels.iter().any(|(id, c)| Some(*id) != except && c.name == name);
+        if taken {
+            return Err(ErrorCode::NameTaken.into());
+        }
+        Ok(())
+    }
+
+    fn channel_json(&self, server: ServerId, channel: ChannelId) -> CoreResult<Channel> {
+        let inner = self.lock();
+        inner.open_sync(&self.ports, server)?;
+        let me = inner.me.as_ref().map(Me::key);
+        let id = model::hex_id(channel.as_bytes());
+        let view = inner.view(server)?;
+        view.channels(me).into_iter().find(|c| c.id == id).ok_or_else(|| ErrorCode::Internal.into())
+    }
+
     /// Rust addition (`undoKick`, B4 kick-undo): the owner lets a kicked
     /// account back. It isn't made a member: it may join again through an
     /// invite. `not-allowed` for anyone but the owner, or someone not kicked.
@@ -767,6 +897,14 @@ impl Core {
                     // A join re-key a batch window deferred: retried each round.
                     let _ = inner.rekey(ports, server, events);
                 }
+                // M2: someone came online or went offline (members only).
+                if inner.db.has_server(server)? && inner.presence_changed(server)? && !changed {
+                    let view = inner.view(server)?;
+                    events.push(Event::MembersChanged {
+                        server_id: model::hex_id(server.as_bytes()),
+                        members: inner.members_json(&view)?,
+                    });
+                }
             }
             Ok(())
         })
@@ -850,6 +988,17 @@ impl Core {
 }
 
 impl Inner {
+    /// Whether the online members of `server` changed since last reported
+    /// (and remembers the new set). Members only: authority's, not kicked.
+    fn presence_changed(&mut self, server: ServerId) -> CoreResult<bool> {
+        let view = self.view(server)?;
+        let mut reach = self.net.presence(server).unwrap_or_default();
+        let member = |key: &PublicKey| view.state.members.contains(key) && !view.is_kicked(key);
+        reach.online.retain(member);
+        reach.direct.retain(|key| reach.online.contains(key));
+        Ok(self.presence_seen.insert(server, reach.clone()) != Some(reach))
+    }
+
     /// Whether we are a moderator or above in a loaded server.
     fn may_rotate(&self, server: ServerId) -> CoreResult<bool> {
         let Some(me) = self.me.as_ref().map(Me::key) else { return Ok(false) };
@@ -1387,6 +1536,9 @@ impl Inner {
 
     fn members_json(&self, view: &ServerView) -> CoreResult<Vec<Member>> {
         let me = self.me.as_ref().map(Me::key);
+        // M2: online from sync's presence; only authority's members are
+        // listed, so a bound non-member or a kicked key never shows.
+        let reach = self.net.presence(view.id).unwrap_or_default();
         let server_id = model::hex_id(view.id.as_bytes());
         let mut out = Vec::new();
         for member in view.members() {
@@ -1398,7 +1550,17 @@ impl Inner {
                 short_code: model::short_code(&member.key),
                 avatar_color: model::color_for(member.key.as_bytes()),
                 // TODO(sync): real presence from connections.
-                presence: if Some(member.key) == me { Presence::Online } else { Presence::Offline },
+                presence: if Some(member.key) == me || reach.online.contains(&member.key) {
+                    Presence::Online
+                } else {
+                    Presence::Offline
+                },
+                connection: (Some(member.key) != me && reach.online.contains(&member.key)).then(
+                    || match reach.direct.contains(&member.key) {
+                        true => Connection::Direct,
+                        false => Connection::Relay,
+                    },
+                ),
                 is_owner: member.key == view.owner,
                 role: member.role,
                 blocked: blocked.then_some(true),
@@ -1516,16 +1678,17 @@ impl ServerView<'_> {
     /// TODO(#116): hide 18+ channels from members without an 18+ claim.
     fn channels(&self, me: Option<PublicKey>) -> Vec<Channel> {
         let server_id = model::hex_id(self.id.as_bytes());
-        let channel = |id: ChannelId, name: &str, adult: bool| Channel {
+        let channel = |id: ChannelId, name: &str, adult: bool, general: bool| Channel {
             id: model::hex_id(id.as_bytes()),
             server_id: server_id.clone(),
             name: name.to_owned(),
             adult,
             unread: false,
             mentions: 0,
+            is_default: general,
         };
-        if self.state.channels.is_empty() {
-            return vec![channel(model::default_channel(self.id), model::GENERAL, false)];
+        if self.state.channels.is_empty() && self.state.deleted_channels.is_empty() {
+            return vec![channel(model::default_channel(self.id), model::GENERAL, false, true)];
         }
         // B7: 18+ channels only for members with an accepted 18+ claim.
         let adult = me.is_some_and(|me| self.state.adults.contains(&me));
@@ -1533,7 +1696,7 @@ impl ServerView<'_> {
             .channels
             .iter()
             .filter(|(_, c)| adult || !c.adult)
-            .map(|(id, c)| channel(*id, &c.name, c.adult))
+            .map(|(id, c)| channel(*id, &c.name, c.adult, c.general))
             .collect()
     }
 }

@@ -15,6 +15,10 @@ sha2 = "0.10"
 # (flate2 with miniz_oxide); no encryption or other codecs.
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# MIT OR Apache-2.0. HTTPS for the update source (B8-4): rustls with ring,
+# OS certificate store (no bundled root list), no cookies, no gzip.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 # MIT OR Apache-2.0. Sets the secret key file's ACL through its handle.
 [target.'cfg(windows)'.dependencies]

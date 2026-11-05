@@ -118,12 +118,17 @@ fn is_plain_text(s: &str) -> bool {
     })
 }
 
+/// The notes to show for a UI language: the exact tag, then its base
+/// language (`he-IL` → `he`), then English, then Hebrew.
+pub fn notes_for<'a>(notes: &'a BTreeMap<String, String>, lang: &str) -> Option<&'a str> {
+    let base = lang.split('-').next().unwrap_or(lang);
+    [lang, base, "en", "he"].into_iter().find_map(|l| notes.get(l)).map(String::as_str)
+}
+
 impl ManifestBody {
-    /// The notes to show for a UI language: the exact tag, then its base
-    /// language (`he-IL` → `he`), then English, then Hebrew.
+    /// See [`notes_for`].
     pub fn notes_for(&self, lang: &str) -> Option<&str> {
-        let base = lang.split('-').next().unwrap_or(lang);
-        [lang, base, "en", "he"].into_iter().find_map(|l| self.notes.get(l)).map(String::as_str)
+        notes_for(&self.notes, lang)
     }
 
     /// Internal consistency checks, independent of time and client state.
