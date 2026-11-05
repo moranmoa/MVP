@@ -12,7 +12,6 @@ Never put the relay domain or any IP address here.
 - **סימון "ישיר" / "דרך relay":** ברשימת החברים, ליד כל חבר מחובר מופיע איך אתם מחוברים אליו.
 - **פורט האזנה קבוע:** האפליקציה בוחרת פורט בהפעלה הראשונה ושומרת אותו גם אחרי הפעלה מחדש, כך שאפשר לאשר אותו פעם אחת ב-Firewall או בראוטר.
 - **ניסיון חיבור ישיר משני הצדדים:** אם החיבור הישיר מהצד הראשון נכשל, הצד השני מנסה בעצמו.
-- **מצב "relay בלבד" בליבה:** אפשר להפעיל אותו כבר עכשיו, אבל עוד אין לו הגדרה באפליקציה.
 - **לוג מפורט לפתרון תקלות:** זמין כשצריך לאבחן בעיה.
 
 ### מה תוקן
@@ -21,7 +20,8 @@ Never put the relay domain or any IP address here.
 
 ### ידוע
 - עדיין אין "ניקוב" חיבור דרך NAT בין רשתות שונות (hole punching); זה הבא בתור.
-- יצירת ערוצים, שינוי שם ומחיקה יגיעו לאפליקציה בגרסה הבאה (הליבה כבר מוכנה).
+- יצירת ערוצים, שינוי שם ומחיקה יגיעו לאפליקציה בגרסה הבאה.
+- מצב "relay בלבד" (שלא חושף את כתובת הרשת שלכם לחברים): יש לו רק תשתית ראשונית, ועוד אי אפשר להפעיל אותו.
 - העדכון האוטומטי בתוך האפליקציה עוד לא פעיל: מתקינים את הגרסה החדשה ידנית מעל הקיימת.
 
 ---
@@ -30,7 +30,6 @@ Never put the relay domain or any IP address here.
 - **"Direct" / "Via relay" tag:** in the member list, each online member shows how you're connected to them.
 - **A stable listening port:** the app picks a port on first start and keeps it across restarts, so you can allow it once in your firewall or router.
 - **Direct connection tried from both sides:** if the first side's direct connection fails, the other side tries.
-- **A "relay only" mode in the core:** it can be switched on already, but there's no setting for it in the app yet.
 - **Detailed logging for troubleshooting:** available when a problem needs diagnosing.
 
 ### Fixed
@@ -39,35 +38,8 @@ Never put the relay domain or any IP address here.
 
 ### Known
 - No NAT hole punching between different networks yet; that's next.
-- Creating, renaming and deleting channels arrives in the app in the next version (the core is ready).
-- In-app auto-update isn't active yet: install the new version manually over the old one.
-
-## [0.2.3] - 2026-11-04
-
-### מה חדש
-- **פורט האזנה קבוע:** בהפעלה הראשונה האפליקציה בוחרת פורט ושומרת אותו גם אחרי הפעלה מחדש. כך אפשר לאשר אותו פעם אחת ב-Windows Firewall או בראוטר.
-- **ניסיון חיבור ישיר משני הצדדים:** אם החיבור הישיר מהצד הראשון נכשל, הצד השני מנסה בעצמו. מספיק שאחד משני המחשבים יקבל חיבורים נכנסים.
-
-### מה תוקן
-- אין תיקונים גלויים מעבר לשיפורי החיבור שלמעלה.
-
-### ידוע
-- עדיין אין "ניקוב" חיבור דרך NAT בין רשתות שונות (hole punching); זה הבא בתור. עד אז, בין ראוטרים שונים החיבור עובר דרך ה-relay.
-- עוד אין באפליקציה סימון אם החיבור ישיר או דרך ה-relay.
-- העדכון האוטומטי בתוך האפליקציה עוד לא פעיל: מתקינים את הגרסה החדשה ידנית מעל הקיימת.
-
----
-
-### New
-- **A stable listening port:** the app picks a port on first start and keeps it across restarts, so you can allow it once in Windows Firewall or on your router.
-- **Direct connection tried from both sides:** if the first side's direct connection fails, the other side tries too. Only one of the two computers needs to accept incoming connections.
-
-### Fixed
-- Nothing user-visible beyond the connection improvements above.
-
-### Known
-- No NAT hole punching between different networks yet; that's next. Until then, computers behind different routers connect through the relay.
-- The app doesn't show yet whether a connection is direct or through the relay.
+- Creating, renaming and deleting channels arrives in the app in the next version.
+- A "relay only" mode (which doesn't reveal your network address to other members) is groundwork only and isn't available yet.
 - In-app auto-update isn't active yet: install the new version manually over the old one.
 
 ## [0.2.2] - 2026-11-04
