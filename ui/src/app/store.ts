@@ -70,6 +70,8 @@ export interface StoreState {
   notice: { kind: 'encryption-renewed'; serverId: Id; at: number } | null;
   /** Shown once: a new version was installed, or the previous one is back. */
   updateNote: UpdateNote | null;
+  /** A short confirmation toast (an i18n id), e.g. "Copied" after a menu copy. */
+  flash: { id: string; at: number } | null;
   /** Bumped when any message window changes, so readers re-render. */
   messagesVersion: number;
 }
@@ -83,6 +85,7 @@ export class Store {
     update: null,
     notice: null,
     updateNote: null,
+    flash: null,
     messagesVersion: 0,
   };
   private listeners = new Set<() => void>();
@@ -180,6 +183,14 @@ export class Store {
 
   clearNotice(): void {
     this.set({ notice: null });
+  }
+
+  showFlash(id: string): void {
+    this.set({ flash: { id, at: Date.now() } });
+  }
+
+  clearFlash(): void {
+    this.set({ flash: null });
   }
 
   clearUpdateNote(): void {

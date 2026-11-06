@@ -97,7 +97,12 @@ pub fn plan(dirs: &UpdateDirs, core_data: &Path, base: Version, platform: &str) 
     };
 
     let restored_snapshot = match boot {
-        Boot::RolledBack { failed, .. } => restore_snapshot(dirs, core_data, failed)?,
+        Boot::RolledBack { failed, boot } => {
+            // For the core's update.rolledBack event (best effort).
+            let notice = serde_json::json!({ "failed": failed.to_string(), "running": boot.to_string() });
+            let _ = write_atomic(&dirs.rollback_notice(), notice.to_string().as_bytes());
+            restore_snapshot(dirs, core_data, failed)?
+        }
         _ => false,
     };
     save_state(dirs, state.to_json().as_bytes(), parses_as_state)?;

@@ -25,6 +25,8 @@ pub mod launcher;
 mod manifest;
 mod policy;
 mod rollback;
+pub mod client;
+pub mod source;
 mod unpack;
 mod root;
 mod version;

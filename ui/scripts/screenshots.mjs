@@ -605,6 +605,40 @@ for (const [lang, t] of [
   await p.close();
 }
 
+// ---- B11 server settings and B25 context menus ---------------------------------
+{
+  const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999', 'x');
+  const channels = p.getByRole('navigation', { name: 'ערוצים' });
+  await shot(p, '180-sidebar-settings-button-he');
+  await channels.getByRole('button', { name: /^clips/ }).click({ button: 'right' });
+  await p.getByRole('menu').waitFor();
+  await shot(p, '172-menu-channel-owner-he');
+  await p.keyboard.press('Escape');
+  await channels.getByRole('button', { name: /^כללי/ }).click({ button: 'right' });
+  await shot(p, '173-menu-general-owner-he');
+  await p.keyboard.press('Escape');
+  const members = p.getByRole('complementary', { name: 'חברי השרת' });
+  const other = members.getByRole('button').filter({ hasNotText: 'בעלים' }).filter({ hasNotText: '(אני)' }).first();
+  await other.click({ button: 'right' });
+  await shot(p, '174-menu-member-owner-he');
+  await p.keyboard.press('Escape');
+  await p.getByRole('button', { name: 'הגדרות השרת' }).click();
+  await p.getByRole('tab', { name: 'כללי' }).waitFor();
+  await shot(p, '181-server-settings-general-he');
+  await p.getByRole('tab', { name: 'ערוצים' }).click();
+  await shot(p, '182-server-settings-channels-he');
+  await p.getByRole('tab', { name: 'חברים' }).click();
+  await shot(p, '183b-server-settings-members-he');
+  await p.close();
+}
+{
+  const p = await chat('?demo=1&still=1&lang=en&theme=light&update=999999', 'x');
+  await p.getByRole('button', { name: 'Server settings' }).click();
+  await p.getByRole('tab', { name: 'General' }).waitFor();
+  await shot(p, '186-server-settings-en-light');
+  await p.close();
+}
+
 await browser.close();
 await server.close();
 

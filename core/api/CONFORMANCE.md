@@ -93,17 +93,19 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 - `syncNow()`: test-only until `sync` drives updates. It shouldn't ship in
   the UI.
 
-## Proposed: in-app update (B8)
+## In-app update (B8)
 
-From `core/updater/docs/B8-in-app-update.md`, approved by the tech lead and
-the security lead. A proposal from dev-updater, for dev-identity to build
-after M1. The `updater` crate does the work (verify, unpack, state, lock),
-and `core/api` only wires it in.
+Built in B8-5 (`src/update.rs`, tests in `tests/update.rs`), from
+`core/updater/docs/B8-in-app-update.md`, approved by the tech lead and the
+security lead. The `updater` crate does all the work (signatures, root
+chain, policy, hash, size, unpack, state, lock); `core/api` only wires it in.
 
 **Startup.** `mvs-core --update-root <install folder>`. The shell passes it
 only when packaged and the root checks out (§0: derived from
 `process.execPath`, and `mvs-launcher` must exist). Without it, updates are
-off: each command below answers `not-implemented`, and no timer runs. The
+off: each command below answers `not-implemented`, no timer runs, and the
+core never contacts the update host. Updates also stay off in a build
+without `MVS_APP_VERSION` (set by release.yml; the running version). The
 state folder is `updater::UpdateDirs::default_state_dir()`.
 
 **Commands.** All four are main/core-only. None is in `CoreCommands`
@@ -128,15 +130,24 @@ plus a relaunch through the launcher.
 | `update.rolledBack` (new) | `{ "failed": "1.3.0", "running": "1.2.0" }` | once, on the first healthy start after the launcher rolled back |
 
 **Rules the core keeps:**
-- It checks at start and then every 6 h ± 30 min (jitter), and downloads as
-  soon as something is available. Downloads are never paused for a call:
-  only the apply step waits.
+- The first check runs once the UI is up (the first `markHealthy`, so the
+  UI hears `update.ready`), or 2 minutes after start if that never comes.
+  Then every 6 h ± 30 min (jitter), and at once after `setUpdateChannel`.
+  Each check downloads whatever is available. Downloads are never paused
+  for a call: only the apply step waits. Check and download errors go to
+  the log (`RUST_LOG`), never to the UI. An already staged version is
+  announced again (`update.ready`) on every check.
 - All state goes through `UpdateLock`, `save_state` and `write_atomic`.
 - Before any schema migration, it writes `core.db.pre-<schema>` (owner-only)
   and records it in `db-snapshot.json`. It deletes the snapshot when
-  `markHealthy` commits (§0).
+  `markHealthy` commits (§0). TODO: `db.rs` has no versioned migrations
+  yet; the first one calls `Updater::record_db_snapshot`.
 - The UI channel maps to the manifest channel: `stable` → `alpha` during the
-  closed alpha.
+  closed alpha, `beta` → `beta`. Each has its own fixed-tag release,
+  `update-<channel>`. Switching channel never downgrades: the running
+  version is the floor.
+- `update.installed` carries the notes in the profile's language (`he`
+  when there is none yet), falling back as `ManifestBody::notes_for` does.
 
 **`api.ts` changes for dev-ui:**
 - add `update.installed` and `update.rolledBack` to `CoreEvents`;
