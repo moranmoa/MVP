@@ -15,7 +15,7 @@ sync = { path = "../sync" }
 updater = { path = "../updater" }
 # Same versions as `sync`: its runtime and its address type.
 anyhow = "1"
-libp2p = { version = "0.54", default-features = false }
+libp2p = { version = "0.57", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
 # BSD-3-Clause
 ed25519-dalek = "2"
