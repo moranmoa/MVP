@@ -19,6 +19,9 @@ import {
 } from '../../components/icons';
 import { paragraphs, textDir, useUiDir } from '../../app/textDir';
 import { displayName, lookalikeIds, LookalikeTag } from './MemberList';
+import { useContextMenu, type MenuItem } from '../../components/ContextMenu';
+import { copyText } from '../../app/clipboard';
+import { useAppStore } from '../../app/App';
 
 const GROUP_GAP_MS = 5 * 60_000;
 const BOTTOM_SLACK_PX = 48;
@@ -57,6 +60,36 @@ export function MessageList({
   const focusPending = useRef(false);
   const count = win.count;
   const flagged = useMemo(() => lookalikeIds([...memberMap.values()]), [memberMap]);
+  const store = useAppStore();
+  const { bind, menu } = useContextMenu();
+  // B25 §2: the message menu, the same actions as the row's toolbar. Deleted
+  // messages and hidden (blocked) ones have no items, so no menu opens.
+  const authorName = (m: Message) => {
+    const a = memberMap.get(m.authorId);
+    return a ? displayName(a) : '…';
+  };
+  const messageItems = (m: Message): MenuItem[] =>
+    m.deleted || (memberMap.get(m.authorId)?.blocked && !revealed.has(m.authorId))
+      ? []
+      : [
+          { key: 'reply', label: intl.formatMessage({ id: 'chat.reply' }), onSelect: () => handlers.onReply(m) },
+          {
+            key: 'copy',
+            label: intl.formatMessage({ id: 'menu.copyText' }),
+            // The stored body: the direction marks are added only when it is shown.
+            onSelect: async () => store.showFlash((await copyText(m.body)) ? 'common.copied' : 'menu.copyFailed'),
+          },
+          {
+            key: 'copy-id',
+            label: intl.formatMessage({ id: 'menu.copyMessageId' }),
+            onSelect: async () => store.showFlash((await copyText(m.id)) ? 'common.copied' : 'menu.copyFailed'),
+          },
+          ...(m.authorId === myId ? [{ key: 'edit', label: intl.formatMessage({ id: 'chat.edit' }), onSelect: () => handlers.onEdit(m) }] : []),
+          { kind: 'separator' },
+          ...(m.authorId === myId || isOwner
+            ? [{ key: 'delete', label: intl.formatMessage({ id: 'chat.delete' }), danger: true, onSelect: () => handlers.onDelete(m) }]
+            : []),
+        ];
 
   const virtualizer = useVirtualizer({
     count,
@@ -206,6 +239,9 @@ export function MessageList({
                 onFocus={(e) => {
                   if (e.target === e.currentTarget) setActive(item.index);
                 }}
+                {...(m && !m.deleted
+                  ? bind(intl.formatMessage({ id: 'menu.forMessage' }, { name: authorName(m) }), () => messageItems(m))
+                  : {})}
               >
                 {m ? (
                   <MessageRow
@@ -242,6 +278,7 @@ export function MessageList({
           <FormattedMessage id="chat.jumpToLatest" />
         </button>
       )}
+      {menu}
     </div>
   );
 }

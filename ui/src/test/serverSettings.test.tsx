@@ -209,3 +209,55 @@ describe('invites page (#214)', () => {
     await waitFor(() => expect(within(panel).getByText('No invite link is open. Create one below.')).toBeTruthy());
   });
 });
+
+describe('message menu (B25 §2)', () => {
+  const rowOf = (text: string) => {
+    const row = screen.getAllByRole('article').find((a) => a.textContent?.includes(text));
+    if (!row) throw new Error(`no row with ${text}`);
+    return row;
+  };
+
+  it('my message: reply, copy, edit and delete; copy takes the stored text', async () => {
+    const { channels } = await setup();
+    // An empty channel, so the new message is the only (rendered) row.
+    fireEvent.click(within(channels()).getByRole('button', { name: 'Create channel' }));
+    fireEvent.change(screen.getByLabelText('Channel name'), { target: { value: 'menu-test' } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+    });
+    const box = await screen.findByRole('textbox', { name: /menu-test/ });
+    fireEvent.change(box, { target: { value: 'menu test שלום' } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    });
+    const row = await waitFor(() => rowOf('menu test שלום'));
+    expect(row.getAttribute('aria-haspopup')).toBe('menu');
+    fireEvent.contextMenu(row);
+    expect(menuItems()).toEqual(['Reply', 'Copy text', 'Copy message ID', 'Edit', 'Delete']);
+
+    let copied = '';
+    Object.assign(window, { mvs: { copyText: async (t: string) => ((copied = t), true) } });
+    try {
+      await act(async () => {
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Copy text' }));
+      });
+      expect(copied).toBe('menu test שלום');
+    } finally {
+      delete (window as { mvs?: unknown }).mvs;
+    }
+  });
+
+  it('someone else\'s message: the owner can delete it, others only reply and copy', async () => {
+    const { channels } = await setup();
+    const myName = screen.getByRole('complementary', { name: 'Channels' }).querySelector('.me-name')!.textContent!;
+    const others = () => screen.getAllByRole('article').filter((a) => a.getAttribute('aria-haspopup') && !a.textContent?.includes(myName));
+    fireEvent.contextMenu(others()[0]);
+    expect(menuItems()).toEqual(['Reply', 'Copy text', 'Copy message ID', 'Delete']);
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+
+    await openOtherServer(channels);
+    await waitFor(() => expect(others().length).toBeGreaterThan(0));
+    fireEvent.contextMenu(others()[0]);
+    expect(menuItems()).toEqual(['Reply', 'Copy text', 'Copy message ID']);
+  });
+});
