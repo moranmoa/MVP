@@ -168,6 +168,7 @@
   "server.settings.nav.members": "חברים",
   "server.settings.name": "שם השרת",
   "server.settings.age": "הגבלת גיל",
+  "server.settings.readOnly": "עריכת הפרטים האלה תגיע בגרסה הבאה.",
   "menu.markRead": "סימון כנקרא",
   "menu.renameChannel": "שינוי שם",
   "menu.copyChannelId": "העתקת מזהה הערוץ",

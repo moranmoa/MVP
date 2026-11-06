@@ -47,6 +47,7 @@ export function ChannelSidebar({
   const channelItems = (c: Channel, active: boolean): MenuItem[] => [
     ...(c.unread && !active ? [{ key: 'read', label: intl.formatMessage({ id: 'menu.markRead' }), onSelect: () => void core.markRead(c.id) }] : []),
     ...(owner ? [{ key: 'rename', label: intl.formatMessage({ id: 'menu.renameChannel' }), onSelect: () => onEditChannel(c) }] : []),
+    { kind: 'separator' },
     {
       key: 'copy-id',
       label: intl.formatMessage({ id: 'menu.copyChannelId' }),

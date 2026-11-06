@@ -79,7 +79,7 @@ describe('context menus (B25)', () => {
     fireEvent.contextMenu(row, { clientX: 10, clientY: 10 });
     expect(screen.getByRole('menu', { name: 'Actions for #⁨clips⁩' })).toBeTruthy();
     expect(menuItems()).toEqual(['Mark as read', 'Rename', 'Copy channel ID', 'Delete channel']);
-    expect(screen.getAllByRole('separator').length).toBe(1);
+    expect(screen.getAllByRole('separator').length).toBe(2);
     expect(document.activeElement?.textContent).toBe('Mark as read');
 
     fireEvent.keyDown(document.activeElement!, { key: 'Escape' });

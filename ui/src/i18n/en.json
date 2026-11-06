@@ -168,6 +168,7 @@
   "server.settings.nav.members": "Members",
   "server.settings.name": "Server name",
   "server.settings.age": "Age limit",
+  "server.settings.readOnly": "Editing these details is coming in the next version.",
   "menu.markRead": "Mark as read",
   "menu.renameChannel": "Rename",
   "menu.copyChannelId": "Copy channel ID",

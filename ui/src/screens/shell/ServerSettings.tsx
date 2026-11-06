@@ -124,22 +124,27 @@ export function ServerSettings({
 function GeneralPage({ server }: { server: ServerSummary }) {
   const age = server.ageRestriction === 'none' ? 'none' : server.ageRestriction.slice(0, 2);
   return (
-    <dl className="server-facts">
-      <dt>
-        <FormattedMessage id="server.settings.name" />
-      </dt>
-      <dd>
-        <Name>{server.name}</Name>
-      </dd>
-      <dt>
-        <FormattedMessage id="server.settings.age" />
-      </dt>
-      <dd>
-        <bdi>
-          <FormattedMessage id={`age.${age}`} />
-        </bdi>
-      </dd>
-    </dl>
+    <>
+      <dl className="server-facts">
+        <dt>
+          <FormattedMessage id="server.settings.name" />
+        </dt>
+        <dd>
+          <Name>{server.name}</Name>
+        </dd>
+        <dt>
+          <FormattedMessage id="server.settings.age" />
+        </dt>
+        <dd>
+          <bdi>
+            <FormattedMessage id={`age.${age}`} />
+          </bdi>
+        </dd>
+      </dl>
+      <p className="muted small">
+        <FormattedMessage id="server.settings.readOnly" />
+      </p>
+    </>
   );
 }
 
