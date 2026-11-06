@@ -6,6 +6,52 @@ fails if its version has no section here. Write a section before tagging:
 `## [X.Y.Z] - YYYY-MM-DD`, then Hebrew and English (Fixed / New / Known).
 Never put the relay domain or any IP address here.
 
+## [0.2.5] - 2026-11-06
+
+גרסה 0.2.4 לא פורסמה, ולכן 0.2.5 כוללת גם את כל מה שבה.
+
+### מה חדש
+- **ערוצים:** בעל השרת יכול ליצור ערוצים, לשנות להם שם ולמחוק אותם.
+- **הגדרות שרת:** כפתור גלגל שיניים ליד שם השרת פותח מסך הגדרות עם ערוצים, חברים וקישורי הזמנה.
+- **קישורי הזמנה:** יצירת קישור עם תוקף ומספר שימושים, רשימת כל הקישורים וביטול קישור.
+- **תפריט קליק ימני:** על ערוצים, חברים, שרתים והודעות (תשובה, העתקה, עריכה, מחיקה).
+- **סמל "ישיר" / "דרך relay":** ליד כל חבר מחובר מופיע סמל שמראה אם החיבור אליו ישיר או עובר דרך ה-relay.
+- **פורט האזנה קבוע** וניסיון חיבור ישיר משני הצדדים.
+- **תשתית לעדכון אוטומטי:** מגרסה זו האפליקציה יודעת לבדוק, להוריד ולהתקין עדכונים חתומים, כולל ערוץ בטא לגרסאות מקדימות.
+
+### מה תוקן
+- **הודעות מגיעות מיד** (בטיוטת 0.2.3 הייתה השהיה של כ-5 שניות).
+- **הצטרפות לשרת:** אם לא נמצא אף חבר מחובר, האפליקציה ממשיכה לנסות ברקע עד 10 דקות במקום לוותר אחרי 5 שניות.
+
+### ידוע
+- את 0.2.5 מתקינים ידנית מעל הגרסה הקיימת. העדכון האוטומטי יעבוד מהגרסה הבאה ואילך.
+- עדיין אין "ניקוב" חיבור דרך NAT בין רשתות שונות (hole punching).
+- שינוי שם שרת, יציאה משרת ומחיקת שרת יגיעו בגרסה הבאה.
+- שיחות קול עדיין לא זמינות.
+
+---
+
+Version 0.2.4 was never published, so 0.2.5 also includes everything in it.
+
+### New
+- **Channels:** the server owner can create channels, rename them and delete them.
+- **Server settings:** a gear next to the server name opens a settings screen with channels, members and invite links.
+- **Invite links:** create a link with an expiry and a use limit, see all links, and revoke one.
+- **Right-click menus:** on channels, members, servers and messages (reply, copy, edit, delete).
+- **"Direct" / "Via relay" icon:** next to each online member, an icon shows whether you're connected directly or through the relay.
+- **A stable listening port**, and a direct connection tried from both sides.
+- **Auto-update groundwork:** from this version the app can check for, download and install signed updates, including a beta channel for pre-releases.
+
+### Fixed
+- **Messages arrive instantly** (the 0.2.3 draft delayed each one by about 5 seconds).
+- **Joining a server:** if no member is online yet, the app keeps trying in the background for up to 10 minutes instead of giving up after 5 seconds.
+
+### Known
+- Install 0.2.5 by hand over your current version. Auto-update works from the next version on.
+- No NAT hole punching between different networks yet.
+- Renaming, leaving and deleting a server come in the next version.
+- Voice calls are not available yet.
+
 ## [0.2.4] - 2026-11-05
 
 ### מה חדש
