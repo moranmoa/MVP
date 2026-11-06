@@ -190,3 +190,20 @@ export interface AppInfo {
   version: string;
   updateChannel: UpdateChannel;
 }
+
+/** An invite to a server (#214). `maxUses` 0 is unlimited; no `expiresAt` is never. */
+export interface Invite {
+  id: Id;
+  createdBy: Id;
+  expiresAt?: number;
+  maxUses: number;
+  uses: number;
+  revoked: boolean;
+}
+
+export interface CreatedInvite {
+  id: Id;
+  link: string;
+  expiresAt?: number;
+  maxUses?: number;
+}

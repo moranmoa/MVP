@@ -27,6 +27,9 @@ const COMMANDS = Object.freeze({
   createServer: ['input'],
   joinServer: ['link'],
   cancelJoin: ['link'],
+  createInvite: ['serverId', 'input'],
+  listInvites: ['serverId'],
+  revokeInvite: ['serverId', 'inviteId'],
   // Messages
   getMessageCount: ['channelId'],
   getMessages: ['channelId', 'start', 'end'],

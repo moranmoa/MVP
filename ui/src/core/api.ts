@@ -9,8 +9,10 @@
 import type {
   AppInfo,
   Channel,
+  CreatedInvite,
   Id,
   Identity,
+  Invite,
   JoinStatus,
   Member,
   Message,
@@ -68,6 +70,16 @@ export interface CoreCommands {
   /** Progress arrives as `join.status` events; resolves with the first status. */
   joinServer(link: string): Promise<JoinStatus>;
   cancelJoin(link: string): Promise<void>;
+  /**
+   * Invites (#214), moderator and up (`not-allowed` below). `expiresMs` is the last
+   * moment a join is accepted (ms since epoch; absent = never, `bad-request` if
+   * not in the future); `maxUses` absent or 0 = unlimited. Fires `server.updated`.
+   */
+  createInvite(serverId: Id, input?: { expiresMs?: number; maxUses?: number }): Promise<CreatedInvite>;
+  /** Oldest first, revoked ones included. */
+  listInvites(serverId: Id): Promise<Invite[]>;
+  /** The invite's author or someone ranked above; `not-found` if unknown or already revoked. Fires `server.updated`. */
+  revokeInvite(serverId: Id, inviteId: Id): Promise<void>;
 
   // Messages
   getMessageCount(channelId: Id): Promise<number>;

@@ -10,6 +10,8 @@ import type {
   AgeRestriction,
   AppInfo,
   Channel,
+  CreatedInvite,
+  Invite,
   CoreError,
   Id,
   Identity,
@@ -141,6 +143,8 @@ function err(e: CoreError): CoreError {
 export class MockCore implements CoreApi {
   private listeners = new Map<CoreEventName, Set<(p: unknown) => void>>();
   private servers = new Map<Id, ServerState>();
+  // Invites per server, made on first use from the server's current link.
+  private invites = new Map<Id, (Invite & { link: string })[]>();
   private channelIndex = new Map<Id, ChannelState>();
   private identity: Identity | null = null;
   private words: string[] = [];
@@ -768,6 +772,51 @@ export class MockCore implements CoreApi {
     const t = this.pendingJoins.get(link.trim());
     if (t) clearTimeout(t);
     this.pendingJoins.delete(link.trim());
+  }
+
+  private invitesOf(serverId: Id): (Invite & { link: string })[] {
+    const s = this.servers.get(serverId);
+    if (!s) throw err({ code: 'not-found' });
+    if (s.summary.ownerId !== this.identity?.id) throw err({ code: 'not-allowed' });
+    let list = this.invites.get(serverId);
+    if (!list) {
+      list = s.summary.inviteLink
+        ? [{ id: 'a'.repeat(64), createdBy: s.summary.ownerId, maxUses: 0, uses: 3, revoked: false, link: s.summary.inviteLink }]
+        : [];
+      this.invites.set(serverId, list);
+    }
+    return list;
+  }
+
+  /** The server's link names the newest open invite (empty once none is left). */
+  private relink(serverId: Id): void {
+    const s = this.servers.get(serverId)!;
+    const open = this.invitesOf(serverId).filter((i) => !i.revoked);
+    s.summary = { ...s.summary, inviteLink: open[open.length - 1]?.link ?? '' };
+    this.emit('server.updated', s.summary);
+  }
+
+  async createInvite(serverId: Id, input?: { expiresMs?: number; maxUses?: number }): Promise<CreatedInvite> {
+    const list = this.invitesOf(serverId);
+    if (input?.expiresMs !== undefined && input.expiresMs <= Date.now()) throw err({ code: 'bad-request' });
+    await this.wait(150);
+    const id = Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) => b.toString(16).padStart(2, '0')).join('');
+    const link = `mvp://join/${serverId.slice(2)}-${id.slice(0, 8)}`;
+    list.push({ id, createdBy: this.identity!.id, expiresAt: input?.expiresMs, maxUses: input?.maxUses ?? 0, uses: 0, revoked: false, link });
+    this.relink(serverId);
+    return { id, link, expiresAt: input?.expiresMs, maxUses: input?.maxUses };
+  }
+
+  async listInvites(serverId: Id): Promise<Invite[]> {
+    return this.invitesOf(serverId).map(({ link: _link, ...i }) => i);
+  }
+
+  async revokeInvite(serverId: Id, inviteId: Id): Promise<void> {
+    const inv = this.invitesOf(serverId).find((i) => i.id === inviteId && !i.revoked);
+    if (!inv) throw err({ code: 'not-found' });
+    await this.wait(150);
+    inv.revoked = true;
+    this.relink(serverId);
   }
 
   private ageOf(birthDate: string): number {

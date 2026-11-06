@@ -173,3 +173,39 @@ describe('context menus (B25)', () => {
     expect(menuItems()).toEqual(['Copy invite link']);
   });
 });
+
+describe('invites page (#214)', () => {
+  async function openInvites() {
+    const { sidebar } = await setup();
+    fireEvent.click(within(sidebar()).getByRole('button', { name: 'Server settings' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Invite link' }));
+    const panel = screen.getByRole('tabpanel');
+    await within(panel).findByText(/^3 uses/);
+    return panel;
+  }
+  const currentLink = (panel: HTMLElement) => panel.querySelector('.invite-link')?.textContent;
+
+  it('creates a link with an expiry and a use limit; it becomes the current link', async () => {
+    const panel = await openInvites();
+    const before = currentLink(panel);
+    fireEvent.change(within(panel).getByLabelText('Expires after'), { target: { value: 'day' } });
+    fireEvent.change(within(panel).getByLabelText('Max uses'), { target: { value: '5' } });
+    await act(async () => {
+      fireEvent.click(within(panel).getByRole('button', { name: 'Create link' }));
+    });
+    await within(panel).findByText(/0 of 5 uses/);
+    expect(within(panel).getAllByText(/^Expires/).length).toBe(1);
+    await waitFor(() => expect(currentLink(panel)).not.toBe(before));
+  });
+
+  it('revokes a link after a confirmation', async () => {
+    const panel = await openInvites();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Revoke' }));
+    const confirm = within(panel).getByRole('group', { name: 'Revoke this link? No one can join with it after this.' });
+    await act(async () => {
+      fireEvent.click(within(confirm).getByRole('button', { name: 'Revoke' }));
+    });
+    await within(panel).findByText('Revoked');
+    await waitFor(() => expect(within(panel).getByText('No invite link is open. Create one below.')).toBeTruthy());
+  });
+});
