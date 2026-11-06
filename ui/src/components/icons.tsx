@@ -106,6 +106,11 @@ export const LinkIcon = (p: IconProps) => (
     <path d="M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1" />
   </Icon>
 );
+export const CloudIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M7 18a5 5 0 0 1-.6-10A6 6 0 0 1 18 9a4.5 4.5 0 0 1-.5 9z" />
+  </Icon>
+);
 export const ArrowDownIcon = (p: IconProps) => (
   <Icon {...p}>
     <path d="M12 5v14M5 12l7 7 7-7" />

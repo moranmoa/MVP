@@ -234,10 +234,10 @@
   "members.online": "מחוברים – {count}",
   "members.offline": "לא מחוברים – {count}",
   "members.owner": "בעלים",
-  "connection.direct": "ישיר",
-  "connection.relay": "דרך ממסר",
+  "connection.direct": "חיבור ישיר",
+  "connection.relay": "דרך הממסר",
   "connection.direct.title": "יש חיבור ישיר (למשל באותה רשת)",
-  "connection.relay.title": "החיבור עובר דרך שרת הממסר",
+  "connection.relay.title": "החיבור עובר דרך ממסר של MVS. הממסר מעביר הודעות מוצפנות ולא יכול לקרוא אותן.",
   "members.me": "(אני)",
   "members.open": "הפרופיל של \u2068{name}\u2069",
 
