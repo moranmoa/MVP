@@ -109,8 +109,10 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "updater",
  "windows-sys 0.61.2",
  "zeroize",
+ "zip",
 ]
 
 [[package]]

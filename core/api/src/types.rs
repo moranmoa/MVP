@@ -226,6 +226,15 @@ pub enum ErrorCode {
     NotImplemented,
     /// Rust addition: storage or keychain failure. Never carries details.
     Internal,
+    /// In-app update (B8): the update host can't be reached.
+    Offline,
+    /// In-app update: any verification failure; details only in the log.
+    InvalidUpdate,
+    /// In-app update: a manifest issued in the future, or all expired.
+    CheckClock,
+    NothingToDownload,
+    NothingStaged,
+    DiskFull,
 }
 
 impl CoreError {
@@ -383,6 +392,12 @@ pub enum Event {
     MessageAdded(Message),
     #[serde(rename = "update.ready")]
     UpdateReady(UpdateInfo),
+    /// Once, after `markHealthy` commits a new version. Text only.
+    #[serde(rename = "update.installed")]
+    UpdateInstalled { version: String, notes: Option<String> },
+    /// Once, on the first healthy start after the launcher rolled back.
+    #[serde(rename = "update.rolledBack")]
+    UpdateRolledBack { failed: String, running: String },
     #[serde(rename = "notice", rename_all = "camelCase")]
     Notice { kind: NoticeKind, server_id: Id },
 }
