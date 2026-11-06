@@ -661,6 +661,11 @@ impl Core {
     // - When an invite expires, send `RevokeInvite` automatically if we are
     //   its inviter or a moderator and up.
     fn control_action(&self, server_id: &str, action: Action) -> CoreResult<()> {
+        self.control_record(server_id, action).map(|_| ())
+    }
+
+    /// `control_action`, returning the accepted record's ID.
+    fn control_record(&self, server_id: &str, action: Action) -> CoreResult<RecordId> {
         let server = parse_server(server_id)?;
         self.run(|inner, ports, events| {
             inner.load_mine(server)?;
@@ -669,11 +674,16 @@ impl Core {
                 return Err(ErrorCode::NotAllowed.into());
             }
             let view = inner.view(server)?;
+            // A revoke-invite lists its invite in its deps.
+            let extra = match &action {
+                Action::RevokeInvite { invite } => Some(*invite),
+                _ => None,
+            };
             let record = authority::sign_control(
                 me.identity.signing_key(),
                 server,
                 view.next_seq(&me.key()),
-                view.deps(None),
+                view.deps(extra),
                 ports.clock.now_ms(),
                 &action,
             )
@@ -693,6 +703,11 @@ impl Core {
                 inner.db.put_record(record)?;
             }
             ports.network.publish(&record);
+            if matches!(action, Action::Invite { .. } | Action::RevokeInvite { .. }) {
+                // The server's link may name another invite now.
+                events.push(Event::ServerUpdated(inner.summary(server)?));
+                return Ok(record.id());
+            }
             let after = inner.view(server)?;
             events.push(Event::MembersChanged {
                 server_id: server_id.to_owned(),
@@ -708,8 +723,80 @@ impl Core {
                     });
                 }
             }
-            Ok(())
+            Ok(record.id())
         })
+    }
+
+    // ---- invites ------------------------------------------------------------
+
+    /// Rust addition (`createInvite`, #208): a new invite, moderator and up.
+    /// `expires_ms`: the last time a join through it is accepted, in the
+    /// future; none for never. `max_uses`: none or 0 for unlimited.
+    pub fn create_invite(
+        &self,
+        server_id: &str,
+        expires_ms: Option<u64>,
+        max_uses: Option<u32>,
+    ) -> CoreResult<CreatedInvite> {
+        if expires_ms.is_some_and(|at| at <= self.ports.clock.now_ms()) {
+            return Err(ErrorCode::BadRequest.into());
+        }
+        let action =
+            Action::Invite { expires_ms: expires_ms.unwrap_or(0), max_uses: max_uses.unwrap_or(0) };
+        let invite = self.control_record(server_id, action)?;
+        let server = parse_server(server_id)?;
+        let secret = self.lock().secret(server)?.ok_or(ErrorCode::Internal)?;
+        Ok(CreatedInvite {
+            id: model::hex_id(invite.as_bytes()),
+            link: model::invite_link(server, invite, &secret),
+            expires_at: expires_ms,
+            max_uses: max_uses.filter(|n| *n > 0),
+        })
+    }
+
+    /// Rust addition (`listInvites`, #208): every invite of the server,
+    /// oldest first, revoked ones included. Moderator and up.
+    pub fn list_invites(&self, server_id: &str) -> CoreResult<Vec<InviteInfo>> {
+        let mut inner = self.lock();
+        let server = inner.load_mine(parse_server(server_id)?)?;
+        let me = inner.me.as_ref().map(Me::key).ok_or(ErrorCode::NotFound)?;
+        let view = inner.view(server)?;
+        if view.state.role(me) < authority::Role::Moderator {
+            return Err(ErrorCode::NotAllowed.into());
+        }
+        Ok(view
+            .records
+            .iter()
+            .filter(|r| r.kind() == Kind::Invite)
+            .filter_map(|r| {
+                let invite = view.state.invites.get(&r.id())?;
+                Some(InviteInfo {
+                    id: model::hex_id(r.id().as_bytes()),
+                    created_by: model::hex_id(invite.author.as_bytes()),
+                    expires_at: (invite.expires_ms > 0).then_some(invite.expires_ms),
+                    max_uses: invite.max_uses,
+                    uses: invite.uses,
+                    revoked: invite.revoked,
+                })
+            })
+            .collect())
+    }
+
+    /// Rust addition (`revokeInvite`, #208): its author, or someone ranked
+    /// above its author. `not-found` for an unknown or already revoked
+    /// invite.
+    pub fn revoke_invite(&self, server_id: &str, invite_id: &str) -> CoreResult<()> {
+        let invite =
+            model::parse_hex32(invite_id).map(RecordId::from_bytes).ok_or(ErrorCode::NotFound)?;
+        {
+            let mut inner = self.lock();
+            let server = inner.load_mine(parse_server(server_id)?)?;
+            let view = inner.view(server)?;
+            if view.state.invites.get(&invite).is_none_or(|i| i.revoked) {
+                return Err(ErrorCode::NotFound.into());
+            }
+        }
+        self.control_action(server_id, Action::RevokeInvite { invite })
     }
 
     // ---- messages ---------------------------------------------------------
