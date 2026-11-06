@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use authority::Action;
 use groupkeys::MemberSecret;
@@ -63,6 +63,12 @@ pub const CHALLENGE_POSITIONS: usize = 3;
 pub const MAX_CHECK_FAILURES: u8 = 5;
 /// How often the background sync runs without a hint.
 pub const SYNC_EVERY: Duration = Duration::from_secs(2);
+/// A join that found nobody online is retried in the background: first
+/// after `JOIN_RETRY_FIRST`, doubling up to `JOIN_RETRY_MAX`, for at most
+/// `JOIN_RETRY_FOR` (until then the inviter may still come online).
+pub const JOIN_RETRY_FIRST: Duration = Duration::from_secs(2);
+pub const JOIN_RETRY_MAX: Duration = Duration::from_secs(30);
+pub const JOIN_RETRY_FOR: Duration = Duration::from_secs(10 * 60);
 /// Join re-keys are batched: at least this long apart per channel, plus
 /// up to `JOIN_REKEY_JITTER_MS`: 15 s ± 20% (12-18 s). Kicks stay immediate.
 pub const JOIN_REKEY_MIN_MS: u64 = 12_000;
@@ -111,6 +117,14 @@ pub struct Core {
     app_version: String,
     /// In-app update; `None` unless `--update-root` (see `with_updates`).
     updates: Option<Arc<Updates>>,
+    /// Joins that found nobody online yet, by link: retried by `sync_now`.
+    pending_joins: Mutex<HashMap<String, PendingJoin>>,
+}
+
+struct PendingJoin {
+    next: Instant,
+    wait: Duration,
+    until: Instant,
 }
 
 /// Events collected while the lock is held, emitted after it is released.
@@ -180,7 +194,13 @@ impl Core {
                 inner.open_sync(&ports, server)?;
             }
         }
-        Ok(Core { inner: Mutex::new(inner), ports, app_version: config.app_version, updates: None })
+        Ok(Core {
+            inner: Mutex::new(inner),
+            ports,
+            app_version: config.app_version,
+            updates: None,
+            pending_joins: Mutex::default(),
+        })
     }
 
     /// What the app lock and sign-out call: the group cipher drops our
@@ -470,11 +490,31 @@ impl Core {
     /// Resolves with the first status; the outcome follows as `join.status`.
     pub fn join_server(&self, link: &str) -> CoreResult<JoinStatus> {
         let link = link.trim().to_owned();
-        let Some((server, invite, secret)) = model::parse_invite_link(&link) else {
+        if model::parse_invite_link(&link).is_none() {
             return Ok(JoinStatus::Invalid { link });
-        };
+        }
         let searching = JoinStatus::Searching { link: link.clone() };
         self.ports.events.emit(&Event::JoinStatus(searching.clone()));
+        let status = self.try_join(&link)?;
+        if matches!(status, JoinStatus::NobodyOnline { .. }) {
+            // The inviter may not be reachable yet: keep trying (`retry_joins`).
+            let now = Instant::now();
+            let retry = PendingJoin {
+                next: now + JOIN_RETRY_FIRST,
+                wait: JOIN_RETRY_FIRST,
+                until: now + JOIN_RETRY_FOR,
+            };
+            self.pending_joins.lock().expect("not poisoned").insert(link, retry);
+        }
+        self.ports.events.emit(&Event::JoinStatus(status));
+        Ok(searching)
+    }
+
+    /// One attempt: open the server, fetch what reachable peers hold, join.
+    fn try_join(&self, link: &str) -> CoreResult<JoinStatus> {
+        let Some((server, invite, secret)) = model::parse_invite_link(link) else {
+            return Ok(JoinStatus::Invalid { link: link.to_owned() });
+        };
         // GAP-4: only the secret lets us ask for the server's logs.
         let general = BTreeSet::from([model::default_channel(server)]);
         self.ports.network.open_server(server, &secret, &general);
@@ -482,15 +522,47 @@ impl Core {
         let fetched: Vec<Record> =
             self.ports.network.fetch(server).into_iter().filter(|r| r.server() == server).collect();
         self.run(|inner, ports, events| {
-            let status = inner.join(ports, server, invite, &secret, &link, fetched, events)?;
-            events.push(Event::JoinStatus(status));
-            Ok(searching)
+            inner.join(ports, server, invite, &secret, link, fetched, events)
         })
     }
 
-    /// Nothing to cancel: joining is synchronous in-process.
-    /// TODO(sync): cancel the peer search.
-    pub fn cancel_join(&self, _link: &str) -> CoreResult<()> {
+    /// Joins that found nobody online, tried again with backoff until they
+    /// get an answer, are cancelled, or `JOIN_RETRY_FOR` runs out. "Nobody
+    /// online" again isn't re-announced: the UI still shows the first one.
+    fn retry_joins(&self) {
+        let now = Instant::now();
+        let due: Vec<String> = {
+            let mut pending = self.pending_joins.lock().expect("not poisoned");
+            pending.retain(|_, p| now < p.until);
+            pending.iter().filter(|(_, p)| now >= p.next).map(|(link, _)| link.clone()).collect()
+        };
+        for link in due {
+            let status = match self.try_join(&link) {
+                Ok(status) => status,
+                Err(e) => {
+                    eprintln!("mvs-core: retrying a join failed: {:?}", e.code);
+                    continue;
+                }
+            };
+            let mut pending = self.pending_joins.lock().expect("not poisoned");
+            if matches!(status, JoinStatus::NobodyOnline { .. }) {
+                if let Some(p) = pending.get_mut(&link) {
+                    p.wait = (p.wait * 2).min(JOIN_RETRY_MAX);
+                    p.next = Instant::now() + p.wait;
+                }
+                continue;
+            }
+            // Cancelled meanwhile: say nothing.
+            if pending.remove(&link).is_some() {
+                drop(pending);
+                self.ports.events.emit(&Event::JoinStatus(status));
+            }
+        }
+    }
+
+    /// Stops retrying a join that found nobody online (`retry_joins`).
+    pub fn cancel_join(&self, link: &str) -> CoreResult<()> {
+        self.pending_joins.lock().expect("not poisoned").remove(link.trim());
         Ok(())
     }
 
@@ -846,6 +918,7 @@ impl Core {
     /// network and reports what changed. TODO(sync): driven by the sync
     /// crate's push and pull instead of a command.
     pub fn sync_now(&self) -> CoreResult<()> {
+        self.retry_joins();
         let servers = {
             let mut inner = self.lock();
             if inner.me.is_none() {

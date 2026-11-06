@@ -1464,6 +1464,82 @@ impl Network for OfflineNet {
     }
 }
 
+/// The world as a joiner sees it: nothing, until the inviter comes online.
+struct LateNet {
+    world: Arc<LoopbackNetwork>,
+    online: std::sync::atomic::AtomicBool,
+}
+
+impl Network for LateNet {
+    fn publish(&self, record: &records::Record) {
+        self.world.publish(record);
+    }
+
+    fn fetch(&self, server: ServerId) -> Vec<records::Record> {
+        if self.online.load(std::sync::atomic::Ordering::SeqCst) {
+            self.world.fetch(server)
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+/// v0.2.4 join hang (mitigation): a join that finds nobody online keeps
+/// trying in the background, so it completes once the inviter comes
+/// online, here 20 s later, without the user joining again.
+#[test]
+fn a_join_completes_when_the_inviter_comes_online_later() {
+    let world = World::new();
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let server = owner.core.create_server("Late", AgeRestriction::None).unwrap();
+    let net = Arc::new(LateNet { world: world.network.clone(), online: Default::default() });
+    let joiner =
+        world.peer_on(net.clone(), Arc::new(MemoryStore::new()), None, Arc::new(PendingGroupKeys));
+    sign_up(&joiner, "Joiner");
+    joiner.events.take();
+
+    let start = std::time::Instant::now();
+    joiner.core.join_server(&server.invite_link).unwrap();
+    assert!(matches!(
+        joiner.events.take().last(),
+        Some(Event::JoinStatus(JoinStatus::NobodyOnline { .. }))
+    ));
+    let joined = |peer: &Peer| peer.core.list_servers().unwrap().iter().any(|s| s.id == server.id);
+    let mut online = false;
+    while !joined(&joiner) {
+        assert!(start.elapsed() < std::time::Duration::from_secs(60), "the join never completed");
+        if !online && start.elapsed() >= std::time::Duration::from_secs(20) {
+            net.online.store(true, std::sync::atomic::Ordering::SeqCst);
+            online = true;
+        }
+        // What the background sync loop does every `SYNC_EVERY`.
+        joiner.core.sync_now().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    assert!(online, "joined before the inviter came online");
+    assert!(joiner
+        .events
+        .take()
+        .iter()
+        .any(|e| matches!(e, Event::JoinStatus(JoinStatus::Joined { .. }))));
+
+    // A cancelled join stops retrying: nothing more is announced.
+    let other = owner.core.create_server("Other", AgeRestriction::None).unwrap();
+    net.online.store(false, std::sync::atomic::Ordering::SeqCst);
+    joiner.core.join_server(&other.invite_link).unwrap();
+    joiner.core.cancel_join(&other.invite_link).unwrap();
+    net.online.store(true, std::sync::atomic::Ordering::SeqCst);
+    joiner.events.take();
+    std::thread::sleep(api::JOIN_RETRY_FIRST + std::time::Duration::from_millis(200));
+    joiner.core.sync_now().unwrap();
+    assert!(!joined_other(&joiner, &other.id), "a cancelled join went on");
+}
+
+fn joined_other(peer: &Peer, id: &str) -> bool {
+    peer.core.list_servers().unwrap().iter().any(|s| s.id == id)
+}
+
 /// B6: a message written offline is still `pending` after a restart (the
 /// state is kept in the db), and a later `received` is kept too.
 #[test]
