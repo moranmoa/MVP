@@ -271,6 +271,13 @@ impl Core {
                 ok(self.revoke_role(&a.server_id, &a.user_id))
             }
             "syncNow" => ok(self.sync_now()),
+            // In-app update (B8-5). Main/core only: never in CoreCommands or
+            // the renderer allow-list (A2). `not-implemented` without
+            // `--update-root`.
+            "checkForUpdate" => self.check_for_update(),
+            "downloadUpdate" => self.download_update(),
+            "applyUpdate" => self.apply_update(),
+            "markHealthy" => self.mark_healthy(),
 
             cmd if NOT_YET.contains(&cmd) => Err(ErrorCode::NotImplemented.into()),
             _ => Err(ErrorCode::BadRequest.into()),
