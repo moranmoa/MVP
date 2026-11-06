@@ -20,8 +20,8 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   projects: [
-    // Must stay green on main. Onboarding through sending a message.
-    { name: 'smoke', testMatch: /smoke\.spec\.ts/, use: { ...devices['Desktop Chrome'] } },
+    // Must stay green on main. Onboarding through sending a message, and channels.
+    { name: 'smoke', testMatch: /(smoke|channels)\.spec\.ts/, use: { ...devices['Desktop Chrome'] } },
     // Exploratory checks and bug repros from BUGS.md. Known bugs are marked
     // test.fail(), so the run stays green until a bug is fixed – then the
     // test "unexpectedly passes" and the mark should be removed.

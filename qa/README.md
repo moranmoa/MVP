@@ -5,6 +5,7 @@
 | `TEST_PLAN.md` | Closed-alpha test plan (Hebrew): cases per feature, non-functional targets, what is automatable |
 | `BUGS.md` | Bugs found by exploratory testing, with severity, steps, expected vs actual and owner |
 | `tests/smoke.spec.ts` | Smoke suite: onboarding → word check → create server → send → join by link → delivered |
+| `tests/channels.spec.ts` | Smoke suite, channels (B11c): owner create/rename/delete, no controls for members, messages stay in their channel |
 | `tests/explore.spec.ts` | Exploratory checks and one repro per UI bug in `BUGS.md` |
 | `core/cli-checks.sh` | `updater` with tampered manifests and `spike-peer` with bad input |
 
@@ -21,7 +22,8 @@ docker compose -f qa/compose.yaml run --rm smoke
 The first run builds the UI (`ui` service, `node:22.23.4-bookworm`) and
 serves it with `vite preview`; the tests run in
 `mcr.microsoft.com/playwright:v1.56.1-noble` against
-`http://localhost:5173`. Expected result: `8 passed`.
+`http://localhost:5173`. Expected result: `12 passed, 1 skipped` (voice
+channels, not in the UI yet).
 
 ## Run the exploratory checks
 

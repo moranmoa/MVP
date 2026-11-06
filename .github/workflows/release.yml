@@ -2,7 +2,7 @@ name: Release
 
 # Push a tag vMAJOR.MINOR.PATCH (the only version form core/updater accepts)
 # to build unsigned artifacts into a DRAFT pre-release. Nothing here holds or
-# needs the update root key: the owner signs manifest-body.json offline and
+# needs the update root key: the owner signs the manifest bodies offline and
 # publishes the draft by hand (docs/release/RELEASING.md).
 #
 # Trust split (GAP-20): the build jobs run third-party code (crates, npm
@@ -164,6 +164,10 @@ jobs:
 
       - name: Build the core sidecar (mvs-core)
         working-directory: core
+        env:
+          # The app's own version: without it the core can't judge "newer"
+          # and in-app updates stay off (B8-5, #211).
+          MVS_APP_VERSION: ${{ env.VERSION }}
         run: |
           cargo build --release --locked --target "${{ matrix.target }}" -p api --bin mvs-core
           mkdir -p ../desktop/.core
@@ -300,7 +304,7 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
-      - name: Check artifacts, SHA256SUMS, manifest-body.json (unsigned)
+      - name: Check artifacts, SHA256SUMS, manifest bodies (unsigned)
         run: bash .github/scripts/collect-release.sh "$VERSION" "$CHANNEL" "$PLATFORMS"
       - name: Create or update the draft
         run: |
@@ -329,14 +333,14 @@ jobs:
           - **Alpha:** the data format may still change. Servers and messages made with this build may be reset by a later one. Your identity is safe as long as you keep your 12 recovery words.
           - The installers are **not code-signed**. Windows SmartScreen will warn: choose "More info" and then "Run anyway".
           - The \`.zip\`/\`.tar.gz\` files are the in-app updater payloads; you don't need them.
-          - \`manifest-body.json\` is the **unsigned** updater manifest. The owner signs it offline and attaches \`manifest.json\`; until then, in-app updates are not offered.
+          - \`manifest-body-beta.json\` / \`manifest-body-alpha.json\` are the **unsigned** update manifests per channel. The owner signs them offline and publishes them to the \`update-beta\` / \`update-alpha\` releases; until then, in-app updates are not offered.
           - Built by GitHub Actions from \`${GITHUB_SHA}\`. Check downloads against \`SHA256SUMS\`.
           EOF
             gh release create "$TAG" --draft --prerelease --verify-tag \
               --title "MVS ${TAG} (closed alpha)" --notes-file notes.md
           fi
           # The explicit list: the ui archive, the installers and updater
-          # payloads checked above, SHA256SUMS, manifest-body.json.
+          # payloads checked above, SHA256SUMS, manifest-body-{beta,alpha}.json.
           mapfile -t files < files
           (cd dist && gh release upload "$TAG" "${files[@]}" --clobber)
       - name: Summary
@@ -367,7 +371,7 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
-      - name: Check artifacts, SHA256SUMS, manifest-body.json (unsigned)
+      - name: Check artifacts, SHA256SUMS, manifest bodies (unsigned)
         run: bash .github/scripts/collect-release.sh "$VERSION" "$CHANNEL" "$PLATFORMS"
       - name: No relay address in dry-run builds
         run: |

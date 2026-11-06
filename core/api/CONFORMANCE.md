@@ -87,6 +87,21 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 - `grantRole(serverId, userId, role: 'admin' | 'moderator' | 'member')` and
   `revokeRole(serverId, userId)`.
 - `Member.role: 'owner' | 'admin' | 'moderator' | 'member'`.
+- Invites (#208), all moderator and up (`not-allowed` below that):
+  - `createInvite(serverId, input?: { expiresMs?: number, maxUses?: number })`
+    returns `{ id, link, expiresAt?, maxUses? }`. `expiresMs` is the last time a
+    join through it is accepted (ms since epoch). An absent `expiresMs` means
+    never, and `bad-request` if it isn't in the future. An absent `maxUses`
+    or 0 means unlimited.
+  - `listInvites(serverId)` returns
+    `{ id, createdBy, expiresAt?, maxUses, uses, revoked }[]`, oldest first,
+    revoked ones included. `maxUses` 0 is unlimited.
+  - `revokeInvite(serverId, inviteId)` is allowed for the invite's author or
+    someone ranked above it (`not-allowed` otherwise). `not-found` for an
+    unknown or malformed ID, or an invite already revoked.
+  - A create or a revoke fires `server.updated`, since the server's
+    `inviteLink` may then name another invite (or be empty once none is
+    left open).
 - `Member.connection: 'direct' | 'relay' | null` (#187): how we reach an online member, a direct connection (LAN) or through the relay; `null` for us and for members who are offline. A change fires `members.changed`.
 - `CoreError.code`: `'bad-request' | 'not-implemented' | 'internal'`, and `'keyring-unavailable'` (QA-20): the OS keychain (Secret Service on Linux) is missing or unusable. The core still starts; `getIdentity` and anything needing the identity reject with it, and the UI shows the keyring cause.
 - `NoticeKind`: `'rekey-waiting'`, sent when removed members still hold a channel key and only a moderator can renew it. Until a moderator does, sending there answers `not-allowed`.

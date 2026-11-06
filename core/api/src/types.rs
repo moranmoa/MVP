@@ -414,6 +414,34 @@ pub struct RemovedMember {
     pub removed_at: Timestamp,
 }
 
+/// Rust addition (`createInvite`, #208): the new invite and its link.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedInvite {
+    pub id: Id,
+    pub link: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Timestamp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_uses: Option<u32>,
+}
+
+/// Rust addition (`listInvites`, #208): one invite of a server.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InviteInfo {
+    pub id: Id,
+    /// Who made it (a user ID).
+    pub created_by: Id,
+    /// The last time a join through it is accepted; absent for never.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Timestamp>,
+    /// 0 for unlimited.
+    pub max_uses: u32,
+    pub uses: u32,
+    pub revoked: bool,
+}
+
 /// #187: a direct connection (LAN, later hole-punched) or through the relay.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
