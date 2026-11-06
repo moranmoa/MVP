@@ -1937,3 +1937,73 @@ fn no_keyring_is_its_own_error() {
     assert_eq!(reply, r#"{"error":{"code":"keyring-unavailable"}}"#);
     assert!(core.get_app_info().is_ok(), "the rest of the core still answers");
 }
+
+/// #208: invites made, listed and revoked; moderator and up, and a revoke
+/// only by the invite's author or someone ranked above it.
+#[test]
+fn invites_are_made_listed_and_revoked() {
+    let world = World::new();
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let guest = world.peer();
+    let guest_id = sign_up(&guest, "Guest").id;
+    let server = owner.core.create_server("Doors", AgeRestriction::None).unwrap();
+    guest.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    guest.core.sync_now().unwrap();
+
+    // A member can't make or list invites.
+    assert_eq!(
+        guest.core.create_invite(&server.id, None, None).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+    assert_eq!(guest.core.list_invites(&server.id).unwrap_err().code, ErrorCode::NotAllowed);
+
+    // The owner makes one with a limit and an expiry; one in the past is refused.
+    let at = common::NOW_MS + 3_600_000;
+    assert_eq!(
+        owner.core.create_invite(&server.id, Some(common::NOW_MS), None).unwrap_err().code,
+        ErrorCode::BadRequest
+    );
+    owner.events.take();
+    let made = owner.core.create_invite(&server.id, Some(at), Some(2)).unwrap();
+    assert_eq!((made.expires_at, made.max_uses), (Some(at), Some(2)));
+    assert!(made.link.starts_with("mvs://join/") && made.link.contains(&made.id));
+    assert!(names(&owner.events.take()).contains(&"server.updated"));
+
+    // Someone joins through it: one use.
+    let third = world.peer();
+    sign_up(&third, "Third");
+    third.core.join_server(&made.link).unwrap();
+    owner.core.sync_now().unwrap();
+    let invites = owner.core.list_invites(&server.id).unwrap();
+    assert_eq!(invites.len(), 2);
+    let listed = invites.iter().find(|i| i.id == made.id).unwrap();
+    assert_eq!(
+        (listed.created_by.as_str(), listed.expires_at, listed.max_uses, listed.uses),
+        (server.owner_id.as_str(), Some(at), 2, 1)
+    );
+    assert!(!listed.revoked);
+
+    // Revoked once; then it's gone, and so is a bad ID.
+    owner.core.revoke_invite(&server.id, &made.id).unwrap();
+    let invites = owner.core.list_invites(&server.id).unwrap();
+    assert!(invites.iter().find(|i| i.id == made.id).unwrap().revoked);
+    assert_eq!(
+        owner.core.revoke_invite(&server.id, &made.id).unwrap_err().code,
+        ErrorCode::NotFound
+    );
+    assert_eq!(owner.core.revoke_invite(&server.id, "zz").unwrap_err().code, ErrorCode::NotFound);
+
+    // A moderator revokes their own invite, not the owner's.
+    owner.core.grant_role(&server.id, &guest_id, Role::Moderator).unwrap();
+    guest.core.sync_now().unwrap();
+    let first = owner.core.list_invites(&server.id).unwrap().remove(0);
+    assert_eq!(
+        guest.core.revoke_invite(&server.id, &first.id).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+    let mine = guest.core.create_invite(&server.id, None, None).unwrap();
+    assert_eq!((mine.expires_at, mine.max_uses), (None, None));
+    guest.core.revoke_invite(&server.id, &mine.id).unwrap();
+}

@@ -139,6 +139,27 @@ struct LinkArg {
     link: String,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateInviteInput {
+    expires_ms: Option<u64>,
+    max_uses: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateInviteArgs {
+    server_id: String,
+    input: Option<CreateInviteInput>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RevokeInviteArgs {
+    server_id: String,
+    invite_id: String,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UserArg {
@@ -250,6 +271,16 @@ impl Core {
             "deleteChannel" => ok(self.delete_channel(&args::<ChannelIdArg>(raw)?.channel_id)),
             "listRemovedMembers" => {
                 ok(self.list_removed_members(&args::<ServerArg>(raw)?.server_id))
+            }
+            "createInvite" => {
+                let a: CreateInviteArgs = args(raw)?;
+                let input = a.input.unwrap_or_default();
+                ok(self.create_invite(&a.server_id, input.expires_ms, input.max_uses))
+            }
+            "listInvites" => ok(self.list_invites(&args::<ServerArg>(raw)?.server_id)),
+            "revokeInvite" => {
+                let a: RevokeInviteArgs = args(raw)?;
+                ok(self.revoke_invite(&a.server_id, &a.invite_id))
             }
 
             "getStorageUsage" => ok(self.get_storage_usage()),
