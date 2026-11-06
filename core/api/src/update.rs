@@ -72,10 +72,13 @@ pub struct UpdateSetup {
     pub source: SourceFor,
 }
 
+/// A manifest channel and its `Updater`.
+type ChannelUpdater = (&'static str, Arc<Updater<DynSource>>);
+
 /// The `Updater` for the current channel, rebuilt when the channel changes.
 pub struct Updates {
     setup: UpdateSetup,
-    current: Mutex<Option<(&'static str, Arc<Updater<DynSource>>)>>,
+    current: Mutex<Option<ChannelUpdater>>,
     /// One download at a time across channel switches (each `Updater` only
     /// serialises its own).
     downloading: Mutex<()>,

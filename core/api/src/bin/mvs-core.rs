@@ -159,10 +159,10 @@ fn main() -> ExitCode {
     let stop = AtomicBool::new(false);
     let served = std::thread::scope(|scope| {
         if let Some(hints) = sync.as_ref().and_then(|net| net.take_hints()) {
-            let (core, stop) = (&core, &stop);
+            let stop = &stop;
             scope.spawn(move || core.run_sync_loop(&hints, stop));
         }
-        let served = sidecar::serve(&core, io::stdin().lock(), &out);
+        let served = sidecar::serve(core, io::stdin().lock(), &out);
         core.stop_updates();
         stop.store(true, Ordering::SeqCst);
         if let Some(net) = &sync {
