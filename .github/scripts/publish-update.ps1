@@ -13,11 +13,25 @@ param(
   [Parameter(Mandatory)][ValidatePattern('^v\d+\.\d+\.\d+$')][string]$Tag,
   [Parameter(Mandatory)][ValidateSet('alpha', 'beta')][string]$Channel,
   [Parameter(Mandatory)][string]$Manifest,
+  # The root.json the app ships (or the newest root-N.json), to verify against.
+  [Parameter(Mandatory)][string]$Root,
   [string[]]$Roots = @(),
+  [string]$Updater = 'updater',
   [string]$Repo = 'moranmoa/MVP'
 )
 $ErrorActionPreference = 'Stop'
 $version = $Tag.Substring(1)
+
+# Verify the signature, root chain and expiry with the updater itself, so a
+# bad or expired manifest is never published.
+if (-not (Get-Command $Updater -ErrorAction SilentlyContinue)) {
+  throw "updater CLI not found ('$Updater'): build it from a reviewed commit (cargo build --release -p updater) and pass -Updater <path>"
+}
+$verifyArgs = @('verify', '--manifest', $Manifest, '--root', $Root)
+foreach ($r in $Roots) { $verifyArgs += @('--root-update', $r) }
+& $Updater @verifyArgs
+if ($LASTEXITCODE -ne 0) { throw "updater verify failed: not publishing $Manifest" }
+"ok: updater verify accepted the signature, root chain and expiry"
 
 $signed = Get-Content -Raw $Manifest | ConvertFrom-Json
 if (-not $signed.signed -or -not $signed.signatures) { throw "$Manifest is not a signed manifest (no 'signed' / 'signatures')" }

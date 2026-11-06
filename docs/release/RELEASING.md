@@ -241,7 +241,8 @@ PowerShell on your normal (online) PC, in the repo:
 
 6. **Publish the update** to the channel releases the app polls
    (`https://github.com/moranmoa/MVP/releases/download/update-<channel>/manifest.json`).
-   The script checks that the signed body's channel and version match, and
+   The script first runs `updater verify` (signature, root chain, expiry;
+   build `updater` from a reviewed commit, or pass `-Updater <path>`). It then checks that the signed body's channel and version match, and
    that the update zip in the release matches its hash and size. It then
    uploads `manifest.json`, the zip and any root rotations to `update-<channel>`,
    which it creates once as a pre-release:
