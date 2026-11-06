@@ -248,9 +248,9 @@ PowerShell on your normal (online) PC, in the repo:
    which it creates once as a pre-release:
 
    ```powershell
-   .\.github\scripts\publish-update.ps1 -Tag v0.1.0 -Channel beta -Manifest .\manifest-beta.json
+   .\.github\scripts\publish-update.ps1 -Tag v0.1.0 -Channel beta -Manifest .\manifest-beta.json -Root .\root.json
    # stable only:
-   .\.github\scripts\publish-update.ps1 -Tag v0.1.0 -Channel alpha -Manifest .\manifest-alpha.json
+   .\.github\scripts\publish-update.ps1 -Tag v0.1.0 -Channel alpha -Manifest .\manifest-alpha.json -Root .\root.json
    # after a root rotation, add (to every channel, oldest first, never removed):
    #   -Roots E:\mvs-keys\root-2.json
    ```
