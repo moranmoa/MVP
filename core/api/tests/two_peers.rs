@@ -300,6 +300,65 @@ fn background_delivery(name: &str, fallback: bool) {
     eprintln!("background sync ({name}): done");
 }
 
+/// v0.2.4 join flake: the relay's DHT still lists many peers that have gone
+/// (app installs, earlier runs), so the peers closest to the joiner's own ID
+/// need not include the inviter. The joiner, started before the inviter has
+/// its relay reservation, still finds it, through the server's provider key.
+#[test]
+#[ignore = "needs a relay: set RELAY and run with --ignored"]
+fn a_joiner_finds_the_inviter_past_stale_peers() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let Ok(relay) = std::env::var("RELAY") else {
+        eprintln!("RELAY not set; skipped");
+        return;
+    };
+    let _ = tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).with_writer(std::io::stderr).try_init();
+    let stale = stale_peers();
+    let peers: Vec<_> = (0..stale)
+        .map(|i| {
+            let dir = std::env::temp_dir().join(format!("mvs-two-peers-{}-stale{i}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            SyncNetwork::start(relay.parse().unwrap(), &dir, Arc::new(MemberGate::new())).unwrap()
+        })
+        .collect();
+    // Long enough to get a reservation and into the relay's DHT; then gone.
+    std::thread::sleep(Duration::from_secs(10));
+    drop(peers);
+
+    let owner = peer("StaleOwner", OWNER, &relay);
+    let server = owner.core.create_server("Stale", AgeRestriction::None).unwrap();
+    // The joiner starts right away: the owner may have no reservation yet.
+    let guest = peer("StaleGuest", GUEST, &relay);
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        for p in [&owner, &guest] {
+            let hints = p.net.take_hints().expect("hints");
+            let stop = &stop;
+            scope.spawn(move || p.core.run_sync_loop(&hints, stop));
+        }
+        let start = Instant::now();
+        let joined = || guest.core.list_servers().unwrap().iter().any(|s| s.id == server.id);
+        while !joined() && start.elapsed() < JOIN_WITHIN {
+            guest.core.join_server(&server.invite_link).unwrap();
+        }
+        let took = start.elapsed();
+        stop.store(true, Ordering::SeqCst);
+        owner.net.wake();
+        guest.net.wake();
+        assert!(joined(), "the guest never found the owner past {stale} stale peers ({took:?})");
+        eprintln!("joined past {stale} stale peers in {took:?}");
+    });
+}
+
+/// Gone peers the relay's DHT still lists: well over its 20 closest
+/// (`STALE_PEERS` overrides it).
+fn stale_peers() -> usize {
+    std::env::var("STALE_PEERS").ok().and_then(|n| n.parse().ok()).unwrap_or(60)
+}
+/// The app's join screen gives up after 120 s.
+const JOIN_WITHIN: Duration = Duration::from_secs(45);
+
 /// v0.2.0 live smoke: B joins A's server by invite and writes first; A never
 /// sends. A's background sync sees the join and keys the channel for B, so
 /// B's send is allowed and A reads it. Nobody calls `sync_now`.

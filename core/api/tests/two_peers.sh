@@ -3,7 +3,7 @@
 # network, started the way infra/test/relay-catchup.sh does. Never touches
 # the live relay or its network.
 #
-#   bash core/api/tests/two_peers.sh
+#   bash core/api/tests/two_peers.sh [test name filter]
 #
 # IMAGE (default mvs-relay:test) is built from infra/relay unless it exists.
 set -euo pipefail
@@ -37,8 +37,8 @@ for _ in $(seq 30); do
 done
 [ -n "$relay_id" ] || { docker logs $P-relay; echo "relay did not start"; exit 1; }
 
-docker run --rm --network $P -e RELAY="/dns4/relay/tcp/4001/p2p/$relay_id" \
+docker run --rm --network $P -e STALE_PEERS="${STALE_PEERS:-60}" -e RUST_LOG="${RUST_LOG:-}" -e RELAY="/dns4/relay/tcp/4001/p2p/$relay_id" \
   -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" -v "$(mount "$core"):/work" \
   -v cargo-registry:/usr/local/cargo/registry -v core-target:/target -e CARGO_TARGET_DIR=/target \
   -w /work rust:1.90-bookworm \
-  cargo test --release -p api --test two_peers -- --ignored --nocapture
+  cargo test --release -p api --test two_peers -- --ignored --nocapture "$@"

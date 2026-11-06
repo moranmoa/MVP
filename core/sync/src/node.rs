@@ -162,6 +162,11 @@ const RELAY_BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// doubling to 5 min.
 const DIAL_BACKOFF_MIN: Duration = Duration::from_secs(5);
 const DIAL_BACKOFF_MAX: Duration = Duration::from_secs(300);
+/// How long peers keep our provider records, and how often we re-announce.
+const PROVIDER_TTL: Duration = Duration::from_secs(2 * 3600);
+const PROVIDER_REANNOUNCE: Duration = Duration::from_secs(30 * 60);
+/// Providers dialled per lookup: anyone with the secret can announce many.
+const MAX_PROVIDER_DIALS: usize = 8;
 /// Addresses kept per relayed peer for a direct upgrade (F2).
 const MAX_DIRECT_CANDIDATES: usize = 8;
 
@@ -723,7 +728,11 @@ async fn build_swarm(key: identity::Keypair, relay: Multiaddr, backoff: SharedBa
             let peer_id = key.public().to_peer_id();
             // Our own protocol name, not the public IPFS DHT's `/ipfs/kad/1.0.0`
             // (threat model R2); the relay speaks it too.
-            let kad_config = kad::Config::new(KAD_PROTOCOL);
+            let mut kad_config = kad::Config::new(KAD_PROTOCOL);
+            // Provider records (a server's peers): short-lived, re-announced well
+            // before they lapse, so gone peers drop out of the answers.
+            kad_config.set_provider_record_ttl(Some(PROVIDER_TTL));
+            kad_config.set_provider_publication_interval(Some(PROVIDER_REANNOUNCE));
             let mut kad = kad::Behaviour::with_config(peer_id, kad::store::MemoryStore::new(peer_id), kad_config);
             // Server mode so peers can find each other through any peer, not
             // only through the bootstrap node. (GAP-6 moves this to client mode.)
@@ -1034,6 +1043,7 @@ impl Task {
                 _ = anti_entropy.tick() => {
                     self.pending.expire(Instant::now(), PENDING_TTL);
                     self.pull_all();
+                    self.find_lonely_servers();
                 }
                 _ = discovery.tick() => self.discover(),
             }
@@ -1058,6 +1068,10 @@ impl Task {
             Command::OpenServer { server, secret } => {
                 self.secrets.entry(server).or_insert(*secret);
                 self.open_sealed(server, Scope::Control);
+                if self.swarm.is_connected(&self.relay_peer) {
+                    self.provide(server);
+                    self.find_providers(server);
+                }
             }
             Command::OpenChannel { server, channel, reply } => {
                 let result = if self.secrets.contains_key(&server) {
@@ -1211,6 +1225,38 @@ impl Task {
             if peer.is_none_or(|p| !self.direct.contains_key(&p)) {
                 let _ = self.swarm.dial(DialOpts::unknown_peer_id().address(addr).build());
             }
+        }
+    }
+
+    /// Announces us under the server's provider key (at the relay and the
+    /// peers closest to the key). Again after each new reservation: the
+    /// relay forgets them when it restarts.
+    fn provide(&mut self, server: ServerId) {
+        let Some(secret) = self.secrets.get(&server) else { return };
+        let key = kad::RecordKey::new(&secret.provider_key());
+        if let Err(err) = self.swarm.behaviour_mut().kad.start_providing(key) {
+            debug!(%err, "announcing as a provider failed");
+        }
+    }
+
+    /// Looks up the server's other peers by its provider key. The lookup by
+    /// our own ID (`discover`) can miss them once the relay's DHT lists many
+    /// peers that have gone (v0.2.4 join hang).
+    fn find_providers(&mut self, server: ServerId) {
+        let Some(secret) = self.secrets.get(&server) else { return };
+        self.swarm.behaviour_mut().kad.get_providers(kad::RecordKey::new(&secret.provider_key()));
+    }
+
+    /// Servers nobody is online for yet (a joiner, or a peer that came back):
+    /// keep looking for their peers.
+    fn find_lonely_servers(&mut self) {
+        if !self.swarm.is_connected(&self.relay_peer) {
+            return;
+        }
+        let lonely: Vec<ServerId> =
+            self.secrets.keys().filter(|server| self.presence.online(server).is_empty()).copied().collect();
+        for server in lonely {
+            self.find_providers(server);
         }
     }
 
@@ -1517,6 +1563,14 @@ impl Task {
                     self.emit(NodeEvent::RelayReserved);
                     let me = *self.swarm.local_peer_id();
                     self.swarm.behaviour_mut().kad.get_closest_peers(me);
+                    // Our circuit goes into our provider records: without an
+                    // address the relay answers with its routing table's,
+                    // which may no longer hold us (see `find_providers`).
+                    self.swarm.add_external_address(self.relay_addr.clone().with(Protocol::P2pCircuit));
+                    for server in self.secrets.keys().copied().collect::<Vec<_>>() {
+                        self.provide(server);
+                        self.find_providers(server);
+                    }
                     self.pull_all();
                 }
             }
@@ -1526,6 +1580,7 @@ impl Task {
             SwarmEvent::ListenerClosed { listener_id, .. } if self.circuit == Some(listener_id) => {
                 // Reservation refused or lost: the next discovery tick asks again.
                 self.circuit = None;
+                self.swarm.remove_external_address(&self.relay_addr.clone().with(Protocol::P2pCircuit));
             }
             SwarmEvent::OutgoingConnectionError { peer_id: Some(peer), error, .. } if peer != self.relay_peer => {
                 // Back off this peer, and forget circuit addresses that failed
@@ -1569,6 +1624,41 @@ impl Task {
                         .build();
                     let _ = self.swarm.dial(opts);
                 }
+            }
+            SwarmEvent::Behaviour(BehaviourEvent::Kad(kad::Event::OutboundQueryProgressed {
+                result: kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders { providers, .. })),
+                ..
+            })) => {
+                // Dialled through our relay's circuit only: the provider
+                // record's addresses are whatever the provider claimed. A
+                // provider is only a hint: what it serves is checked as usual.
+                let now = Instant::now();
+                let mut dialled = 0;
+                for peer in providers {
+                    if peer == *self.swarm.local_peer_id()
+                        || self.connected.contains(&peer)
+                        || !self.dial_backoff.lock().unwrap().may_dial(&peer, now)
+                    {
+                        continue;
+                    }
+                    if dialled == MAX_PROVIDER_DIALS {
+                        break;
+                    }
+                    dialled += 1;
+                    debug!(%peer, "found a provider");
+                    let circuit = self.relay_addr.clone().with(Protocol::P2pCircuit).with(Protocol::P2p(peer));
+                    let opts = DialOpts::peer_id(peer)
+                        .addresses(vec![circuit])
+                        .condition(PeerCondition::DisconnectedAndNotDialing)
+                        .build();
+                    let _ = self.swarm.dial(opts);
+                }
+            }
+            SwarmEvent::Behaviour(BehaviourEvent::Kad(kad::Event::OutboundQueryProgressed {
+                result: result @ (kad::QueryResult::GetProviders(_) | kad::QueryResult::StartProviding(_)),
+                ..
+            })) => {
+                debug!(?result, "provider query");
             }
             SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message {
                 propagation_source,

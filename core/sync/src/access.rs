@@ -37,6 +37,7 @@ pub const SECRET_LEN: usize = 32;
 
 const TOPIC_CONTEXT: &str = "mvs/topic/v1";
 const GOSSIP_CONTEXT: &str = "mvs/gossip/v1";
+const PROVIDER_CONTEXT: &str = "mvs/provider/v1";
 const BINDING_CONTEXT: &[u8] = b"mvs/peer-binding/v1";
 
 const SEAL_VERSION: u8 = 1;
@@ -73,6 +74,13 @@ impl ServerSecret {
     /// The name of one of the server's logs on the wire.
     pub fn handle(&self, scope: Scope) -> Handle {
         Handle(self.derive(TOPIC_CONTEXT, scope))
+    }
+
+    /// The DHT key the server's peers announce themselves under, so a joiner
+    /// finds them however many other peers the DHT lists. Opaque without
+    /// the secret.
+    pub(crate) fn provider_key(&self) -> [u8; 32] {
+        self.derive(PROVIDER_CONTEXT, Scope::Control)
     }
 
     /// The key that seals one log's gossip.
@@ -289,6 +297,10 @@ mod tests {
         // Handle, gossip key and another secret's handle all differ.
         assert_ne!(control, chan);
         assert_ne!(control.0, *secret().gossip_key(Scope::Control));
+        // The provider key: its own context, never a handle or a gossip key.
+        assert_eq!(secret().provider_key(), blake3::derive_key("mvs/provider/v1", &[[9; 32].as_slice(), &[0]].concat()));
+        assert_ne!(secret().provider_key(), control.0);
+        assert_ne!(secret().provider_key(), *secret().gossip_key(Scope::Control));
         assert_ne!(control, ServerSecret::from_bytes([8; 32]).handle(Scope::Control));
         assert_eq!(Handle::parse(&control.wire()), Some(control));
         assert_eq!(Handle::parse("h/00"), None);
