@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use api::{
-    CollectingSink, Config, Core, FixedClock, GroupCipher, LoopbackNetwork, PendingGroupKeys, Ports,
+    CollectingSink, Config, Core, FixedClock, GroupCipher, LoopbackNetwork, Network,
+    PendingGroupKeys, Ports,
 };
 use identity::MemoryStore;
 
@@ -40,12 +41,24 @@ impl World {
         db_path: Option<PathBuf>,
         cipher: Arc<dyn GroupCipher>,
     ) -> Peer {
+        self.peer_on(self.network.clone(), secrets, db_path, cipher)
+    }
+
+    /// A peer on its own view of the network (e.g. one that can't reach
+    /// anyone yet).
+    pub fn peer_on(
+        &self,
+        network: Arc<dyn Network>,
+        secrets: Arc<MemoryStore>,
+        db_path: Option<PathBuf>,
+        cipher: Arc<dyn GroupCipher>,
+    ) -> Peer {
         let events = Arc::new(CollectingSink::new());
         let core = Core::open(
             Config { db_path, app_version: "0.1.0-alpha".into() },
             Ports {
                 secrets: secrets.clone(),
-                network: self.network.clone(),
+                network,
                 events: events.clone(),
                 clock: self.clock.clone(),
                 cipher,
