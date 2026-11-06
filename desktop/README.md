@@ -179,6 +179,24 @@ The address is never in git:
 which also takes `extraArgs` for other parts of the shell). Tests:
 `test/config.test.js`.
 
+### update.js (B8-6)
+
+`src/update.js` turns updates on only in an installed copy with
+`mvs-launcher` next to it. The update root is derived from where the exe is
+(`<root>/MVS.exe` or `<root>/versions/<ver>/MVS.exe`); a
+`--mvs-update-root=` argument that names another folder turns updates off for
+the run. With updates on, main:
+- gives the core `--update-root <root>`;
+- registers `mvs://` to the launcher, still with `--` before the link;
+- handles `restartToUpdate` itself: the core's `applyUpdate` first (refused
+  during a call; the error goes back to the UI), then a relaunch through the
+  launcher;
+- after the window has loaded and the core answers `getAppInfo`, tells the
+  core `markHealthy`.
+
+`markHealthy`, `checkForUpdate`, `downloadUpdate` and `applyUpdate` are
+core-only and not on the allow-list (GAP-17). Tests: `test/update.test.js`.
+
 ## Core status (T8-01)
 
 For the "core unavailable" screen. While mvs-core is not running, every
