@@ -197,7 +197,7 @@ describe('message menu (B25 §2)', () => {
     const row = await waitFor(() => rowOf('menu test שלום'));
     expect(row.getAttribute('aria-haspopup')).toBe('menu');
     fireEvent.contextMenu(row);
-    expect(menuItems()).toEqual(['Reply', 'Copy text', 'Edit', 'Delete']);
+    expect(menuItems()).toEqual(['Reply', 'Copy text', 'Copy message ID', 'Edit', 'Delete']);
 
     let copied = '';
     Object.assign(window, { mvs: { copyText: async (t: string) => ((copied = t), true) } });
@@ -216,12 +216,12 @@ describe('message menu (B25 §2)', () => {
     const myName = screen.getByRole('complementary', { name: 'Channels' }).querySelector('.me-name')!.textContent!;
     const others = () => screen.getAllByRole('article').filter((a) => a.getAttribute('aria-haspopup') && !a.textContent?.includes(myName));
     fireEvent.contextMenu(others()[0]);
-    expect(menuItems()).toEqual(['Reply', 'Copy text', 'Delete']);
+    expect(menuItems()).toEqual(['Reply', 'Copy text', 'Copy message ID', 'Delete']);
     fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
 
     await openOtherServer(channels);
     await waitFor(() => expect(others().length).toBeGreaterThan(0));
     fireEvent.contextMenu(others()[0]);
-    expect(menuItems()).toEqual(['Reply', 'Copy text']);
+    expect(menuItems()).toEqual(['Reply', 'Copy text', 'Copy message ID']);
   });
 });

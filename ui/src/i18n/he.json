@@ -170,6 +170,7 @@
   "server.settings.age": "הגבלת גיל",
   "server.settings.readOnly": "עריכת הפרטים האלה תגיע בגרסה הבאה.",
   "menu.copyText": "העתקת הטקסט",
+  "menu.copyMessageId": "העתקת מזהה ההודעה",
   "menu.forMessage": "פעולות להודעה של ⁨{name}⁩",
   "menu.markRead": "סימון כנקרא",
   "menu.renameChannel": "שינוי שם",

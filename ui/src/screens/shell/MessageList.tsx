@@ -79,6 +79,11 @@ export function MessageList({
             // The stored body: the direction marks are added only when it is shown.
             onSelect: async () => store.showFlash((await copyText(m.body)) ? 'common.copied' : 'menu.copyFailed'),
           },
+          {
+            key: 'copy-id',
+            label: intl.formatMessage({ id: 'menu.copyMessageId' }),
+            onSelect: async () => store.showFlash((await copyText(m.id)) ? 'common.copied' : 'menu.copyFailed'),
+          },
           ...(m.authorId === myId ? [{ key: 'edit', label: intl.formatMessage({ id: 'chat.edit' }), onSelect: () => handlers.onEdit(m) }] : []),
           { kind: 'separator' },
           ...(m.authorId === myId || isOwner
