@@ -68,9 +68,15 @@ fi
 # One UNSIGNED body per update channel (#211): every release goes to beta;
 # one promoted to stable is also signed for alpha. The owner signs offline.
 # $channel is kept for compatibility and ignored here.
+# Only zip payloads: the updater fetches and unpacks mvs-<v>-<platform>.zip
+# (in-app update is Windows-only for now). The Linux tar.gz stays a plain
+# release file.
+update_platforms=$(for p in $platforms; do case "$p" in windows-*) printf '%s ' "$p" ;; esac; done)
+rm -rf update-payloads && mkdir update-payloads
+for p in $update_platforms; do cp "dist/mvs-${version}-$p.zip" update-payloads/; done
 for ch in beta alpha; do
   node "$here/manifest-body.mjs" --version "$version" --channel "$ch" "${notes_args[@]}" \
-    --platforms "$platforms" --dir dist --days 14 --out "dist/manifest-body-$ch.json"
+    --platforms "$update_platforms" --dir update-payloads --days 14 --out "dist/manifest-body-$ch.json"
   echo "manifest-body-$ch.json" >> files
 done
 cat dist/manifest-body-beta.json

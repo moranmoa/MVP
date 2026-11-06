@@ -230,7 +230,10 @@ PowerShell on your normal (online) PC, in the repo:
    `sign-manifest` prints the body before signing; check the version and the
    channel.
 
-5. **Publish the release** (it stays a pre-release):
+5. **Publish the release** (it stays a pre-release). This only publishes
+   the installers for people downloading by hand. The app **fetches its
+   update payload from `update-<channel>`, not from here**, so step 6 is
+   what makes the update reach installed apps:
 
    ```powershell
    gh release edit v0.1.0 --draft=false --repo moranmoa/MVP
@@ -251,8 +254,11 @@ PowerShell on your normal (online) PC, in the repo:
    #   -Roots E:\mvs-keys\root-2.json
    ```
 
-   The payload (`mvs-X.Y.Z-<platform>.zip|.tar.gz`) is the unpacked app
-   folder, without the installer and without `mvs-launcher` (B8).
+   The payload (`mvs-X.Y.Z-<platform>.zip`) is the unpacked app folder,
+   without the installer and without `mvs-launcher` (B8). In-app update is
+   **Windows-only for now**: the updater fetches and unpacks only `.zip`, so
+   the manifests list only `windows-*`. The Linux `.tar.gz` stays a plain
+   release file.
 
 ## Keeping a release alive
 

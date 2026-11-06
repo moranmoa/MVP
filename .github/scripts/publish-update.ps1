@@ -31,8 +31,8 @@ $work = Join-Path ([IO.Path]::GetTempPath()) "mvs-update-$Channel-$version"
 New-Item -ItemType Directory -Force $work | Out-Null
 $files = @()
 foreach ($p in $body.artifacts.PSObject.Properties) {
-  $ext = if ($p.Name -like 'windows-*') { 'zip' } else { 'tar.gz' }
-  $name = "mvs-$version-$($p.Name).$ext"
+  # The updater fetches and unpacks only mvs-<version>-<platform>.zip.
+  $name = "mvs-$version-$($p.Name).zip"
   gh release download $Tag --repo $Repo --pattern $name --dir $work --clobber
   $path = Join-Path $work $name
   $hash = (Get-FileHash $path -Algorithm SHA256).Hash.ToLower()
