@@ -11,7 +11,7 @@ tag vX.Y.Z ──> Release workflow ──> draft pre-release (unsigned)
                                      ├─ mvs-X.Y.Z-<platform>.zip|.tar.gz     updater payloads
                                      ├─ mvs-ui-X.Y.Z.tar.gz                  built UI
                                      ├─ SHA256SUMS
-                                     └─ manifest-body.json                   UNSIGNED
+                                     └─ manifest-body-{beta,alpha}.json      UNSIGNED, one per channel
 owner, offline: updater sign-manifest ──> manifest.json ──> upload ──> publish
 ```
 
@@ -50,7 +50,7 @@ the release notes link to.
      anything missing or extra;
    - writes `SHA256SUMS` over those files;
    - [`manifest-body.mjs`](../../.github/scripts/manifest-body.mjs) writes
-     `manifest-body.json`: channel `alpha`, the version, one `{sha256, size}`
+     `manifest-body-beta.json` and `manifest-body-alpha.json`: the channel, the version, the CHANGELOG notes, one `{sha256, size}`
      entry per platform in `PLATFORMS` (any other platform is an error),
      valid for 14 days from the build;
    - creates the draft pre-release and uploads that explicit list.
@@ -197,7 +197,7 @@ PowerShell on your normal (online) PC, in the repo:
      $sum, $file = $_ -split '\s+', 2
      if ((Get-FileHash $file -Algorithm SHA256).Hash.ToLower() -ne $sum) { "MISMATCH $file" } else { "ok $file" }
    }
-   Get-Content manifest-body.json
+   Get-Content manifest-body-beta.json
    ```
 
    Read the body: `version` matches the tag, `channel` is `alpha`, all four
@@ -207,59 +207,63 @@ PowerShell on your normal (online) PC, in the repo:
    window (the 14 days count from `issued_at`; hashes are not touched):
 
    ```powershell
-   node ..\.github\scripts\manifest-body.mjs --restamp manifest-body.json --days 14
+   node ..\.github\scripts\manifest-body.mjs --restamp manifest-body-beta.json --days 14
    ```
 
    **Do not re-run the workflow after this point.** A re-run replaces the
    draft's assets, and the hashes you are about to sign would no longer match.
 
-4. **Sign offline.** Copy only `manifest-body.json` to the signing machine
+4. **Sign offline, one manifest per channel.** The draft carries
+   `manifest-body-beta.json` and `manifest-body-alpha.json`. Both have the
+   same artifacts and the "what's new" notes from `CHANGELOG.md` (Hebrew +
+   English). Every release goes to **beta**; sign **alpha** too only when the
+   release is promoted to stable. Copy only the bodies to the signing machine
    (USB stick). The key never comes to the online PC. There:
 
    ```powershell
-   updater sign-manifest --key E:\mvs-keys\root.key --body manifest-body.json --out manifest.json
-   updater verify --manifest manifest.json --root root.json
+   updater sign-manifest --key E:\mvs-keys\root.key --body manifest-body-beta.json --out manifest-beta.json
+   updater verify --manifest manifest-beta.json --root root.json
+   # stable only:
+   updater sign-manifest --key E:\mvs-keys\root.key --body manifest-body-alpha.json --out manifest-alpha.json
    ```
 
-   `sign-manifest` prints the body before signing; check it again.
-   Optionally also check one artifact:
-   `updater verify --manifest manifest.json --root root.json --artifact mvs-0.1.0-windows-x86_64.zip --platform windows-x86_64`.
+   `sign-manifest` prints the body before signing; check the version and the
+   channel.
 
-5. **Attach and publish.** Copy `manifest.json` back, then:
+5. **Publish the release** (it stays a pre-release):
 
    ```powershell
-   gh release upload v0.1.0 manifest.json --repo moranmoa/MVP
    gh release edit v0.1.0 --draft=false --repo moranmoa/MVP
    ```
 
-   It stays marked as a pre-release. Send the link to testers.
-
-6. **Point the updater at it.** Installed apps look for the signed manifest
-   at a fixed address per channel: the release with tag `update-alpha`
-   (`https://github.com/moranmoa/MVP/releases/download/update-alpha/manifest.json`,
-   with the root-rotation files `root-*.json` next to it). Create it once,
-   then replace its manifest on every release:
+6. **Publish the update** to the channel releases the app polls
+   (`https://github.com/moranmoa/MVP/releases/download/update-<channel>/manifest.json`).
+   The script checks that the signed body's channel and version match, and
+   that the update zip in the release matches its hash and size. It then
+   uploads `manifest.json`, the zip and any root rotations to `update-<channel>`,
+   which it creates once as a pre-release:
 
    ```powershell
-   # once:
-   gh release create update-alpha --repo moranmoa/MVP --prerelease --title "Update channel: alpha" --notes "Signed update manifest for the alpha channel. Not an installer."
-   # every release (and every keep-alive re-sign):
-   gh release upload update-alpha manifest.json --clobber --repo moranmoa/MVP
+   .\.github\scripts\publish-update.ps1 -Tag v0.1.0 -Channel beta -Manifest .\manifest-beta.json
+   # stable only:
+   .\.github\scripts\publish-update.ps1 -Tag v0.1.0 -Channel alpha -Manifest .\manifest-alpha.json
+   # after a root rotation, add (to every channel, oldest first, never removed):
+   #   -Roots E:\mvs-keys\root-2.json
    ```
 
-   The updater payload (`mvs-X.Y.Z-<platform>.zip|.tar.gz`) is the unpacked
-   app folder, without the installer and without `mvs-launcher` (B8).
+   The payload (`mvs-X.Y.Z-<platform>.zip|.tar.gz`) is the unpacked app
+   folder, without the installer and without `mvs-launcher` (B8).
 
 ## Keeping a release alive
 
 A manifest expires (at most 30 days, 14 by default). Clients refuse it after
 that, which stops an attacker freezing users on an old release. Before it
 runs out, re-sign the same release without a new build: download
-`manifest-body.json`, `--restamp` it, sign it offline (step 4), then
+the channel's `manifest-body-<channel>.json`, `--restamp` it, sign it offline (step 4), then
 `gh release upload v0.1.0 manifest.json --clobber`.
 
 To pull a bad version, put it in the next body's `revoked` list (edit
-`manifest-body.json` before signing). A manifest cannot revoke its own
+`manifest-body-beta.json` before signing). A manifest cannot revoke its own
 version.
 
 ## Later: 2 of 3 keys
