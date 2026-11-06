@@ -6,6 +6,8 @@ import { useCore, type Member, type ServerSummary } from '../../core';
 import { Avatar, Code, Dialog, Name } from '../../components/common';
 import { textDir, useUiDir } from '../../app/textDir';
 import { CloseIcon } from '../../components/icons';
+import { useContextMenu, type MenuItem } from '../../components/ContextMenu';
+import { copyText } from '../../app/clipboard';
 import { nameSkeleton } from '../../core/sanitize';
 
 const NO_MEMBERS: Member[] = [];
@@ -48,7 +50,37 @@ export function MemberList({ server, onClose }: { server: ServerSummary; onClose
   const members = useStore(store, (s) => s.members[server.id] ?? NO_MEMBERS);
   const myId = useStore(store, (s) => s.identity?.id);
   const intl = useIntl();
+  const core = useCore();
   const [openId, setOpenId] = useState<string | null>(null);
+  const [kickId, setKickId] = useState<string | null>(null);
+  const { bind, menu } = useContextMenu();
+  const owner = server.ownerId === myId;
+  // B25 §4: the member menu. Every item is also on the profile card.
+  const memberItems = (m: Member): MenuItem[] => [
+    { key: 'profile', label: intl.formatMessage({ id: 'menu.profile' }), onSelect: () => setOpenId(m.id) },
+    {
+      key: 'code',
+      label: intl.formatMessage({ id: 'menu.copyCode' }),
+      onSelect: async () => store.showFlash((await copyText(m.shortCode)) ? 'common.copied' : 'menu.copyFailed'),
+    },
+    { kind: 'separator' },
+    ...(m.id === myId
+      ? []
+      : [{ key: 'block', label: intl.formatMessage({ id: m.blocked ? 'profile.unblock' : 'profile.block' }), onSelect: () => void core.blockUser(m.id) }]),
+    ...(owner && m.id !== myId && !m.isOwner
+      ? [
+          {
+            key: 'kick',
+            label: intl.formatMessage({ id: 'profile.kick' }),
+            danger: true,
+            onSelect: () => {
+              setKickId(m.id);
+              setOpenId(m.id);
+            },
+          },
+        ]
+      : []),
+  ];
 
   const [online, offline] = useMemo(() => {
     const collator = new Intl.Collator(intl.locale);
@@ -77,6 +109,7 @@ export function MemberList({ server, onClose }: { server: ServerSummary; onClose
               <button
                 type="button"
                 className={`member ${m.presence}`}
+                {...bind(intl.formatMessage({ id: 'menu.forMember' }, { name: displayName(m) }), () => memberItems(m))}
                 onClick={() => setOpenId(m.id)}
                 aria-label={[
                   intl.formatMessage({ id: 'members.open' }, { name: displayName(m) }),
@@ -148,7 +181,21 @@ export function MemberList({ server, onClose }: { server: ServerSummary; onClose
       )}
       {group(online, 'members.online')}
       {group(offline, 'members.offline')}
-      {open && <ProfileCard member={open} server={server} isMe={open.id === myId} lookalike={flagged.has(open.id)} onClose={() => setOpenId(null)} />}
+      {open && (
+        <ProfileCard
+          key={`${open.id}-${kickId === open.id}`}
+          member={open}
+          server={server}
+          isMe={open.id === myId}
+          lookalike={flagged.has(open.id)}
+          startKick={kickId === open.id}
+          onClose={() => {
+            setOpenId(null);
+            setKickId(null);
+          }}
+        />
+      )}
+      {menu}
     </aside>
   );
 }
@@ -158,12 +205,15 @@ export function ProfileCard({
   server,
   isMe,
   lookalike,
+  startKick,
   onClose,
 }: {
   member: Member;
   server: ServerSummary;
   isMe: boolean;
   lookalike?: boolean;
+  /** Opens straight on the removal confirmation (from a menu or the settings screen). */
+  startKick?: boolean;
   onClose: () => void;
 }) {
   const core = useCore();
@@ -171,7 +221,7 @@ export function ProfileCard({
   const intl = useIntl();
   const uiDir = useUiDir();
   const myId = useStore(store, (s) => s.identity?.id);
-  const [confirmKick, setConfirmKick] = useState(false);
+  const [confirmKick, setConfirmKick] = useState(!!startKick);
   const canKick = server.ownerId === myId && !isMe && !member.isOwner;
   const name = displayName(member);
 

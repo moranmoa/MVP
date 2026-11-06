@@ -5,6 +5,9 @@ import { useStore } from '../../app/store';
 import type { Channel, Id, ServerSummary } from '../../core';
 import { Avatar, Badge, Code, InviteBox, Name } from '../../components/common';
 import { GearIcon, HashIcon, LinkIcon, PlusIcon } from '../../components/icons';
+import { useContextMenu, type MenuItem } from '../../components/ContextMenu';
+import { copyText } from '../../app/clipboard';
+import { useCore } from '../../core';
 
 const NO_CHANNELS: Channel[] = [];
 
@@ -15,6 +18,8 @@ export function ChannelSidebar({
   onOpenSettings,
   onCreateChannel,
   onEditChannel,
+  onDeleteChannel,
+  onOpenServerSettings,
 }: {
   server: ServerSummary;
   channelId: Id;
@@ -23,6 +28,10 @@ export function ChannelSidebar({
   /** Owner only (B11c). */
   onCreateChannel: () => void;
   onEditChannel: (channel: Channel) => void;
+  /** Owner only: the delete confirmation, from the channel menu. */
+  onDeleteChannel: (channel: Channel) => void;
+  /** Owner only (B11): the server settings screen. */
+  onOpenServerSettings: () => void;
 }) {
   const store = useAppStore();
   const channels = useStore(store, (s) => s.channels[server.id] ?? NO_CHANNELS);
@@ -32,6 +41,23 @@ export function ChannelSidebar({
   // desktop page can't write the clipboard by itself, see app/clipboard.ts).
   const [showInvite, setShowInvite] = useState(false);
   const owner = server.ownerId === identity.id;
+  const core = useCore();
+  const { bind, menu } = useContextMenu();
+  // B25 §3: the channel menu. Rename and delete are also behind the channel's gear.
+  const channelItems = (c: Channel, active: boolean): MenuItem[] => [
+    ...(c.unread && !active ? [{ key: 'read', label: intl.formatMessage({ id: 'menu.markRead' }), onSelect: () => void core.markRead(c.id) }] : []),
+    ...(owner ? [{ key: 'rename', label: intl.formatMessage({ id: 'menu.renameChannel' }), onSelect: () => onEditChannel(c) }] : []),
+    { kind: 'separator' },
+    {
+      key: 'copy-id',
+      label: intl.formatMessage({ id: 'menu.copyChannelId' }),
+      onSelect: async () => store.showFlash((await copyText(c.id)) ? 'common.copied' : 'menu.copyFailed'),
+    },
+    { kind: 'separator' },
+    ...(owner && !c.isDefault
+      ? [{ key: 'delete', label: intl.formatMessage({ id: 'channel.delete' }), danger: true, onSelect: () => onDeleteChannel(c) }]
+      : []),
+  ];
 
   return (
     <aside className="sidebar" aria-label={intl.formatMessage({ id: 'channels.label' })}>
@@ -42,6 +68,17 @@ export function ChannelSidebar({
         <span className="age-tag">
           <FormattedMessage id={`age.${server.ageRestriction === 'none' ? 'none' : server.ageRestriction.slice(0, 2)}`} />
         </span>
+        {owner && (
+          <button
+            type="button"
+            className="icon-button server-settings-button"
+            onClick={onOpenServerSettings}
+            aria-label={intl.formatMessage({ id: 'server.settings.open' })}
+            title={intl.formatMessage({ id: 'server.settings.open' })}
+          >
+            <GearIcon />
+          </button>
+        )}
         <button
           type="button"
           className="icon-button"
@@ -92,6 +129,7 @@ export function ChannelSidebar({
                   aria-current={active ? 'page' : undefined}
                   aria-label={parts.filter(Boolean).join(', ')}
                   onClick={() => onSelectChannel(c.id)}
+                  {...bind(intl.formatMessage({ id: 'menu.forChannel' }, { channel: c.name }), () => channelItems(c, active))}
                 >
                   <HashIcon />
                   <span className="channel-name">
@@ -138,6 +176,7 @@ export function ChannelSidebar({
           <GearIcon />
         </button>
       </footer>
+      {menu}
     </aside>
   );
 }

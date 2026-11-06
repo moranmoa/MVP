@@ -1,20 +1,25 @@
-import { useRef, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
+import { useRef, type CSSProperties, type HTMLAttributes, type KeyboardEvent, type ReactNode } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import { isCoreError, useCore, type Id, type ServerSummary } from '../../core';
 import { GearIcon, HomeIcon, PlusIcon, RefreshIcon } from '../../components/icons';
+import { useContextMenu, type MenuItem } from '../../components/ContextMenu';
+import { copyText } from '../../app/clipboard';
 
 export function ServerRail({
   selected,
   onSelect,
   onAdd,
   onOpenSettings,
+  onOpenServerSettings,
 }: {
   selected: Id | 'home';
   onSelect: (id: Id | 'home') => void;
   onAdd: () => void;
   onOpenSettings: () => void;
+  /** Owner only (B11): opens that server's settings. */
+  onOpenServerSettings: (id: Id) => void;
 }) {
   const store = useAppStore();
   const servers = useStore(store, (s) => s.servers);
@@ -22,6 +27,17 @@ export function ServerRail({
   const core = useCore();
   const intl = useIntl();
   const listRef = useRef<HTMLUListElement>(null);
+  const myId = useStore(store, (s) => s.identity?.id);
+  const { bind, menu } = useContextMenu();
+  // B25 §4: the server menu in the rail. Leaving a server waits for a core command.
+  const serverItems = (s: ServerSummary): MenuItem[] => [
+    {
+      key: 'invite',
+      label: intl.formatMessage({ id: 'menu.copyInvite' }),
+      onSelect: async () => store.showFlash((await copyText(s.inviteLink)) ? 'common.copied' : 'menu.copyFailed'),
+    },
+    ...(s.ownerId === myId ? [{ key: 'settings', label: intl.formatMessage({ id: 'server.settings.open' }), onSelect: () => onOpenServerSettings(s.id) }] : []),
+  ];
 
   // Arrow keys move between rail buttons (one Tab stop for the whole list).
   const onKeyDown = (e: KeyboardEvent) => {
@@ -69,6 +85,7 @@ export function ServerRail({
               tabIndex={selected === s.id ? 0 : -1}
               unread={s.unread}
               mentions={s.mentions}
+              menuProps={bind(intl.formatMessage({ id: 'menu.forServer' }, { name: s.name }), () => serverItems(s))}
             >
               <bdi className="initials">{s.initials}</bdi>
             </RailButton>
@@ -105,6 +122,7 @@ export function ServerRail({
           <GearIcon />
         </button>
       </div>
+      {menu}
     </nav>
   );
 }
@@ -120,6 +138,7 @@ function RailButton({
   tabIndex,
   unread,
   mentions = 0,
+  menuProps,
 }: {
   active?: boolean;
   label: string;
@@ -131,6 +150,7 @@ function RailButton({
   tabIndex?: number;
   unread?: boolean;
   mentions?: number;
+  menuProps?: HTMLAttributes<HTMLButtonElement>;
 }) {
   return (
     <div className={`rail-item ${active ? 'active' : ''} ${unread ? 'unread' : ''}`}>
@@ -144,6 +164,7 @@ function RailButton({
         onClick={onClick}
         style={style}
         tabIndex={tabIndex}
+        {...menuProps}
       >
         {children}
       </button>
