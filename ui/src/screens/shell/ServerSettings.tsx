@@ -9,7 +9,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
-import type { Channel, Member, ServerSummary } from '../../core';
+import { useCore, useCoreEvent, type Channel, type Invite, type Member, type ServerSummary } from '../../core';
 import { Avatar, Dialog, InviteBox, Name } from '../../components/common';
 import { GearIcon, HashIcon, PlusIcon } from '../../components/icons';
 import { displayName, ProfileCard } from './MemberList';
@@ -113,7 +113,7 @@ export function ServerSettings({
           </h3>
           {page === 'general' && <GeneralPage server={server} />}
           {page === 'channels' && <ChannelsPage server={server} onCreate={onCreateChannel} onEdit={onEditChannel} />}
-          {page === 'invite' && <InviteBox link={server.inviteLink} />}
+          {page === 'invite' && <InvitePage server={server} />}
           {page === 'members' && <MembersPage server={server} />}
         </section>
       </div>
@@ -212,5 +212,177 @@ function MembersPage({ server }: { server: ServerSummary }) {
       </ul>
       {kick && <ProfileCard member={kick} server={server} isMe={false} startKick onClose={() => setKick(null)} />}
     </>
+  );
+}
+
+const HOUR = 3_600_000;
+const EXPIRY = { never: 0, hour: HOUR, day: 24 * HOUR, week: 7 * 24 * HOUR } as const;
+type Expiry = keyof typeof EXPIRY;
+const MAX_USES = [0, 1, 5, 10, 25, 100];
+
+// Invites (#214): the current link, making a new one with an expiry and a use
+// limit, and the list of links with Revoke. The core sends server.updated after
+// a create or a revoke, and the list is read again then.
+function InvitePage({ server }: { server: ServerSummary }) {
+  const core = useCore();
+  const intl = useIntl();
+  const members = useStore(useAppStore(), (s) => s.members[server.id] ?? NO_MEMBERS);
+  const [invites, setInvites] = useState<Invite[] | null>(null);
+  const [expiry, setExpiry] = useState<Expiry>('never');
+  const [maxUses, setMaxUses] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const [confirm, setConfirm] = useState<string | null>(null);
+
+  const load = () =>
+    core.listInvites(server.id).then(setInvites, () => {
+      setInvites([]);
+      setFailed(true);
+    });
+  useEffect(() => {
+    void load();
+  }, [server.id]);
+  useCoreEvent('server.updated', (s) => {
+    if (s.id === server.id) void load();
+  }, [server.id]);
+
+  const run = async (action: () => Promise<unknown>) => {
+    setBusy(true);
+    setFailed(false);
+    try {
+      await action();
+    } catch {
+      setFailed(true);
+    } finally {
+      setBusy(false);
+    }
+    await load();
+  };
+
+  const create = () =>
+    run(() =>
+      core.createInvite(server.id, {
+        ...(expiry !== 'never' ? { expiresMs: Date.now() + EXPIRY[expiry] } : {}),
+        ...(maxUses ? { maxUses } : {}),
+      }),
+    );
+
+  const now = Date.now();
+  const status = (i: Invite) =>
+    i.revoked ? 'revoked' : i.expiresAt !== undefined && i.expiresAt <= now ? 'expired' : i.maxUses && i.uses >= i.maxUses ? 'usedUp' : null;
+  const author = (id: string) => {
+    const m = members.find((x) => x.id === id);
+    return m ? displayName(m) : '…';
+  };
+
+  return (
+    <div className="stack">
+      <h4>
+        <FormattedMessage id="invite.current" />
+      </h4>
+      {server.inviteLink ? (
+        <InviteBox link={server.inviteLink} />
+      ) : (
+        <p className="muted small">
+          <FormattedMessage id="invite.none" />
+        </p>
+      )}
+
+      <h4>
+        <FormattedMessage id="invite.create" />
+      </h4>
+      <div className="invite-form">
+        <label className="field">
+          <span>
+            <FormattedMessage id="invite.expires" />
+          </span>
+          <select value={expiry} onChange={(e) => setExpiry(e.target.value as Expiry)}>
+            {(Object.keys(EXPIRY) as Expiry[]).map((k) => (
+              <option key={k} value={k}>
+                {intl.formatMessage({ id: `invite.expires.${k}` })}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span>
+            <FormattedMessage id="invite.maxUses" />
+          </span>
+          <select value={maxUses} onChange={(e) => setMaxUses(Number(e.target.value))}>
+            {MAX_USES.map((n) => (
+              <option key={n} value={n}>
+                {n ? intl.formatNumber(n) : intl.formatMessage({ id: 'invite.maxUses.unlimited' })}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button type="button" className="primary" disabled={busy} onClick={() => void create()}>
+          <FormattedMessage id="invite.createButton" />
+        </button>
+      </div>
+      {failed && (
+        <p className="error small" role="alert">
+          <FormattedMessage id="invite.failed" />
+        </p>
+      )}
+
+      <h4>
+        <FormattedMessage id="invite.list" />
+      </h4>
+      {invites === null ? (
+        <p className="muted small">
+          <FormattedMessage id="common.loading" />
+        </p>
+      ) : (
+        <ul className="settings-list invite-list">
+          {[...invites].reverse().map((i) => {
+            const st = status(i);
+            return (
+              <li key={i.id} className={st ? 'inactive' : undefined}>
+                <div className="grow">
+                  <div>
+                    <FormattedMessage id="invite.by" values={{ name: author(i.createdBy) }} />
+                  </div>
+                  <div className="muted small">
+                    {i.maxUses ? (
+                      <FormattedMessage id="invite.usesOf" values={{ count: i.uses, max: i.maxUses }} />
+                    ) : (
+                      <FormattedMessage id="invite.uses" values={{ count: i.uses }} />
+                    )}
+                    {' · '}
+                    {i.expiresAt === undefined ? (
+                      <FormattedMessage id="invite.neverExpires" />
+                    ) : (
+                      <>
+                        <FormattedMessage id="invite.expiresOn" />{' '}
+                        {intl.formatDate(i.expiresAt, { dateStyle: 'medium', timeStyle: 'short' })}
+                      </>
+                    )}
+                  </div>
+                </div>
+                {st ? (
+                  <span className="muted small">
+                    <FormattedMessage id={`invite.status.${st}`} />
+                  </span>
+                ) : confirm === i.id ? (
+                  <span className="invite-confirm" role="group" aria-label={intl.formatMessage({ id: 'invite.revokeConfirm' })}>
+                    <button type="button" className="danger small" autoFocus disabled={busy} onClick={() => void run(() => core.revokeInvite(server.id, i.id)).then(() => setConfirm(null))}>
+                      <FormattedMessage id="invite.revoke" />
+                    </button>
+                    <button type="button" className="secondary small" onClick={() => setConfirm(null)}>
+                      <FormattedMessage id="common.cancel" />
+                    </button>
+                  </span>
+                ) : (
+                  <button type="button" className="secondary small" onClick={() => setConfirm(i.id)}>
+                    <FormattedMessage id="invite.revoke" />
+                  </button>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
   );
 }

@@ -12,6 +12,7 @@ import type {
   AgeRestriction,
   Channel,
   Identity,
+  Invite,
   JoinStatus,
   Member,
   Message,
@@ -186,6 +187,20 @@ export function cleanServer(s: ServerSummary): ServerSummary {
   };
 }
 
+const when = (raw: unknown): number | undefined => (typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? raw : undefined);
+const id = (raw: unknown): string => String(raw ?? '').slice(0, 128);
+
+export function cleanInvite(i: Invite): Invite {
+  return {
+    id: id(i.id),
+    createdBy: id(i.createdBy),
+    expiresAt: when(i.expiresAt),
+    maxUses: count(i.maxUses),
+    uses: count(i.uses),
+    revoked: i.revoked === true,
+  };
+}
+
 export function cleanChannel(c: Channel): Channel {
   return {
     ...c,
@@ -290,6 +305,8 @@ export function guardCore(core: CoreApi): CoreApi {
     updateChannel: wrap(core.updateChannel, cleanChannel),
     listMembers: wrap(core.listMembers, (l) => l.map(cleanMember)),
     createServer: wrap(core.createServer, cleanServer),
+    createInvite: wrap(core.createInvite, (r) => ({ ...r, id: id(r.id), link: cleanLink(r.link), expiresAt: when(r.expiresAt) })),
+    listInvites: wrap(core.listInvites, (l) => l.map(cleanInvite)),
     joinServer: wrap(core.joinServer, cleanJoin),
     getMessages: wrap(core.getMessages, cleanRange),
     sendMessage: wrap(core.sendMessage, cleanMessage),

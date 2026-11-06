@@ -2353,3 +2353,18 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Invites page (#214). */
+.invite-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+}
+.invite-list li.inactive .grow {
+  opacity: 0.6;
+}
+.invite-confirm {
+  display: inline-flex;
+  gap: 0.375rem;
+}
