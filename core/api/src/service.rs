@@ -20,6 +20,8 @@ use crate::db::Db;
 use crate::model::{self, GenesisBody, Log, ServerView};
 use crate::ports::{CipherError, GroupCipher, Network, Ports, Reach, SharedSecrets};
 use crate::types::*;
+use crate::update::Updates;
+use updater::client::UpdateEvent;
 
 const DEFAULT_STORAGE_LIMIT: u64 = 5 * 1024 * 1024 * 1024;
 const KV_STORAGE_LIMIT: &str = "storage-limit";
@@ -107,6 +109,8 @@ pub struct Core {
     inner: Mutex<Inner>,
     ports: Ports,
     app_version: String,
+    /// In-app update; `None` unless `--update-root` (see `with_updates`).
+    updates: Option<Arc<Updates>>,
 }
 
 /// Events collected while the lock is held, emitted after it is released.
@@ -176,7 +180,7 @@ impl Core {
                 inner.open_sync(&ports, server)?;
             }
         }
-        Ok(Core { inner: Mutex::new(inner), ports, app_version: config.app_version })
+        Ok(Core { inner: Mutex::new(inner), ports, app_version: config.app_version, updates: None })
     }
 
     /// What the app lock and sign-out call: the group cipher drops our
@@ -983,7 +987,103 @@ impl Core {
             UpdateChannel::Stable => b"stable",
             UpdateChannel::Beta => b"beta",
         };
-        self.lock().db.set(KV_UPDATE_CHANNEL, value)
+        self.lock().db.set(KV_UPDATE_CHANNEL, value)?;
+        // A new channel is checked now, not in 6 hours.
+        if let Some(updates) = &self.updates {
+            updates.wake();
+        }
+        Ok(())
+    }
+
+    /// Turns in-app update on (B8-5): `mvs-core --update-root`. Without
+    /// it the update commands answer `not-implemented` and no check runs.
+    pub fn with_updates(mut self, updates: Updates) -> Core {
+        self.updates = Some(Arc::new(updates));
+        self
+    }
+
+    fn updates(&self) -> CoreResult<&Updates> {
+        self.updates.as_deref().ok_or_else(|| ErrorCode::NotImplemented.into())
+    }
+
+    fn ui_channel(&self) -> CoreResult<UpdateChannel> {
+        Ok(self.get_app_info()?.update_channel)
+    }
+
+    fn now_secs(&self) -> u64 {
+        self.ports.clock.now_ms() / 1000
+    }
+
+    fn emit_update(&self, events: Vec<UpdateEvent>) {
+        self.emit(events.into_iter().map(update_event).collect());
+    }
+
+    /// `checkForUpdate` (main/core only, A2).
+    pub fn check_for_update(&self) -> CoreResult<serde_json::Value> {
+        self.updates()?.check(self.ui_channel()?, self.now_secs())
+    }
+
+    /// `downloadUpdate` (main/core only): emits `update.ready` once staged.
+    pub fn download_update(&self) -> CoreResult<serde_json::Value> {
+        let outcome = self.updates()?.download(self.ui_channel()?, self.now_secs())?;
+        self.emit_update(outcome.events);
+        Ok(outcome.ok)
+    }
+
+    /// `applyUpdate` (main/core only). TODO(voice): refuse during a call.
+    pub fn apply_update(&self) -> CoreResult<serde_json::Value> {
+        self.updates()?.apply(self.ui_channel()?, false)
+    }
+
+    /// `markHealthy` (main only): commits a trial version; `update.installed`
+    /// carries the notes in the profile's language.
+    pub fn mark_healthy(&self) -> CoreResult<serde_json::Value> {
+        let updates = self.updates()?;
+        let lang = match self.lock().me.as_ref().and_then(|me| me.profile.locale) {
+            Some(Locale::En) => "en",
+            _ => "he",
+        };
+        let outcome = updates.mark_healthy(self.ui_channel()?, lang)?;
+        self.emit_update(outcome.events);
+        Ok(outcome.ok)
+    }
+
+    /// The background check: once the UI is up (or after a fallback wait),
+    /// then every 6 h ± 30 min, and at once after a channel switch. Downloads
+    /// whatever is available; the apply waits for the user (or next start).
+    /// Returns when `Updates::stop` is called; without updates, at once.
+    pub fn run_update_loop(&self) {
+        let Some(updates) = &self.updates else { return };
+        if !updates.wait(crate::update::FIRST_CHECK_AFTER) {
+            return;
+        }
+        loop {
+            if let Ok(channel) = self.ui_channel() {
+                self.emit_update(updates.background_round(channel, self.now_secs()));
+            }
+            if !updates.wait(crate::update::next_interval()) {
+                return;
+            }
+        }
+    }
+
+    /// Ends `run_update_loop` (stdin closed).
+    pub fn stop_updates(&self) {
+        if let Some(updates) = &self.updates {
+            updates.stop();
+        }
+    }
+}
+
+fn update_event(e: UpdateEvent) -> Event {
+    match e {
+        UpdateEvent::Ready { version, waiting_for_call } => {
+            Event::UpdateReady(UpdateInfo { version: version.to_string(), waiting_for_call })
+        }
+        UpdateEvent::Installed { version, notes } => Event::UpdateInstalled { version: version.to_string(), notes },
+        UpdateEvent::RolledBack { failed, running } => {
+            Event::UpdateRolledBack { failed: failed.to_string(), running: running.to_string() }
+        }
     }
 }
 

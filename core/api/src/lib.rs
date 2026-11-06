@@ -22,6 +22,7 @@ mod service;
 pub mod sidecar;
 pub mod syncnet;
 pub mod types;
+pub mod update;
 
 pub use access::{KeyBinder, MemberReadGate, MemberStubGate, BINDING_PREFIX};
 pub use dispatch::NOT_YET;
