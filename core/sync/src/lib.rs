@@ -30,6 +30,7 @@ mod announce;
 mod keyfile;
 mod limits;
 mod presence;
+mod punch;
 #[cfg(test)]
 pub(crate) mod testutil;
 
