@@ -1,0 +1,16 @@
+# Override for a Linux host (Proxmox VM/LXC with a bridged NIC): the relay
+# uses the host's network stack, so it sees clients' REAL source addresses.
+# Docker Desktop's port publishing rewrites them all to the gateway
+# (172.18.x.1), which breaks DCUtR hole punching (#219). See infra/README.md,
+# "Running on a Linux host".
+#
+#   docker compose -f docker-compose.yml -f docker-compose.host.yml up -d relay
+#
+# Linux only: on Docker Desktop, host networking still sits behind the VM's NAT.
+services:
+  relay:
+    network_mode: host
+    # Host networking publishes nothing; the relay binds 4001 tcp/udp and
+    # 4002 (ws) on the host directly. Restrict 4002 to the reverse proxy with
+    # the host firewall (README).
+    ports: !reset []
