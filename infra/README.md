@@ -236,6 +236,50 @@ Things to know about hosting at home:
 - The domain points at your home IP, so that IP is public. A proxy service that
   hides it (like Cloudflare's) does not carry the TCP/UDP ports above.
 
+## Running on a Linux host (real source addresses)
+
+Hole punching (DCUtR, #219) needs the relay to see each client's real public
+address. Docker Desktop on Windows can't do that: every inbound connection to
+a published port, the forwarded 4001 included, arrives from the Docker
+gateway (`172.18.x.1`). Run the relay on a Linux host with a bridged network
+interface instead, such as a small Proxmox VM or LXC (1 vCPU, 512 MB), and
+use host networking. It's the same image, compose file and hardening.
+
+1. **Host**: Debian with Docker Engine (not Docker Desktop), on a bridged NIC
+   with a fixed LAN address. For an LXC, enable `nesting` so Docker runs.
+2. **Move the identity**: back up `node.key` on the old PC and restore it on
+   the new host ([Backing up the relay key](#backing-up-the-relay-key)), so the
+   peer ID, and every built-in relay address, stays the same. Stop the old
+   relay first, so two relays never run with one key.
+3. **`.env`** on the new host: copy the old one, then:
+   - `WS_BIND` doesn't apply (host networking binds 4002 on the host);
+   - `PROXY_IPS` = the reverse proxy's LAN address. The relay now sees NPM's
+     real address instead of the Docker gateway, so this changes;
+   - `EXTERNAL_ADDRS` keeps the wss address. When the owner's DNS-only
+     hostname for TCP exists, add `/dns4/<relay-tcp-host>/tcp/4001` and
+     `/dns4/<relay-tcp-host>/udp/4001/quic-v1` (the same name goes into the
+     repository variable `MVS_RELAY_TCP_ADDR` for clients; never commit it).
+4. **Start** with the host-network override:
+
+   ```
+   docker compose -f docker-compose.yml -f docker-compose.host.yml up -d --build relay
+   ```
+
+5. **Firewall on the host**: 4001 TCP+UDP open; **4002 only from the reverse
+   proxy** (`nft` or `ufw allow from <npm-lan-address> to any port 4002 proto tcp`).
+6. **Router**: move the 4001 TCP+UDP forward to the new host's LAN address.
+7. **NPM**: change the relay proxy host's Forward Hostname/IP to the new
+   host's LAN address (port 4002, WebSockets on, as above).
+8. **Check**: from a phone hotspot (outside your network), start a client and
+   run `docker compose logs relay` with `RUST_LOG=info,relay_node=debug` for a
+   minute, then set it back. The connection's remote address must be the
+   hotspot's public IP, not a private one. Also check that `circuits_denied` in
+   the `stats` line stays flat.
+
+The Caddy profile isn't supported with this override: Caddy reaches the
+relay by its compose service name, which host networking doesn't provide. Use
+NPM, or point Caddy at `127.0.0.1:4002`.
+
 ## Uptime and metrics
 
 Kept simple and private: nothing here publishes who connects.
