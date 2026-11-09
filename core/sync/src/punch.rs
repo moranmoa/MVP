@@ -221,6 +221,22 @@ impl MemberPunch {
         }
     }
 
+    /// Peers with a gate open now.
+    pub(crate) fn open_peers(&self) -> Vec<PeerId> {
+        self.relayed.keys().filter(|p| self.is_open(p)).copied().collect()
+    }
+
+    /// `peer` is no longer a member (kicked, or the read gate changed):
+    /// close its gates. DCUtR stops (no retries), and its punch dials are
+    /// refused from now on.
+    pub(crate) fn close(&mut self, peer: PeerId) {
+        for id in self.relayed.get(&peer).into_iter().flatten() {
+            if self.opened.remove(id) {
+                self.queued.push_back(ToSwarm::NotifyHandler { peer_id: peer, handler: NotifyHandler::One(*id), event: GateIn::Close });
+            }
+        }
+    }
+
     fn is_open(&self, peer: &PeerId) -> bool {
         self.relayed.get(peer).is_some_and(|c| c.iter().any(|id| self.opened.contains(id)))
     }
@@ -447,5 +463,24 @@ mod tests {
         }
         punch.relayed.insert(peer, HashSet::from([conn()]));
         assert!(punch.open_at(peer, start + Duration::from_secs(3601)));
+    }
+
+    /// A member kicked after its gate opened: the gate closes again, and
+    /// DCUtR's dials toward it are refused from then on.
+    #[test]
+    fn a_kicked_members_gate_closes() {
+        let mut punch = MemberPunch::new(PeerId::random(), false);
+        let peer = PeerId::random();
+        punch.relayed.insert(peer, HashSet::from([conn()]));
+        assert!(punch.open(peer));
+        assert_eq!(punch.open_peers(), vec![peer]);
+        punch.queued.clear();
+        punch.close(peer);
+        assert!(matches!(punch.queued.pop_front(), Some(ToSwarm::NotifyHandler { event: GateIn::Close, .. })));
+        assert!(punch.open_peers().is_empty());
+        let id = conn();
+        punch.dials.insert(id, peer);
+        let global: Multiaddr = "/ip4/8.8.8.8/tcp/4001".parse().unwrap();
+        assert!(punch.handle_pending_outbound_connection(id, Some(peer), &[global], Endpoint::Dialer).is_err());
     }
 }

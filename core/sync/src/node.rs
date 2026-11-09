@@ -1044,6 +1044,7 @@ impl Task {
                 _ = soon.tick() => {
                     self.pull_soon();
                     self.direct_fallback();
+                    self.recheck_punch();
                     let gone = self.presence.expire(Instant::now());
                     self.went_offline(gone);
                 }
@@ -1296,6 +1297,17 @@ impl Task {
         }
         if self.swarm.behaviour_mut().punch.open(peer) {
             debug!(%peer, "hole punching allowed with a member");
+        }
+    }
+
+    /// Every second: close the punch gate of a peer that stopped being a
+    /// member (kicked, or our read gate changed) since we opened it.
+    fn recheck_punch(&mut self) {
+        for peer in self.swarm.behaviour().punch.open_peers() {
+            if !self.is_member(peer) {
+                debug!(%peer, "no longer a member: hole punching closed");
+                self.swarm.behaviour_mut().punch.close(peer);
+            }
         }
     }
 
