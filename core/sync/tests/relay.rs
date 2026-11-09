@@ -445,6 +445,9 @@ async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
     let id = |n: u8| records::PublicKey::from_bytes(SigningKey::from_bytes(&[n; 32]).verifying_key().to_bytes());
     let ((smaller, _), (larger, smaller_id)) =
         if a.peer_id() < b.peer_id() { ((&a, id(10)), (&b, id(9))) } else { ((&b, id(9)), (&a, id(10))) };
+    // F2 on its own: a hole punch would go direct before the larger turn.
+    a.test_no_hole_punch().unwrap();
+    b.test_no_hole_punch().unwrap();
     smaller.test_no_direct_dials().unwrap();
     let start = Instant::now();
     // The larger side shows the smaller one as direct: its own dial worked.
@@ -456,4 +459,56 @@ async fn bound_peers_on_one_lan_switch_from_relayed_to_direct() {
     assert_eq!(larger.peers().await.unwrap(), vec![smaller.peer_id()]);
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
+}
+
+/// DCUtR (#184): two members who meet only through the relay, neither
+/// making the F2 direct dial, hole-punch to a direct connection, and both
+/// show the other as direct (the UI indicator). Here the observed address
+/// the relay reports is loopback, so this needs "LAN allowed"; without it
+/// there is nothing to punch to and the pair falls back cleanly: still
+/// connected and online through the relay.
+#[tokio::test(flavor = "multi_thread")]
+async fn members_hole_punch_from_relayed_to_direct_or_stay_relayed() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("sync=debug,libp2p_dcutr=debug")
+        .with_test_writer()
+        .try_init();
+    let id = |n: u8| records::PublicKey::from_bytes(SigningKey::from_bytes(&[n; 32]).verifying_key().to_bytes());
+    for allow_lan in [true, false] {
+        let relay_key = identity::Keypair::generate_ed25519();
+        let port = free_port();
+        let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::from(relay_key.public())).parse().unwrap();
+        let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _relay = start_relay_counting(relay_key, port, circuits.clone(), true);
+        let a = bound_node(&format!("punch-a-{allow_lan}"), &relay, 11, allow_lan, Arc::new(AcceptAll)).await;
+        let b = bound_node(&format!("punch-b-{allow_lan}"), &relay, 12, allow_lan, Arc::new(AcceptAll)).await;
+        // No F2 dial from either side: only a hole punch can go direct.
+        a.test_no_direct_dials().unwrap();
+        b.test_no_direct_dials().unwrap();
+        let start = Instant::now();
+        if allow_lan {
+            loop {
+                let (sa, sb) = (a.presence(test_server().0).await.unwrap(), b.presence(test_server().0).await.unwrap());
+                if sa.direct.contains(&id(12)) && sb.direct.contains(&id(11)) {
+                    break;
+                }
+                assert!(start.elapsed() < Duration::from_secs(60), "never punched: A sees {sa:?}, B sees {sb:?}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert_eq!(a.direct_peers().await.unwrap(), vec![b.peer_id()]);
+        } else {
+            let ids = [a.peer_id(), b.peer_id()];
+            while !circuits.lock().unwrap().iter().any(|(p, ok)| *ok && ids.contains(p)) {
+                assert!(start.elapsed() < Duration::from_secs(30), "never met through the relay");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            assert!(a.direct_peers().await.unwrap().is_empty(), "went direct with nothing to punch to");
+            let seen = a.presence(test_server().0).await.unwrap();
+            assert!(seen.online.contains(&id(12)) && seen.direct.is_empty(), "not online through the relay: {seen:?}");
+            assert_eq!(a.peers().await.unwrap(), vec![b.peer_id()], "the relayed connection went");
+        }
+        a.shutdown().await.unwrap();
+        b.shutdown().await.unwrap();
+    }
 }

@@ -29,6 +29,8 @@ libp2p = { version = "0.54", features = [
     "noise",
     "yamux",
     "relay",
+    # Hole punching with members only (`punch`).
+    "dcutr",
     "identify",
     "ping",
     "kad",

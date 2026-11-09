@@ -285,6 +285,7 @@ enum Command {
     ListenAddrs { reply: oneshot::Sender<Vec<Multiaddr>> },
     RelayOnly { on: bool },
     NoDirectDials,
+    NoHolePunch,
     #[cfg(test)]
     Served { peer: PeerId, log: String, reply: oneshot::Sender<usize> },
     Prune { id: RecordId, reply: oneshot::Sender<Result<bool>> },
@@ -356,6 +357,8 @@ struct Behaviour {
     sync: request_response::cbor::Behaviour<SyncRequest, SyncResponse>,
     limits: connection_limits::Behaviour,
     guard: DialGuard,
+    /// Hole punching (DCUtR), with verified members only (`punch`).
+    punch: crate::punch::MemberPunch,
 }
 
 type SharedBackoff = Arc<Mutex<DialBackoff<PeerId>>>;
@@ -472,7 +475,7 @@ impl Node {
 
         let backoff: SharedBackoff =
             Arc::new(Mutex::new(DialBackoff::new(DIAL_BACKOFF_MIN, DIAL_BACKOFF_MAX, MAX_TRACKED_PEERS)));
-        let mut swarm = build_swarm(key, config.relay.clone(), backoff.clone()).await?;
+        let mut swarm = build_swarm(key, config.relay.clone(), backoff.clone(), config.allow_lan).await?;
         // A stable port: `listen` with TCP port 0 reuses the one saved in
         // `listen.port` (written on first start); if it is taken now, a random
         // one, and the saved one is kept for next time.
@@ -663,6 +666,13 @@ impl Node {
         self.send(Command::NoDirectDials)
     }
 
+    /// Tests only: no hole punching (DCUtR) from or with this node, so the
+    /// F2 direct dial can be shown on its own.
+    #[doc(hidden)]
+    pub fn test_no_hole_punch(&self) -> Result<()> {
+        self.send(Command::NoHolePunch)
+    }
+
     pub fn set_relay_only(&self, on: bool) -> Result<()> {
         self.send(Command::RelayOnly { on })
     }
@@ -708,7 +718,12 @@ fn load_or_create_key(path: &std::path::Path) -> Result<identity::Keypair> {
     Ok(key)
 }
 
-async fn build_swarm(key: identity::Keypair, relay: Multiaddr, backoff: SharedBackoff) -> Result<Swarm<Behaviour>> {
+async fn build_swarm(
+    key: identity::Keypair,
+    relay: Multiaddr,
+    backoff: SharedBackoff,
+    allow_lan: bool,
+) -> Result<Swarm<Behaviour>> {
     Ok(SwarmBuilder::with_existing_identity(key)
         .with_tokio()
         .with_tcp(tcp::Config::default().nodelay(true), noise::Config::new, yamux::Config::default)?
@@ -785,6 +800,7 @@ async fn build_swarm(key: identity::Keypair, relay: Multiaddr, backoff: SharedBa
                 ),
                 limits: connection_limits::Behaviour::new(limits),
                 guard: DialGuard { backoff },
+                punch: crate::punch::MemberPunch::new(peer_id, allow_lan),
             })
         })?
         .with_swarm_config(|c| c.with_idle_connection_timeout(IDLE_TIMEOUT))
@@ -1028,6 +1044,7 @@ impl Task {
                 _ = soon.tick() => {
                     self.pull_soon();
                     self.direct_fallback();
+                    self.recheck_punch();
                     let gone = self.presence.expire(Instant::now());
                     self.went_offline(gone);
                 }
@@ -1106,6 +1123,7 @@ impl Task {
             }
             Command::RelayOnly { on } => self.set_relay_only(on),
             Command::NoDirectDials => self.direct_dials = false,
+            Command::NoHolePunch => self.swarm.behaviour_mut().punch.set_enabled(false),
             Command::ListenAddrs { reply } => {
                 let _ = reply.send(self.swarm.listeners().cloned().collect());
             }
@@ -1253,6 +1271,8 @@ impl Task {
             return;
         }
         self.relay_only = on;
+        // No hole punching either way while relay-only (GAP-6).
+        self.swarm.behaviour_mut().punch.set_enabled(!on);
         if on {
             if let Some(id) = self.listener.take() {
                 self.swarm.remove_listener(id);
@@ -1265,6 +1285,30 @@ impl Task {
             }
         }
         info!(on, "relay only");
+    }
+
+    /// Lets DCUtR run on our relayed connections to `peer` once it is a
+    /// verified member (bound, accepted by our read gate) and relay-only is
+    /// off; see `punch`. Each side does this once it verified the other;
+    /// until then the side that would answer holds the request.
+    fn try_punch(&mut self, peer: PeerId) {
+        if self.relay_only || self.direct.contains_key(&peer) || !self.relayed.contains_key(&peer) || !self.is_member(peer) {
+            return;
+        }
+        if self.swarm.behaviour_mut().punch.open(peer) {
+            debug!(%peer, "hole punching allowed with a member");
+        }
+    }
+
+    /// Every second: close the punch gate of a peer that stopped being a
+    /// member (kicked, or our read gate changed) since we opened it.
+    fn recheck_punch(&mut self) {
+        for peer in self.swarm.behaviour().punch.open_peers() {
+            if !self.is_member(peer) {
+                debug!(%peer, "no longer a member: hole punching closed");
+                self.swarm.behaviour_mut().punch.close(peer);
+            }
+        }
     }
 
     fn try_direct(&mut self, peer: PeerId) {
@@ -1393,6 +1437,7 @@ impl Task {
         self.bound.insert((peer, server), (binding, identity));
         // Now bound: a LAN address it reported may be tried (F2).
         self.try_direct(peer);
+        self.try_punch(peer);
         Some(identity)
     }
 
@@ -1425,6 +1470,9 @@ impl Task {
                 }
                 if peer_id != self.relay_peer {
                     self.track_connection(peer_id, connection_id, &endpoint);
+                    if is_relayed(&endpoint) {
+                        self.try_punch(peer_id);
+                    }
                 }
                 if peer_id == self.relay_peer {
                     self.relay_backoff = RELAY_BACKOFF_MIN;
@@ -1531,7 +1579,9 @@ impl Task {
                 // Back off this peer, and forget circuit addresses that failed
                 // (a reservation that ended): the relay denies each such dial.
                 // A dial our own guard refused isn't a new failure.
-                if !matches!(error, libp2p::swarm::DialError::Denied { .. }) {
+                // Nor is an extra dial to a peer we are connected to (a
+                // direct or hole-punch attempt that failed).
+                if !matches!(error, libp2p::swarm::DialError::Denied { .. }) && !self.connected.contains(&peer) {
                     let jitter = |wait| jittered(wait, OsRng.next_u32());
                     self.dial_backoff.lock().unwrap().failed(peer, Instant::now(), jitter);
                 }
@@ -1590,6 +1640,15 @@ impl Task {
                             self.on_response(key, response);
                         }
                     }
+                }
+            }
+            SwarmEvent::Behaviour(BehaviourEvent::Punch(libp2p::dcutr::Event { remote_peer_id, result })) => {
+                // A success shows up as a direct connection: `track_connection`
+                // flips the link to direct and parks the relayed one (#206).
+                // A failure leaves the relayed connection as it is.
+                match result {
+                    Ok(_) => info!(peer = %remote_peer_id, "hole punch succeeded"),
+                    Err(err) => debug!(peer = %remote_peer_id, %err, "hole punch failed: staying relayed"),
                 }
             }
             SwarmEvent::Behaviour(BehaviourEvent::Sync(request_response::Event::OutboundFailure {
@@ -3003,6 +3062,7 @@ mod tests {
             identity::Keypair::generate_ed25519(),
             "/ip4/1.2.3.4/tcp/1".parse().unwrap(),
             Arc::new(Mutex::new(DialBackoff::new(DIAL_BACKOFF_MIN, DIAL_BACKOFF_MAX, 4))),
+            false,
         ).await.unwrap();
         let relay = PeerId::random();
         // Without a WebSocket transport this fails at once ("multiaddr not
