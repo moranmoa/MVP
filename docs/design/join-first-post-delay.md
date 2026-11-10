@@ -18,7 +18,7 @@ A join is followed by these steps, each with a worst case:
 | 4 | `rotate_channel` signs the rotation and publishes it on the channel's gossip topic | `service.rs` `rotate_channel`; `node.rs` `append_local` | ms |
 | 5 | The joiner receives it by gossip, or else on its next anti-entropy pull | `node.rs` `ANTI_ENTROPY` | 0–5 s |
 
-- Likely cause, to be confirmed by the measurement below: gossip in step 5 misses when the joiner isn't yet in the owner's view of that channel topic. The joiner subscribes to channel topics only after its own join is accepted and `open_server` runs, which races the owner's rotation.
+- Confirmed by the measurement below, for step 1 too: gossip in step 5 misses when the joiner isn't yet in the owner's view of that channel topic. The joiner subscribes to channel topics only after its own join is accepted and `open_server` runs, which races the owner's rotation.
 - `append_local` treats "no subscribed peers" as fine, because they'll pull. So the record waits for the joiner's next 5 s pull.
 - The Tech Lead's smoke log shows the rotation arriving on a pull. That fits steps 1 + 2 + 5 with a missed gossip: about 5 + 2 + 3 ≈ 10 s.
 - Step 3 can add more when joins come close together, as they did in the 10-join smoke.
@@ -44,14 +44,49 @@ The goal: a new member gets the key without waiting for any 5 s pull.
 
 Expected result: step 5 drops from 0–5 s to ≤ 1 s, and step 1 improves too. A join outside a batch window should post in about 1–3 s.
 
-## Before coding: measure
-Add debug logs (`RUST_LOG=api=debug,sync=debug`, from #204) with millisecond timestamps for each of these:
-- `Join` stored at the owner;
-- `rekey` run, and whether it was deferred;
-- the rotation published;
-- the rotation stored at the joiner.
+## Measured (2026-11-10, throwaway relay in Docker)
+- **Setup:** an uncommitted probe test (in the style of `tests/two_peers.rs`) ran against a throwaway relay on its own Docker network, with real `SyncNetwork` and the real cipher.
+  - Both cores ran `run_sync_loop`. The core code was unchanged.
+  - The clock starts when the joiner lists the server. The probe then polls every 20 ms.
+- **What it records:** ms until the owner lists the joiner, the `KeyRotation` is in the owner's store, the rotation is in the joiner's store, and the joiner's first `sendMessage` succeeds.
 
-Rerun the 10-join smoke on a throwaway relay. If step 3 turns out to dominate, piece 4 comes first.
+**A: 10 fresh owner/joiner pairs** (no batching possible). All times in ms.
+
+| Round | Owner sees join | Rotation at owner | Rotation at joiner | First post |
+| --- | --- | --- | --- | --- |
+| 0 | 4836 | 4836 | 9854 | **9869** |
+| 2 | 4737 | 4737 | 4863 | **4959** |
+| the other 8 | 0 | 0 | 0 | 34–93 |
+
+**B: one owner, 3 joiners about 4 s apart** (batching in play). All times in ms.
+
+| Joiner | Owner sees join | Rotation at owner | Rotation at joiner | First post |
+| --- | --- | --- | --- | --- |
+| 1st | 0 | 0 | 0 | 31 |
+| 2nd | 0 | 10049 | 10049 | **10071** |
+| 3rd | 0 | 12056 | 12056 | **12084** |
+
+Findings:
+1. **A missed gossip costs one anti-entropy pull, about 5 s, and it happens on both legs.**
+   - Round 0 is the ~9.8 s case reproduced (9.87 s). The owner missed the `Join` gossip (4.8 s), then the joiner missed the rotation gossip (+5.0 s).
+   - Round 2 missed only the first leg (5.0 s).
+   - 8 of 10 rounds missed neither and posted in under 0.1 s.
+2. **The core loop costs nothing measurable.** The rotation is in the owner's store at the same poll tick as the join (step 2 ≈ 0 ms).
+3. **Batching (GAP-8) dominates when joins are close.**
+   - When a join lands inside a 12–18 s window after the last rotation, it waits for the window to end: 10–12 s.
+   - That happens even though gossip delivered the rotation instantly (rotation at owner = rotation at joiner).
+
+What this means for the fix:
+- **Pull on `Subscribed` (dev-sync)** covers both missed legs:
+  - the owner pulls the control log as soon as the joiner subscribes, which fixes leg 1;
+  - the joiner pulls the channel log as soon as the owner's subscription is seen, which fixes leg 2.
+- **`want`/`unwant`** is the backstop.
+- **Batching** needs a decision from the security lead. Options: rotate at once for the first few joins per window (for example 3 a minute) and batch only past that, or keep the window and accept a wait of up to 18 s for clustered joins. Piece 4 alone (an exact wake) saves at most one 2 s round.
+
+## How it was measured (to rerun)
+- Use `core/api/tests/two_peers.sh` as the template, with its own container and network names, and nothing pointed at the live relay. The probe adds `core/api/tests/first_post_probe.rs`, with two `#[ignore]` tests: `probe_fresh_pairs` (`ROUNDS`, default 10) and `probe_close_joins`.
+- The probe isn't committed, so this PR stays docs only. A copy is in the shared notes folder, as `first_post_probe.rs`.
+- Run the probe again after each fix: the pass bar is a first post under 3 s in all 10 fresh pairs.
 
 ## Files
 - **sync:**
