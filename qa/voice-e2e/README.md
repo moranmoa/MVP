@@ -26,7 +26,7 @@ The first run builds `mvs-core` in release mode, which takes several minutes. Af
 
 Isolation:
 - Each run is its own compose project, `mvs-voice-<time>-<random>`, so containers, the network and the rendezvous volume are unique per run.
-- Only the build caches are shared: cargo, the UI `node_modules`, and `mvs-voice-e2e-desktop-nm`.
+- Only the build caches are shared: cargo, the UI `node_modules`, and the desktop `node_modules` (`mvs-voice-e2e-desktop-nm-<lockfile hash>`). Runs may overlap: `deps.sh` installs under a lock and skips `npm ci` when that lockfile is already installed.
 
 The microphone:
 - Chromium's `--use-fake-device-for-media-stream` provides a beeping test microphone.
@@ -53,6 +53,8 @@ The network:
    - Then A leaves, and B (outside the call) sees an empty roster.
 7. **Rejoin.** Each side joins again without the IP notice. Last comes the legacy desktop-capture probe, because Chromium kills the renderer for it.
 
+   Then both are back in the room, and A kicks B (V4). A checks that B drops off its roster within 5 s (not the 30 s timeout) and that A stays in the call alone. B checks that its call ends, `getVoiceRoom` and `joinCall` are refused, the roster is gone, and the mic is refused.
+
 Results land in `results/<project>/`, which is git-ignored:
 - `a.log` and `b.log`: one `PASS|FAIL <case>` line per check, plus diagnostics on failure;
 - `results-a.json` and `results-b.json`;
@@ -60,7 +62,7 @@ Results land in `results/<project>/`, which is git-ignored:
 
 ## Result on `main` 6c95251 (2026-11-10)
 
-Runs 9 and 10 gave the same result. Case IDs are from `docs/qa/voice-v1-test-plan.md`.
+Runs 9 and 10 gave the same result. Which side offers depends on which identity is lower, so QA-21 silences A in some runs and B in others. The "no audio while muted" check measures A→B audio, so it fails along with QA-21 whenever A is the answerer. Case IDs are from `docs/qa/voice-v1-test-plan.md`.
 
 | Case | Result | Evidence |
 | --- | --- | --- |
@@ -83,8 +85,12 @@ Runs 9 and 10 gave the same result. Case IDs are from `docs/qa/voice-v1-test-pla
 | V6.1 IP notice before the first join, no join until OK | PASS | no peer connection before OK |
 | V6.3 OK joins, the choice is remembered, focus on Mute | PASS | |
 | V6.4 no notice on the second join | PASS | |
+| V4.1 the kicked member drops off the owner's roster at once | PASS | 0.4 s, and the connection to B ends |
+| V4.2 the kicked member can't read the room or rejoin | PASS | `not-found` for both (the server is gone for B; the plan said `not-allowed`, and either is a refusal) |
+| V4.3 the kicked member's call ends and the roster goes | PASS | 0.4 s after the kick |
+| V4.4 the owner stays in the call | PASS | alone in the room |
 
-**Not covered here** (still manual, per the plan): V2.5–V2.10 (timeout, the 5-person cap with real clients, long calls), V3 (relay-only), V4 (kick), V5.1/V5.7/V5.8 (OS prompt, no device), V7 (real networks).
+**Not covered here** (still manual, per the plan): V2.5–V2.10 (timeout, the 5-person cap with real clients, long calls), V3 (relay-only, to add once #272 and #274 land), V5.1/V5.7/V5.8 (OS prompt, no device), V7 (real networks).
 
 ## Bugs found
 
