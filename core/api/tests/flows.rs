@@ -4228,3 +4228,50 @@ fn concurrent_channel_moves_converge() {
     assert!(at >= 2);
     assert_eq!(seen[0][at - 2..at].iter().map(String::as_str).collect::<BTreeSet<_>>(), BTreeSet::from(["delta", "gamma"]));
 }
+
+/// Security Lead (#323): a plain member's channel-order spam costs nothing
+/// and changes nothing. 500 posts from someone who was never owner or admin
+/// are skipped before any resolving: listing channels stays fast and the
+/// order stays the owner's.
+#[test]
+fn channel_order_spam_from_a_member_is_cheap_and_ignored() {
+    let world = World::new();
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let server = owner.core.create_server("Spam", AgeRestriction::None).unwrap();
+    for name in ["alpha", "beta", "gamma"] {
+        owner.core.create_channel(&server.id, name, false).unwrap();
+    }
+    let bob = world.peer();
+    bob.core.restore_identity(LEGAL.split(' ').map(String::from).collect()).unwrap();
+    let bob_key = identity::RecoveryPhrase::parse(LEGAL).unwrap().identity().signing_key().clone();
+    bob.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    let list = owner.core.list_channels(&server.id).unwrap();
+    let last = list.last().unwrap().id.clone();
+    let order = owner.core.move_channel(&server.id, &last, Some(&list[0].id), None).unwrap();
+
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let heads: Vec<records::RecordId> =
+        world.network.fetch(server_key).iter().filter(|r| r.scope() == Scope::Control).map(|r| r.id()).collect();
+    for i in 0..500u64 {
+        let text = format!(r#"{{"mvs":"mvs/channel-order/v1","v":1,"pos":{{"{last}":"{}"}}}}"#, i + 1);
+        let post = authority::sign_control(
+            &bob_key,
+            server_key,
+            1_000 + i,
+            heads.clone(),
+            4 + i,
+            &authority::Action::Post { text },
+        )
+        .unwrap();
+        world.network.publish(&post);
+    }
+    owner.core.sync_now().unwrap();
+    let start = std::time::Instant::now();
+    for _ in 0..10 {
+        assert_eq!(channel_names(&owner.core.list_channels(&server.id).unwrap()), channel_names(&order));
+    }
+    // Resolving each post's past would take tens of seconds here.
+    assert!(start.elapsed() < std::time::Duration::from_secs(3), "{:?}", start.elapsed());
+}

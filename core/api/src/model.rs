@@ -607,11 +607,19 @@ impl ServerView<'_> {
     /// at that record: in the state of the post's causal past (its deps and
     /// theirs). Per channel, the last counting post wins. Deleted and
     /// unknown channels, and bad keys, are ignored.
+    ///
+    /// Cheap against spam (Security Lead on #323): a post whose author was
+    /// never owner or admin in this server is skipped before anything is
+    /// parsed or resolved, and each resolved post's answer is remembered.
     pub fn channel_positions(&self) -> BTreeMap<ChannelId, String> {
+        let ever_admin = self.ever_admin();
         let by_id: HashMap<RecordId, &Record> = self.records.iter().map(|r| (r.id(), r)).collect();
         let mut out = BTreeMap::new();
         for id in &self.state.posts {
             let Some(record) = by_id.get(id) else { continue };
+            if !ever_admin.contains(&record.author()) {
+                continue;
+            }
             let Some(Action::Post { text }) = Action::from_record(record) else { continue };
             let Ok(body) = serde_json::from_str::<ChannelOrderBody>(&text) else { continue };
             if body.mvs != CHANNEL_ORDER_TAG || body.v != 1 {
@@ -630,8 +638,27 @@ impl ServerView<'_> {
         out
     }
 
+    /// Everyone who was ever owner or admin here: the owner, and the target
+    /// of any accepted grant of admin or owner. One pass, no resolving.
+    fn ever_admin(&self) -> HashSet<PublicKey> {
+        let mut out = HashSet::from([self.owner]);
+        for record in self.records.iter().filter(|r| r.kind() == Kind::Grant) {
+            if let Some(Action::Grant { target, role }) = Action::from_record(record) {
+                if role >= authority::Role::Admin {
+                    out.insert(target);
+                }
+            }
+        }
+        out
+    }
+
     /// `record`'s author is owner or admin in the state of its causal past.
+    /// The answer depends only on the record (its ID fixes its deps, and so
+    /// its past), so it's remembered by ID.
     fn admin_at(&self, record: &Record, by_id: &HashMap<RecordId, &Record>) -> bool {
+        if let Some(known) = admin_cache().lock().expect("not poisoned").get(&record.id()) {
+            return *known;
+        }
         let mut past: Vec<Record> = Vec::new();
         let mut seen = HashSet::new();
         let mut stack: Vec<RecordId> = record.deps().to_vec();
@@ -645,8 +672,23 @@ impl ServerView<'_> {
             }
         }
         let state = authority::resolve(self.id, &past);
-        state.role(record.author()) >= authority::Role::Admin
+        let admin = state.role(record.author()) >= authority::Role::Admin;
+        let mut cache = admin_cache().lock().expect("not poisoned");
+        if cache.len() >= ADMIN_CACHE_MAX {
+            cache.clear();
+        }
+        cache.insert(record.id(), admin);
+        admin
     }
+}
+
+/// `admin_at` answers by record ID, at most this many (then it starts over).
+const ADMIN_CACHE_MAX: usize = 4096;
+
+fn admin_cache() -> &'static std::sync::Mutex<HashMap<RecordId, bool>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<RecordId, bool>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
 }
 
 #[cfg(test)]
