@@ -22,7 +22,9 @@ const B = `mvs://join/${'c'.repeat(64)}/${'d'.repeat(64)}/${'f'.repeat(64)}`;
 // A throwaway profile, shared by the second launches (same single-instance
 // lock), never the real app's.
 const PROFILE = mkdtempSync(join(tmpdir(), 'mvs-e2e-link-'));
-const env = { ...process.env, MVS_CORE_PATH: FAKE_CORE, MVS_TEST_USER_DATA: PROFILE };
+// A STUN URL for the page (#222), as a checkout gets it.
+const STUN = 'stun:stun.example.invalid:3478';
+const env = { ...process.env, MVS_CORE_PATH: FAKE_CORE, MVS_TEST_USER_DATA: PROFILE, MVS_STUN: STUN };
 
 let app;
 let page;
@@ -91,4 +93,10 @@ test('the page gets the core status at load, and its change to up (T8-01)', asyn
   assert.ok(first && ['starting', 'up'].includes(first.state), JSON.stringify(first));
   await page.evaluate(() => window.mvs.invoke('getAppInfo', []));
   assert.ok(await until(async () => (await page.evaluate(() => window.__status.at(-1)?.state)) === 'up'), 'no core.status up');
+});
+
+test('every core.status carries the STUN URL, read-only (#222)', async () => {
+  const all = await page.evaluate(() => window.__status.map((s) => s.stunUrl));
+  assert.ok(all.length > 0);
+  assert.ok(all.every((u) => u === STUN), JSON.stringify(all));
 });

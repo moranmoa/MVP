@@ -7,7 +7,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
-const { relayFor, bootstrapFor, validRelay, logHost, MAX_RELAY, MAX_BOOTSTRAP } = require('../src/config');
+const { relayFor, bootstrapFor, validRelay, logHost, MAX_RELAY, MAX_BOOTSTRAP, stunFor, validStun, stunHost, MAX_STUN } = require('../src/config');
 const { createLog } = require('../src/logfile');
 const { Sidecar } = require('../src/sidecar');
 
@@ -128,6 +128,53 @@ test('mvs-core gets --bootstrap after --relay, and only with a relay', () => {
   assert.deepEqual(spawnedArgs({ relay: null, bootstrap: [TCP] }), ['--data-dir', data]);
   assert.throws(() => spawnedArgs({ bootstrap: [42] }), /strings/);
   assert.throws(() => spawnedArgs({ bootstrap: TCP }), /strings/);
+});
+
+// STUN for voice (#222): a plain stun:/stuns: URL, the same rule as the UI's iceServersFor.
+test('valid STUN URLs', () => {
+  for (const ok of ['stun:stun.example.org:3478', 'stuns:stun.example.org:5349', 'STUN:stun.example.org', 'stun:198.51.100.7:3478', 'stun:[2001:db8::7]:3478', '  stun:stun.example.org:3478  ']) {
+    assert.equal(validStun(ok), true, ok);
+  }
+});
+
+test('anything but a plain STUN URL is refused', () => {
+  for (const bad of ['turn:turn.example.org:3478', 'turns:turn.example.org', 'stun:user:pass@stun.example.org', 'stun:stun.example.org/path', 'stun:stun.example.org?transport=udp', 'stun:stun.example.org#x', 'stun:stun example.org', 'stun:', 'https://stun.example.org', '//stun.example.org', 'stun.example.org:3478', 'stun:' + 'a'.repeat(MAX_STUN), '', 7, null, ['stun:stun.example.org'], {}]) {
+    assert.equal(validStun(bad), false, String(bad));
+  }
+});
+
+test('packaged: STUN comes from mvs-config.json; MVS_STUN is ignored', () => {
+  const warns = [];
+  const warn = (m) => warns.push(m);
+  const env = { MVS_STUN: 'stun:env.example.org:3478' };
+  assert.equal(stunFor({ packaged: true, resourcesPath: resources(JSON.stringify({ relay: RELAY, stun: ' stun:stun.example.org:3478 ' })), env, warn }), 'stun:stun.example.org:3478');
+  assert.equal(stunFor({ packaged: true, resourcesPath: resources(), env, warn }), null, 'no file');
+  assert.equal(stunFor({ packaged: true, resourcesPath: resources(JSON.stringify({ relay: RELAY })), env, warn }), null, 'no stun key');
+  assert.equal(stunFor({ packaged: true, resourcesPath: resources('{nope'), env, warn }), null, 'broken JSON');
+  assert.deepEqual(warns, []);
+  assert.equal(stunFor({ packaged: true, resourcesPath: resources(JSON.stringify({ stun: 'turn:t.example.org:3478' })), env, warn }), null);
+  assert.equal(stunFor({ packaged: true, resourcesPath: resources(JSON.stringify({ stun: ['stun:a.example.org'] })), env, warn }), null);
+  assert.equal(warns.length, 2);
+  // The warning never names the value.
+  assert.ok(warns.every((w) => !w.includes('example')), warns.join());
+});
+
+test('checkout: STUN comes from MVS_STUN only', () => {
+  const warns = [];
+  const warn = (m) => warns.push(m);
+  assert.equal(stunFor({ packaged: false, env: { MVS_STUN: 'stun:stun.example.org:3478' }, warn }), 'stun:stun.example.org:3478');
+  assert.equal(stunFor({ packaged: false, env: {}, warn }), null);
+  assert.equal(stunFor({ packaged: false, env: { MVS_STUN: '' }, warn }), null);
+  assert.equal(stunFor({ packaged: false, env: { MVS_STUN: 'stun:u:p@stun.example.org' }, warn }), null);
+  assert.equal(warns.length, 1);
+});
+
+test('the STUN host is found for the file log to hide', () => {
+  assert.equal(stunHost('stun:stun.example.org:3478'), 'stun.example.org');
+  assert.equal(stunHost('stuns:stun.example.org'), 'stun.example.org');
+  assert.equal(stunHost('stun:198.51.100.7:3478'), '198.51.100.7');
+  assert.equal(stunHost('stun:[2001:db8::7]:3478'), '2001:db8::7');
+  assert.equal(stunHost(null), null);
 });
 
 test('relay and bootstrap hosts, DNS or IP, never reach the file log', () => {

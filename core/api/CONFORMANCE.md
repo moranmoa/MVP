@@ -136,6 +136,18 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
   - A create or a revoke fires `server.updated`, since the server's
     `inviteLink` may then name another invite (or be empty once none is
     left open).
+  - Short links (T8-02, `docs/design/short-invite-link.md`):
+    - `createInvite` also returns `shortLink`, and `listInvites` returns it for
+      an invite I made that is still live; it is absent otherwise. A short link
+      is `mvs://join/` plus at most 51 base58 characters, **case-sensitive**.
+    - `joinServer` accepts both formats. A short link that finds nobody online
+      is retried like any other join.
+    - **The UI must not show `shortLink` until release N+1.** Peers on older
+      releases can't parse it, so it would read as invalid to them. Until
+      then the UI keeps showing the v0 `link` / `inviteLink`. From N+1,
+      `createInvite`'s `link` itself becomes the short form.
+    - A short link stops working when its invite is revoked, expires or is
+      used up, and when the server is closed, left or purged.
 - `Member.connection: 'direct' | 'relay' | null` (#187): how we reach an online member, a direct connection (LAN) or through the relay; `null` for us and for members who are offline. A change fires `members.changed`.
 - `CoreError.code`: `'bad-request' | 'not-implemented' | 'internal'`, and `'keyring-unavailable'` (QA-20): the OS keychain (Secret Service on Linux) is missing or unusable. The core still starts; `getIdentity` and anything needing the identity reject with it, and the UI shows the keyring cause.
 - `NoticeKind`: `'rekey-waiting'`, sent when removed members still hold a channel key and only a moderator can renew it. Until a moderator does, sending there answers `not-allowed`.
