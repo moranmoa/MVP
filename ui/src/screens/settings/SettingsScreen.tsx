@@ -130,7 +130,7 @@ function AccountSection({
   const store = useAppStore();
   const identity = useStore(store, (s) => s.identity)!;
   return (
-    <div className="stack">
+    <div className="stack account-sections">
       <ProfileEditor ref={editor} onDirtyChange={onDirtyChange} />
       <BirthDateSection />
       <h4>

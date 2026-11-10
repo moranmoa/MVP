@@ -2811,10 +2811,20 @@ input.switch:disabled {
   margin: 0;
 }
 
+/* Information, not a warning (UX on #312): the accent tint with a start bar. */
 .dob-pending {
   padding: 0.5rem 0.75rem;
   border-radius: var(--radius-s);
-  background: var(--warning-bg);
-  border: 1px solid var(--warning-border);
-  color: var(--warning-text);
+  background: var(--accent-soft);
+  border-inline-start: 3px solid var(--accent);
+  color: var(--text);
+}
+
+/* Account: each part after the profile form starts under a divider, so the
+   date of birth doesn't read as part of the form (UX on #312). */
+.account-sections > .dob-section,
+.account-sections > h4 {
+  margin-block-start: 0.75rem;
+  padding-block-start: 1rem;
+  border-block-start: 1px solid var(--border);
 }
