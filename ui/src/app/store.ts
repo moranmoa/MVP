@@ -63,6 +63,8 @@ export type UpdateNote =
 
 export interface StoreState {
   identity: Identity | null;
+  /** A server left this device (left, closed and purged, or a kick): its name, for a toast. */
+  serverGone: { name: string; reason: 'left' | 'closed' | 'kicked'; at: number } | null;
   servers: ServerSummary[];
   channels: Record<Id, Channel[]>;
   members: Record<Id, Member[]>;
@@ -101,6 +103,7 @@ export class Store {
     voiceRooms: {},
     relayOnly: false,
     flash: null,
+    serverGone: null,
     messagesVersion: 0,
   };
   private listeners = new Set<() => void>();
@@ -123,8 +126,15 @@ export class Store {
       on('server.updated', (s) =>
         this.set({ servers: this.state.servers.map((x) => (x.id === s.id ? s : x)) }),
       ),
-      on('server.removed', ({ serverId }) =>
-        this.set({ servers: this.state.servers.filter((x) => x.id !== serverId) }),
+      on('server.removed', ({ serverId, reason }) => {
+        const gone = this.state.servers.find((x) => x.id === serverId);
+        this.set({
+          servers: this.state.servers.filter((x) => x.id !== serverId),
+          serverGone: gone ? { name: gone.name, reason: reason ?? 'kicked', at: Date.now() } : this.state.serverGone,
+        });
+      }),
+      on('server.closed', ({ serverId }) =>
+        this.set({ servers: this.state.servers.map((x) => (x.id === serverId ? { ...x, closed: true } : x)) }),
       ),
       on('channel.updated', (c) =>
         this.set({
@@ -224,6 +234,10 @@ export class Store {
 
   clearFlash(): void {
     this.set({ flash: null });
+  }
+
+  clearServerGone(): void {
+    this.set({ serverGone: null });
   }
 
   clearUpdateNote(): void {

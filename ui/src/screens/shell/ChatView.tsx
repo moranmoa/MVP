@@ -127,28 +127,35 @@ export function ChatView({
         onDelete={onDelete}
         onRetry={onRetry}
       />
-      <Composer
-        channelName={channelName}
-        replyTo={replyTo}
-        replyName={replyTo ? (memberMap.get(replyTo.authorId)?.displayName ?? '') : ''}
-        editing={editing}
-        onCancel={() => {
-          setReplyTo(null);
-          setEditing(null);
-        }}
-        onEditLast={editLast}
-        onSubmit={async (body) => {
-          if (editing) {
-            if (body !== editing.body) await core.editMessage(editing.id, body);
-            setEditing(null);
-          } else {
-            const reply = replyTo?.id;
+      {server.closed ? (
+        // Closed by its owner (#261): read-only until it is removed 30 days later.
+        <div className="closed-banner" role="status">
+          <FormattedMessage id="server.closedBanner" />
+        </div>
+      ) : (
+        <Composer
+          channelName={channelName}
+          replyTo={replyTo}
+          replyName={replyTo ? (memberMap.get(replyTo.authorId)?.displayName ?? '') : ''}
+          editing={editing}
+          onCancel={() => {
             setReplyTo(null);
-            setStickToken((t) => t + 1);
-            await core.sendMessage(channelId, body, reply);
-          }
-        }}
-      />
+            setEditing(null);
+          }}
+          onEditLast={editLast}
+          onSubmit={async (body) => {
+            if (editing) {
+              if (body !== editing.body) await core.editMessage(editing.id, body);
+              setEditing(null);
+            } else {
+              const reply = replyTo?.id;
+              setReplyTo(null);
+              setStickToken((t) => t + 1);
+              await core.sendMessage(channelId, body, reply);
+            }
+          }}
+        />
+      )}
       <Dialog open={!!toDelete} onClose={() => setToDelete(null)} title={intl.formatMessage({ id: 'chat.delete' })}>
         <p>
           <FormattedMessage id="chat.deleteConfirm" />

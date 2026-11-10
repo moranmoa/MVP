@@ -50,6 +50,8 @@ export function createCore(search = typeof location !== 'undefined' ? location.s
     coreDown: (params.get('coreDown') as MockOptions['coreDown']) ?? undefined,
     callError: (params.get('callError') as MockOptions['callError']) ?? undefined,
     roomFull: params.has('roomFull'),
+    outdatedMembers: params.has('outdated'),
+    closedServer: params.has('closed'),
     storage,
   });
 }
