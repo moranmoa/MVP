@@ -109,8 +109,13 @@ function startCore() {
     const host = logHost(addr);
     if (host) fileLog.hide(host);
   }
+  // Checkouts only (tests): Windows cannot execute a .js stand-in for the core
+  // (EFTYPE), so it runs under this Electron in Node mode. Never in a packaged
+  // app, where the RunAsNode fuse is off anyway.
+  const jsCore = !app.isPackaged && process.platform === 'win32' && CORE_EXE.endsWith('.js');
   core = new Sidecar({
-    exe: CORE_EXE,
+    exe: jsCore ? process.execPath : CORE_EXE,
+    script: jsCore ? CORE_EXE : null,
     dataDir,
     // Without a relay the core runs offline (no invites, no chat with others).
     relay,
