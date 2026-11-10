@@ -19,12 +19,14 @@ function redact(text) {
     .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '<ip>')
     // IPv6: the full eight-group form, and the compressed forms with "::"
     // (not plain "12:30:45" clock times). A compressed address needs a hex
-    // group next to its "::" and can't start right after a letter, digit or
-    // colon, so Rust paths like "mvs::join" or "api::add" stay as they are.
+    // group next to its "::", can't start right after a word character or a
+    // hex group and colon, and can't end just before one. So Rust paths like
+    // "mvs::join" or "api::add" stay, while "addr:2001:db8::7" and
+    // "2001:db8::7: timeout" are still caught (security lead on #308).
     // An embedded IPv4 (already "<ip>" above) is taken in too: "::ffff:<ip>".
     .replace(/\b(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}\b/gi, '<ip>')
     .replace(
-      /(?<![\w:])(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6}::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})?|::[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})(?::<ip>)?(?![\w:])/gi,
+      /(?<!\w|[0-9a-f]:)(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6}::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})?|::[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})(?::<ip>)?(?!\w|:[0-9a-f])/gi,
       '<ip>',
     );
 }

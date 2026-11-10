@@ -15,6 +15,10 @@ test('IPv6 addresses are redacted, in every common form', () => {
     ['zone fe80::1%eth0', 'zone <ip>%eth0'],
     ['full 2001:0db8:0000:0000:0000:ff00:0042:8329', 'full <ip>'],
     ['trailing fe80::', 'trailing <ip>'],
+    // Next to a colon (security lead on #308): these leaked with the first fix.
+    ['dial 2001:db8::7: timeout', 'dial <ip>: timeout'],
+    ['addr:2001:db8::7', 'addr:<ip>'],
+    ['peer=fe80::1:', 'peer=<ip>:'],
   ]) {
     assert.strictEqual(redact(line), want, line);
   }
@@ -26,6 +30,8 @@ test('Rust paths and clock times are left alone', () => {
     'sync::node: dial',
     'api::add_member done',
     'core::api::service ok',
+    'sync::node::dial failed',
+    'api::add',
     'at 12:30:45 restart',
   ]) {
     assert.strictEqual(redact(line), line);
