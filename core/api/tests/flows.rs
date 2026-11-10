@@ -916,10 +916,10 @@ fn a_kick_re_keys_the_channel() {
     guest.events.take();
     guest.core.sync_now().unwrap();
     assert_eq!(notices(&guest), [NoticeKind::RekeyWaiting]);
-    assert_eq!(
-        guest.core.send_message(&channel, "anyone?", None).unwrap_err().code,
-        ErrorCode::NotAllowed
-    );
+    // No key until a moderator re-keys: held, not refused (sent below).
+    let held = guest.core.send_message(&channel, "anyone?", None).unwrap();
+    assert_eq!(held.send_state, Some(SendState::Pending));
+    assert!(held.id.starts_with(api::KEY_PENDING_PREFIX));
     // The owner reads the kick and re-keys; then the guest can write again.
     owner.events.take();
     owner.core.sync_now().unwrap();
@@ -935,7 +935,7 @@ fn a_kick_re_keys_the_channel() {
         .into_iter()
         .map(|m| m.body)
         .collect();
-    assert_eq!(bodies, ["before", "after", "still here", "back"]);
+    assert_eq!(bodies, ["before", "after", "still here", "anyone?", "back"]);
 }
 
 /// Edits (author only), deletes (author, or a higher rank) as tombstones that
@@ -1650,6 +1650,85 @@ fn a_joiners_first_send_right_after_the_join_succeeds() {
     });
 }
 
+/// #285 follow-up (tech lead): a send before the key comes returns at once
+/// as `pending` with a provisional ID, is listed, and is sent by the sync
+/// loop when the re-key arrives (`message.updated` with `replaces`).
+#[test]
+fn a_message_held_for_its_key_is_sent_when_the_key_comes() {
+    let world = World::new();
+    let owner = keyed_peer(&world, Arc::new(MemoryStore::new()), None);
+    owner.core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
+    let guest = keyed_peer(&world, Arc::new(MemoryStore::new()), None);
+    guest.core.restore_identity(LEGAL.split(' ').map(String::from).collect()).unwrap();
+    let server = owner.core.create_server("Held", AgeRestriction::None).unwrap();
+    guest.core.join_server(&server.invite_link).unwrap();
+    let channel = guest.core.list_channels(&server.id).unwrap().remove(0).id;
+
+    // The owner hasn't read the join yet: no key. Held, not refused.
+    guest.events.take();
+    let held = guest.core.send_message(&channel, "before the key", None).unwrap();
+    assert_eq!(held.send_state, Some(SendState::Pending));
+    assert!(held.id.starts_with(api::KEY_PENDING_PREFIX), "{}", held.id);
+    assert!(guest.events.take().contains(&Event::MessageAdded(held.clone())));
+    assert_eq!(guest.core.get_message_count(&channel).unwrap(), 1);
+    assert_eq!(guest.core.get_messages(&channel, 0, 9).unwrap().messages, std::slice::from_ref(&held));
+    // Still no key at the guest's next round: still held, nothing said.
+    guest.core.sync_now().unwrap();
+    assert!(!guest.events.take().iter().any(|e| matches!(e, Event::MessageUpdated(_))));
+
+    // The owner's round re-keys; the guest's next round sends it.
+    owner.core.sync_now().unwrap();
+    guest.core.sync_now().unwrap();
+    let sent: Vec<Message> = guest
+        .events
+        .take()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::MessageUpdated(m) if m.replaces.is_some() => Some(m),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent.len(), 1, "one replacement");
+    assert_eq!(sent[0].replaces.as_deref(), Some(held.id.as_str()));
+    assert_eq!((sent[0].body.as_str(), sent[0].send_state), ("before the key", Some(SendState::Sent)));
+    assert!(!sent[0].id.starts_with(api::KEY_PENDING_PREFIX));
+    let listed = guest.core.get_messages(&channel, 0, 9).unwrap().messages;
+    assert_eq!(listed.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), [sent[0].id.as_str()]);
+    // The owner reads it.
+    owner.core.sync_now().unwrap();
+    let got = owner.core.get_messages(&channel, 0, 9).unwrap().messages;
+    assert_eq!(got.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(), ["before the key"]);
+}
+
+/// A message held for its key that never gets it turns `failed` after
+/// `KEY_PENDING_FOR` (`message.updated`, and `notice: rekey-waiting`).
+#[test]
+fn a_message_held_without_a_key_fails_after_two_minutes() {
+    let world = World::new();
+    let owner = keyed_peer(&world, Arc::new(MemoryStore::new()), None);
+    owner.core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
+    let guest = keyed_peer(&world, Arc::new(MemoryStore::new()), None);
+    guest.core.restore_identity(LEGAL.split(' ').map(String::from).collect()).unwrap();
+    let server = owner.core.create_server("Silent", AgeRestriction::None).unwrap();
+    guest.core.join_server(&server.invite_link).unwrap();
+    let channel = guest.core.list_channels(&server.id).unwrap().remove(0).id;
+    let held = guest.core.send_message(&channel, "nobody keys me", None).unwrap();
+    assert_eq!(held.send_state, Some(SendState::Pending));
+
+    // The owner never comes back. Two minutes pass.
+    *world.clock.0.lock().unwrap() += api::KEY_PENDING_FOR.as_millis() as u64 + 1;
+    guest.events.take();
+    guest.core.sync_now().unwrap();
+    let events = guest.events.take();
+    let failed = Message { send_state: Some(SendState::Failed), ..held.clone() };
+    assert!(events.contains(&Event::MessageUpdated(failed.clone())), "{events:?}");
+    assert!(events.contains(&Event::Notice { kind: NoticeKind::RekeyWaiting, server_id: server.id.clone() }));
+    assert_eq!(guest.core.get_messages(&channel, 0, 9).unwrap().messages, [failed]);
+    // Said once, not every round.
+    guest.core.sync_now().unwrap();
+    assert!(!guest.events.take().iter().any(|e| matches!(e, Event::MessageUpdated(_))));
+}
+
 /// v0.2.0 smoke: a member who joins writes first, and the owner never
 /// sends. The owner's sync sees the join and keys the channel for the new
 /// member set, so the joiner can write (and the owner can read it).
@@ -1722,10 +1801,10 @@ fn a_failed_join_re_key_fails_closed() {
     );
     guest.core.sync_now().unwrap();
     let channel = guest.core.list_channels(&server.id).unwrap().remove(0).id;
-    assert_eq!(
-        guest.core.send_message(&channel, "x", None).unwrap_err().code,
-        ErrorCode::NotAllowed
-    );
+    // Fails closed: nothing sealed or sent without the key; only held.
+    let held = guest.core.send_message(&channel, "x", None).unwrap();
+    assert_eq!(held.send_state, Some(SendState::Pending));
+    assert!(held.id.starts_with(api::KEY_PENDING_PREFIX));
 }
 
 /// A server, its owner (real cipher), and a counter of rotations (one
@@ -1798,10 +1877,9 @@ fn join_re_keys_spend_a_token_bucket() {
     assert_eq!(rotations(&world, &server), after_burst, "a 4th re-key without a token");
     for peer in [&fourth, &fifth] {
         peer.core.sync_now().unwrap();
-        assert_eq!(
-            peer.core.send_message(&channel, "too soon", None).unwrap_err().code,
-            ErrorCode::NotAllowed
-        );
+        // No key yet: held (sent once the shared re-key reaches them).
+        let held = peer.core.send_message(&channel, "too soon", None).unwrap();
+        assert_eq!(held.send_state, Some(SendState::Pending));
     }
     // Due one refill after the first token was spent (a few hundred ms of
     // test clock ago); the loop wakes exactly then.
@@ -1821,8 +1899,8 @@ fn join_re_keys_spend_a_token_bucket() {
         peer.core.send_message(&channel, "now", None).unwrap();
     }
     owner.core.sync_now().unwrap();
-    // 1 from before, 3 from the burst, 2 shared.
-    assert_eq!(owner.core.get_message_count(&channel).unwrap(), 6);
+    // 1 from before, 3 from the burst, 2 held then sent, 2 shared.
+    assert_eq!(owner.core.get_message_count(&channel).unwrap(), 8);
     // Nobody who joined opens the message from before they joined.
     first[0].core.sync_now().unwrap();
     let bodies: Vec<String> = first[0]

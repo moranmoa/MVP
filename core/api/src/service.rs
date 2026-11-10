@@ -90,10 +90,11 @@ pub const CHALLENGE_POSITIONS: usize = 3;
 pub const MAX_CHECK_FAILURES: u8 = 5;
 /// How often the background sync runs without a hint.
 pub const SYNC_EVERY: Duration = Duration::from_secs(2);
-/// How long a new member's send waits for the channel key (the re-key a
-/// moderator makes when they read the join), and how often it looks.
-pub const KEY_WAIT: Duration = Duration::from_secs(2);
-const KEY_WAIT_POLL: Duration = Duration::from_millis(100);
+/// How long a message held for its channel key (the re-key a moderator
+/// makes when they read the join) waits before it is marked `failed`.
+pub const KEY_PENDING_FOR: Duration = Duration::from_secs(120);
+/// Provisional IDs of messages held for their key.
+pub const KEY_PENDING_PREFIX: &str = "pending-";
 /// A join that found nobody online is retried in the background: first
 /// after `JOIN_RETRY_FIRST`, doubling up to `JOIN_RETRY_MAX`, for at most
 /// `JOIN_RETRY_FOR` (until then the inviter may still come online).
@@ -145,6 +146,39 @@ struct Inner {
     join_waiting: BTreeSet<ServerId>,
     /// Voice calls: mine, and who is in which call.
     calls: voice::Calls,
+    /// Messages written before their channel key reached me (a member who
+    /// just joined), oldest first: sent by the sync loop when it comes.
+    /// In memory only (never the plain text on disk): lost on restart.
+    key_pending: Vec<KeyPending>,
+}
+
+/// A message held for its channel key (`Core::send_message`).
+struct KeyPending {
+    /// Provisional, `pending-` + 16 random hex: never a record ID.
+    id: String,
+    server: ServerId,
+    channel: ChannelId,
+    author: PublicKey,
+    body: Zeroizing<String>,
+    created_at: u64,
+    failed: bool,
+}
+
+impl KeyPending {
+    fn message(&self, index: usize) -> Message {
+        Message {
+            id: self.id.clone(),
+            channel_id: model::hex_id(self.channel.as_bytes()),
+            index,
+            author_id: model::hex_id(self.author.as_bytes()),
+            body: self.body.as_str().to_owned(),
+            created_at: self.created_at,
+            edited_at: None,
+            deleted: None,
+            send_state: Some(if self.failed { SendState::Failed } else { SendState::Pending }),
+            replaces: None,
+        }
+    }
 }
 
 pub struct Core {
@@ -221,6 +255,7 @@ impl Core {
             join_buckets: HashMap::new(),
             join_waiting: BTreeSet::new(),
             calls: voice::Calls::default(),
+            key_pending: Vec::new(),
         };
         // GAP-6r: the stored relay-only setting, applied before anything
         // else reaches the network.
@@ -1222,12 +1257,11 @@ impl Core {
     /// message of a channel, or the first after a removal, needs a key
     /// rotation: a moderator or above makes one on the way. A plain member
     /// without the key yet (just joined: the moderator's re-key is on its
-    /// way) waits for it up to [`KEY_WAIT`], and only then gets
-    /// `not-allowed`. The wait only re-tries the seal: the background sync
-    /// loop (woken now) brings the key, never this request.
-    /// TODO(#285, tech lead): hold the message as pending in the core and
-    /// let the sync loop send it when the key comes, instead of blocking
-    /// the request thread at all.
+    /// way) gets the message back at once as `sendState: pending`, with a
+    /// provisional `pending-…` ID. The sync loop sends it when the key comes
+    /// (`message.updated` carrying `replaces`), or after
+    /// [`KEY_PENDING_FOR`] marks it `failed` (`message.updated`, and
+    /// `notice: rekey-waiting`). Never a wait on the request thread.
     pub fn send_message(
         &self,
         channel_id: &str,
@@ -1240,36 +1274,30 @@ impl Core {
         if body.trim().is_empty() || !authority::message_text_ok(body) {
             return Err(ErrorCode::BadRequest.into());
         }
-        let deadline = Instant::now() + KEY_WAIT;
-        loop {
-            let sent = self.run(|inner, ports, events| {
-                let (server, channel) = inner.find_channel(channel_id)?;
-                let sealed = match inner.seal(ports, server, channel, body) {
-                    Ok(sealed) => sealed,
-                    Err(e) if e.code == ErrorCode::NotAllowed && inner.awaiting_key(server)? => {
-                        return Ok(None);
-                    }
-                    Err(e) => return Err(e),
-                };
-                let record =
-                    inner.sign_in_channel(ports, server, channel, None, Kind::Message, sealed)?;
-                inner.store(server, record.clone())?;
-                ports.network.publish(&record);
-                let message = inner.message(&*ports.cipher, server, channel, record.id())?;
-                events.push(Event::MessageAdded(message.clone()));
-                Ok(Some(message))
-            })?;
-            if let Some(message) = sent {
-                return Ok(message);
-            }
-            if Instant::now() >= deadline {
-                return Err(ErrorCode::NotAllowed.into());
-            }
-            // A round of the background sync now, rather than at its next
-            // tick: it brings the re-key in. Nothing is fetched here.
+        let message = self.run(|inner, ports, events| {
+            let (server, channel) = inner.find_channel(channel_id)?;
+            let sealed = match inner.seal(ports, server, channel, body) {
+                Ok(sealed) => sealed,
+                Err(e) if e.code == ErrorCode::NotAllowed && inner.awaiting_key(server)? => {
+                    let message = inner.hold_for_key(ports, server, channel, body)?;
+                    events.push(Event::MessageAdded(message.clone()));
+                    return Ok(message);
+                }
+                Err(e) => return Err(e),
+            };
+            let record =
+                inner.sign_in_channel(ports, server, channel, None, Kind::Message, sealed)?;
+            inner.store(server, record.clone())?;
+            ports.network.publish(&record);
+            let message = inner.message(&*ports.cipher, server, channel, record.id())?;
+            events.push(Event::MessageAdded(message.clone()));
+            Ok(message)
+        })?;
+        if message.send_state == Some(SendState::Pending) && message.id.starts_with(KEY_PENDING_PREFIX) {
+            // A round of the background sync now: it brings the re-key in.
             self.ports.network.wake();
-            std::thread::sleep(KEY_WAIT_POLL);
         }
+        Ok(message)
     }
 
     /// The author only (authority's rule). The new text is sealed like a
@@ -1322,7 +1350,9 @@ impl Core {
     pub fn get_message_count(&self, channel_id: &str) -> CoreResult<usize> {
         let mut inner = self.lock();
         let (server, channel) = inner.find_channel(channel_id)?;
-        inner.message_count(&*self.ports.cipher, server, channel)
+        // Messages held for their key are listed after the stored ones.
+        let held = inner.key_pending.iter().filter(|p| p.channel == channel).count();
+        Ok(inner.message_count(&*self.ports.cipher, server, channel)? + held)
     }
 
     /// Messages `start..end` (0-based, end exclusive) of the channel.
@@ -1336,13 +1366,14 @@ impl Core {
         let (server, channel) = inner.find_channel(channel_id)?;
         let me = inner.me.as_ref().map(Me::key);
         let shown = inner.shown(&*self.ports.cipher, server, channel)?;
-        let end = end.min(shown.len());
+        // Messages held for their key come after the stored ones.
+        let held: Vec<&KeyPending> = inner.key_pending.iter().filter(|p| p.channel == channel).collect();
+        let end = end.min(shown.len() + held.len());
         let start = start.min(end);
-        let messages = shown[start..end]
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                message_json(s, start + i, channel, me, &Status { net: &*inner.net, db: &inner.db })
+        let messages = (start..end)
+            .map(|index| match shown.get(index) {
+                Some(s) => message_json(s, index, channel, me, &Status { net: &*inner.net, db: &inner.db }),
+                None => held[index - shown.len()].message(index),
             })
             .collect();
         Ok(MessageRange { channel_id: channel_id.to_owned(), start, messages })
@@ -1490,7 +1521,8 @@ impl Core {
                     });
                 }
             }
-            Ok(())
+            // Messages held for their key: sent now if it came.
+            inner.send_key_pending(ports, events)
         })
     }
 
@@ -1968,6 +2000,84 @@ impl Inner {
     /// Whether a refused seal in `server` only means the key hasn't reached
     /// me yet: I'm a current member of an open server who can't rotate
     /// (`seal`'s `not-allowed` for anyone else is final).
+    /// Holds a message until its channel key reaches me (`send_message`),
+    /// shown after the channel's stored messages.
+    fn hold_for_key(
+        &mut self,
+        ports: &Ports,
+        server: ServerId,
+        channel: ChannelId,
+        body: &str,
+    ) -> CoreResult<Message> {
+        let author = self.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+        let mut tag = [0u8; 8];
+        OsRng.fill_bytes(&mut tag);
+        let held = KeyPending {
+            id: format!("{KEY_PENDING_PREFIX}{}", hex::encode(tag)),
+            server,
+            channel,
+            author,
+            body: Zeroizing::new(body.to_owned()),
+            created_at: ports.clock.now_ms(),
+            failed: false,
+        };
+        let index = self.message_count(&*ports.cipher, server, channel)?
+            + self.key_pending.iter().filter(|p| p.channel == channel).count();
+        let message = held.message(index);
+        self.key_pending.push(held);
+        Ok(message)
+    }
+
+    /// The sync loop's part (`sync_now`): each held message whose key has
+    /// come is sealed and sent (`message.updated` with `replaces`, then
+    /// listed like any other); one still without it after
+    /// [`KEY_PENDING_FOR`], or that can no longer be sent (kicked, left,
+    /// closed), turns `failed` (`message.updated`, `notice: rekey-waiting`)
+    /// and stays listed until a restart.
+    fn send_key_pending(&mut self, ports: &Ports, events: &mut Events) -> CoreResult<()> {
+        let now = ports.clock.now_ms();
+        let mut i = 0;
+        while i < self.key_pending.len() {
+            if self.key_pending[i].failed {
+                i += 1;
+                continue;
+            }
+            let (server, channel) = (self.key_pending[i].server, self.key_pending[i].channel);
+            let body = self.key_pending[i].body.clone();
+            let waiting = self.db.has_server(server)? && {
+                self.load(server)?;
+                match self.seal(ports, server, channel, &body) {
+                    Ok(sealed) => {
+                        let held = self.key_pending.remove(i);
+                        let record =
+                            self.sign_in_channel(ports, server, channel, None, Kind::Message, sealed)?;
+                        self.store(server, record.clone())?;
+                        ports.network.publish(&record);
+                        let mut message = self.message(&*ports.cipher, server, channel, record.id())?;
+                        message.replaces = Some(held.id);
+                        events.push(Event::MessageUpdated(message));
+                        continue;
+                    }
+                    Err(e) => e.code == ErrorCode::NotAllowed && self.awaiting_key(server)?,
+                }
+            };
+            let held = &self.key_pending[i];
+            let expired = now.saturating_sub(held.created_at) >= KEY_PENDING_FOR.as_millis() as u64;
+            if !waiting || expired {
+                self.key_pending[i].failed = true;
+                let index = self.message_count(&*ports.cipher, server, channel)?
+                    + self.key_pending[..i].iter().filter(|p| p.channel == channel).count();
+                events.push(Event::MessageUpdated(self.key_pending[i].message(index)));
+                events.push(Event::Notice {
+                    kind: NoticeKind::RekeyWaiting,
+                    server_id: model::hex_id(server.as_bytes()),
+                });
+            }
+            i += 1;
+        }
+        Ok(())
+    }
+
     fn awaiting_key(&self, server: ServerId) -> CoreResult<bool> {
         let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
         let view = self.view(server)?;
@@ -2853,6 +2963,7 @@ fn message_json(
         edited_at: s.edited_at,
         deleted: s.deleted.then_some(true),
         send_state: send_state(s, me, st),
+        replaces: None,
     }
 }
 
