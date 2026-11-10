@@ -21,6 +21,12 @@ export interface Identity {
   bio?: string;
   country: string;
   birthDate: BirthDate;
+  /**
+   * B7 §9 (#306): a correction that raises my age, waiting its 30 days. Until
+   * `effectiveAt` my current age stays. Absent otherwise; identity.changed
+   * fires when it takes effect.
+   */
+  pendingBirthDate?: { date: BirthDate; effectiveAt: Timestamp };
   /** False until the person proved they wrote the 12 words down. */
   recoveryChecked: boolean;
 }

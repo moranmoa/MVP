@@ -166,9 +166,29 @@ function oneOf<T extends string>(raw: unknown, allowed: readonly T[], fallback: 
 // Unknown age limits are treated as the strictest one.
 const age = (raw: unknown): AgeRestriction => oneOf(raw, ['none', '16+', '18+'] as const, '18+');
 
+/** A real calendar date as YYYY-MM-DD, or '' when it isn't one. */
+function cleanBirthDate(raw: unknown): string {
+  if (typeof raw !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(raw)) return '';
+  const [y, m, d] = raw.split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d));
+  return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d ? raw : '';
+}
+
+/** B7 §9: a pending correction, or undefined when it's missing or malformed. */
+function cleanPendingBirthDate(raw: unknown): Identity['pendingBirthDate'] {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const { date, effectiveAt } = raw as Record<string, unknown>;
+  const d = cleanBirthDate(date);
+  if (!d || typeof effectiveAt !== 'number' || !Number.isFinite(effectiveAt) || effectiveAt <= 0) return undefined;
+  return { date: d, effectiveAt };
+}
+
 export function cleanIdentity(i: Identity): Identity {
+  const { pendingBirthDate, ...rest } = i;
+  const pending = cleanPendingBirthDate(pendingBirthDate);
   return {
-    ...i,
+    ...rest,
+    ...(pending ? { pendingBirthDate: pending } : {}),
     shortCode: cleanCode(i.shortCode),
     displayName: cleanName(i.displayName),
     avatarColor: safeColor(i.avatarColor),
