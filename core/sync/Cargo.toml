@@ -24,6 +24,9 @@ futures = "0.3"
 libp2p = { version = "0.56", features = [
     "tokio",
     "tcp",
+    # QUIC (`/udp/<port>/quic-v1`) beside TCP: the direct path hole punching
+    # can open on Windows too (TCP simultaneous open never completes there).
+    "quic",
     # /wss to the relay behind Cloudflare: TLS by rustls with webpki roots
     # (libp2p-websocket's client config), no native-tls.
     "websocket",

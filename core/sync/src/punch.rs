@@ -251,10 +251,21 @@ impl MemberPunch {
     }
 }
 
-/// An address DCUtR may send or dial: plain TCP (no circuit, websocket or
-/// DNS), global unless LAN is allowed.
+/// An address DCUtR may send or dial: an IP with plain TCP or QUIC
+/// (`/ip4|ip6/<ip>/tcp/<port>` or `/ip4|ip6/<ip>/udp/<port>/quic-v1`, then
+/// at most a `/p2p/<id>`; no circuit, websocket or DNS), global unless LAN is
+/// allowed.
 pub(crate) fn punchable(addr: &Multiaddr, allow_lan: bool) -> bool {
-    let plain = addr.iter().all(|p| matches!(p, Protocol::Ip4(_) | Protocol::Ip6(_) | Protocol::Tcp(_) | Protocol::P2p(_)));
+    let parts: Vec<Protocol> = addr.iter().collect();
+    let body = match parts.last() {
+        Some(Protocol::P2p(_)) => &parts[..parts.len() - 1],
+        _ => &parts[..],
+    };
+    let plain = matches!(
+        body,
+        [Protocol::Ip4(_) | Protocol::Ip6(_), Protocol::Tcp(_)]
+            | [Protocol::Ip4(_) | Protocol::Ip6(_), Protocol::Udp(_), Protocol::QuicV1]
+    );
     plain && reachable(addr, allow_lan)
 }
 
@@ -433,11 +444,25 @@ mod tests {
         assert!(punch.queued.is_empty(), "the stranger's gate was opened");
         assert!(dial(&mut punch, member, &global));
         assert!(!dial(&mut punch, stranger, &global), "a non-member's punch went out");
-        // Not dialable: LAN (not allowed here), circuits, websocket, too many, none.
+        // QUIC as well as TCP, with or without the peer's ID.
+        let quic: Vec<Multiaddr> = vec![
+            "/ip4/8.8.8.8/udp/4001/quic-v1".parse().unwrap(),
+            format!("/ip6/2001:4860:4860::8888/udp/4001/quic-v1/p2p/{member}").parse().unwrap(),
+        ];
+        assert!(dial(&mut punch, member, &quic));
+        assert!(!dial(&mut punch, stranger, &quic), "a non-member's QUIC punch went out");
+        // Not dialable: LAN (not allowed here), circuits, websocket, DNS,
+        // other UDP protocols, too many, none.
         for bad in [
             vec!["/ip4/192.168.1.5/tcp/4001".parse().unwrap()],
+            vec!["/ip4/192.168.1.5/udp/4001/quic-v1".parse().unwrap()],
             vec![format!("/ip4/8.8.4.4/tcp/4001/p2p/{}/p2p-circuit", PeerId::random()).parse().unwrap()],
+            vec![format!("/ip4/8.8.4.4/udp/4001/quic-v1/p2p/{}/p2p-circuit", PeerId::random()).parse().unwrap()],
             vec!["/ip4/8.8.8.8/tcp/443/wss".parse().unwrap()],
+            vec!["/dns4/example.com/udp/4001/quic-v1".parse().unwrap()],
+            vec!["/ip4/8.8.8.8/udp/4001/quic".parse().unwrap()],
+            vec!["/ip4/8.8.8.8/udp/4001".parse().unwrap()],
+            vec!["/ip4/8.8.8.8/udp/4001/quic-v1/webtransport".parse().unwrap()],
             vec![global[0].clone(); MAX_PUNCH_ADDRS + 1],
             vec![],
         ] {
