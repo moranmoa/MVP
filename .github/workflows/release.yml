@@ -287,7 +287,8 @@ jobs:
         if: startsWith(matrix.platform, 'windows-')
         run: |
           shopt -s nullglob
-          node .github/scripts/pe-imports.mjs desktop/.core/mvs-core.exe desktop/.core/mvs-launcher.exe desktop/dist/win-unpacked/*.exe desktop/dist/*Setup*.exe
+          # Whole folders: every .exe and .dll in .core/ and in the app, plus the setup.
+          node .github/scripts/pe-imports.mjs desktop/.core desktop/dist/win-unpacked desktop/dist/*Setup*.exe
 
       # Release names. The updater payload is the unpacked app folder
       # (win-unpacked / linux-unpacked, contents at the archive root) with no
