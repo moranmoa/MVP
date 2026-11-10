@@ -358,6 +358,8 @@ dependencies = [
  "groupkeys",
  "rand_core 0.6.4",
  "records",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

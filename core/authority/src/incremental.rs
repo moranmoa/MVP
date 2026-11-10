@@ -123,6 +123,8 @@ pub struct Resolver {
     /// Every channel create, in linear order, accepted or not. The first
     /// accepted one is #general.
     channel_creates: Vec<RecordId>,
+    /// Every server rename, in linear order, accepted or not.
+    server_edits: Vec<RecordId>,
 
     // What the reference run would hold for the joined records.
     state: State,
@@ -177,6 +179,7 @@ impl Resolver {
             invite_revokes: HashMap::new(),
             channel_ops: HashMap::new(),
             channel_creates: Vec::new(),
+            server_edits: Vec::new(),
             state: State::default(),
             writes: HashMap::new(),
             genesis: None,
@@ -318,6 +321,11 @@ impl Resolver {
                 creates.insert(creates.partition_point(|other| pos[other] < at), id);
             }
         }
+        if matches!(action, Some(Action::ServerEdit { .. })) {
+            let pos = &self.pos;
+            let edits = &mut self.server_edits;
+            edits.insert(edits.partition_point(|other| pos[other] < at), id);
+        }
         self.actions.insert(id, action);
 
         self.stats.joined += 1;
@@ -357,6 +365,19 @@ impl Resolver {
     /// Applies the new record at position `at` the way the reference would.
     fn apply_at(&mut self, id: RecordId, at: usize) -> Result<(), Fallback> {
         let author = self.known[&id].author();
+        // After a close, only its causal past counts. A new record can't be in
+        // it (the close would have waited for it), so it is refused, unless it
+        // is an owner's close that comes first in linear order: re-resolve.
+        if let Some(close) = self.state.closed {
+            if self.is_valid_close(id) && at < self.pos[&close] {
+                return Err(Fallback::Other);
+            }
+            self.excluded.insert(id);
+            return Ok(());
+        }
+        if self.is_valid_close(id) {
+            return Err(Fallback::Other);
+        }
         let Some(action) = self.actions[&id].clone() else {
             // Never accepted; it can still be voided like any record.
             if self.removed_concurrently(&self.kick_targets, author, id) {
@@ -396,6 +417,28 @@ impl Resolver {
             }
             Action::Invite { .. } | Action::RevokeInvite { .. } => {
                 return self.apply_invite_record(id, at, &action, voided, allowed);
+            }
+            // Not the owner's (see `is_valid_close`): refused in every pass.
+            Action::ServerClose => {
+                if voided {
+                    self.excluded.insert(id);
+                }
+                return Ok(());
+            }
+            Action::ServerEdit { .. } => {
+                // Changes no roles; whether it counts depends on the author's
+                // role, which must be the same in every pass. The latest in
+                // linear order names the server.
+                if self.owner_unsettled || self.is_unsettled(author, at) {
+                    return Err(Fallback::Other);
+                }
+                if voided {
+                    self.excluded.insert(id);
+                } else if allowed {
+                    self.state.accepted.insert(id);
+                }
+                self.refresh_server_name();
+                return Ok(());
             }
             Action::AgeClaim { .. } => {
                 // Changes no roles; whether it counts depends on the author's
@@ -475,6 +518,7 @@ impl Resolver {
             | Action::Revoke { target, .. }
             | Action::Kick { target, .. }
             | Action::Unban { target } => target,
+            Action::Leave { .. } => author,
         };
 
         // From here on the record is judged the same way in every pass.
@@ -671,6 +715,24 @@ impl Resolver {
 
     /// Recomputes whether `actor` counts as 18+: their latest accepted age
     /// claim in linear order.
+    /// The server's name: the latest accepted rename in linear order.
+    fn refresh_server_name(&mut self) {
+        let latest = self.server_edits.iter().rev().find(|id| self.state.accepted.contains(*id));
+        self.state.server_name = latest.and_then(|id| match &self.actions[id] {
+            Some(Action::ServerEdit { name }) => Some(name.clone()),
+            _ => None,
+        });
+    }
+
+    /// Whether `id` is a close the reference would accept: the owner's, with
+    /// the genesis among its ancestors (see `closed_past`).
+    fn is_valid_close(&self, id: RecordId) -> bool {
+        let record = &self.known[&id];
+        matches!(self.actions[&id], Some(Action::ServerClose))
+            && Some(record.author()) == self.state.owner
+            && self.genesis.is_some_and(|genesis| self.is_control_ancestor(genesis, record.deps()))
+    }
+
     fn refresh_adult(&mut self, actor: Actor) {
         let latest = self.touch.get(&actor).into_iter().flatten().rev().find_map(|id| {
             match self.actions[id] {
@@ -769,6 +831,27 @@ impl Resolver {
                     }
                     dirty.insert(target);
                 }
+                Action::Leave { .. } => {
+                    if now {
+                        self.accept_write(id, &action);
+                    } else {
+                        self.state.accepted.remove(&id);
+                        self.writes
+                            .get_mut(&author)
+                            .expect("accepted write")
+                            .retain(|w| w.record != id);
+                    }
+                    dirty.insert(author);
+                }
+                Action::ServerEdit { .. } => {
+                    if now {
+                        self.state.accepted.insert(id);
+                    } else {
+                        self.state.accepted.remove(&id);
+                    }
+                    self.refresh_server_name();
+                }
+                Action::ServerClose => return Err(Fallback::Other),
                 // Removals accepted differently void different records.
                 Action::Revoke { .. } | Action::Kick { .. } => return Err(Fallback::Voids),
                 Action::RevokeInvite { .. } => return Err(Fallback::Voids),
