@@ -226,10 +226,15 @@ impl<S: SecretStore> Vault<S> {
     }
 
     /// Deletes the identity from this device. Only the words bring it back.
-    pub fn forget(&self) -> Result<(), VaultError> {
-        self.store.delete(ENTRY_RECOVERY_CHECK)?;
+    /// Sign-out: deletes this identity from the keychain. The secret goes
+    /// first: if that fails nothing changed, the identity still opens, and
+    /// that is the only error. Once the secret is gone the identity is gone,
+    /// so a failure to delete the recovery-check marker after it is not an
+    /// error: it returns `Ok(false)` ("marker left"). A stale marker only
+    /// says "checked" if the same words are restored here.
+    pub fn forget(&self) -> Result<bool, VaultError> {
         self.store.delete(ENTRY_SECRET)?;
-        Ok(())
+        Ok(self.store.delete(ENTRY_RECOVERY_CHECK).is_ok())
     }
 
     fn ensure_empty(&self) -> Result<(), VaultError> {
