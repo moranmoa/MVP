@@ -127,9 +127,11 @@ services:
       - --no-dtls
       - --fingerprint
       - --listening-port=3478
-      - --log-file=stdout
+      # No logs at all: coturn would otherwise log every client's address
+      # (GAP-7: the relay host keeps no record of who talks to whom).
+      - --no-stdout-log
+      - --log-file=/dev/null
       - --pidfile=/tmp/turnserver.pid
-      - --simple-log
     ports:
       - "3478:3478/udp"
     read_only: true

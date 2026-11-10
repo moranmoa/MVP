@@ -243,7 +243,10 @@ answers that question from **our** host, so no third-party STUN server sees
 users' IP addresses. It's coturn in **STUN-only** mode: no TURN, no relaying,
 no authentication and no TLS, and it carries no media. It listens on
 3478/udp, read-only with every capability dropped except the one its binary
-needs to start.
+needs to start. **It keeps no logs** (`--no-stdout-log`, `--log-file=/dev/null`),
+so no client address is written anywhere on the host. The trade-off is that
+start-up errors aren't logged either: if `docker compose ps` shows it
+restarting, run the same command once by hand to see why.
 
 Owner steps:
 
