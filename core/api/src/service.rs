@@ -452,6 +452,19 @@ impl Core {
     }
 
     pub fn restore_identity(&self, words: Vec<String>) -> CoreResult<Identity> {
+        self.restore_identity_with(words, None)
+    }
+
+    /// `restoreIdentity(words, input?)`: the words don't carry the country
+    /// or birth date (spec, age §), so the UI asks them again before the
+    /// words and passes them here, as `createIdentity` takes them. Without
+    /// `input` this device has neither, and a rejoin keeps what my servers
+    /// already hold (no age claim from no date).
+    pub fn restore_identity_with(
+        &self,
+        words: Vec<String>,
+        input: Option<NewIdentityInput>,
+    ) -> CoreResult<Identity> {
         self.run(|inner, ports, _| {
             if inner.me.is_some() {
                 return Err(ErrorCode::NotAllowed.into());
@@ -459,9 +472,19 @@ impl Core {
             let phrase = RecoveryPhrase::parse(&words.join(" ")).map_err(phrase_error)?;
             inner.vault.restore(&phrase).map_err(vault_error)?;
             inner.db.delete(KV_RECOVERY_CHALLENGE)?;
-            // TODO(backup): the spec restores the birth date from the
-            // encrypted identity backup; until then the UI asks again.
-            let me = inner.new_me(phrase, Profile::default())?;
+            // TODO(backup): the spec restores these from the encrypted
+            // identity backup (docs/design, restore servers); until then the
+            // UI asks again. The name comes after, from `updateProfile`.
+            let profile = match input {
+                Some(input) => Profile {
+                    country: input.country,
+                    birth_date: input.birth_date,
+                    locale: Some(input.locale),
+                    ..Profile::default()
+                },
+                None => Profile::default(),
+            };
+            let me = inner.new_me(phrase, profile)?;
             let identity = inner.identity_json(&me)?;
             inner.me = Some(me);
             unlock_cipher(ports, inner.me.as_ref());
@@ -2815,12 +2838,23 @@ impl Inner {
         if view.state.closed.is_some() {
             return Ok(JoinStatus::Closed { link });
         }
+        let key = me.key();
+        // Already a member (this device lost its copy, e.g. a restore on a
+        // new computer): no new join, and nothing that would overwrite what
+        // the server already holds about me.
+        let member = view.state.is_member(key);
         let required = view.genesis.age_restriction;
         let age = model::age_on(&me.profile.birth_date, ports.clock.now_ms());
-        if required.min_age() > 0 && age.is_none_or(|age| age < required.min_age()) {
+        // A member's earlier age claim stands while this device has no birth
+        // date (a restore doesn't carry it yet); a known age too low still
+        // blocks.
+        let age_unknown_member = member && age.is_none();
+        if required.min_age() > 0
+            && !age_unknown_member
+            && age.is_none_or(|age| age < required.min_age())
+        {
             return Ok(JoinStatus::AgeBlocked { link, required });
         }
-        let key = me.key();
         if view.is_kicked(&key) {
             // TODO(ui): a "you were removed from this server" phase.
             return Ok(JoinStatus::Invalid { link });
@@ -2836,9 +2870,8 @@ impl Inner {
             )
             .map_err(|_| CoreError::from(ErrorCode::BadRequest))
         };
-        // Already a member (this device lost its copy): no new join needed.
         let mut mine = Vec::new();
-        if !view.state.is_member(key) {
+        if !member {
             // An invite we don't hold, revoked or used up: `authority`
             // refuses the join, and nothing is stored or sent.
             // TODO(ui): phases for "invite expired" and "invite used up".
@@ -2850,17 +2883,27 @@ impl Inner {
             mine.push(join);
         }
         let view = ServerView::build(server, &log).ok_or(ErrorCode::Internal)?;
-        let profile =
-            sign(&view, view.deps(None), &model::profile_action(&me.profile.display_name))?;
+        // A member without a name here (a restore) keeps the profile the
+        // server holds: an empty one would replace my name for everyone.
+        let post_profile = !(member && me.profile.display_name.trim().is_empty());
+        let profile = post_profile
+            .then(|| sign(&view, view.deps(None), &model::profile_action(&me.profile.display_name)))
+            .transpose()?;
         for record in log.records.iter().chain(&log.channel) {
             self.db.put_record(record)?;
         }
         self.logs.insert(server, log);
-        mine.push(profile.clone());
-        self.store(server, profile)?;
-        let claim = self.sign_age_claim(ports, server)?;
-        mine.push(claim.clone());
-        self.store(server, claim)?;
+        if let Some(profile) = profile {
+            mine.push(profile.clone());
+            self.store(server, profile)?;
+        }
+        // Likewise a member without a birth date keeps its earlier claim:
+        // a claim from no date would say "not adult", which counts at once.
+        if !age_unknown_member {
+            let claim = self.sign_age_claim(ports, server)?;
+            mine.push(claim.clone());
+            self.store(server, claim)?;
+        }
         for record in &mine {
             ports.network.publish(record);
         }

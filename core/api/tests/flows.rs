@@ -3245,3 +3245,284 @@ fn a_leave_waits_in_the_outbox_until_the_gate_opens() {
     drop(guest);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Records of `kind` that `who` (a user ID) wrote in `server`.
+fn records_by(world: &World, server: &str, who: &str, kind: Kind) -> usize {
+    let server = ServerId::from_bytes(hex::decode(server).unwrap().try_into().unwrap());
+    let who = PublicKey::from_bytes(hex::decode(who).unwrap().try_into().unwrap());
+    world.network.fetch(server).iter().filter(|r| r.kind() == kind && r.author() == who).count()
+}
+
+/// Owner bug (0.3.1): an owner restores their words on a new computer and
+/// rejoins their 18+ server by its invite link. They come back as the same
+/// member (no new join), still the owner, and nothing they post overwrites
+/// what the server holds: no empty name, no "not adult" claim from a
+/// birth date this device doesn't have. A member who restored and set a
+/// name posts the name, still with no claim.
+#[test]
+fn a_restored_member_rejoins_without_blanking_their_name_or_age() {
+    let world = World::new();
+    let owner = world.peer();
+    let created = owner.core.create_identity(adult()).unwrap();
+    assert!(answer(&owner, &created.words, &[]).1.unwrap().ok);
+    let owner_id = owner
+        .core
+        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None })
+        .unwrap()
+        .id;
+    let server = owner.core.create_server("Night", AgeRestriction::Eighteen).unwrap();
+    let bob = world.peer();
+    sign_up(&bob, "Bob");
+    assert!(matches!(
+        bob.core.join_server(&server.invite_link).unwrap(),
+        JoinStatus::Searching { .. }
+    ));
+    owner.core.sync_now().unwrap();
+    bob.core.sync_now().unwrap();
+    let joins = records_by(&world, &server.id, &owner_id, Kind::Join);
+    let posts = records_by(&world, &server.id, &owner_id, Kind::Post);
+    let claims = records_by(&world, &server.id, &owner_id, Kind::AgeClaim);
+
+    // A new computer: the same words, no name, no birth date.
+    let laptop = world.peer();
+    let restored = laptop.core.restore_identity(created.words.clone()).unwrap();
+    assert_eq!(restored.id, owner_id);
+    // Someone who isn't a member yet, with no birth date, is still blocked.
+    let stranger = world.peer();
+    stranger.core.restore_identity(stranger_words()).unwrap();
+    stranger.core.join_server(&server.invite_link).unwrap();
+    assert!(stranger.core.list_servers().unwrap().is_empty(), "joined an 18+ server with no birth date");
+
+    laptop.core.join_server(&server.invite_link).unwrap();
+    let listed = laptop.core.list_servers().unwrap();
+    assert_eq!(listed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), [server.id.as_str()]);
+    assert_eq!(listed[0].owner_id, owner_id);
+    // Nothing new from me: no join, no profile post, no age claim.
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::Join), joins);
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::Post), posts);
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::AgeClaim), claims);
+    // Bob still sees MoA, the owner.
+    bob.core.sync_now().unwrap();
+    let me = bob
+        .core
+        .list_members(&server.id)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.id == owner_id)
+        .unwrap();
+    assert_eq!((me.display_name.as_str(), me.is_owner), ("MoA", true));
+
+    // A second restore that sets a name first posts it, but still no claim.
+    let other = world.peer();
+    other.core.restore_identity(created.words.clone()).unwrap();
+    other
+        .core
+        .update_profile(ProfileInput { display_name: "MoA 2".into(), bio: None, avatar_data_url: None })
+        .unwrap();
+    other.core.join_server(&server.invite_link).unwrap();
+    assert_eq!(other.core.list_servers().unwrap().len(), 1);
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::Post), posts + 1);
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::AgeClaim), claims);
+    bob.core.sync_now().unwrap();
+    let names: Vec<String> =
+        bob.core.list_members(&server.id).unwrap().into_iter().map(|m| m.display_name).collect();
+    assert!(names.contains(&"MoA 2".to_owned()), "{names:?}");
+}
+
+/// Words for an identity nobody else in the test uses.
+fn stranger_words() -> Vec<String> {
+    let world = World::new();
+    let peer = world.peer();
+    peer.core.create_identity(adult()).unwrap().words
+}
+
+/// Fix 1's api: `restoreIdentity(words, input)` takes the country and birth
+/// date asked again; a rejoin then posts a claim from that date.
+#[test]
+fn a_restore_takes_the_birth_date_asked_again() {
+    let world = World::new();
+    let owner = world.peer();
+    let created = owner.core.create_identity(adult()).unwrap();
+    assert!(answer(&owner, &created.words, &[]).1.unwrap().ok);
+    let owner_id = owner
+        .core
+        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None })
+        .unwrap()
+        .id;
+    let server = owner.core.create_server("Night", AgeRestriction::Eighteen).unwrap();
+    owner.core.sync_now().unwrap();
+    let claims = records_by(&world, &server.id, &owner_id, Kind::AgeClaim);
+
+    let laptop = world.peer();
+    let request = serde_json::json!({
+        "cmd": "restoreIdentity",
+        "args": {
+            "words": created.words,
+            "input": { "locale": "he", "country": "IL", "birthDate": "1990-05-01" }
+        }
+    });
+    let answer: serde_json::Value =
+        serde_json::from_str(&laptop.core.handle(&request.to_string())).unwrap();
+    assert_eq!(answer["ok"]["id"], serde_json::json!(owner_id));
+    assert_eq!(answer["ok"]["birthDate"], serde_json::json!("1990-05-01"));
+    // Without input, the words alone still restore (as before).
+    let bare = world.peer();
+    let request = serde_json::json!({ "cmd": "restoreIdentity", "args": { "words": created.words } });
+    let answer: serde_json::Value =
+        serde_json::from_str(&bare.core.handle(&request.to_string())).unwrap();
+    assert_eq!(answer["ok"]["birthDate"], serde_json::json!(""));
+
+    laptop.core.join_server(&server.invite_link).unwrap();
+    assert_eq!(laptop.core.list_servers().unwrap().len(), 1);
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::AgeClaim), claims + 1);
+}
+
+/// One side of a network partition: while cut, it sees only what the world
+/// held when it was cut, and what it publishes waits until it heals.
+struct Partition {
+    world: Arc<LoopbackNetwork>,
+    cut: std::sync::Mutex<Option<BTreeSet<records::RecordId>>>,
+    held: std::sync::Mutex<Vec<records::Record>>,
+}
+
+impl Partition {
+    fn new(world: &Arc<LoopbackNetwork>) -> Arc<Partition> {
+        Arc::new(Partition { world: world.clone(), cut: Default::default(), held: Default::default() })
+    }
+
+    fn cut(&self, server: ServerId) {
+        *self.cut.lock().unwrap() = Some(self.world.fetch(server).iter().map(|r| r.id()).collect());
+    }
+
+    fn heal(&self) {
+        *self.cut.lock().unwrap() = None;
+        for record in std::mem::take(&mut *self.held.lock().unwrap()) {
+            self.world.publish(&record);
+        }
+    }
+}
+
+impl Network for Partition {
+    fn publish(&self, record: &records::Record) {
+        if self.cut.lock().unwrap().is_some() {
+            self.held.lock().unwrap().push(record.clone());
+        } else {
+            self.world.publish(record);
+        }
+    }
+
+    fn fetch(&self, server: ServerId) -> Vec<records::Record> {
+        let all = self.world.fetch(server);
+        match &*self.cut.lock().unwrap() {
+            Some(seen) => all.into_iter().filter(|r| seen.contains(&r.id())).collect(),
+            None => all,
+        }
+    }
+
+    fn fetch_invite(&self, handle: [u8; 32]) -> Vec<Vec<u8>> {
+        self.world.fetch_invite(handle)
+    }
+}
+
+/// Tech Lead and Security Lead (restore design): one owner identity on two
+/// computers re-keys the same join concurrently, neither seeing the other's
+/// rotation. Both rotations are valid; a third member reads what each
+/// computer sealed; a later kick shuts the kicked member out of what both
+/// seal next.
+#[test]
+fn one_identity_on_two_cores_re_keys_concurrently_and_converges() {
+    use api::crypto::GroupKeysCipher;
+
+    let world = World::new();
+    let (owner, server, channel) = keyed_server(&world, "Twins");
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let carol = joiner(&world, &server, "Carol");
+    owner.core.sync_now().unwrap();
+    // The same owner on a second computer: restored, rejoined by the link.
+    let partition = Partition::new(&world.network);
+    let laptop = world.peer_on(
+        partition.clone(),
+        Arc::new(MemoryStore::new()),
+        None,
+        Arc::new(GroupKeysCipher::locked()),
+    );
+    laptop.core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
+    laptop.core.join_server(&server.invite_link).unwrap();
+    advance(&world, JOIN_REKEY_REFILL_MS * 4);
+    for peer in [&owner, &laptop, &carol] {
+        peer.core.sync_now().unwrap();
+    }
+    assert_eq!(laptop.core.list_servers().unwrap().len(), 1);
+
+    // Dan joins; both owner cores re-key for it without seeing each other.
+    let dan_cipher = Arc::new(GroupKeysCipher::locked());
+    let dan = world.peer_with(Arc::new(MemoryStore::new()), None, dan_cipher.clone());
+    sign_up(&dan, "Dan");
+    dan.core.join_server(&server.invite_link).unwrap();
+    advance(&world, JOIN_REKEY_REFILL_MS * 4);
+    let rotation_ids = |records: &[records::Record]| -> BTreeSet<records::RecordId> {
+        records.iter().filter(|r| r.kind() == Kind::KeyRotation).map(|r| r.id()).collect()
+    };
+    let before = rotation_ids(&world.network.fetch(server_key));
+    partition.cut(server_key);
+    owner.core.sync_now().unwrap();
+    laptop.core.sync_now().unwrap();
+    owner.core.send_message(&channel, "from the PC", None).unwrap();
+    laptop.core.send_message(&channel, "from the laptop", None).unwrap();
+    // Each side rotated, neither seeing the other's rotation.
+    let from_pc: BTreeSet<_> =
+        rotation_ids(&world.network.fetch(server_key)).difference(&before).copied().collect();
+    let from_laptop = rotation_ids(&partition.held.lock().unwrap());
+    assert!(!from_pc.is_empty(), "the PC didn't re-key for the join");
+    assert!(!from_laptop.is_empty(), "the laptop didn't re-key for the join");
+    assert!(from_pc.is_disjoint(&from_laptop));
+    partition.heal();
+
+    // Everyone, Dan included, reads both.
+    for peer in [&owner, &laptop, &carol, &dan] {
+        peer.core.sync_now().unwrap();
+    }
+    let bodies = |peer: &Peer| -> Vec<String> {
+        let mut bodies: Vec<String> = peer
+            .core
+            .get_messages(&channel, 0, 50)
+            .unwrap()
+            .messages
+            .into_iter()
+            .map(|m| m.body)
+            .collect();
+        bodies.sort();
+        bodies
+    };
+    for peer in [&owner, &laptop, &carol, &dan] {
+        assert_eq!(bodies(peer), ["from the PC", "from the laptop"]);
+    }
+
+    // A kick from the PC: what either computer seals next is shut to Dan.
+    let dan_id = dan.core.get_identity().unwrap().unwrap().id;
+    owner.core.kick_member(&server.id, &dan_id).unwrap();
+    let after_pc = owner.core.send_message(&channel, "PC after", None).unwrap();
+    laptop.core.sync_now().unwrap();
+    let after_laptop = laptop.core.send_message(&channel, "laptop after", None).unwrap();
+    carol.core.sync_now().unwrap();
+    let carol_bodies = bodies(&carol);
+    for body in ["PC after", "laptop after"] {
+        assert!(carol_bodies.contains(&body.to_owned()), "Carol can't read {body:?}: {carol_bodies:?}");
+    }
+    let held = world.network.fetch(server_key);
+    for record in held.iter().filter(|r| r.kind() == Kind::KeyRotation) {
+        let _ = dan_cipher.apply_rotation(record);
+    }
+    let accepted = held.iter().filter(|r| r.kind() == Kind::KeyRotation).map(|r| r.id()).collect();
+    dan_cipher.set_accepted(server_key, &accepted);
+    for sent in [&after_pc, &after_laptop] {
+        let record =
+            held.iter().find(|r| hex::encode(r.id().as_bytes()) == sent.id).expect("published");
+        let Scope::Channel(ch) = record.scope() else { panic!("a channel record") };
+        assert!(
+            dan_cipher.decrypt(server_key, ch, record.author(), record.body()).is_err(),
+            "the kicked member read {:?}",
+            sent.body
+        );
+    }
+}
