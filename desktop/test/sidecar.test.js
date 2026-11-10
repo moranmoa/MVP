@@ -57,6 +57,22 @@ test('spawned by absolute path, no shell, minimal env, data dir argument', async
 test('relative paths are refused', () => {
   assert.throws(() => new Sidecar({ exe: 'mvs-core', dataDir: DATA, onEvent() {} }), /absolute/);
   assert.throws(() => new Sidecar({ exe: FAKE, dataDir: 'data', onEvent() {} }), /absolute/);
+  assert.throws(() => new Sidecar({ exe: process.execPath, script: 'fake-core.js', dataDir: DATA, onEvent() {} }), /absolute/);
+});
+
+test('a .js stand-in runs as exe <script> with ELECTRON_RUN_AS_NODE (checkouts on Windows)', async () => {
+  let seen;
+  const spawnImpl = (exe, args, opts) => {
+    seen = { exe, args, opts };
+    return require('node:child_process').spawn(exe, args, opts);
+  };
+  const core = new Sidecar({ exe: process.execPath, script: FAKE, dataDir: DATA, onEvent() {}, spawnImpl }).start();
+  const res = await core.request('getAppInfo', {});
+  core.stop();
+  assert.equal(seen.exe, process.execPath);
+  assert.deepEqual(seen.args, [FAKE, '--data-dir', DATA]);
+  assert.equal(seen.opts.env.ELECTRON_RUN_AS_NODE, '1');
+  assert.deepEqual(res.ok.argv, ['--data-dir', DATA]);
 });
 
 test('minimalEnv keeps only the listed variables', () => {
