@@ -4,21 +4,31 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { _electron as electron } from 'playwright-core';
 
 const FAKE_CORE = fileURLToPath(new URL('./fake-core.js', import.meta.url));
+// A throwaway profile: never the real app's profile or its single-instance lock.
+const PROFILE = mkdtempSync(join(tmpdir(), 'mvs-e2e-'));
 
 let app;
 let page;
 
 before(async () => {
-  app = await electron.launch({ args: ['.'], env: { ...process.env, MVS_DEMO: '1', MVS_CORE_PATH: FAKE_CORE } });
+  app = await electron.launch({ args: ['.'], env: { ...process.env, MVS_DEMO: '1', MVS_CORE_PATH: FAKE_CORE, MVS_TEST_USER_DATA: PROFILE } });
   page = await app.firstWindow();
   await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, null, { timeout: 30_000 });
 });
 
 after(async () => {
   await app?.close();
+  rmSync(PROFILE, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+});
+
+test('the app runs in the throwaway test profile', async () => {
+  assert.equal(await app.evaluate(({ app: a }) => a.getPath('userData')), PROFILE);
 });
 
 test('the UI renders from app://mvs', async () => {

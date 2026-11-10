@@ -22,6 +22,14 @@ const { relayFor } = require('./config');
 const update = require('./update');
 const { createLog } = require('./logfile');
 
+// Tests only, and only in a checkout (never a release build): a throwaway
+// profile, so a test run never shares the installed app's profile
+// (%APPDATA%\MVS, ~/.config/MVS) or its single-instance lock. Set before the
+// lock below, which lives in the profile.
+if (!app.isPackaged && process.env.MVS_TEST_USER_DATA && path.isAbsolute(process.env.MVS_TEST_USER_DATA)) {
+  app.setPath('userData', process.env.MVS_TEST_USER_DATA);
+}
+
 // One instance only: a second launch (e.g. an mvs:// link, B1-3) focuses this one.
 if (!app.requestSingleInstanceLock()) {
   app.exit(0);
