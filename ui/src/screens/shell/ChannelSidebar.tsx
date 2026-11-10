@@ -277,18 +277,18 @@ export function ChannelSidebar({
                     <button
                       type="button"
                       className="icon-button"
-                      disabled={i === 0}
+                      aria-disabled={i === 0 || undefined}
                       aria-label={`${intl.formatMessage({ id: 'channelOrder.moveUp' })}: ${c.name}`}
-                      onClick={() => moveChannel(c, i - 1)}
+                      onClick={() => i > 0 && moveChannel(c, i - 1)}
                     >
                       ▲
                     </button>
                     <button
                       type="button"
                       className="icon-button"
-                      disabled={i === channels.length - 1}
+                      aria-disabled={i === channels.length - 1 || undefined}
                       aria-label={`${intl.formatMessage({ id: 'channelOrder.moveDown' })}: ${c.name}`}
-                      onClick={() => moveChannel(c, i + 1)}
+                      onClick={() => i < channels.length - 1 && moveChannel(c, i + 1)}
                     >
                       ▼
                     </button>

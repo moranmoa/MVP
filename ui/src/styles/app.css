@@ -2912,7 +2912,7 @@ input.switch:disabled {
 
 .channel-handle {
   position: absolute;
-  inset-inline-start: -0.875rem;
+  inset-inline-start: -0.5rem;
   inset-block-start: 50%;
   translate: 0 -50%;
   width: 1rem;
@@ -2968,4 +2968,30 @@ input.switch:disabled {
 
 .channel-arrange-done {
   margin: 0 0.5rem 0.5rem;
+}
+
+/* Arrange mode (G-01, G-11): an arrow that can't move further stays 44px and focusable. */
+.rail-arrange .icon-button[aria-disabled='true'],
+.channel-arrange .icon-button[aria-disabled='true'] {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Phone: behind the widened rail while arranging (UX on #322). */
+.rail-arrange-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 4;
+  background: rgb(0 0 0 / 0.35);
+}
+
+/* Arrange mode: the arrows sit on the channel's own row. */
+.channel-row:has(.channel-arrange) {
+  display: flex;
+  align-items: center;
+}
+
+.channel-row:has(.channel-arrange) .channel {
+  flex: 1;
+  min-width: 0;
 }

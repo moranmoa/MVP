@@ -108,7 +108,7 @@ describe('server order in the rail (G-01)', () => {
       fireEvent.click(screen.getByRole('menuitem', { name: 'Arrange servers' }));
     });
     const nav = rail();
-    expect(within(nav).getByRole('button', { name: `Move up: ${before[0]}` }).hasAttribute('disabled')).toBe(true);
+    expect(within(nav).getByRole('button', { name: `Move up: ${before[0]}` }).getAttribute('aria-disabled')).toBe('true'); // stays focusable (UX)
     await act(async () => {
       fireEvent.click(within(nav).getByRole('button', { name: `Move down: ${before[0]}` }));
     });

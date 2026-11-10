@@ -180,6 +180,9 @@ export function ServerRail({
   const dragged = dragging ? servers.find((s) => s.id === dragging.id) : undefined;
 
   return (
+    <>
+    {/* Phone: arrange mode widens the rail over the channel list; dim that (UX on #322). */}
+    {arranging && <div className="rail-arrange-backdrop" aria-hidden="true" onClick={() => setArranging(false)} />}
     <nav className={`rail ${arranging ? 'arranging' : ''} ${dragging ? 'dragging' : ''}`} aria-label={intl.formatMessage({ id: 'rail.label' })}>
       <span className="visually-hidden" aria-live="polite">
         {announce}
@@ -234,18 +237,18 @@ export function ServerRail({
                 <button
                   type="button"
                   className="icon-button"
-                  disabled={i === 0}
+                  aria-disabled={i === 0 || undefined}
                   aria-label={`${intl.formatMessage({ id: 'serverOrder.moveUp' })}: ${s.name}`}
-                  onClick={() => move(s.id, i - 1)}
+                  onClick={() => i > 0 && move(s.id, i - 1)}
                 >
                   ▲
                 </button>
                 <button
                   type="button"
                   className="icon-button"
-                  disabled={i === servers.length - 1}
+                  aria-disabled={i === servers.length - 1 || undefined}
                   aria-label={`${intl.formatMessage({ id: 'serverOrder.moveDown' })}: ${s.name}`}
-                  onClick={() => move(s.id, i + 1)}
+                  onClick={() => i < servers.length - 1 && move(s.id, i + 1)}
                 >
                   ▼
                 </button>
@@ -293,6 +296,7 @@ export function ServerRail({
       </div>
       {menu}
     </nav>
+    </>
   );
 }
 
