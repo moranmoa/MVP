@@ -196,13 +196,12 @@ jobs:
       - name: Install desktop dependencies
         working-directory: desktop
         run: npm ci --no-audit --no-fund
-      # Skips the three tests that need a running core (names matching "the core|core events"):
-      # test/fake-core.js is spawned directly, and Windows cannot execute a .js
-      # file (EFTYPE; the shell now survives that, the core just stays down).
-      # Linux runs them. The permission (mic) tests still run here.
+      # The full suite, the fake core included: in a checkout on Windows the
+      # shell runs test/fake-core.js under Electron in Node mode (sidecar.js
+      # "script"), since Windows cannot execute a .js file.
       # DEBUG=pw:browser* puts Electron's own stdout/stderr (main's log lines,
       # the sidecar's "core:" lines) into the output, which is kept below.
-      - name: Electron e2e (without the core-spawning tests)
+      - name: Electron e2e
         working-directory: desktop
         shell: bash
         env:
@@ -210,7 +209,7 @@ jobs:
           ELECTRON_ENABLE_LOGGING: "1"
         run: |
           set -o pipefail
-          node --test --test-concurrency=1 --test-skip-pattern="the core|core events" test/e2e.test.mjs 2>&1 | tee "$RUNNER_TEMP/e2e-output.log"
+          node --test --test-concurrency=1 test/e2e.test.mjs 2>&1 | tee "$RUNNER_TEMP/e2e-output.log"
       - name: Collect e2e logs
         if: always()
         shell: bash

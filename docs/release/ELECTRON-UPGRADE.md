@@ -23,8 +23,8 @@ what proves our refusals still hold.
 
    When it fails, download the `desktop-e2e-windows-logs` artifact. It holds
    Electron's own output, the sidecar's `core:` lines and `mvs.log`.
-4. **Linux desktop e2e.** `desktop e2e (Linux, xvfb)` is green. It also runs
-   the core-dependent cases that Windows skips.
+4. **Linux desktop e2e.** `desktop e2e (Linux, xvfb)` is green: the same suite
+   on Linux (Electron's sandbox under Xvfb).
 5. **Unit tests.** `desktop unit tests` is green, including
    `security.test.js`'s permission-handler cases.
 6. **Fuses.** `npm run test:fuses` passes against a packaged build (the
