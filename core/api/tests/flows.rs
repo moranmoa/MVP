@@ -3526,3 +3526,69 @@ fn one_identity_on_two_cores_re_keys_concurrently_and_converges() {
         );
     }
 }
+
+/// Profile posts by `who` (a user ID) in `server`.
+fn profile_posts(world: &World, server: &str, who: &str) -> usize {
+    let server = ServerId::from_bytes(hex::decode(server).unwrap().try_into().unwrap());
+    let who = PublicKey::from_bytes(hex::decode(who).unwrap().try_into().unwrap());
+    world.network.fetch(server).iter().filter(|r| r.kind() == Kind::Post && r.author() == who).count()
+}
+
+fn name_seen_by(peer: &Peer, server: &str, who: &str) -> String {
+    peer.core.list_members(server).unwrap().into_iter().find(|m| m.id == who).unwrap().display_name
+}
+
+/// TODO(profiles), done (B11e's edit-profile screen): a new name in
+/// `updateProfile` reaches every server I'm still in as a new profile post;
+/// the same name, or only a new bio or avatar, posts nothing; a server I was
+/// kicked from or one that was closed gets nothing, and neither fails the
+/// call.
+#[test]
+fn a_new_name_reaches_every_server_i_am_in() {
+    let world = World::new();
+    let owner = world.peer();
+    let owner_id = sign_up(&owner, "Owner").id;
+    let bob = world.peer();
+    let bob_id = sign_up(&bob, "Bob").id;
+    let one = owner.core.create_server("One", AgeRestriction::None).unwrap();
+    let two = owner.core.create_server("Two", AgeRestriction::None).unwrap();
+    let three = owner.core.create_server("Three", AgeRestriction::None).unwrap();
+    for server in [&one, &two, &three] {
+        bob.core.join_server(&server.invite_link).unwrap();
+    }
+    owner.core.sync_now().unwrap();
+    bob.core.sync_now().unwrap();
+    // Bob is kicked from Two; Three is closed.
+    owner.core.kick_member(&two.id, &bob_id).unwrap();
+    owner.core.close_server(&three.id).unwrap();
+    bob.core.sync_now().unwrap();
+    let before: Vec<usize> =
+        [&one, &two, &three].iter().map(|s| profile_posts(&world, &s.id, &bob_id)).collect();
+
+    let rename = |name: &str, bio: Option<&str>| {
+        bob.core
+            .update_profile(ProfileInput {
+                display_name: name.into(),
+                bio: bio.map(String::from),
+                avatar_data_url: None,
+            })
+            .unwrap()
+    };
+    assert_eq!(rename("Bobby", None).display_name, "Bobby");
+    let after: Vec<usize> =
+        [&one, &two, &three].iter().map(|s| profile_posts(&world, &s.id, &bob_id)).collect();
+    assert_eq!(after, [before[0] + 1, before[1], before[2]], "only the server Bob is still in");
+    owner.core.sync_now().unwrap();
+    assert_eq!(name_seen_by(&owner, &one.id, &bob_id), "Bobby");
+
+    // The same name (spaces trimmed), or a new bio only: nothing posted.
+    rename(" Bobby ", Some("hi"));
+    assert_eq!(profile_posts(&world, &one.id, &bob_id), after[0]);
+    // The owner renames too: seen by Bob.
+    owner
+        .core
+        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None })
+        .unwrap();
+    bob.core.sync_now().unwrap();
+    assert_eq!(name_seen_by(&bob, &one.id, &owner_id), "MoA");
+}

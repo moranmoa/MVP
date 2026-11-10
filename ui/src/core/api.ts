@@ -56,7 +56,12 @@ export interface CoreCommands {
    * Success also lifts a burned challenge.
    */
   getRecoveryWords(): Promise<string[]>;
-  restoreIdentity(words: string[]): Promise<Identity>;
+  /**
+   * The account from its 12 words. `input` (#290) carries what the restore asks
+   * again, as for a new account (spec: age, restore asks again): language, country,
+   * birth date. The words alone still work.
+   */
+  restoreIdentity(words: string[], input?: NewIdentityInput): Promise<Identity>;
   updateProfile(input: ProfileInput): Promise<Identity>;
 
   // Servers and channels

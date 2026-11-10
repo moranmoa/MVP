@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { FormattedMessage, FormattedNumber, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { FONT_MAX, FONT_MIN, SCALE_MAX, SCALE_MIN, useSettings, type Theme } from '../../app/settings';
@@ -8,6 +8,7 @@ import { Avatar, Code, Dialog, Name, RICH } from '../../components/common';
 import { CheckIcon, ShieldIcon } from '../../components/icons';
 import { LOCALES } from '../../i18n';
 import { textDir, useUiDir } from '../../app/textDir';
+import { ProfileEditor, type ProfileEditorHandle } from './ProfileEditor';
 
 type Section = 'account' | 'privacy' | 'language' | 'appearance' | 'storage' | 'diagnostics' | 'about';
 const SECTIONS: Section[] = ['account', 'privacy', 'language', 'appearance', 'storage', 'diagnostics', 'about'];
@@ -32,12 +33,25 @@ export function SettingsScreen({
     const s = new URLSearchParams(location.search).get('settings');
     return SECTIONS.includes(s as Section) ? (s as Section) : 'appearance';
   });
+  // B11e: unsaved profile changes are asked about before leaving Account.
+  const [profileDirty, setProfileDirty] = useState(false);
+  const editor = useRef<ProfileEditorHandle>(null);
+  const [leaving, setLeaving] = useState<(() => void) | null>(null);
+  const guard = (action: () => void) => (profileDirty && section === 'account' ? setLeaving(() => action) : action());
+  const onDirtyChange = useCallback((d: boolean) => setProfileDirty(d), []);
   useEffect(() => {
-    if (request && SECTIONS.includes(request.section as Section)) setSection(request.section as Section);
+    if (request && SECTIONS.includes(request.section as Section)) guard(() => setSection(request.section as Section));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [request]);
+  const leave = () => {
+    const go = leaving;
+    setLeaving(null);
+    setProfileDirty(false);
+    go?.();
+  };
 
   return (
-    <Dialog open={open} onClose={onClose} title={intl.formatMessage({ id: 'settings.title' })} className="settings-dialog">
+    <Dialog open={open} onClose={() => guard(onClose)} title={intl.formatMessage({ id: 'settings.title' })} className="settings-dialog">
       <div className="settings">
         <nav className="settings-nav" aria-label={intl.formatMessage({ id: 'settings.title' })}>
           <ul>
@@ -47,9 +61,12 @@ export function SettingsScreen({
                   type="button"
                   className={section === s ? 'active' : ''}
                   aria-current={section === s ? 'true' : undefined}
-                  onClick={() => setSection(s)}
+                  onClick={() => s !== section && guard(() => setSection(s))}
                 >
                   <FormattedMessage id={`settings.nav.${s}`} />
+                  {s === 'account' && profileDirty && (
+                    <span className="nav-dirty" role="img" aria-label={intl.formatMessage({ id: 'profile.edit.unsaved' })} />
+                  )}
                 </button>
               </li>
             ))}
@@ -59,7 +76,7 @@ export function SettingsScreen({
           <h3 id={`settings-h-${section}`}>
             <FormattedMessage id={`settings.nav.${section}`} />
           </h3>
-          {section === 'account' && <AccountSection onCheckWords={onCheckWords} />}
+          {section === 'account' && <AccountSection onCheckWords={onCheckWords} editor={editor} onDirtyChange={onDirtyChange} />}
           {section === 'language' && <LanguageSection />}
           {section === 'appearance' && <AppearanceSection />}
           {section === 'storage' && <StorageSection />}
@@ -68,25 +85,52 @@ export function SettingsScreen({
           {section === 'privacy' && <PrivacySection focus={request?.section === 'privacy' ? request.at : undefined} />}
         </section>
       </div>
+      <Dialog open={!!leaving} onClose={() => setLeaving(null)} title={intl.formatMessage({ id: 'profile.edit.unsavedTitle' })}>
+        <div className="actions">
+          <button
+            type="button"
+            className="primary"
+            autoFocus
+            onClick={async () => {
+              if (await editor.current?.save()) leave();
+              else setLeaving(null); // the error shows in the form
+            }}
+          >
+            <FormattedMessage id="profile.edit.save" />
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => {
+              editor.current?.discard();
+              leave();
+            }}
+          >
+            <FormattedMessage id="profile.edit.unsavedDiscard" />
+          </button>
+          <button type="button" className="link" onClick={() => setLeaving(null)}>
+            <FormattedMessage id="profile.edit.unsavedBack" />
+          </button>
+        </div>
+      </Dialog>
     </Dialog>
   );
 }
 
-function AccountSection({ onCheckWords }: { onCheckWords: () => void }) {
+function AccountSection({
+  onCheckWords,
+  editor,
+  onDirtyChange,
+}: {
+  onCheckWords: () => void;
+  editor: React.Ref<ProfileEditorHandle>;
+  onDirtyChange: (dirty: boolean) => void;
+}) {
   const store = useAppStore();
   const identity = useStore(store, (s) => s.identity)!;
-  const name = identity.displayName || identity.shortCode;
   return (
     <div className="stack">
-      <div className="account-row">
-        <Avatar name={name} color={identity.avatarColor} src={identity.avatarDataUrl} size={56} />
-        <div>
-          <Name>{name}</Name>
-          <div>
-            <Code value={identity.shortCode} />
-          </div>
-        </div>
-      </div>
+      <ProfileEditor ref={editor} onDirtyChange={onDirtyChange} />
       <h4>
         <FormattedMessage id="settings.account.words" />
       </h4>
