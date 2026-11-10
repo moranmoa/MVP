@@ -220,6 +220,10 @@ pub enum ErrorCode {
     /// The OS keychain (Secret Service on Linux) is missing or unusable
     /// (QA-20): the core runs, but nothing that needs the identity works.
     KeyringUnavailable,
+    /// Voice: the call already has 5 participants (the mesh cap).
+    CallFull,
+    /// Voice: relay-only is on, so calls are off.
+    RelayOnly,
     /// Rust addition: malformed command JSON or arguments.
     BadRequest,
     /// Rust addition: in the contract, not done by this core yet.
@@ -392,6 +396,14 @@ pub enum Event {
     MessageAdded(Message),
     #[serde(rename = "update.ready")]
     UpdateReady(UpdateInfo),
+    /// Voice: my call changed (join, leave, mute, timeout). After a leave,
+    /// or a refusal by a full call, its participants are empty.
+    #[serde(rename = "call.state")]
+    CallState(CallState),
+    /// Voice: WebRTC signalling from a participant of my call. Offers and
+    /// answers come only verified (see `voice`), so the flag is always true.
+    #[serde(rename = "call.signal", rename_all = "camelCase")]
+    CallSignal { from: Id, kind: SignalKind, payload: String, fingerprint_verified: bool },
     /// Once, after `markHealthy` commits a new version. Text only.
     #[serde(rename = "update.installed")]
     UpdateInstalled { version: String, notes: Option<String> },
@@ -440,6 +452,33 @@ pub struct InviteInfo {
     pub max_uses: u32,
     pub uses: u32,
     pub revoked: bool,
+}
+
+/// Voice: a call, me first.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallState {
+    pub channel_id: Id,
+    pub participants: Vec<CallParticipant>,
+    /// 5 participants: nobody else can join.
+    pub full: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallParticipant {
+    /// A user ID.
+    pub identity: Id,
+    pub muted: bool,
+}
+
+/// Voice: the WebRTC signalling `sendSignal` carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SignalKind {
+    Offer,
+    Answer,
+    Ice,
 }
 
 /// #187: a direct connection (LAN, later hole-punched) or through the relay.

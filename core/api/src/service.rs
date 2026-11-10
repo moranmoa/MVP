@@ -21,6 +21,7 @@ use crate::model::{self, GenesisBody, Log, ServerView};
 use crate::ports::{CipherError, GroupCipher, Network, Ports, Reach, SharedSecrets};
 use crate::types::*;
 use crate::update::Updates;
+use crate::voice::{self, VoiceNet};
 use updater::client::UpdateEvent;
 
 const DEFAULT_STORAGE_LIMIT: u64 = 5 * 1024 * 1024 * 1024;
@@ -109,6 +110,8 @@ struct Inner {
     keyed_for: HashMap<(ServerId, ChannelId), BTreeSet<PublicKey>>,
     /// The earliest next join re-key per channel (batching, GAP-8).
     rekey_after: HashMap<(ServerId, ChannelId), u64>,
+    /// Voice calls: mine, and who is in which call.
+    calls: voice::Calls,
 }
 
 pub struct Core {
@@ -171,6 +174,7 @@ impl Core {
             presence_seen: HashMap::new(),
             keyed_for: HashMap::new(),
             rekey_after: HashMap::new(),
+            calls: voice::Calls::default(),
         };
         // QA-20: without a usable keychain the core still starts, and says so
         // (`keyring-unavailable`) instead of crashing or looking empty.
@@ -204,8 +208,10 @@ impl Core {
     }
 
     /// What the app lock and sign-out call: the group cipher drops our
-    /// secret and every channel key. TODO(app lock): the commands.
+    /// secret and every channel key, and we leave any call. TODO(app lock):
+    /// the commands.
     pub fn lock_keys(&self) {
+        let _ = self.leave_call();
         self.ports.cipher.lock();
         self.ports.network.lock();
     }
@@ -799,6 +805,84 @@ impl Core {
         })
     }
 
+    // ---- voice ------------------------------------------------------------
+
+    /// Voice: sync's voice transport (piece A). Without one, `joinCall`
+    /// answers `not-implemented`.
+    pub fn set_voice(&self, net: Arc<dyn VoiceNet>) {
+        self.lock().calls.set_net(net);
+    }
+
+    /// In a call: `applyUpdate` refuses.
+    pub fn in_call(&self) -> bool {
+        self.lock().calls.in_call()
+    }
+
+    /// `joinCall`: leaves any other call first.
+    pub fn join_call(&self, channel_id: &str) -> CoreResult<CallState> {
+        let channel =
+            model::parse_hex32(channel_id).map(ChannelId::from_bytes).ok_or(ErrorCode::NotFound)?;
+        self.voice(|calls, ctx, inner| {
+            let server = inner.channel_server(channel)?;
+            calls.join(ctx, inner, server, channel)
+        })
+    }
+
+    /// `leaveCall`: idempotent.
+    pub fn leave_call(&self) -> CoreResult<()> {
+        if !self.in_call() {
+            return Ok(());
+        }
+        self.voice(|calls, ctx, inner| {
+            calls.leave(ctx, inner);
+            Ok(())
+        })
+    }
+
+    /// `setMuted`: `not-allowed` outside a call.
+    pub fn set_muted(&self, muted: bool) -> CoreResult<()> {
+        self.voice(|calls, ctx, inner| calls.set_muted(ctx, inner, muted))
+    }
+
+    /// `sendSignal`: to a participant of my call.
+    pub fn send_signal(&self, to: &str, kind: SignalKind, payload: String) -> CoreResult<()> {
+        let to = parse_user(to)?;
+        self.voice(|calls, ctx, _| calls.send_signal(ctx, to, kind, payload))
+    }
+
+    /// A blob from sync's voice transport; `from` is the identity sync bound
+    /// the sending peer to. Anything that doesn't check out is dropped.
+    pub fn voice_received(&self, from: Option<PublicKey>, blob: &[u8]) {
+        let _ = self.voice(|calls, ctx, inner| {
+            calls.received(ctx, inner, from, blob);
+            Ok(())
+        });
+    }
+
+    /// Hellos and timeouts; the sync loop calls it every round.
+    pub fn voice_tick(&self) {
+        let _ = self.voice(|calls, ctx, inner| {
+            calls.tick(ctx, inner);
+            Ok(())
+        });
+    }
+
+    fn voice<T>(
+        &self,
+        f: impl FnOnce(&mut voice::Calls, &mut voice::Ctx, &mut Inner) -> CoreResult<T>,
+    ) -> CoreResult<T> {
+        self.run(|inner, ports, events| {
+            let me = inner.me.as_ref().ok_or(ErrorCode::NotFound)?;
+            let key = me.identity.signing_key().clone();
+            // Out of `inner` while it answers who may call.
+            let mut calls = std::mem::take(&mut inner.calls);
+            let mut ctx = voice::Ctx { key: &key, now: ports.clock.now_ms(), events };
+            let result = f(&mut calls, &mut ctx, inner);
+            inner.calls = calls;
+            result
+        })
+    }
+
     // ---- invites ------------------------------------------------------------
 
     /// Rust addition (`createInvite`, #208): a new invite, moderator and up.
@@ -992,6 +1076,7 @@ impl Core {
             if let Err(e) = self.sync_now() {
                 eprintln!("mvs-core: sync round failed: {:?}", e.code);
             }
+            self.voice_tick();
             match hints.recv_timeout(SYNC_EVERY) {
                 // Several hints at once are one round.
                 Ok(()) => while hints.try_recv().is_ok() {},
@@ -1190,9 +1275,9 @@ impl Core {
         Ok(outcome.ok)
     }
 
-    /// `applyUpdate` (main/core only). TODO(voice): refuse during a call.
+    /// `applyUpdate` (main/core only): `not-allowed` during a call.
     pub fn apply_update(&self) -> CoreResult<serde_json::Value> {
-        self.updates()?.apply(self.ui_channel()?, false)
+        self.updates()?.apply(self.ui_channel()?, self.in_call())
     }
 
     /// `markHealthy` (main only): commits a trial version; `update.installed`
@@ -1240,10 +1325,44 @@ fn update_event(e: UpdateEvent) -> Event {
         UpdateEvent::Ready { version, waiting_for_call } => {
             Event::UpdateReady(UpdateInfo { version: version.to_string(), waiting_for_call })
         }
-        UpdateEvent::Installed { version, notes } => Event::UpdateInstalled { version: version.to_string(), notes },
+        UpdateEvent::Installed { version, notes } => {
+            Event::UpdateInstalled { version: version.to_string(), notes }
+        }
         UpdateEvent::RolledBack { failed, running } => {
             Event::UpdateRolledBack { failed: failed.to_string(), running: running.to_string() }
         }
+    }
+}
+
+impl voice::Members for Inner {
+    fn may_call(&mut self, who: PublicKey, server: ServerId, channel: ChannelId) -> bool {
+        let mine = self.db.servers().is_ok_and(|servers| servers.contains(&server));
+        if !mine || self.load(server).is_err() {
+            return false;
+        }
+        let Ok(known) = self.known(server) else { return false };
+        let state = self.logs[&server].resolver.state();
+        let adult_only = state.channels.get(&channel).is_some_and(|c| c.adult);
+        state.members.contains(&who)
+            && !state.kicked.contains(&who)
+            && known.contains(&channel)
+            && (!adult_only || state.adults.contains(&who))
+    }
+
+    fn audience(&mut self, server: ServerId) -> Vec<PublicKey> {
+        if self.load(server).is_err() {
+            return Vec::new();
+        }
+        let me = self.me.as_ref().map(Me::key);
+        let online = self.net.online(server);
+        let state = self.logs[&server].resolver.state();
+        state
+            .members
+            .iter()
+            .filter(|key| Some(**key) != me && !state.kicked.contains(key))
+            .filter(|key| online.as_ref().is_none_or(|online| online.contains(key)))
+            .copied()
+            .collect()
     }
 }
 
@@ -1648,6 +1767,18 @@ impl Inner {
 
     /// The server of my default channel `channel_id`; `not-found` for any
     /// other. Loads the server.
+    /// The server a channel of mine is in, 18+ ones included (whether I may
+    /// use it is the caller's check).
+    fn channel_server(&mut self, channel: ChannelId) -> CoreResult<ServerId> {
+        for server in self.db.servers()? {
+            self.load(server)?;
+            if self.known(server)?.contains(&channel) {
+                return Ok(server);
+            }
+        }
+        Err(ErrorCode::NotFound.into())
+    }
+
     fn find_channel(&mut self, channel_id: &str) -> CoreResult<(ServerId, ChannelId)> {
         let channel =
             model::parse_hex32(channel_id).map(ChannelId::from_bytes).ok_or(ErrorCode::NotFound)?;

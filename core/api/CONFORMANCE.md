@@ -87,6 +87,33 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 - `grantRole(serverId, userId, role: 'admin' | 'moderator' | 'member')` and
   `revokeRole(serverId, userId)`.
 - `Member.role: 'owner' | 'admin' | 'moderator' | 'member'`.
+- Voice calls (voice v1, piece B; `src/voice.rs`). IDs are 64 lower-case hex, and `identity` is a user ID.
+  - `joinCall(channelId)` returns `CallState { channelId, participants: { identity, muted }[], full }`, me first. It leaves any other call first.
+    - Errors:
+      - `not-found`: an unknown channel.
+      - `not-allowed`: not a member, kicked, or an 18+ channel without my 18+ claim.
+      - `call-full`: 5 are already in.
+      - `relay-only`: relay-only is on, so calls are off.
+      - `not-implemented`: no voice transport (sync's piece A).
+  - `leaveCall()` returns `null` and is idempotent. The app lock and quitting leave too.
+  - `setMuted(muted: boolean)` returns `null`. `not-allowed` outside a call.
+  - `sendSignal(to, kind: 'offer' | 'answer' | 'ice', payload: string)` returns `null`.
+    - Errors:
+      - `not-allowed`: not in a call, or `to` isn't in it.
+      - `bad-request`: an unknown kind, a payload over 12 KiB, or an offer or answer whose SDP has no `a=fingerprint`.
+      - `not-found`: a malformed `to`.
+  - Events:
+    - `call.state` (a `CallState`) on every change to my call: join, leave, mute or timeout. After a leave, or a refusal by a full call, its `participants` is `[]`.
+    - `call.signal { from, kind, payload, fingerprintVerified: true }`.
+  - It fails closed. A core-to-core envelope is signed by the sender's identity key under `mvs/voice-signal/v1`, and the signature covers the SDP and its fingerprint. The core drops, without an event:
+    - an envelope that doesn't verify or isn't `v: 1`;
+    - one outside ±120 s of our clock;
+    - a replayed nonce (up to 4096 remembered);
+    - one from someone who couldn't join that call themselves;
+    - an offer or answer without a fingerprint.
+  - Presence: a hello every 10 s, a bye on leaving, and a participant dropped after 30 s of silence.
+  - `applyUpdate` answers `not-allowed` during a call.
+- `CoreError.code`, voice: `'call-full' | 'relay-only'`.
 - Invites (#208), all moderator and up (`not-allowed` below that):
   - `createInvite(serverId, input?: { expiresMs?: number, maxUses?: number })`
     returns `{ id, link, expiresAt?, maxUses? }`. `expiresMs` is the last time a
