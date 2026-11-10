@@ -326,7 +326,6 @@
   "privacy.relayOnly.label": "ממסר בלבד",
   "privacy.relayOnly.hint": "כל החיבורים עוברים דרך הממסר של MVS, ולכן אחרים בשרת לא רואים את כתובת ה-IP שלך. הממסר עצמו עדיין רואה אותה. ההודעות עשויות להגיע קצת לאט יותר.",
   "privacy.relayOnly.calls": "כשהאפשרות פעילה אין שיחות קוליות, כי בשיחה המחשבים מתחברים ישירות. אם יש שיחה פעילה, ההפעלה מסיימת אותה.",
-  "privacy.relayOnly.restart": "נכנס לתוקף מלא אחרי הפעלה מחדש.",
   "privacy.relayOnly.open": "שינוי בהגדרות",
   "privacy.relayOnly.confirm": "השיחה תסתיים. להפעיל?",
   "privacy.relayOnly.turnOn": "הפעלה",

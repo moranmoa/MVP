@@ -400,7 +400,7 @@ function PrivacySection({ focus }: { focus?: number }) {
           className="switch"
           checked={relayOnly}
           disabled={busy}
-          aria-describedby="relay-only-hint relay-only-calls relay-only-restart"
+          aria-describedby="relay-only-hint relay-only-calls"
           onChange={(e) => (e.target.checked && inCall ? setConfirm(true) : void apply(e.target.checked))}
         />
       </label>
@@ -424,10 +424,6 @@ function PrivacySection({ focus }: { focus?: number }) {
       </p>
       <p id="relay-only-calls" className="muted small">
         <FormattedMessage id="privacy.relayOnly.calls" />
-      </p>
-      {/* Until the node starts relay-only and drops open direct connections (GAP-6r), a restart is what makes it complete. */}
-      <p id="relay-only-restart" className="muted small">
-        <FormattedMessage id="privacy.relayOnly.restart" />
       </p>
       {failed && (
         <p className="error small" role="alert">

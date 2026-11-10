@@ -40,7 +40,7 @@ describe('relay-only', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Privacy' }));
     const toggle = screen.getByRole('switch', { name: 'Relay only' }) as HTMLInputElement;
     expect(toggle.checked).toBe(false);
-    expect(toggle.getAttribute('aria-describedby')).toBe('relay-only-hint relay-only-calls relay-only-restart');
+    expect(toggle.getAttribute('aria-describedby')).toBe('relay-only-hint relay-only-calls');
 
     await act(async () => {
       fireEvent.click(toggle);
