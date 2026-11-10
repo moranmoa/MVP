@@ -9,16 +9,17 @@
 # network has no default route, so a call would gather no candidates at all.
 
 services:
-  # Electron and playwright-core for desktop/, into a shared cache volume.
+  # Electron and playwright-core for desktop/, into a shared cache volume
+  # (deps.sh: one per lockfile, locked, skipped when already installed).
   deps:
     image: mcr.microsoft.com/playwright:v1.56.1-noble
     working_dir: /repo/desktop
     volumes:
       - ../..:/repo
       - desktop_node_modules:/repo/desktop/node_modules
-    command: >
-      sh -c "chown pwuser /repo/desktop/node_modules &&
-             runuser -u pwuser -- sh -c 'npm ci --no-audit --no-fund && npx install-electron --no && ls node_modules/electron/dist/electron'"
+      - deps_lock:/lock
+      - ./deps.sh:/deps.sh:ro
+    command: ["sh", "/deps.sh"]
 
   # A throwaway relay from infra/relay. Private addresses are allowed because
   # the Docker network is private; never set that on the live relay.
@@ -77,7 +78,10 @@ networks:
 
 volumes:
   rendezvous:
-  # Shared cache across runs; run.sh creates it, and `down -v` leaves it.
+  # Shared across runs (run.sh creates them, and `down -v` leaves them).
   desktop_node_modules:
-    name: mvs-voice-e2e-desktop-nm
+    name: mvs-voice-e2e-desktop-nm-${DEPS_KEY:?run through run.sh}
+    external: true
+  deps_lock:
+    name: mvs-voice-e2e-deps-lock
     external: true

@@ -7,6 +7,8 @@
 #   bash qa/voice-e2e/run.sh            # build what is missing, then run
 #   REBUILD=1 bash qa/voice-e2e/run.sh  # rebuild mvs-core and the UI first
 #   KEEP=1 bash qa/voice-e2e/run.sh     # leave the containers for debugging
+#   SRC=<dir> REBUILD=1 bash ...         # core/ and ui/ from another tree (a PR
+#                                        # head via `git archive`), the rest from here
 #
 # Every run uses its own compose project (mvs-voice-<time>-<random>), so its
 # containers, network and rendezvous volume never clash with another run or
@@ -16,13 +18,14 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 case "$(uname -s)" in MINGW*|MSYS*) export MSYS_NO_PATHCONV=1; mount() { (cd "$1" && pwd -W); };; *) mount() { (cd "$1" && pwd); };; esac
+src="$(cd "${SRC:-$repo}" && pwd)"
 build="$here/.build"
 mkdir -p "$build"
 
 # 1. mvs-core (Linux, release), the same way desktop/README.md builds it.
 if [ -n "${REBUILD:-}" ] || [ ! -f "$build/mvs-core" ]; then
   echo "== building mvs-core"
-  docker run --rm -v "$(mount "$repo/core"):/work:ro" -v "$(mount "$build"):/out" \
+  docker run --rm -v "$(mount "$src/core"):/work:ro" -v "$(mount "$build"):/out" \
     -v cargo-registry:/usr/local/cargo/registry -v mvs-voice-e2e-core-target:/target -e CARGO_TARGET_DIR=/target \
     -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" -w /work rust:1.90-bookworm \
     sh -c 'cargo build --release --locked -p api --bin mvs-core && cp /target/release/mvs-core /out/'
@@ -31,7 +34,7 @@ fi
 # 2. The UI, a production build (the app loads it from app://mvs).
 if [ -n "${REBUILD:-}" ] || [ ! -f "$build/ui/index.html" ]; then
   echo "== building the UI"
-  docker run --rm -v "$(mount "$repo/ui"):/app" -v mvs-voice-e2e-ui-nm:/app/node_modules -v "$(mount "$build"):/out" \
+  docker run --rm -v "$(mount "$src/ui"):/app" -v mvs-voice-e2e-ui-nm:/app/node_modules -v "$(mount "$build"):/out" \
     -w /app node:22.23.4-bookworm \
     sh -c 'npm ci --no-audit --no-fund >/dev/null && npx vite build --outDir /out/ui --emptyOutDir --logLevel warn'
 fi
@@ -39,6 +42,9 @@ fi
 # 3. The relay image from infra/relay (Docker's cache keeps this quick).
 echo "== building the relay image"
 docker build -q -t mvs-relay:voice-e2e --build-arg CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" "$(mount "$repo/infra/relay")" >/dev/null
+
+# The desktop node_modules volume is per lockfile (see deps.sh).
+export DEPS_KEY="$(sha256sum "$repo/desktop/package-lock.json" | cut -c1-12)"
 
 P="mvs-voice-$(date +%s)-$RANDOM"
 out="$here/results/$P"
@@ -52,7 +58,8 @@ trap cleanup EXIT INT TERM
 
 # 4. Desktop node_modules (Electron, playwright-core) into a shared cache volume.
 echo "== desktop dependencies"
-docker volume create mvs-voice-e2e-desktop-nm >/dev/null
+docker volume create "mvs-voice-e2e-desktop-nm-$DEPS_KEY" >/dev/null
+docker volume create mvs-voice-e2e-deps-lock >/dev/null
 dc run --rm --no-deps deps
 
 # 5. The relay, then its peer ID.
