@@ -180,6 +180,7 @@ export function VoiceRoomEntry({ serverId, myId, engine }: { serverId: Id; myId:
         <div className="actions">
           <button
             type="button"
+            className="primary"
             ref={okRef}
             onClick={async () => {
               rememberIpNotice();
