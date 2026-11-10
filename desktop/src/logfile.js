@@ -17,10 +17,18 @@ function redact(text) {
     .replace(/\b(?:12D3KooW|Qm)[1-9A-HJ-NP-Za-km-z]{40,60}\b/g, '<peer>')
     .replace(/\/(dns|dns4|dns6|dnsaddr)\/[^/\s]+/g, '/$1/<host>')
     .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '<ip>')
-    // IPv6: the full eight-group form, and any compressed form with "::"
-    // (not plain "12:30:45" clock times).
+    // IPv6: the full eight-group form, and the compressed forms with "::"
+    // (not plain "12:30:45" clock times). A compressed address needs a hex
+    // group next to its "::", can't start right after a word character or a
+    // hex group and colon, and can't end just before one. So Rust paths like
+    // "mvs::join" or "api::add" stay, while "addr:2001:db8::7" and
+    // "2001:db8::7: timeout" are still caught (security lead on #308).
+    // An embedded IPv4 (already "<ip>" above) is taken in too: "::ffff:<ip>".
     .replace(/\b(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}\b/gi, '<ip>')
-    .replace(/(?:\b[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})?::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6}\b)?/gi, '<ip>');
+    .replace(
+      /(?<!\w|[0-9a-f]:)(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6}::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})?|::[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})(?::<ip>)?(?!\w|:[0-9a-f])/gi,
+      '<ip>',
+    );
 }
 
 function createLog(dir, { maxBytes = MAX_BYTES } = {}) {
