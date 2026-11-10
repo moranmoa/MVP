@@ -31,6 +31,76 @@ test('no permission is granted', () => {
   }
 });
 
+// Voice v1 (piece C): the microphone for app://mvs only; nothing else.
+const PAGE = 'app://mvs/index.html';
+const micReq = (over = {}) => ({ mediaTypes: ['audio'], requestingUrl: PAGE, securityOrigin: 'app://mvs/', isMainFrame: true, ...over });
+const micCheck = (over = {}) => ({ mediaType: 'audio', requestingUrl: PAGE, securityOrigin: 'app://mvs/', isMainFrame: true, ...over });
+
+test('the microphone is granted to the internal origin', () => {
+  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq()), true);
+  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ securityOrigin: undefined })), true);
+  assert.equal(sec.allowPermissionCheck(PAGE, 'media', 'app://mvs', micCheck()), true);
+  // Electron may run a check with no webContents.
+  assert.equal(sec.allowPermissionCheck(undefined, 'media', 'app://mvs', micCheck()), true);
+});
+
+test('the microphone is denied to any other origin', () => {
+  for (const other of ['https://evil.example/', 'http://localhost:5173/', 'app://evil/index.html', 'file:///C:/x.html', 'mvs://join/x', 'devtools://devtools/', 'data:text/html,x', '', 'not a url']) {
+    // Request: the page, the requesting URL or the origin is somewhere else.
+    assert.equal(sec.allowPermissionRequest(other, 'media', micReq()), false, 'page ' + other);
+    assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ requestingUrl: other })), false, 'url ' + other);
+    assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ securityOrigin: other })), false, 'origin ' + other);
+    // Check: the same, plus the requesting origin.
+    assert.equal(sec.allowPermissionCheck(other, 'media', 'app://mvs', micCheck()), false, 'check page ' + other);
+    assert.equal(sec.allowPermissionCheck(PAGE, 'media', other, micCheck()), false, 'check origin ' + other);
+    assert.equal(sec.allowPermissionCheck(PAGE, 'media', 'app://mvs', micCheck({ securityOrigin: other })), false, 'check sec ' + other);
+    assert.equal(sec.allowPermissionCheck(PAGE, 'media', 'app://mvs', micCheck({ requestingUrl: other })), false, 'check url ' + other);
+  }
+  // A missing requesting URL or origin is not ours either.
+  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ requestingUrl: undefined })), false);
+  assert.equal(sec.allowPermissionCheck(PAGE, 'media', undefined, micCheck()), false);
+  // Subframes, even ours, never get it.
+  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ isMainFrame: false })), false);
+  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ isMainFrame: undefined })), false);
+  assert.equal(sec.allowPermissionCheck(PAGE, 'media', 'app://mvs', micCheck({ isMainFrame: false })), false);
+});
+
+test('the camera is denied, also next to the microphone', () => {
+  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ mediaTypes: ['video'] })), false);
+  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ mediaTypes: ['audio', 'video'] })), false);
+  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ mediaTypes: ['video', 'audio'] })), false);
+  assert.equal(sec.allowPermissionCheck(PAGE, 'media', 'app://mvs', micCheck({ mediaType: 'video' })), false);
+  // An empty, missing or odd media list is not "audio only".
+  for (const mediaTypes of [[], undefined, null, 'audio', ['audio', 'unknown'], [{}]]) {
+    assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ mediaTypes })), false, JSON.stringify(mediaTypes));
+  }
+  for (const mediaType of ['unknown', undefined, '', 'AUDIO']) {
+    assert.equal(sec.allowPermissionCheck(PAGE, 'media', 'app://mvs', micCheck({ mediaType })), false, String(mediaType));
+  }
+  assert.equal(sec.allowPermissionRequest(PAGE, 'media', undefined), false);
+  assert.equal(sec.allowPermissionCheck(PAGE, 'media', 'app://mvs', undefined), false);
+});
+
+test('WebRTC uses only the default route interface', () => {
+  assert.equal(sec.WEBRTC_IP_POLICY, 'default_public_and_private_interfaces');
+});
+
+test('screen capture is denied', () => {
+  for (const perm of ['display-capture', 'screen', 'desktop', 'window-management', 'window-placement']) {
+    assert.equal(sec.allowPermissionRequest(PAGE, perm, micReq()), false, perm);
+    assert.equal(sec.allowPermissionCheck(PAGE, perm, 'app://mvs', micCheck()), false, perm);
+  }
+  // Desktop capture surfaces as 'media' with a video type; also refused.
+  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ mediaTypes: ['video'] })), false);
+});
+
+test('unknown and other permissions are denied, even for our own page', () => {
+  for (const perm of ['geolocation', 'notifications', 'clipboard-read', 'clipboard-sanitized-write', 'openExternal', 'fullscreen', 'pointerLock', 'midi', 'midiSysex', 'hid', 'serial', 'usb', 'idle-detection', 'speaker-selection', 'storage-access', 'mediaKeySystem', 'unknown', 'microphone', 'audioCapture', 'Media', '', undefined]) {
+    assert.equal(sec.allowPermissionRequest(PAGE, perm, micReq()), false, String(perm));
+    assert.equal(sec.allowPermissionCheck(PAGE, perm, 'app://mvs', micCheck()), false, String(perm));
+  }
+});
+
 test('CSP comes from the built page and gains frame-ancestors', () => {
   assert.equal(sec.cspFromIndexHtml(META), "default-src 'none'; script-src 'self'; frame-ancestors 'none'");
 });

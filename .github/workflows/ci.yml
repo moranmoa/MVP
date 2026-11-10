@@ -131,6 +131,106 @@ jobs:
         if: hashFiles('desktop/package-lock.json') != ''
         run: node .github/scripts/electron-age.mjs desktop/package-lock.json
 
+  # CI-D1: the desktop shell's unit tests (no display, no Electron launch).
+  # Non-blocking until its first green run; then it becomes required.
+  desktop-unit:
+    name: desktop unit tests
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Licence policy (desktop lockfile, before installing anything)
+        run: node ../.github/scripts/npm-licenses.mjs package-lock.json
+      # Install scripts stay off: the unit tests never start Electron.
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: node --test test/*.test.js
+
+  # CI-D1: the real app (Electron + a fresh ui/dist + test/fake-core.js) with
+  # the in-app security checks, incl. the mic permission one. Windows: it has
+  # a display. Non-blocking until its first green run.
+  desktop-e2e-windows:
+    name: desktop e2e (Windows)
+    runs-on: windows-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            ui/package-lock.json
+            desktop/package-lock.json
+      - name: Build the UI
+        working-directory: ui
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+      - name: Licence policy (desktop lockfile, before installing anything)
+        run: node .github/scripts/npm-licenses.mjs desktop/package-lock.json
+      # Install scripts on: electron's postinstall fetches its binary
+      # (checked against the package's own SHASUMS).
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci --no-audit --no-fund
+      # Skips the three tests that spawn the core (names matching "the core|core events"):
+      # test/fake-core.js is spawned directly, and Windows cannot execute a .js
+      # file (EFTYPE). Linux runs them. The permission (mic) test still runs here.
+      - name: Electron e2e (without the core-spawning tests)
+        working-directory: desktop
+        run: node --test --test-concurrency=1 --test-skip-pattern="the core|core events" test/e2e.test.mjs
+
+  # The same e2e on Linux under Xvfb. ubuntu-22.04 on purpose: 24.04 runners
+  # restrict unprivileged user namespaces, which Electron's sandbox needs, and
+  # we don't relax the sandbox to get around it.
+  desktop-e2e-linux:
+    name: desktop e2e (Linux, xvfb)
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    timeout-minutes: 20
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            ui/package-lock.json
+            desktop/package-lock.json
+      - name: Build the UI
+        working-directory: ui
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+      - name: Licence policy (desktop lockfile, before installing anything)
+        run: node .github/scripts/npm-licenses.mjs desktop/package-lock.json
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci --no-audit --no-fund
+      - name: Electron e2e
+        working-directory: desktop
+        run: xvfb-run -a node --test --test-concurrency=1 test/e2e.test.mjs
+
   # B10: the qa/ smoke suite (onboarding -> send -> join by link) against a
   # production build of the UI with the mock core, as qa/compose.yaml runs it.
   # The image matches @playwright/test in qa/package-lock.json, pinned by digest.
