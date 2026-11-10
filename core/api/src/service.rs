@@ -60,6 +60,13 @@ const KV_RECOVERY_CHALLENGE: &str = "recovery-challenge";
 const KV_BACKUP_KNOWN: &str = "backup-known";
 /// Restore servers: a restore still has servers to rejoin from the backup.
 const KV_BACKUP_PENDING: &str = "backup-pending";
+/// Restore servers: a fingerprint of the server set last backed up, and
+/// when it was last put (u64le ms).
+const KV_BACKUP_WRITTEN: &str = "backup-written";
+const KV_BACKUP_PUT_AT: &str = "backup-put-at";
+/// Restore servers: an unchanged backup is put again this often (design
+/// §4), so holders keep it and copies heal.
+pub const BACKUP_REPUBLISH_MS: u64 = 24 * 3_600_000;
 
 pub struct Config {
     /// `None` keeps everything in memory (tests).
@@ -254,6 +261,8 @@ pub struct Core {
     db_path: Option<PathBuf>,
     /// Signed out: the shell restarts the core, which finishes the wipe.
     signed_out: AtomicBool,
+    /// Restore servers: the first sync round after start backs up (login).
+    backup_started: AtomicBool,
 }
 
 struct PendingJoin {
@@ -414,6 +423,7 @@ impl Core {
             pending_joins: Mutex::default(),
             db_path: config.db_path,
             signed_out: AtomicBool::new(false),
+            backup_started: AtomicBool::new(false),
         })
     }
 
@@ -749,6 +759,39 @@ impl Core {
         if !waiting {
             let _ = self.lock().db.delete(KV_BACKUP_PENDING);
         }
+    }
+
+    /// One backup round (Tech Lead on #317): decide under the lock, fetch
+    /// outside it, merge and seal under it, put outside it. Nothing at all
+    /// happens on a round with nothing due (`Inner::backup_due`).
+    fn backup_round(&self) {
+        let now = self.ports.clock.now_ms();
+        let login = !self.backup_started.load(Ordering::SeqCst);
+        let tag = {
+            let inner = self.lock();
+            match inner.backup_due(now, login) {
+                Ok(true) => inner.me.as_ref().map(|me| me.identity.backup_keys().tag()),
+                Ok(false) => None,
+                Err(e) => {
+                    eprintln!("mvs-core: the server backup wasn't checked: {:?}", e.code);
+                    None
+                }
+            }
+        };
+        let Some(tag) = tag else {
+            if login && self.lock().me.is_some() {
+                self.backup_started.store(true, Ordering::SeqCst);
+            }
+            return;
+        };
+        let answers = self.ports.network.fetch_backup(tag);
+        let blob = self.lock().backup_merge(now, &answers);
+        match blob {
+            Ok(Some(blob)) => self.ports.network.put_backup(tag, &blob),
+            Ok(None) => {}
+            Err(e) => eprintln!("mvs-core: the server backup wasn't written: {:?}", e.code),
+        }
+        self.backup_started.store(true, Ordering::SeqCst);
     }
 
     pub fn update_profile(&self, input: ProfileInput) -> CoreResult<Identity> {
@@ -1761,6 +1804,10 @@ impl Core {
         if self.lock().db.get(KV_BACKUP_PENDING).ok().flatten().is_some() {
             self.restore_from_backup();
         }
+        // Restore servers (#291 phase A): my server list, backed up when it
+        // changed, at login, or every 24 h; the network calls run outside
+        // the core lock.
+        self.backup_round();
         let servers = {
             let mut inner = self.lock();
             if inner.me.is_none() {
@@ -1795,10 +1842,6 @@ impl Core {
             inner.expire_closed(ports, events)?;
             // Decision 18: a raise whose 30 days are up takes effect.
             inner.apply_due_birth_date(ports, events)?;
-            // Restore servers (#291 phase A): my server list, backed up.
-            if let Err(e) = inner.write_backup(ports) {
-                eprintln!("mvs-core: the server backup wasn't written: {:?}", e.code);
-            }
             for (server, records) in fetched {
                 if !inner.db.has_server(server)? {
                     continue;
@@ -2224,21 +2267,9 @@ impl Inner {
         Ok(due)
     }
 
-    /// Each sync round (restore servers, #291 phase A): my server list,
-    /// merged into the newest backup the holders keep, sealed and handed to
-    /// them when it changed. Servers I'm in are live; servers this device
-    /// listed before and no longer has (left, kicked, closed, purged) get a
-    /// tombstone. Merging keeps what my other devices wrote.
-    fn write_backup(&mut self, ports: &Ports) -> CoreResult<()> {
-        let Some(keys) = self.me.as_ref().map(|me| me.identity.backup_keys()) else {
-            return Ok(());
-        };
-        let now = ports.clock.now_ms();
-        let mut known: BTreeMap<String, u64> = self
-            .db
-            .get(KV_BACKUP_KNOWN)?
-            .and_then(|json| serde_json::from_slice(&json).ok())
-            .unwrap_or_default();
+    /// My servers for the backup: server ID (hex) to sync secret (hex), not
+    /// closed.
+    fn backup_set(&self) -> CoreResult<BTreeMap<String, String>> {
         let mut current = BTreeMap::new();
         for server in self.db.servers()? {
             if self.db.closed_at(server)?.is_some() {
@@ -2248,17 +2279,58 @@ impl Inner {
                 current.insert(model::hex_id(server.as_bytes()), hex::encode(*secret));
             }
         }
-        let remote = backup::newest(&keys, &ports.network.fetch_backup(keys.tag()));
+        Ok(current)
+    }
+
+    fn backup_fingerprint(current: &BTreeMap<String, String>) -> Vec<u8> {
+        let json = serde_json::to_vec(current).expect("plain map");
+        blake3::derive_key("mvs/backup-written/v1", &json).to_vec()
+    }
+
+    /// Restore servers (#291 phase A, Tech Lead on #317): a write is due
+    /// only when my server set changed since the last one, on the first
+    /// round after start (`login`), or [`BACKUP_REPUBLISH_MS`] after the
+    /// last. Otherwise a round fetches and puts nothing.
+    fn backup_due(&self, now: u64, login: bool) -> CoreResult<bool> {
+        if self.me.is_none() {
+            return Ok(false);
+        }
+        let changed = self.db.get(KV_BACKUP_WRITTEN)?.as_deref()
+            != Some(Self::backup_fingerprint(&self.backup_set()?).as_slice());
+        let last = self
+            .db
+            .get(KV_BACKUP_PUT_AT)?
+            .and_then(|v| v.try_into().ok())
+            .map(u64::from_le_bytes)
+            .unwrap_or(0);
+        Ok(login || changed || now.saturating_sub(last) >= BACKUP_REPUBLISH_MS)
+    }
+
+    /// My server list merged into the newest of `answers` (fetched outside
+    /// the lock): servers I'm in are live; servers this device listed
+    /// before and no longer has (left, kicked, closed, purged) get a
+    /// tombstone; what my other devices wrote is kept. Sealed as the next
+    /// version, to be put outside the lock. `None`: nothing to back up.
+    fn backup_merge(&mut self, now: u64, answers: &[Vec<u8>]) -> CoreResult<Option<Vec<u8>>> {
+        let Some(keys) = self.me.as_ref().map(|me| me.identity.backup_keys()) else {
+            return Ok(None);
+        };
+        let mut known: BTreeMap<String, u64> = self
+            .db
+            .get(KV_BACKUP_KNOWN)?
+            .and_then(|json| serde_json::from_slice(&json).ok())
+            .unwrap_or_default();
+        let current = self.backup_set()?;
+        let remote = backup::newest(&keys, answers);
         if remote.is_none() && current.is_empty() && known.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let remote = remote.unwrap_or_default();
         let mut plain = remote.clone();
         for (id, secret) in &current {
             let joined_at = *known.entry(id.clone()).or_insert(now);
-            let mine = backup::Entry { secret: secret.clone(), joined_at, gone_at: None };
             let mut ours = backup::Plain::default();
-            ours.servers.insert(id.clone(), mine);
+            ours.servers.insert(id.clone(), backup::Entry { secret: secret.clone(), joined_at, gone_at: None });
             plain.merge(&ours);
         }
         for id in known.keys().filter(|id| !current.contains_key(*id)) {
@@ -2269,14 +2341,12 @@ impl Inner {
             }
         }
         known.retain(|id, _| current.contains_key(id));
-        self.db.set(KV_BACKUP_KNOWN, &serde_json::to_vec(&known).expect("plain map"))?;
-        if plain.servers == remote.servers && remote.version > 0 {
-            return Ok(());
-        }
         plain.version = remote.version + 1;
         let blob = backup::seal(&keys, &plain).map_err(|_| ErrorCode::Internal)?;
-        ports.network.put_backup(keys.tag(), &blob);
-        Ok(())
+        self.db.set(KV_BACKUP_KNOWN, &serde_json::to_vec(&known).expect("plain map"))?;
+        self.db.set(KV_BACKUP_WRITTEN, &Self::backup_fingerprint(&current))?;
+        self.db.set(KV_BACKUP_PUT_AT, &now.to_le_bytes())?;
+        Ok(Some(blob))
     }
 
     /// Each sync round: a raise whose 30 days are up takes effect, and its

@@ -4023,3 +4023,72 @@ fn a_restore_brings_my_servers_back_from_the_backup() {
     stranger.core.restore_identity(LEGAL.split(' ').map(String::from).collect()).unwrap();
     assert!(stranger.core.list_servers().unwrap().is_empty());
 }
+
+/// A network that counts backup fetches and puts.
+struct CountingNet {
+    world: Arc<LoopbackNetwork>,
+    fetches: std::sync::atomic::AtomicUsize,
+    puts: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingNet {
+    fn counts(&self) -> (usize, usize) {
+        use std::sync::atomic::Ordering::SeqCst;
+        (self.fetches.load(SeqCst), self.puts.load(SeqCst))
+    }
+}
+
+impl Network for CountingNet {
+    fn publish(&self, record: &records::Record) {
+        self.world.publish(record);
+    }
+    fn fetch(&self, server: ServerId) -> Vec<records::Record> {
+        self.world.fetch(server)
+    }
+    fn fetch_invite(&self, handle: [u8; 32]) -> Vec<Vec<u8>> {
+        self.world.fetch_invite(handle)
+    }
+    fn put_backup(&self, tag: [u8; 32], blob: &[u8]) {
+        self.puts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.world.put_backup(tag, blob);
+    }
+    fn fetch_backup(&self, tag: [u8; 32]) -> Vec<Vec<u8>> {
+        self.fetches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.world.fetch_backup(tag)
+    }
+}
+
+/// Tech Lead (#317): the backup is fetched and put only when my server set
+/// changed, at login (the first round after start), or every 24 h. Rounds
+/// with nothing new fetch and put nothing (a real holder allows 60 fetches
+/// an hour; rounds come every 2 s).
+#[test]
+fn unchanged_rounds_neither_fetch_nor_put_the_backup() {
+    let world = World::new();
+    let secrets = Arc::new(MemoryStore::new());
+    let net = Arc::new(CountingNet {
+        world: world.network.clone(),
+        fetches: Default::default(),
+        puts: Default::default(),
+    });
+    let me = world.peer_on(net.clone(), secrets.clone(), None, Arc::new(PendingGroupKeys));
+    sign_up(&me, "MoA");
+    me.core.create_server("One", AgeRestriction::None).unwrap();
+    me.core.sync_now().unwrap();
+    assert_eq!(net.counts(), (1, 1), "login round");
+    for _ in 0..20 {
+        advance(&world, 2_000);
+        me.core.sync_now().unwrap();
+    }
+    assert_eq!(net.counts(), (1, 1), "rounds with nothing new fetched or put");
+    // A change: one fetch, one put.
+    me.core.create_server("Two", AgeRestriction::None).unwrap();
+    me.core.sync_now().unwrap();
+    me.core.sync_now().unwrap();
+    assert_eq!(net.counts(), (2, 2));
+    // 24 h later, unchanged: put again (holders keep it, copies heal).
+    advance(&world, api::BACKUP_REPUBLISH_MS);
+    me.core.sync_now().unwrap();
+    me.core.sync_now().unwrap();
+    assert_eq!(net.counts(), (3, 3));
+}

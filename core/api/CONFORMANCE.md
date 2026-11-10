@@ -86,7 +86,7 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 ## Proposed contract additions (Rust has them; `api.ts` doesn't yet)
 
 - Restore servers, phase A (#291, `src/backup.rs`). No new command or event.
-  - **Each sync round:** my server list (server IDs and sync secrets) is merged into the newest backup the holders keep, sealed, and handed to them (`Network::put_backup`) when it changed.
+  - **When the backup is written:** only when my server set changed since the last write, on the first sync round after start (login), or every 24 h (`BACKUP_REPUBLISH_MS`). Then my server list (server IDs and sync secrets) is merged into the newest backup the holders keep (`Network::fetch_backup`), sealed as the next version and handed to them (`Network::put_backup`). Rounds with nothing due fetch and put nothing. The fetch and the put run outside the core lock.
     - Servers this device listed and no longer has get a tombstone.
     - Merging keeps what my other devices wrote.
   - **The blob:** `mvsb1 ‖ tag ‖ w_pub ‖ version ‖ nonce ‖ XChaCha20-Poly1305(padded JSON) ‖ Ed25519 sig by w`.
@@ -96,7 +96,6 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
     - A server whose log no longer lists me isn't entered.
     - Servers nobody could be reached for are retried each sync round.
   - **Holders:** the ports are no-ops until dev-sync's `/mvs/backup/1` and devops' mailbox exist. `LoopbackNetwork` holds them for tests.
-  - **Phase B follow-up:** once the ports reach the relay or the network store, stop fetching the remote backup every sync round. Fetch at login and after a write, and keep the last version locally between them.
 
 - `signOut({ words: string[] } | { withoutWords: true })` returns `null` (both read at the top level of `args`). It removes this identity from this computer.
   - `words` must be this identity's 12 words: `invalid-words` (with `positions`) for unknown words, `not-allowed` for another identity's. `withoutWords: true` is the explicit "I accept losing this account" path. Neither: `bad-request`. No identity: `not-found`.
