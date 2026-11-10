@@ -64,6 +64,21 @@ license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 [[licenses.exceptions]]
 crate = "ring@0.16.20"
 allow = ["OpenSSL"]
+# Since T3 (libp2p 0.56) core no longer has ring 0.16; infra/relay (checked
+# against this file too) still does until its own libp2p upgrade (devops).
+# Remove both entries above after that.
+
+# ACCEPTED EXCEPTION - approved by the owner (Nov 2026, T3 #256). Scoped to
+# this one crate.
+# webpki-roots 1.x is the Mozilla root store as data, under the Community
+# Data License Agreement Permissive 2.0: permissive, commercial use allowed,
+# no copyleft; the only condition is passing on the licence text, which goes
+# into the third-party notices file (devops, T22 #258). It comes in through
+# libp2p 0.56:
+# libp2p-websocket 0.45 (our /wss link to the relay) -> webpki-roots 1.
+[[licenses.exceptions]]
+crate = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
 
 # Our own workspace crates are `publish = false` and carry no licence field.
 [licenses.private]
