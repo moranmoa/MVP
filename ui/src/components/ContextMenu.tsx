@@ -1,10 +1,14 @@
 // B25 (spec docs/ux/specs/B25-context-menus.md): one menu component for every
 // right-click menu. Opens on right-click, a 500 ms long press, or Shift+F10 /
 // the Menu key on the focused row. Closes on Esc, a click outside, scroll,
-// resize, or choosing an item; focus then goes back to the row.
+// resize, or choosing an item; focus then goes back to the row. At phone
+// width (the shell's phone layout) it is a bottom sheet instead (B25 §5),
+// with the same keys and focus.
 
 import { createPortal } from 'react-dom';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
+import { phoneQuery, useMediaQuery } from '../app/media';
+import { useSettings } from '../app/settings';
 
 export type MenuItem =
   | { kind?: 'item'; key: string; label: string; icon?: ReactNode; danger?: boolean; onSelect: () => void }
@@ -36,11 +40,14 @@ export function ContextMenu({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ left: x, top: y });
+  const sheet = useMediaQuery(phoneQuery(useSettings().settings.uiScale));
 
   // Opens at the point, towards the end side; flips to stay inside the window.
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
+    el.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+    if (sheet) return;
     const { width, height } = el.getBoundingClientRect();
     const rtl = getComputedStyle(el).direction === 'rtl';
     let left = rtl ? x - width : x;
@@ -49,8 +56,7 @@ export function ContextMenu({
     let top = y;
     if (top + height > window.innerHeight) top = y - height;
     setPos({ left: Math.max(0, left), top: Math.max(0, top) });
-    el.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
-  }, [x, y]);
+  }, [x, y, sheet]);
 
   useEffect(() => {
     const outside = (e: Event) => {
@@ -95,16 +101,21 @@ export function ContextMenu({
   };
 
   const shown = tidy(items);
-  return (
+  const menu = (
     <div
       ref={ref}
-      className="context-menu"
+      className={sheet ? 'context-menu sheet' : 'context-menu'}
       role="menu"
       aria-label={label}
-      style={{ left: pos.left, top: pos.top }}
+      style={sheet ? undefined : { left: pos.left, top: pos.top }}
       onKeyDown={onKeyDown}
       onContextMenu={(e) => e.preventDefault()}
     >
+      {sheet && (
+        <div className="context-menu-title" aria-hidden="true">
+          {label}
+        </div>
+      )}
       {shown.map((it, i) =>
         it.kind === 'separator' ? (
           <div key={`sep-${i}`} role="separator" className="context-menu-sep" />
@@ -126,6 +137,15 @@ export function ContextMenu({
         ),
       )}
     </div>
+  );
+  // The backdrop is outside the menu, so a tap on it is an outside click.
+  return sheet ? (
+    <>
+      <div className="context-menu-backdrop" aria-hidden="true" />
+      {menu}
+    </>
+  ) : (
+    menu
   );
 }
 

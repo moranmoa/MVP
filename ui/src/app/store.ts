@@ -5,7 +5,7 @@
 
 import { useSyncExternalStore } from 'react';
 import type { CoreApi } from '../core/api';
-import type { Channel, Id, Identity, Member, Message, ServerSummary, UpdateInfo, CallState } from '../core/types';
+import type { Channel, Id, Identity, Member, Message, ServerSummary, UpdateInfo, CallState, VoiceRoom } from '../core/types';
 
 const PAGE = 100;
 
@@ -74,6 +74,13 @@ export interface StoreState {
   call: CallState | null;
   /** Why the last joinCall failed, until the next try or dismissal. */
   callError: string | null;
+  /** Each server's voice room (who is in it), by server id. */
+  voiceRooms: Record<Id, VoiceRoom>;
+  /**
+   * Calls are off because relay-only is on. The core doesn't say so up front, so
+   * this is learned from a join refused with relay-only and lasts the session.
+   */
+  relayOnly: boolean;
   /** A short confirmation toast (an i18n id), e.g. "Copied" after a menu copy. */
   flash: { id: string; at: number } | null;
   /** Bumped when any message window changes, so readers re-render. */
@@ -91,12 +98,16 @@ export class Store {
     updateNote: null,
     call: null,
     callError: null,
+    voiceRooms: {},
+    relayOnly: false,
     flash: null,
     messagesVersion: 0,
   };
   private listeners = new Set<() => void>();
   private windows = new Map<Id, MessageWindow>();
   private unsubs: (() => void)[] = [];
+  /** While my own leaveCall runs: that end of the call isn't news. */
+  private leaving = false;
 
   constructor(readonly core: CoreApi) {}
 
@@ -143,7 +154,15 @@ export class Store {
       on('message.updated', (m) => this.windows.get(m.channelId)?.apply(m)),
       on('update.ready', (update) => this.set({ update })),
       on('update.installed', (u) => this.set({ updateNote: { kind: 'installed', ...u } })),
-      on('call.state', (c) => this.set({ call: c.participants.length ? c : null })),
+      on('call.state', (c) => {
+        const ended = !c.participants.length && !!this.state.call && !this.leaving;
+        this.set({
+          call: c.participants.length ? c : null,
+          // The core ends my call when relay-only goes on (#232 V3.4): say why.
+          ...(ended && this.state.relayOnly ? { callError: 'relay-only' } : {}),
+        });
+      }),
+      on('voice.room', (r) => this.set({ voiceRooms: { ...this.state.voiceRooms, [r.serverId]: r } })),
       on('update.rolledBack', (u) => this.set({ updateNote: { kind: 'rolledBack', ...u } })),
       on('notice', (n) => this.set({ notice: { ...n, at: Date.now() } })),
     );
@@ -172,6 +191,13 @@ export class Store {
       channels: { ...this.state.channels, [id]: channels },
       members: { ...this.state.members, [id]: members },
     });
+    await this.loadVoiceRoom(id);
+  }
+
+  /** Re-reads a server's voice room (events are hints): on start and on server switch. */
+  async loadVoiceRoom(serverId: Id): Promise<void> {
+    const room = await this.core.getVoiceRoom(serverId).catch(() => null);
+    if (room) this.set({ voiceRooms: { ...this.state.voiceRooms, [serverId]: room } });
   }
 
   window(channelId: Id): MessageWindow {
@@ -215,13 +241,24 @@ export class Store {
       const call = await this.core.joinCall(channelId);
       this.set({ call: call.participants.length ? call : null });
     } catch (e) {
-      this.set({ callError: (e as { code?: string })?.code ?? 'internal' });
+      const code = (e as { code?: string })?.code ?? 'internal';
+      this.set({ callError: code, ...(code === 'relay-only' ? { relayOnly: true } : {}) });
     }
   }
 
   async leaveCall(): Promise<void> {
-    await this.core.leaveCall().catch(() => null);
+    this.leaving = true;
+    try {
+      await this.core.leaveCall().catch(() => null);
+    } finally {
+      this.leaving = false;
+    }
     this.set({ call: null });
+  }
+
+  /** Relay-only is on (or off): until the core reports it up front, only a refused join says so. */
+  setRelayOnly(on: boolean): void {
+    this.set({ relayOnly: on });
   }
 
   clearCallError(): void {

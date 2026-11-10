@@ -88,10 +88,14 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
   `revokeRole(serverId, userId)`.
 - `Member.role: 'owner' | 'admin' | 'moderator' | 'member'`.
 - Voice calls (voice v1, piece B; `src/voice.rs`). IDs are 64 lower-case hex, and `identity` is a user ID.
-  - `joinCall(channelId)` returns `CallState { channelId, participants: { identity, muted }[], full }`, me first. It leaves any other call first.
+  - Calls happen only in each server's one voice room, whose ID is derived: `blake3::derive_key("mvs/voice-room/v1", serverId)`. There is no channel record for it, no 18+ gate, and text channels carry no calls.
+  - `getVoiceRoom(serverId)` returns `VoiceRoom { serverId, roomId, participants: { userId, muted }[] }`.
+    - Participants: me first when I'm in it, at most 5 (the first to arrive), built from verified hellos only, each dropped 30 s after we last received one.
+    - Errors: `not-found` for a server I don't have (a kicked member's core removes it), `not-allowed` if I'm not a member or I'm kicked.
+  - `joinCall(channelId)` takes the room ID and returns `CallState { channelId, participants: { identity, muted }[], full }`, me first; `channelId` is the room ID. It leaves any other call first.
     - Errors:
-      - `not-found`: an unknown channel.
-      - `not-allowed`: not a member, kicked, or an 18+ channel without my 18+ claim.
+      - `not-found`: an unknown ID.
+      - `not-allowed`: a text channel's ID, not a member, or kicked.
       - `call-full`: 5 are already in.
       - `relay-only`: relay-only is on, so calls are off.
       - `not-implemented`: no voice transport (sync's piece A).
@@ -105,6 +109,7 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
   - Events:
     - `call.state` (a `CallState`) on every change to my call: join, leave, mute or timeout. After a leave, or a refusal by a full call, its `participants` is `[]`.
     - `call.signal { from, kind, payload, fingerprintVerified: true }`.
+    - `voice.room` (a `VoiceRoom`) when a room's roster changes (join, leave, mute, timeout, kick), whether or not I'm in it. At most one per room per sync round, and only while I'm a member. It's a hint: re-read with `getVoiceRoom`. `muted` is a display hint.
   - It fails closed. A core-to-core envelope is signed by the sender's identity key under `mvs/voice-signal/v1`, and the signature covers the SDP and its fingerprint. The core drops, without an event:
     - an envelope that doesn't verify or isn't `v: 1`;
     - one outside ±120 s of our clock;

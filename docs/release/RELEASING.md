@@ -263,6 +263,9 @@ PowerShell on your normal (online) PC, in the repo:
 
 ## Keeping a release alive
 
+Electron bumps follow [ELECTRON-UPGRADE.md](ELECTRON-UPGRADE.md): the Windows
+desktop e2e must be re-run green on the bump itself.
+
 A manifest expires (at most 30 days, 14 by default). Clients refuse it after
 that, which stops an attacker freezing users on an old release. Before it
 runs out, re-sign the same release without a new build: download

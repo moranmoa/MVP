@@ -329,7 +329,8 @@ impl Core {
             }
             "syncNow" => ok(self.sync_now()),
 
-            // Voice (piece B).
+            // Voice (piece B). `joinCall` takes the room ID as `channelId`.
+            "getVoiceRoom" => ok(self.get_voice_room(&args::<ServerArg>(raw)?.server_id)),
             "joinCall" => ok(self.join_call(&args::<ChannelIdArg>(raw)?.channel_id)),
             "leaveCall" => ok(self.leave_call()),
             "setMuted" => ok(self.set_muted(args::<MutedArg>(raw)?.muted)),

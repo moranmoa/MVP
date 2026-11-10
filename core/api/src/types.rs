@@ -428,6 +428,11 @@ pub enum Event {
     /// answers come only verified (see `voice`), so the flag is always true.
     #[serde(rename = "call.signal", rename_all = "camelCase")]
     CallSignal { from: Id, kind: SignalKind, payload: String, fingerprint_verified: bool },
+    /// Voice: who is in a server's room changed (join, leave, mute,
+    /// timeout, kick), mine or not. At most one per room per sync round,
+    /// only while I'm a member. A hint: `getVoiceRoom` re-reads it.
+    #[serde(rename = "voice.room")]
+    VoiceRoom(VoiceRoom),
     /// Once, after `markHealthy` commits a new version. Text only.
     #[serde(rename = "update.installed")]
     UpdateInstalled { version: String, notes: Option<String> },
@@ -505,6 +510,25 @@ pub enum RemovedReason {
     /// The owner closed (deleted) it, mine or read; sent when its 30 days
     /// are up and the rest of it is purged.
     Closed,
+}
+
+/// Voice: a server's one voice room and who is in it, from verified hellos.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceRoom {
+    pub server_id: Id,
+    /// What `joinCall` takes; `CallState.channelId` in a call.
+    pub room_id: Id,
+    /// At most 5: me first when I'm in it, then the others.
+    pub participants: Vec<VoiceParticipant>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceParticipant {
+    pub user_id: Id,
+    /// A display hint only.
+    pub muted: bool,
 }
 
 /// Voice: the WebRTC signalling `sendSignal` carries.

@@ -7,6 +7,9 @@
 //   getStorageUsage   -> never answers (timeout)
 //   clearCache        -> exits (crash)
 //   exportDiagnostics -> a 17 MiB line (over the shell's cap)
+//   joinCall          -> call.state, then the CallState (me alone); channel
+//                        'e'x64 is ended by the core 300 ms later
+//   leaveCall         -> call.state with no participants, then null
 'use strict';
 
 const WORDS = ['fake', 'words', 'never', 'logged'];
@@ -60,6 +63,19 @@ process.stdin.on('data', (chunk) => {
         break;
       case 'exportDiagnostics':
         process.stdout.write(`{"type":"response","id":${m.id},"ok":"${'x'.repeat(17 * 1024 * 1024)}"}\n`);
+        break;
+      case 'joinCall': {
+        const call = { channelId: m.args.channelId, participants: [{ identity: 'a'.repeat(64), muted: false }], full: false };
+        out({ type: 'event', event: 'call.state', payload: call });
+        out({ type: 'response', id: m.id, ok: call });
+        if (m.args.channelId === 'e'.repeat(64)) {
+          setTimeout(() => out({ type: 'event', event: 'call.state', payload: { ...call, participants: [] } }), 300);
+        }
+        break;
+      }
+      case 'leaveCall':
+        out({ type: 'event', event: 'call.state', payload: { channelId: 'c'.repeat(64), participants: [], full: false } });
+        out({ type: 'response', id: m.id, ok: null });
         break;
       case 'checkRecoveryWords':
         out({ type: 'response', id: m.id, error: { code: 'invalid-words', positions: [2, 'x', 5], secret: 'dropped' } });

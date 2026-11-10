@@ -5,8 +5,9 @@
 // Security model (ui/SECURITY.md, GAP-17): the renderer is an untrusted web
 // page. It runs sandboxed with context isolation and no Node, is served only
 // from app://mvs with the UI's CSP as a header, cannot navigate, open
-// windows, embed webviews or get permissions, and opens external links only
-// through the OS after the user confirms.
+// windows, embed webviews or get permissions (except the microphone, for its
+// own top frame), and opens external links only through the OS after the user
+// confirms.
 
 'use strict';
 
@@ -20,6 +21,14 @@ const deeplink = require('./deeplink');
 const { relayFor, bootstrapFor, logHost } = require('./config');
 const update = require('./update');
 const { createLog } = require('./logfile');
+
+// Tests only, and only in a checkout (never a release build): a throwaway
+// profile, so a test run never shares the installed app's profile
+// (%APPDATA%\MVS, ~/.config/MVS) or its single-instance lock. Set before the
+// lock below, which lives in the profile.
+if (!app.isPackaged && process.env.MVS_TEST_USER_DATA && path.isAbsolute(process.env.MVS_TEST_USER_DATA)) {
+  app.setPath('userData', process.env.MVS_TEST_USER_DATA);
+}
 
 // One instance only: a second launch (e.g. an mvs:// link, B1-3) focuses this one.
 if (!app.requestSingleInstanceLock()) {
@@ -53,6 +62,8 @@ const log = (line) => {
 };
 /** Where the core stands, for the "core unavailable" screen (T8-01). */
 let coreStatus = { state: 'starting' };
+/** V-C2: the microphone only while we are in a call (security.js). */
+const callGate = sec.createCallGate();
 
 /** Sends a shell event (not from the core) to our own windows. */
 function toPages(name, payload) {
@@ -62,6 +73,7 @@ function toPages(name, payload) {
 }
 
 function setCoreStatus(status) {
+  callGate.onCoreStatus(status);
   coreStatus = status;
   toPages('core.status', status);
 }
@@ -96,7 +108,10 @@ function startCore() {
     relay,
     bootstrap,
     extraArgs: update.coreArgs(UPDATE),
-    onEvent: toPages,
+    onEvent: (name, payload) => {
+      callGate.onEvent(name, payload);
+      toPages(name, payload);
+    },
     onStatus: setCoreStatus,
     // stderr only (counts and error kinds); stdout is never logged.
     log,
@@ -120,7 +135,12 @@ function serveCoreIpc() {
         app.quit();
       });
     }
-    return core.request(req.cmd, req.args);
+    // The call gate sees joinCall's answer before the page does, so the
+    // page's getUserMedia after a join finds the microphone open.
+    const token = callGate.beforeCommand(req.cmd);
+    const res = await core.request(req.cmd, req.args);
+    callGate.afterCommand(req.cmd, token, res);
+    return res;
   });
   // The "core unavailable" screen (T8-01): try again now, and open the logs.
   const fromUs = (event) => {
@@ -185,6 +205,9 @@ async function openExternal(win, url) {
 
 /** Applied to every webContents, including any created later. */
 function lockDown(contents) {
+  // Voice: WebRTC gathers candidates only on the default route's interface
+  // (public and private address), never every local adapter (VPNs, VMs).
+  contents.setWebRTCIPHandlingPolicy(sec.WEBRTC_IP_POLICY);
   contents.setWindowOpenHandler(({ url }) => {
     const win = BrowserWindow.fromWebContents(contents);
     if (win) openExternal(win, url).catch(() => {});
@@ -200,8 +223,32 @@ function lockDown(contents) {
 }
 
 function lockDownSession(ses) {
-  ses.setPermissionRequestHandler((_wc, permission, done) => done(sec.ALLOWED_PERMISSIONS.has(permission)));
-  ses.setPermissionCheckHandler((_wc, permission) => sec.ALLOWED_PERMISSIONS.has(permission));
+  // Voice v1: the microphone (audio only) for our own top frame, and only
+  // during a call (V-C2); nothing else. Camera and screen capture stay refused (rules in security.js).
+  // A destroyed or unreadable webContents gives '' (never internal).
+  const urlOf = (wc) => {
+    try {
+      return wc.isDestroyed() ? '' : wc.getURL();
+    } catch {
+      return '';
+    }
+  };
+  ses.setPermissionRequestHandler((wc, permission, done, details) => {
+    let ok = false;
+    try {
+      ok = sec.allowPermissionRequest(wc ? urlOf(wc) : '', permission, details, callGate.inCall) === true;
+    } catch {
+      ok = false;
+    }
+    done(ok);
+  });
+  ses.setPermissionCheckHandler((wc, permission, requestingOrigin, details) => {
+    try {
+      return sec.allowPermissionCheck(wc ? urlOf(wc) : undefined, permission, requestingOrigin, details, callGate.inCall) === true;
+    } catch {
+      return false;
+    }
+  });
   ses.setDevicePermissionHandler(() => false);
   ses.setDisplayMediaRequestHandler((_req, done) => done({}));
   // Nothing the UI needs lives on the network; any other request is a bug or an attack.
@@ -309,7 +356,10 @@ app.on('second-instance', (_event, argv) => {
   if (link) openInvite(link);
 });
 
-app.on('will-quit', () => core?.stop());
+app.on('will-quit', () => {
+  callGate.end();
+  core?.stop();
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

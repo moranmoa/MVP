@@ -28,6 +28,7 @@ import type {
   CoreStatus,
   CallState,
   CallSignal,
+  VoiceRoom,
 } from './types';
 
 export interface CoreCommands {
@@ -96,7 +97,12 @@ export interface CoreCommands {
   blockUser(userId: Id): Promise<void>;
   kickMember(serverId: Id, userId: Id): Promise<void>;
   // Voice v1 (#223)
-  /** Joins (leaving any other call first). Rejects not-found, not-allowed, call-full, relay-only, not-implemented. */
+  /** A server's voice room and who is in it. Rejects not-found, not-allowed (not a member, kicked). */
+  getVoiceRoom(serverId: Id): Promise<VoiceRoom>;
+  /**
+   * Joins a voice room (leaving any other call first); `channelId` is the room's
+   * id. Rejects not-found, not-allowed (a text channel), call-full, relay-only, not-implemented.
+   */
   joinCall(channelId: Id): Promise<CallState>;
   /** Idempotent. */
   leaveCall(): Promise<null>;
@@ -147,6 +153,8 @@ export interface CoreEvents {
   /** Every change to my call; participants [] after leaving. */
   'call.state': CallState;
   'call.signal': CallSignal;
+  /** A voice room's roster changed (join, leave, mute, timeout), mine or not. A hint: re-read with getVoiceRoom. */
+  'voice.room': VoiceRoom;
 }
 
 export type CoreEventName = keyof CoreEvents;
