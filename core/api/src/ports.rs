@@ -125,6 +125,10 @@ pub trait Network: Send + Sync {
         None
     }
 
+    /// Asks the background sync loop (`Core::run_sync_loop`) for a round
+    /// now rather than at its next tick. Nothing to do without one.
+    fn wake(&self) {}
+
     /// B6-p: replace a held record by its stub, if the stub gate agrees.
     fn prune(&self, id: records::RecordId) {
         let _ = id;

@@ -90,6 +90,10 @@ pub const CHALLENGE_POSITIONS: usize = 3;
 pub const MAX_CHECK_FAILURES: u8 = 5;
 /// How often the background sync runs without a hint.
 pub const SYNC_EVERY: Duration = Duration::from_secs(2);
+/// How long a new member's send waits for the channel key (the re-key a
+/// moderator makes when they read the join), and how often it looks.
+pub const KEY_WAIT: Duration = Duration::from_secs(2);
+const KEY_WAIT_POLL: Duration = Duration::from_millis(100);
 /// A join that found nobody online is retried in the background: first
 /// after `JOIN_RETRY_FIRST`, doubling up to `JOIN_RETRY_MAX`, for at most
 /// `JOIN_RETRY_FOR` (until then the inviter may still come online).
@@ -1216,8 +1220,14 @@ impl Core {
 
     /// Seals `body` for the channel's members and sends it. The first
     /// message of a channel, or the first after a removal, needs a key
-    /// rotation: a moderator or above makes one on the way; anyone else
-    /// gets `not-allowed` until one arrives.
+    /// rotation: a moderator or above makes one on the way. A plain member
+    /// without the key yet (just joined: the moderator's re-key is on its
+    /// way) waits for it up to [`KEY_WAIT`], and only then gets
+    /// `not-allowed`. The wait only re-tries the seal: the background sync
+    /// loop (woken now) brings the key, never this request.
+    /// TODO(#285, tech lead): hold the message as pending in the core and
+    /// let the sync loop send it when the key comes, instead of blocking
+    /// the request thread at all.
     pub fn send_message(
         &self,
         channel_id: &str,
@@ -1230,17 +1240,36 @@ impl Core {
         if body.trim().is_empty() || !authority::message_text_ok(body) {
             return Err(ErrorCode::BadRequest.into());
         }
-        self.run(|inner, ports, events| {
-            let (server, channel) = inner.find_channel(channel_id)?;
-            let sealed = inner.seal(ports, server, channel, body)?;
-            let record =
-                inner.sign_in_channel(ports, server, channel, None, Kind::Message, sealed)?;
-            inner.store(server, record.clone())?;
-            ports.network.publish(&record);
-            let message = inner.message(&*ports.cipher, server, channel, record.id())?;
-            events.push(Event::MessageAdded(message.clone()));
-            Ok(message)
-        })
+        let deadline = Instant::now() + KEY_WAIT;
+        loop {
+            let sent = self.run(|inner, ports, events| {
+                let (server, channel) = inner.find_channel(channel_id)?;
+                let sealed = match inner.seal(ports, server, channel, body) {
+                    Ok(sealed) => sealed,
+                    Err(e) if e.code == ErrorCode::NotAllowed && inner.awaiting_key(server)? => {
+                        return Ok(None);
+                    }
+                    Err(e) => return Err(e),
+                };
+                let record =
+                    inner.sign_in_channel(ports, server, channel, None, Kind::Message, sealed)?;
+                inner.store(server, record.clone())?;
+                ports.network.publish(&record);
+                let message = inner.message(&*ports.cipher, server, channel, record.id())?;
+                events.push(Event::MessageAdded(message.clone()));
+                Ok(Some(message))
+            })?;
+            if let Some(message) = sent {
+                return Ok(message);
+            }
+            if Instant::now() >= deadline {
+                return Err(ErrorCode::NotAllowed.into());
+            }
+            // A round of the background sync now, rather than at its next
+            // tick: it brings the re-key in. Nothing is fetched here.
+            self.ports.network.wake();
+            std::thread::sleep(KEY_WAIT_POLL);
+        }
     }
 
     /// The author only (authority's rule). The new text is sealed like a
@@ -1936,6 +1965,18 @@ impl Inner {
 
     /// Seals `text` for `channel`'s members. If no key is usable yet, a
     /// moderator or above rotates first; anyone else gets `not-allowed`.
+    /// Whether a refused seal in `server` only means the key hasn't reached
+    /// me yet: I'm a current member of an open server who can't rotate
+    /// (`seal`'s `not-allowed` for anyone else is final).
+    fn awaiting_key(&self, server: ServerId) -> CoreResult<bool> {
+        let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+        let view = self.view(server)?;
+        Ok(view.state.is_member(me)
+            && !view.is_kicked(&me)
+            && view.state.closed.is_none()
+            && view.state.role(me) < authority::Role::Moderator)
+    }
+
     fn seal(
         &mut self,
         ports: &Ports,
