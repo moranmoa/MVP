@@ -41,7 +41,8 @@ export function ChannelSidebar({
   // The invite link, shown selectable with a Copy button (P0 from v0.2.0: the
   // desktop page can't write the clipboard by itself, see app/clipboard.ts).
   const [showInvite, setShowInvite] = useState(false);
-  const owner = server.ownerId === identity.id;
+  // A closed server is read-only (#261): no owner controls there.
+  const owner = server.ownerId === identity.id && !server.closed;
   const core = useCore();
   // The one voice engine for my call, shared by the room entry and the call bar.
   const engine = useCallEngine(identity.id);
@@ -160,7 +161,8 @@ export function ChannelSidebar({
             );
           })}
         </ul>
-        <VoiceRoomEntry serverId={server.id} myId={identity.id} engine={engine} />
+        {/* A closed server is read-only (#261): no calls; the core ends any call there. */}
+        {!server.closed && <VoiceRoomEntry serverId={server.id} myId={identity.id} engine={engine} />}
       </nav>
       <CallBar myId={identity.id} engine={engine} />
       <footer className="me-panel">

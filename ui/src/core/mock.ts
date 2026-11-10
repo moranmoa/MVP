@@ -62,6 +62,10 @@ export interface MockOptions {
   callError?: 'call-full' | 'relay-only' | 'not-implemented';
   /** Every demo voice room starts with 5 people in it (full). */
   roomFull?: boolean;
+  /** Server lifecycle (#261): two members run an old MVS, so rename and close answer `update-needed` (a leave never does). */
+  outdatedMembers?: boolean;
+  /** The demo server "Minecraft IL" starts closed by its owner (read-only). */
+  closedServer?: boolean;
   /** As the desktop shell would: a STUN URL on core.status (#222), given to every listener. */
   stunUrl?: string;
   /** Add members and messages written the way an attacker would (see SECURITY.md). */
@@ -448,6 +452,7 @@ export class MockCore implements CoreApi {
     });
     this.servers.set(seed.id, state);
     this.refreshServerUnread(state);
+    if (this.options.closedServer && seed.name === 'Minecraft IL') state.summary = { ...state.summary, closed: true };
   }
 
   private addOwnServer(id: Id, name: string, ageRestriction: AgeRestriction, inviteLink: string): ServerState {
@@ -832,6 +837,63 @@ export class MockCore implements CoreApi {
     inv.revoked = true;
     this.relink(serverId);
   }
+  // ---- server lifecycle (#261) ----------------------------------------------
+
+  /** The rollout gate: with `outdatedMembers`, two members still run an old MVS. */
+  private outdatedOf(s: ServerState): Id[] {
+    if (!this.options.outdatedMembers) return [];
+    return s.members.filter((m) => m.id !== this.identity?.id).slice(0, 2).map((m) => m.id);
+  }
+
+  private lifecycleGate(s: ServerState): void {
+    if (this.outdatedOf(s).length) throw err({ code: 'update-needed' });
+  }
+
+  async getUpdateNeeded(serverId: Id): Promise<Id[]> {
+    const s = this.servers.get(serverId);
+    if (!s) throw err({ code: 'not-found' });
+    return this.outdatedOf(s);
+  }
+
+  async renameServer(serverId: Id, name: string): Promise<ServerSummary> {
+    const s = this.servers.get(serverId);
+    if (!s) throw err({ code: 'not-found' });
+    if (s.summary.ownerId !== this.identity?.id || s.summary.closed) throw err({ code: 'not-allowed' });
+    const clean = name.trim();
+    // As the core: 1–100 code points, no bidi, control or zero-width characters.
+    if (!clean || [...clean].length > 100 || /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/.test(clean)) {
+      throw err({ code: 'bad-request' });
+    }
+    this.lifecycleGate(s);
+    await this.wait(150);
+    s.summary = { ...s.summary, name: clean, initials: initialsOf(clean) };
+    this.emit('server.updated', s.summary);
+    return s.summary;
+  }
+
+  async leaveServer(serverId: Id): Promise<void> {
+    const s = this.servers.get(serverId);
+    if (!s) throw err({ code: 'not-found' });
+    // A leave is never gated: it always succeeds here (CONFORMANCE).
+    if (s.summary.ownerId === this.identity?.id) throw err({ code: 'not-allowed' });
+    await this.wait(150);
+    this.servers.delete(serverId);
+    for (const c of s.channels) this.channelIndex.delete(c.channel.id);
+    this.emit('server.removed', { serverId, reason: 'left' });
+  }
+
+  async closeServer(serverId: Id): Promise<void> {
+    const s = this.servers.get(serverId);
+    if (!s) throw err({ code: 'not-found' });
+    if (s.summary.ownerId !== this.identity?.id || s.summary.closed) throw err({ code: 'not-allowed' });
+    this.lifecycleGate(s);
+    await this.wait(200);
+    // The 30-day purge (then `server.removed { reason: 'closed' }`) is not simulated.
+    s.summary = { ...s.summary, closed: true };
+    this.emit('server.closed', { serverId });
+    this.emit('server.updated', s.summary);
+  }
+
 
   private ageOf(birthDate: string): number {
     const [y, m, d] = birthDate.split('-').map(Number);
@@ -862,6 +924,7 @@ export class MockCore implements CoreApi {
   async sendMessage(channelId: Id, body: string, replyToId?: Id): Promise<Message> {
     const ch = this.channelIndex.get(channelId);
     if (!ch || !this.identity) throw err({ code: 'not-found' });
+    if (this.servers.get(ch.channel.serverId)?.summary.closed) throw err({ code: 'not-allowed' });
     const index = this.count(ch);
     ch.appendedCount++;
     const msg: Message = {

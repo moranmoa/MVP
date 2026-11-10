@@ -50,6 +50,8 @@ export interface ServerSummary {
   inviteLink: string;
   unread: boolean;
   mentions: number;
+  /** Closed by its owner (#261): read-only until it is purged 30 days later. */
+  closed?: boolean;
 }
 
 export interface Channel {
@@ -123,7 +125,9 @@ export interface CoreError {
     | 'check-clock'
     | 'nothing-to-download'
     | 'nothing-staged'
-    | 'disk-full';
+    | 'disk-full'
+    // Server lifecycle (#261): a member's MVS is too old for rename, leave or close; nothing was signed.
+    | 'update-needed';
   /** With `core-unavailable` (desktop shell, T8-01): why the core is not answering. */
   detail?: CoreDownDetail;
   /** 1-based word positions that were not recognised (restore). */

@@ -188,6 +188,7 @@ export function cleanServer(s: ServerSummary): ServerSummary {
     inviteLink: cleanLink(s.inviteLink),
     unread: s.unread === true,
     mentions: count(s.mentions),
+    closed: s.closed === true,
   };
 }
 
@@ -314,6 +315,8 @@ const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[
   'identity.changed': cleanIdentity,
   'server.added': cleanServer,
   'server.updated': cleanServer,
+  'server.removed': (p) => ({ serverId: id(p.serverId), reason: p.reason === 'left' || p.reason === 'closed' ? p.reason : undefined }),
+  'server.closed': (p) => ({ serverId: id(p.serverId) }),
   'channel.updated': cleanChannel,
   'channel.added': cleanChannel,
   'channel.removed': (p) => ({ serverId: p.serverId, channelId: p.channelId, name: cleanName(p.name, CHANNEL_NAME_MAX) || '…' }),
@@ -370,6 +373,8 @@ export function guardCore(core: CoreApi): CoreApi {
     updateChannel: wrap(core.updateChannel, cleanChannel),
     listMembers: wrap(core.listMembers, (l) => l.map(cleanMember)),
     createServer: wrap(core.createServer, cleanServer),
+    renameServer: wrap(core.renameServer, cleanServer),
+    getUpdateNeeded: wrap(core.getUpdateNeeded, (l) => (Array.isArray(l) ? l.filter((x): x is string => typeof x === 'string').map(id) : [])),
     createInvite: wrap(core.createInvite, (r) => ({ ...r, id: id(r.id), link: cleanLink(r.link), expiresAt: when(r.expiresAt) })),
     listInvites: wrap(core.listInvites, (l) => l.map(cleanInvite)),
     joinServer: wrap(core.joinServer, cleanJoin),

@@ -170,7 +170,7 @@ describe('context menus (B25)', () => {
     fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
 
     fireEvent.contextMenu(within(rail).getByRole('button', { name: /^Minecraft IL/ }));
-    expect(menuItems()).toEqual(['Copy invite link']);
+    expect(menuItems()).toEqual(['Copy invite link', 'Leave server']);
   });
 });
 

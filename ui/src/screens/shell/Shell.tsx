@@ -17,6 +17,7 @@ import { CreateServerDialog, Home, JoinDialog } from './Home';
 import { MemberList } from './MemberList';
 import { ServerRail } from './ServerRail';
 import { ServerSettings } from './ServerSettings';
+import { LeaveServerDialog } from './ServerLifecycle';
 
 const MEMBERS_KEY = 'mvp.ui.membersOpen';
 
@@ -30,6 +31,7 @@ export function Shell() {
   const notice = useStore(store, (s) => s.notice);
   const updateNote = useStore(store, (s) => s.updateNote);
   const flash = useStore(store, (s) => s.flash);
+  const serverGone = useStore(store, (s) => s.serverGone);
   const uiDir = useUiDir();
   const intl = useIntl();
   const { uiScale } = useSettings().settings;
@@ -88,6 +90,8 @@ export function Shell() {
   const [channelDialog, setChannelDialog] = useState<ChannelDialogMode | null>(null);
   // B11: the owner's server settings screen, for the open server.
   const [serverSettingsOpen, setServerSettingsOpen] = useState(false);
+  // #261: the server whose leave confirmation is open.
+  const [leaving, setLeaving] = useState<Id | null>(null);
   const [channelGone, setChannelGone] = useState<string | null>(null);
   const openChannel = useRef(channelId);
   openChannel.current = channelId;
@@ -104,6 +108,12 @@ export function Shell() {
   useEffect(() => {
     if (serverId !== 'home' && !servers.some((s) => s.id === serverId)) setServerId(servers[0]?.id ?? 'home');
   }, [servers, serverId]);
+
+  useEffect(() => {
+    if (!serverGone) return;
+    const t = setTimeout(() => store.clearServerGone(), 6000);
+    return () => clearTimeout(t);
+  }, [serverGone, store]);
 
   useEffect(() => {
     if (!flash) return;
@@ -228,7 +238,9 @@ export function Shell() {
           selectServer(id);
           setServerSettingsOpen(true);
         }}
+        onLeaveServer={setLeaving}
       />
+      <LeaveServerDialog server={servers.find((s) => s.id === leaving) ?? null} onClose={() => setLeaving(null)} />
       {server && channelId && (
         <ChannelSidebar
           server={server}
@@ -244,7 +256,7 @@ export function Shell() {
           onOpenServerSettings={() => setServerSettingsOpen(true)}
         />
       )}
-      {server && server.ownerId === identity.id && (
+      {server && server.ownerId === identity.id && !server.closed && (
         <ServerSettings
           server={server}
           open={serverSettingsOpen}
@@ -317,6 +329,11 @@ export function Shell() {
 
       {/* Toasts stack in one column, so two at once never overlap. */}
       <div className="toasts">
+        {serverGone && (
+          <div className="toast" role="status" key={serverGone.at}>
+            <FormattedMessage id={`server.gone.${serverGone.reason}`} values={{ name: serverGone.name }} />
+          </div>
+        )}
         {flash && (
           <div className="toast" role="status" key={flash.at}>
             <FormattedMessage id={flash.id} />
