@@ -36,8 +36,8 @@ describe('message catalogs', () => {
   it('isolates names, codes and sizes inside sentences', () => {
     const FSI = String.fromCharCode(0x2068);
     const PDI = String.fromCharCode(0x2069);
-    // Exactly FSI {x} PDI, with nothing else (not even a channel's #) inside the isolate.
-    const isolated = new RegExp(`${FSI}{(channel|name|code|version|failed|running|used|limit)}${PDI}`, 'g');
+    // Exactly FSI {x} PDI; a channel's # goes inside, so "#clips" stays one LTR unit in RTL.
+    const isolated = new RegExp(`${FSI}#?{(channel|name|code|version|failed|running|used|limit)}${PDI}`, 'g');
     for (const [locale, messages] of Object.entries(catalogs)) {
       for (const [id, text] of Object.entries(messages)) {
         const bare = text.replace(isolated, '').match(/{(channel|name|code|version|failed|running|used|limit)}/);

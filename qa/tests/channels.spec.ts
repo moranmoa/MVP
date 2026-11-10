@@ -13,7 +13,7 @@ const ch = {
   submit: 'יצירה',
   delete: 'מחיקת הערוץ',
   cannotDeleteDefault: 'אי אפשר למחוק את הערוץ הראשון של השרת',
-  deleted: (name: string) => `הערוץ #⁨${name}⁩ נמחק.`,
+  deleted: (name: string) => `הערוץ ⁨#${name}⁩ נמחק.`,
 };
 
 function channelList(page: Page) {
@@ -79,7 +79,7 @@ test.describe('channels', () => {
     // Delete, through the confirmation; the open channel shows the notice.
     await channelList(page).getByRole('button', { name: `${ch.edit}: qa-renamed` }).click();
     await page.getByRole('dialog', { name: ch.edit }).getByRole('button', { name: ch.delete }).click();
-    const confirm = page.getByRole('dialog', { name: /^למחוק את #/ });
+    const confirm = page.getByRole('dialog', { name: /^למחוק את \u2068?#/ });
     await expect(confirm).toBeVisible();
     await confirm.getByRole('button', { name: ch.delete }).click();
     await expect(channelButton(page, 'qa-renamed')).toHaveCount(0);

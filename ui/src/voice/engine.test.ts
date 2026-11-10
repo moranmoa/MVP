@@ -665,6 +665,64 @@ a=fingerprint:sha-256 ${newFingerprint()}
     engine.dispose();
   });
 
+  it('a failed offer send is retried, not the end of the re-offers', async () => {
+    const { hx, cx, cy, ex, ey } = pair();
+    const errors = record<VoiceError>((cb) => ex.on('error', cb));
+    const realSend = cx.sendSignal.bind(cx);
+    let failures = 1;
+    cx.sendSignal = async (to, kind, payload) => {
+      if (failures-- > 0) throw Object.assign(new Error('busy'), { code: 'internal' });
+      return realSend(to, kind, payload);
+    };
+    await ey.attach(cy.state(), B);
+    await ex.attach(cx.state(), A);
+    await flush();
+    expect(cx.sent.map((s) => s.kind)).toEqual(['offer']); // the 2nd attempt; the 1st threw
+    expect(hx.pcs).toHaveLength(2);
+    expect(hx.pcs[0]!.closed).toBe(true);
+    expect(hx.pcs[1]!.connectionState).toBe('connected');
+    expect(errors).toEqual([]);
+  });
+
+  it('an answer that fails to apply leads to a re-offer', async () => {
+    const { hx, cx, cy, ex, ey } = pair();
+    const errors = record<VoiceError>((cb) => ex.on('error', cb));
+    const realCreate = hx.env.createPeerConnection;
+    let first = true;
+    hx.env.createPeerConnection = (c) => {
+      const pc = realCreate(c) as unknown as FakePC;
+      if (first) {
+        first = false;
+        pc.setRemoteDescription = async () => {
+          throw new Error('bad answer');
+        };
+      }
+      return pc as unknown as RTCPeerConnection;
+    };
+    await ey.attach(cy.state(), B);
+    await ex.attach(cx.state(), A);
+    await flush(20);
+    expect(cx.sent.map((s) => s.kind)).toEqual(['offer', 'offer']);
+    expect(hx.pcs[1]!.connectionState).toBe('connected');
+    expect(errors).toEqual([]);
+  });
+
+  it('gives up as peer-failed when every offer send fails', async () => {
+    const h = fakeEnv();
+    const core = new FakeCore(A, [A, B]);
+    core.sendSignal = async () => {
+      throw new Error('down');
+    };
+    const engine = createVoiceEngine(core, { env: h.env });
+    const errors = record<VoiceError>((cb) => engine.on('error', cb));
+    await engine.attach(core.state(), A);
+    await flush();
+    expect(h.pcs).toHaveLength(3);
+    expect(h.pcs.every((pc) => pc.closed)).toBe(true);
+    expect(errors).toEqual([{ code: 'peer-failed', peer: B }]);
+    engine.dispose();
+  });
+
   it('dispose unsubscribes from the core', async () => {
     const core = new FakeCore(A, [A]);
     const engine = createVoiceEngine(core, { env: fakeEnv().env });

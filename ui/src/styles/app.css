@@ -2528,3 +2528,35 @@ kbd {
 .call-peer-failed.refused {
   color: var(--danger);
 }
+
+/* B25 §5: at phone width the menu is a bottom sheet. */
+.context-menu.sheet {
+  inset: auto 0 0 0;
+  min-width: 0;
+  max-width: none;
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 0.5rem 0.5rem calc(0.5rem + env(safe-area-inset-bottom));
+  border-radius: var(--radius-l) var(--radius-l) 0 0;
+  border-block-end: 0;
+}
+.context-menu.sheet [role='menuitem'] {
+  min-height: 3rem;
+}
+.context-menu-title {
+  padding: 0.25rem 0.625rem 0.5rem;
+  color: var(--text-muted);
+  font-size: 0.875rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-block-end: 1px solid var(--border);
+  margin-block-end: 0.25rem;
+}
+.context-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 59;
+  background: rgb(0 0 0 / 0.35);
+}
