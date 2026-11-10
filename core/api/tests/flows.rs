@@ -3376,3 +3376,153 @@ fn a_restore_takes_the_birth_date_asked_again() {
     assert_eq!(laptop.core.list_servers().unwrap().len(), 1);
     assert_eq!(records_by(&world, &server.id, &owner_id, Kind::AgeClaim), claims + 1);
 }
+
+/// One side of a network partition: while cut, it sees only what the world
+/// held when it was cut, and what it publishes waits until it heals.
+struct Partition {
+    world: Arc<LoopbackNetwork>,
+    cut: std::sync::Mutex<Option<BTreeSet<records::RecordId>>>,
+    held: std::sync::Mutex<Vec<records::Record>>,
+}
+
+impl Partition {
+    fn new(world: &Arc<LoopbackNetwork>) -> Arc<Partition> {
+        Arc::new(Partition { world: world.clone(), cut: Default::default(), held: Default::default() })
+    }
+
+    fn cut(&self, server: ServerId) {
+        *self.cut.lock().unwrap() = Some(self.world.fetch(server).iter().map(|r| r.id()).collect());
+    }
+
+    fn heal(&self) {
+        *self.cut.lock().unwrap() = None;
+        for record in std::mem::take(&mut *self.held.lock().unwrap()) {
+            self.world.publish(&record);
+        }
+    }
+}
+
+impl Network for Partition {
+    fn publish(&self, record: &records::Record) {
+        if self.cut.lock().unwrap().is_some() {
+            self.held.lock().unwrap().push(record.clone());
+        } else {
+            self.world.publish(record);
+        }
+    }
+
+    fn fetch(&self, server: ServerId) -> Vec<records::Record> {
+        let all = self.world.fetch(server);
+        match &*self.cut.lock().unwrap() {
+            Some(seen) => all.into_iter().filter(|r| seen.contains(&r.id())).collect(),
+            None => all,
+        }
+    }
+
+    fn fetch_invite(&self, handle: [u8; 32]) -> Vec<Vec<u8>> {
+        self.world.fetch_invite(handle)
+    }
+}
+
+/// Tech Lead and Security Lead (restore design): one owner identity on two
+/// computers re-keys the same join concurrently, neither seeing the other's
+/// rotation. Both rotations are valid; a third member reads what each
+/// computer sealed; a later kick shuts the kicked member out of what both
+/// seal next.
+#[test]
+fn one_identity_on_two_cores_re_keys_concurrently_and_converges() {
+    use api::crypto::GroupKeysCipher;
+
+    let world = World::new();
+    let (owner, server, channel) = keyed_server(&world, "Twins");
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let carol = joiner(&world, &server, "Carol");
+    owner.core.sync_now().unwrap();
+    // The same owner on a second computer: restored, rejoined by the link.
+    let partition = Partition::new(&world.network);
+    let laptop = world.peer_on(
+        partition.clone(),
+        Arc::new(MemoryStore::new()),
+        None,
+        Arc::new(GroupKeysCipher::locked()),
+    );
+    laptop.core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
+    laptop.core.join_server(&server.invite_link).unwrap();
+    advance(&world, JOIN_REKEY_REFILL_MS * 4);
+    for peer in [&owner, &laptop, &carol] {
+        peer.core.sync_now().unwrap();
+    }
+    assert_eq!(laptop.core.list_servers().unwrap().len(), 1);
+
+    // Dan joins; both owner cores re-key for it without seeing each other.
+    let dan_cipher = Arc::new(GroupKeysCipher::locked());
+    let dan = world.peer_with(Arc::new(MemoryStore::new()), None, dan_cipher.clone());
+    sign_up(&dan, "Dan");
+    dan.core.join_server(&server.invite_link).unwrap();
+    advance(&world, JOIN_REKEY_REFILL_MS * 4);
+    let rotation_ids = |records: &[records::Record]| -> BTreeSet<records::RecordId> {
+        records.iter().filter(|r| r.kind() == Kind::KeyRotation).map(|r| r.id()).collect()
+    };
+    let before = rotation_ids(&world.network.fetch(server_key));
+    partition.cut(server_key);
+    owner.core.sync_now().unwrap();
+    laptop.core.sync_now().unwrap();
+    owner.core.send_message(&channel, "from the PC", None).unwrap();
+    laptop.core.send_message(&channel, "from the laptop", None).unwrap();
+    // Each side rotated, neither seeing the other's rotation.
+    let from_pc: BTreeSet<_> =
+        rotation_ids(&world.network.fetch(server_key)).difference(&before).copied().collect();
+    let from_laptop = rotation_ids(&partition.held.lock().unwrap());
+    assert!(!from_pc.is_empty(), "the PC didn't re-key for the join");
+    assert!(!from_laptop.is_empty(), "the laptop didn't re-key for the join");
+    assert!(from_pc.is_disjoint(&from_laptop));
+    partition.heal();
+
+    // Everyone, Dan included, reads both.
+    for peer in [&owner, &laptop, &carol, &dan] {
+        peer.core.sync_now().unwrap();
+    }
+    let bodies = |peer: &Peer| -> Vec<String> {
+        let mut bodies: Vec<String> = peer
+            .core
+            .get_messages(&channel, 0, 50)
+            .unwrap()
+            .messages
+            .into_iter()
+            .map(|m| m.body)
+            .collect();
+        bodies.sort();
+        bodies
+    };
+    for peer in [&owner, &laptop, &carol, &dan] {
+        assert_eq!(bodies(peer), ["from the PC", "from the laptop"]);
+    }
+
+    // A kick from the PC: what either computer seals next is shut to Dan.
+    let dan_id = dan.core.get_identity().unwrap().unwrap().id;
+    owner.core.kick_member(&server.id, &dan_id).unwrap();
+    let after_pc = owner.core.send_message(&channel, "PC after", None).unwrap();
+    laptop.core.sync_now().unwrap();
+    let after_laptop = laptop.core.send_message(&channel, "laptop after", None).unwrap();
+    carol.core.sync_now().unwrap();
+    let carol_bodies = bodies(&carol);
+    for body in ["PC after", "laptop after"] {
+        assert!(carol_bodies.contains(&body.to_owned()), "Carol can't read {body:?}: {carol_bodies:?}");
+    }
+    let held = world.network.fetch(server_key);
+    for record in held.iter().filter(|r| r.kind() == Kind::KeyRotation) {
+        let _ = dan_cipher.apply_rotation(record);
+    }
+    let accepted = held.iter().filter(|r| r.kind() == Kind::KeyRotation).map(|r| r.id()).collect();
+    dan_cipher.set_accepted(server_key, &accepted);
+    for sent in [&after_pc, &after_laptop] {
+        let record =
+            held.iter().find(|r| hex::encode(r.id().as_bytes()) == sent.id).expect("published");
+        let Scope::Channel(ch) = record.scope() else { panic!("a channel record") };
+        assert!(
+            dan_cipher.decrypt(server_key, ch, record.author(), record.body()).is_err(),
+            "the kicked member read {:?}",
+            sent.body
+        );
+    }
+}
