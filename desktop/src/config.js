@@ -1,9 +1,10 @@
 // Build-time settings for the core, kept out of git: the release workflow
 // writes build/mvs-config.json (from a repository variable) and packaging
 // puts it next to the app as resources/mvs-config.json. A checkout uses the
-// MVS_RELAY environment variable instead.
+// MVS_RELAY (and MVS_BOOTSTRAP) environment variables instead.
 //
-//   { "relay": "/dns4/<host>/tcp/443/wss/p2p/<peer id>" }
+//   { "relay": "/dns4/<host>/tcp/443/wss/p2p/<peer id>",
+//     "bootstrap": ["/dns4/<host>/tcp/4001/p2p/<peer id>"] }   (optional)
 //
 // Anything malformed is ignored with a warning: the app then runs without a
 // relay (offline) rather than handing the core something unchecked.
@@ -55,4 +56,40 @@ function relayFor({ packaged, resourcesPath, env = process.env, warn = (m) => co
   return value;
 }
 
-module.exports = { MAX_RELAY, validRelay, relayFor };
+
+/** Most `bootstrap` entries passed on (mvs-core takes at most 4). */
+const MAX_BOOTSTRAP = 4;
+
+/**
+ * The relay's direct addresses to give the core as `--bootstrap` (#219): the
+ * `bootstrap` list of mvs-config.json, or MVS_BOOTSTRAP (comma-separated) in
+ * a checkout. Each must pass the same check as the relay; bad entries are
+ * dropped with a warning, and a list that isn't one is ignored.
+ * @param {{ packaged: boolean, resourcesPath?: string, env?: object, warn?: (m: string) => void }} o
+ * @returns {string[]}
+ */
+function bootstrapFor({ packaged, resourcesPath, env = process.env, warn = (m) => console.warn(m) }) {
+  let list;
+  if (packaged) {
+    const file = path.join(resourcesPath, 'mvs-config.json');
+    if (!fs.existsSync(file)) return [];
+    try {
+      list = JSON.parse(fs.readFileSync(file, 'utf8')).bootstrap;
+    } catch {
+      return []; // relayFor already warned
+    }
+  } else {
+    list = env.MVS_BOOTSTRAP ? env.MVS_BOOTSTRAP.split(',') : undefined;
+  }
+  if (list === undefined || list === null) return [];
+  if (!Array.isArray(list)) {
+    warn('ignoring a malformed bootstrap list');
+    return [];
+  }
+  const ok = list.filter(validRelay);
+  if (ok.length < list.length) warn('ignoring malformed bootstrap addresses');
+  if (ok.length > MAX_BOOTSTRAP) warn(`using the first ${MAX_BOOTSTRAP} bootstrap addresses`);
+  return ok.slice(0, MAX_BOOTSTRAP);
+}
+
+module.exports = { MAX_RELAY, MAX_BOOTSTRAP, validRelay, relayFor, bootstrapFor };

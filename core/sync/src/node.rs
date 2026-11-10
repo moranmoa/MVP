@@ -538,6 +538,7 @@ impl Node {
             relay_backoff: RELAY_BACKOFF_MIN,
             relay_next_dial: Instant::now(),
             bootstrap: config.bootstrap.into_iter().map(|addr| (addr, None)).collect(),
+            bootstrap_conns: HashMap::new(),
             allow_lan: config.allow_lan,
             relayed: HashMap::new(),
             direct: HashMap::new(),
@@ -927,6 +928,11 @@ struct Task {
     relay_next_dial: Instant,
     /// Bootstrap addresses and the peer each one turned out to be.
     bootstrap: Vec<(Multiaddr, Option<PeerId>)>,
+    /// Open connections we dialled at a bootstrap address, by address. The
+    /// relay itself can be a bootstrap (its plain TCP address, so identify
+    /// observes our public address for hole punching): it is never "direct",
+    /// so this is what stops redialling it every discovery round.
+    bootstrap_conns: HashMap<ConnectionId, Multiaddr>,
     allow_lan: bool,
     /// Open connections per peer, through the relay and direct. A peer with
     /// a direct connection is not in `relayed`, even while its old relayed
@@ -1226,7 +1232,8 @@ impl Task {
         }
         // Bootstrap peers are dialled directly: not while relay-only.
         for (addr, peer) in if self.relay_only { Vec::new() } else { self.bootstrap.clone() } {
-            if peer.is_none_or(|p| !self.direct.contains_key(&p)) {
+            let open = self.bootstrap_conns.values().any(|a| *a == addr);
+            if !open && peer.is_none_or(|p| !self.direct.contains_key(&p)) {
                 let _ = self.swarm.dial(DialOpts::unknown_peer_id().address(addr).build());
             }
         }
@@ -1463,6 +1470,11 @@ impl Task {
         match event {
             SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, .. } => {
                 self.dial_backoff.lock().unwrap().connected(&peer_id);
+                if let ConnectedPoint::Dialer { address, .. } = &endpoint {
+                    if let Some((a, _)) = self.bootstrap.iter().find(|(a, _)| without_peer(a) == without_peer(address)) {
+                        self.bootstrap_conns.insert(connection_id, a.clone());
+                    }
+                }
                 if !self.admit_by_ip(connection_id, &endpoint) {
                     debug!(%peer_id, "too many connections from one address");
                     self.swarm.close_connection(connection_id);
@@ -1491,6 +1503,7 @@ impl Task {
             }
             SwarmEvent::ConnectionClosed { peer_id, connection_id, num_established, .. } => {
                 self.per_ip.release(connection_id);
+                self.bootstrap_conns.remove(&connection_id);
                 self.relayed_preferred.remove(&connection_id);
                 let had_direct = self.direct.contains_key(&peer_id);
                 for conns in [&mut self.relayed, &mut self.direct, &mut self.parked] {
@@ -2176,6 +2189,12 @@ fn is_relayed(endpoint: &ConnectedPoint) -> bool {
         // (listening) address, not in the remote one.
         ConnectedPoint::Listener { local_addr, send_back_addr } => has_circuit(local_addr) || has_circuit(send_back_addr),
     }
+}
+
+/// `addr` without a trailing `/p2p/<id>`, to compare a dialled address
+/// with a configured one whichever of the two carries it.
+fn without_peer(addr: &Multiaddr) -> Multiaddr {
+    addr.iter().filter(|p| !matches!(p, Protocol::P2p(_))).collect()
 }
 
 /// Whether to dial `addr` to reach a peer directly: not a relay circuit, and
