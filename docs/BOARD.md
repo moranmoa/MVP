@@ -19,6 +19,7 @@ Last updated: 2026-11-05, refresh 11. `main` has every PR up to #201 except the 
 - **Review flow** ([TEAM.md](TEAM.md#review-flows)): engineering PRs need tech-lead (+ sec-lead for crypto, identity, permissions, network) → manager merges. A lead's own PR is reviewed by another lead.
 - **Product review gate:** product, UX, business, QA-plan and board PRs need a `VERDICT: APPROVE` from product-lead. product-lead's own PRs are reviewed by ux (plus another lead). Engineering features are accepted or rejected by product-lead against their acceptance criteria before they are marked `done`.
 - **Acceptance criteria:** B-items in `docs/reviews/po-review-1.md` §8; T-items in [T acceptance criteria](#t-acceptance-criteria) below.
+- **Every UI PR:** AA contrast (G-112, B20) and reduced motion (G-114, B21) are a condition of acceptance (product-lead, #320).
 - **CI checks:** `main` has a ruleset with 6 required checks (owner). **Never rename a CI job**, or every open PR blocks on a check that no longer reports.
 - Before starting an item, check [File ownership](#file-ownership). One writer per path at a time.
 - Never commit IPs, keys, `.env` files or real tester data.
@@ -148,6 +149,66 @@ Merged since the first board: everything up to #201 except the open PRs above. S
 | B22 | Flow polish (UX-22..32 part, UX-41..48, QA-05, QA-07, QA-09, QA-11) | dev-ui | todo | – | – | M | – |
 | B24 | About screen: abuse-report address, links to the agreement and privacy notice (business plan §3.3, approved by product-lead in #16) | dev-ui | todo (5.1 decided; spec in #35) | – | 5.1 | S | M3 |
 | UX-10 | `mvs://` links not clickable in WhatsApp/Telegram/Discord → https landing page on `<relay-domain>` | devops + dev-ui | todo (5.1 decided) | – | T4 | S | M3 |
+
+### UX gaps ([`docs/ux/GAPS.md`](ux/GAPS.md), #320; priorities from product-lead on #320)
+
+**Condition on every UI PR from now on:** AA contrast (G-112, B20) and reduced motion (G-114, B21). A UI PR that breaks either is not accepted.
+
+| ID | Title | Owner | Status | PR | Depends on | Size | MS |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **0.4.0** | **"Order and attention" (P0)** | | | | | | |
+| G-01 | Server order in the rail: drag or keyboard (local, GAPS §2.1) (reviews: tech-lead, product-lead (+ ux visual)) | dev-ui | todo | – | – | M | 0.4.0 |
+| G-11 | Channel order, the same for all members (signed record, GAPS §2.2) (reviews: tech-lead, sec-lead (records), product-lead) | dev-records (record) → dev-identity (api) → dev-ui | todo | – | B4 | M | 0.4.0 |
+| G-21 | New-messages divider and jump to it (local + core index, GAPS §2.3) (reviews: tech-lead, product-lead (+ ux visual)) | dev-ui + dev-identity (index) | todo | – | – | M | 0.4.0 |
+| G-24 | @mentions (UI + core format, GAPS §2.5) (reviews: tech-lead, product-lead (+ ux visual), sec-lead (format)) | dev-ui + dev-identity (format) | todo | – | – | M | 0.4.0 |
+| G-05 | Mention badge in the rail, separate from the new-messages dot (`mentionsMe` exists) (reviews: tech-lead, product-lead (+ ux visual)) | dev-ui | todo | – | G-24 | S | 0.4.0 |
+| G-61 | Notifications and mute (local + shell, GAPS §2.4); includes the taskbar part (reviews: tech-lead, product-lead (+ ux visual)) | dev-ui + dev-voice-shell | todo | – | – | M | 0.4.0 |
+| G-17 | Mute a channel (reviews: tech-lead, product-lead (+ ux visual)) | dev-ui | todo | – | G-61 | S | 0.4.0 |
+| G-03 | Mute a server, greyed in the rail (reviews: tech-lead, product-lead (+ ux visual)) | dev-ui | todo | – | G-61 | S | 0.4.0 |
+| G-04 | Mark all as read for a server, from the context menu (reviews: tech-lead, product-lead (+ ux visual)) | dev-ui | todo | – | G-21 | S | 0.4.0 |
+| G-22 | Message context menu: reply, copy, edit, delete (B25 §2, rest of #208) (reviews: tech-lead, product-lead (+ ux visual)) | dev-ui | todo | – | B25 | S | 0.4.0 |
+| G-06 | Tooltip with the full server name in the rail (48-character names) (reviews: tech-lead, product-lead (+ ux visual)) | dev-ui | todo | – | – | S | 0.4.0 |
+| **0.4.x** | **In parallel, infrastructure (P0)** | | | | | | |
+| G-81 | Calls across networks, not only the same network (QUIC/STUN, #243, #220) (reviews: tech-lead, sec-lead (network)) | dev-sync (+ devops for the relay move) | todo | – | #220, STUN | L | 0.4.x |
+| G-91 | Servers come back automatically after a restore (today only via an invite link, #291, #293) (reviews: tech-lead, sec-lead (identity)) | dev-identity (+ dev-sync) | todo | – | – | L | 0.4.x |
+| **0.5.0** | **"Conversation" (P1)** | | | | | | |
+| G-23 | Date divider (B16, UX-12) | dev-ui | todo | – | – | S | 0.5.0 |
+| G-29 | "Is typing…" (ephemeral, not stored) | dev-sync + dev-ui | todo | – | – | M | 0.5.0 |
+| G-25 | Basic Markdown (mind direction, B17) | dev-ui | todo | – | – | M | 0.5.0 |
+| G-26 | Emoji reactions (signed record) | dev-records → dev-identity → dev-ui | todo | – | – | M | 0.5.0 |
+| G-27 | Emoji picker | dev-ui | todo | – | – | M | 0.5.0 |
+| G-32 | ↑ to edit the last message (check `onEditLast`) | dev-ui | todo | – | – | S | 0.5.0 |
+| G-33 | Jump to latest message button | dev-ui | todo | – | – | S | 0.5.0 |
+| G-30 | Link to a message | dev-ui + dev-identity | todo | – | – | M | 0.5.0 |
+| G-63 | Notification sound | dev-ui | todo | – | – | S | 0.5.0 |
+| G-62 | Taskbar unread count | dev-voice-shell | todo | – | G-61 | S | 0.5.0 |
+| G-113 | Screen-reader announcement of new messages (B21, UX-38) | dev-ui | todo | – | – | S | 0.5.0 |
+| G-92 | "What now?" after sign-up (check with T8) | dev-ui | todo | – | – | S | 0.5.0 |
+| **0.5.x** | **"Managing a server" (P1)** | | | | | | |
+| G-53 | Removed accounts list + undo-kick UI (core ready, #110) | dev-ui | todo | – | – | S | 0.5.x |
+| G-52 | Age restriction setting (B7 §6; read-only today) | dev-ui | todo | – | – | S | 0.5.x |
+| G-51 | Server icon and description (signed record) | dev-records → dev-ui | todo | – | – | M | 0.5.x |
+| G-12 | Channel categories (signed record) | dev-records → dev-ui | todo | – | G-11 | L | 0.5.x |
+| G-13 | Collapse categories (local) | dev-ui | todo | – | G-12 | S | 0.5.x |
+| G-14 | Channel topic (signed record) | dev-records → dev-ui | todo | – | – | S | 0.5.x |
+| G-18 | Write-only-for-owners channel (signed record, channel permissions) | dev-records → dev-ui | todo | – | – | M | 0.5.x |
+| G-47 | Blocked list with unblock (local) | dev-ui | todo | – | – | S | 0.5.x |
+| G-48 | Report to the owners (signed record) | dev-records → dev-ui | todo | – | – | M | 0.5.x |
+| G-41 | Search members (30+ member servers) | dev-ui | todo | – | – | S | 0.5.x |
+| G-77 | Correct the date of birth (B7 §2; #312 only displays it) | dev-identity → dev-ui | todo | – | – | S | 0.5.x |
+| **0.6.0** | **"Voice like Discord" (P1)** | | | | | | |
+| G-16 | Additional voice channels (record + core) | dev-records + dev-identity → dev-ui | todo | – | – | L | 0.6.0 |
+| G-72 | Microphone/speaker choice and mic test | dev-ui | todo | – | – | M | 0.6.0 |
+| G-73 | Per-person volume | dev-ui | todo | – | – | S | 0.6.0 |
+| G-84 | Deafen | dev-ui | todo | – | – | S | 0.6.0 |
+| G-74 | Push-to-talk (global key) | dev-ui + dev-voice-shell | todo | – | – | M | 0.6.0 |
+| G-64 | Join notification sound | dev-ui | todo | – | – | S | 0.6.0 |
+| G-83 | Participant count (check; `call.activity`, tech-lead decision in #224) | dev-identity → dev-ui | todo | – | – | S | 0.6.0 |
+| **P2** | **P2 backlog, after the closed alpha: see [`docs/ux/GAPS.md`](ux/GAPS.md)** (G-28 files, G-31 search, G-34 link previews, G-15 pins, G-42 roles, G-43, G-44, G-45 DM, G-46, G-55, G-71, G-75, G-76, G-78, G-93, G-02, G-101–G-103, G-111, G-115) | product-lead | todo | – | – | – | – |
+| **Done** | | | | | | | |
+| G-35 | Owners delete any message (in B25) | – | done | #208 | – | – | – |
+| G-54 | Limited invite links (time or uses) | – | done | #216 | – | – | – |
+| G-82 | Who is speaking (ring in `CallBar`) | – | done | – | – | – | – |
 
 ### Reviews, QA, security, business
 
