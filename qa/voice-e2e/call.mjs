@@ -337,13 +337,16 @@ try {
       if (await page.locator('.call-peer-failed').count()) throw new Error(await page.locator('.call-peer-failed').innerText());
       return c.certFingerprint.split(' ')[0];
     });
-    await check('V2.2', 'audio arrives from the other side (inbound RTP bytes > 0 and growing)', async () => {
+    await check('V2.2', 'audio arrives from the other side (inbound RTP bytes and audio energy growing)', async () => {
       const a1 = (await live()).find((x) => x.state === 'connected');
       await sleep(3000);
       const a2 = (await live()).find((x) => x.state === 'connected');
       if (!(a2.bytesIn > 0)) throw new Error(`bytesIn ${a2.bytesIn}; my side is the ${a2.role}: ${JSON.stringify(a2.transceivers)}`);
       if (!(a2.bytesIn > a1.bytesIn)) throw new Error(`not growing: ${a1.bytesIn} -> ${a2.bytesIn}`);
-      return `${a2.bytesIn} B in, ${a2.packetsIn} packets, ${a2.bytesOut} B out, ${a2.codec}`;
+      // Bytes alone could be silence: the fake microphone beeps, so energy must grow.
+      const energy = a2.energyIn - a1.energyIn;
+      if (!(energy > 0)) throw new Error(`no audio energy in 3 s (bytes ${a2.bytesIn}); my side is the ${a2.role}`);
+      return `${a2.bytesIn} B in, ${a2.packetsIn} packets, energy +${energy.toExponential(2)} in 3 s, ${a2.codec}, as the ${a2.role}`;
     });
     await check('V2.2', 'my microphone audio goes out (outbound RTP bytes > 0)', async () => {
       const c = (await live()).find((x) => x.state === 'connected');
@@ -439,6 +442,7 @@ try {
       await until('roster empty', async () => (await roster().count()) === 0, 15_000);
       return `${((Date.now() - at) / 1000).toFixed(1)} s`;
     });
+    put('saw-empty');
   } else {
     const { at } = await take('left');
     await check('V2.4', 'A sees B leave the roster', async () => {
@@ -454,6 +458,8 @@ try {
       await until('roster empty', async () => (await roster().count()) === 0, 10_000);
     });
     put('left');
+    // Rejoining (V6.4) before B has seen the empty roster would race its check.
+    await take('saw-empty');
   }
 
   await check('V6.4', 'a second join needs no IP notice (it was remembered)', async () => {

@@ -26,7 +26,7 @@ The first run builds `mvs-core` in release mode, which takes several minutes. Af
 
 Isolation:
 - Each run is its own compose project, `mvs-voice-<time>-<random>`, so containers, the network and the rendezvous volume are unique per run.
-- Only the build caches are shared: cargo, the UI `node_modules`, and `mvs-voice-e2e-desktop-nm`.
+- Only the build caches are shared: cargo, the UI `node_modules`, and the desktop `node_modules` (`mvs-voice-e2e-desktop-nm-<lockfile hash>`). Runs may overlap: `deps.sh` installs under a lock and skips `npm ci` when that lockfile is already installed.
 
 The microphone:
 - Chromium's `--use-fake-device-for-media-stream` provides a beeping test microphone.
