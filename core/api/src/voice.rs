@@ -249,11 +249,30 @@ pub(crate) struct Calls {
     /// Servers whose room roster changed since the last tick: one
     /// `voice.room` each, at the next tick (coalesced).
     dirty: BTreeSet<ServerId>,
+    /// The user's relay-only setting (`setRelayOnly`), kept by the core.
+    relay_only: bool,
 }
 
 impl Calls {
     pub fn set_net(&mut self, net: Arc<dyn VoiceNet>) {
         self.net = Some(net);
+    }
+
+    /// `setRelayOnly`: calls are off while it's on. A call in progress ends
+    /// at the next tick (or right away, see `Core::set_relay_only`).
+    pub fn set_relay_only(&mut self, on: bool) {
+        self.relay_only = on;
+    }
+
+    /// Relay-only is on: the setting, or the transport says so.
+    pub fn relay_only(&self) -> bool {
+        self.relay_only || self.net.as_ref().is_some_and(|net| net.relay_only())
+    }
+
+    /// One `voice.room` for `server` at the next tick (its `relayOnly`
+    /// changed, say).
+    pub fn mark_dirty(&mut self, server: ServerId) {
+        self.dirty.insert(server);
     }
 
     pub fn in_call(&self) -> bool {
@@ -291,9 +310,10 @@ impl Calls {
         server: ServerId,
         channel: ChannelId,
     ) -> CoreResult<CallState> {
-        if self.net()?.relay_only() {
+        if self.relay_only() {
             return Err(ErrorCode::RelayOnly.into());
         }
+        self.net()?;
         if !members.may_call(ctx.me(), server, channel) {
             return Err(ErrorCode::NotAllowed.into());
         }
@@ -325,6 +345,7 @@ impl Calls {
             channel_id: model::hex_id(mine.channel.as_bytes()),
             participants: Vec::new(),
             full: false,
+            relay_only: self.relay_only(),
         }));
     }
 
@@ -384,8 +405,7 @@ impl Calls {
         if let Some((server, channel)) = self.mine.as_ref().map(|m| (m.server, m.channel)) {
             // Kicked, or relay-only turned on mid-call (the media would go
             // direct): leave, with a bye.
-            let relay_only = self.net.as_ref().is_some_and(|net| net.relay_only());
-            if relay_only || !members.may_call(ctx.me(), server, channel) {
+            if self.relay_only() || !members.may_call(ctx.me(), server, channel) {
                 self.leave(ctx, members);
             }
         }
@@ -465,6 +485,7 @@ impl Calls {
                     channel_id: model::hex_id(signal.channel.as_bytes()),
                     participants: Vec::new(),
                     full: true,
+                    relay_only: self.relay_only(),
                 }));
             }
             WireKind::Offer | WireKind::Answer | WireKind::Ice => {
@@ -652,7 +673,12 @@ impl Calls {
             }));
         }
         let full = participants.len() >= MAX_PARTICIPANTS;
-        Some(CallState { channel_id: model::hex_id(mine.channel.as_bytes()), participants, full })
+        Some(CallState {
+            channel_id: model::hex_id(mine.channel.as_bytes()),
+            participants,
+            full,
+            relay_only: self.relay_only(),
+        })
     }
 
     /// `getVoiceRoom`: drops who went quiet or was kicked, then the roster
@@ -693,6 +719,7 @@ impl Calls {
             server_id: model::hex_id(server.as_bytes()),
             room_id: model::hex_id(room.as_bytes()),
             participants,
+            relay_only: self.relay_only(),
         }
     }
 }

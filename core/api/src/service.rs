@@ -1,7 +1,7 @@
 //! The core: `CoreCommands` from `ui/src/core/api.ts`, one method each.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -28,6 +28,31 @@ use updater::client::UpdateEvent;
 const DEFAULT_STORAGE_LIMIT: u64 = 5 * 1024 * 1024 * 1024;
 const KV_STORAGE_LIMIT: &str = "storage-limit";
 const KV_UPDATE_CHANNEL: &str = "update-channel";
+/// GAP-6r: `[1]` while relay-only is on. Per device, not per identity: it's
+/// about this computer's network.
+const KV_RELAY_ONLY: &str = "relay-only";
+
+/// Fails closed: off only when never set or set to off (`[0]`); any other
+/// value is on.
+fn relay_only_in(db: &Db) -> CoreResult<bool> {
+    Ok(!matches!(db.get(KV_RELAY_ONLY)?.as_deref(), None | Some([0])))
+}
+
+/// GAP-6r: the stored relay-only setting in the core database at
+/// `db_path`, read before the network starts so the node starts with it.
+/// Fails closed: a database that can't be opened or read means on, so an
+/// error never starts a relay-only user with direct connections. A fresh
+/// data dir (no `core.db` yet) is off: the database is created empty.
+pub fn stored_relay_only(db_path: &Path) -> bool {
+    match Db::open(Some(db_path)).and_then(|db| relay_only_in(&db)) {
+        Ok(on) => on,
+        Err(e) => {
+            // No path: it names the user's profile folder.
+            eprintln!("mvs-core: can't read the relay-only setting ({:?}); starting relay-only", e.code);
+            true
+        }
+    }
+}
 const KV_RECOVERY_CHALLENGE: &str = "recovery-challenge";
 
 pub struct Config {
@@ -193,6 +218,11 @@ impl Core {
             join_waiting: BTreeSet::new(),
             calls: voice::Calls::default(),
         };
+        // GAP-6r: the stored relay-only setting, applied before anything
+        // else reaches the network.
+        let relay_only = relay_only_in(&inner.db)?;
+        inner.calls.set_relay_only(relay_only);
+        ports.network.set_relay_only(relay_only);
         // QA-20: without a usable keychain the core still starts, and says so
         // (`keyring-unavailable`) instead of crashing or looking empty.
         let state = match inner.vault.state() {
@@ -1500,7 +1530,28 @@ impl Core {
             Some(b"beta") => UpdateChannel::Beta,
             _ => UpdateChannel::Stable,
         };
-        Ok(AppInfo { version: self.app_version.clone(), update_channel: channel })
+        let relay_only = relay_only_in(&self.lock().db)?;
+        Ok(AppInfo { version: self.app_version.clone(), update_channel: channel, relay_only })
+    }
+
+    /// `setRelayOnly(on)` (GAP-6r): stored, then applied to the network. On
+    /// ends my call first (its media would go direct) and refuses calls
+    /// until it's off. Each of my servers gets a `voice.room` with the new
+    /// `relayOnly` at the next tick. Needs no identity.
+    pub fn set_relay_only(&self, on: bool) -> CoreResult<()> {
+        if on {
+            self.lock().calls.set_relay_only(true);
+            self.leave_call()?;
+        }
+        self.run(|inner, ports, _| {
+            inner.db.set(KV_RELAY_ONLY, &[u8::from(on)])?;
+            inner.calls.set_relay_only(on);
+            for server in inner.db.servers()? {
+                inner.calls.mark_dirty(server);
+            }
+            ports.network.set_relay_only(on);
+            Ok(())
+        })
     }
 
     pub fn set_update_channel(&self, channel: UpdateChannel) -> CoreResult<()> {
@@ -2783,5 +2834,37 @@ fn unlock_cipher(ports: &Ports, me: Option<&Me>) {
         ports.cipher.unlock(Arc::new(MemberSecret::new(me.identity.signing_key())));
         // GAP-4: peer bindings with the identity key.
         ports.network.unlock(me.identity.signing_key());
+    }
+}
+
+#[cfg(test)]
+mod relay_only_tests {
+    use super::{stored_relay_only, Db, KV_RELAY_ONLY};
+
+    fn dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("mvs-relayonly-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Security lead (#272): stored_relay_only fails closed.
+    #[test]
+    fn the_stored_setting_fails_closed() {
+        let dir = dir("unit");
+        let db = dir.join("core.db");
+        // A fresh data dir: no setting yet, so off.
+        assert!(!stored_relay_only(&db));
+        // Off and on as stored; anything else is on.
+        for (value, on) in [(&[0u8][..], false), (&[1], true), (&[2], true), (b"", true)] {
+            Db::open(Some(&db)).unwrap().set(KV_RELAY_ONLY, value).unwrap();
+            assert_eq!(stored_relay_only(&db), on, "{value:?}");
+        }
+        // Can't be opened (its folder is missing) or isn't a database: on.
+        assert!(stored_relay_only(&dir.join("missing").join("core.db")));
+        let junk = dir.join("junk.db");
+        std::fs::write(&junk, vec![0x5a; 4096]).unwrap();
+        assert!(stored_relay_only(&junk));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
