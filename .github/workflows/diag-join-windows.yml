@@ -17,8 +17,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ref: [main, v0.2.5]
+        ref: [diag, v0.2.5]
         transport: [tcp, ws]
+        exclude:
+          # 0.2.5 takes no plain /ws relay address (InvalidMultiaddr).
+          - ref: v0.2.5
+            transport: ws
     defaults:
       run:
         shell: bash
@@ -30,7 +34,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-          ref: ${{ matrix.ref }}
+          ref: ${{ matrix.ref == 'diag' && github.sha || matrix.ref }}
           path: core-src
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10
         with:
@@ -63,10 +67,14 @@ jobs:
             echo "RELAY=/ip4/127.0.0.1/tcp/4001/p2p/$id" >> "$GITHUB_ENV"
           fi
       - name: Two peers join and chat through the relay
+        # pwsh, not Git Bash: MSYS rewrites /ip4/... env values into Windows paths.
+        shell: pwsh
         working-directory: core-src/core
         env:
-          RUST_LOG: info,sync=debug,api=debug,libp2p_swarm=debug
-        run: timeout 1200 cargo test --release --locked -p api --test two_peers -- --ignored --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/two_peers.log"
+          RUST_LOG: info,sync=debug,api=debug,mvs=info
+        run: |
+          cargo test --release --locked -p api --test two_peers -- --ignored --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/two_peers.log"
+          exit $LASTEXITCODE
       - name: Relay log
         if: always()
         run: sed 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/relay.log" | tail -200

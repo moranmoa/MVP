@@ -58,6 +58,30 @@ fn peer(name: &str, words: &str, relay: &str) -> Peer {
     core.update_profile(profile).unwrap();
     Peer { core, events, net, _cipher: cipher, _dir: dir }
 }
+/// The same identity on a second device (restored from its words, no/// profile yet), as on the owner's laptop: its own node key, so another peer.fn second_device(name: &str, words: &str, relay: &str) -> Peer {    let dir = std::env::temp_dir().join(format!("mvs-two-peers-{}-{name}", std::process::id()));    let _ = std::fs::remove_dir_all(&dir);    let net = Arc::new(SyncNetwork::start(relay.parse().unwrap(), &dir, Arc::new(MemberGate::new())).unwrap());    let events = Arc::new(CollectingSink::new());    let cipher = Arc::new(GroupKeysCipher::locked());    let core = Core::open(        Config { db_path: Some(dir.join("core.db")), app_version: "test".into() },        Ports {            secrets: Arc::new(MemoryStore::new()),            network: net.clone(),            events: events.clone(),            clock: Arc::new(SystemClock),            cipher: cipher.clone(),        },    )    .unwrap();    core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();    Peer { core, events, net, _cipher: cipher, _dir: dir }}
+
+/// The same identity on a second device (restored from its words, no
+/// profile yet), as on the owner's laptop: its own node key, so another peer.
+fn second_device(name: &str, words: &str, relay: &str) -> Peer {
+    let dir = std::env::temp_dir().join(format!("mvs-two-peers-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let net = Arc::new(SyncNetwork::start(relay.parse().unwrap(), &dir, Arc::new(MemberGate::new())).unwrap());
+    let events = Arc::new(CollectingSink::new());
+    let cipher = Arc::new(GroupKeysCipher::locked());
+    let core = Core::open(
+        Config { db_path: Some(dir.join("core.db")), app_version: "test".into() },
+        Ports {
+            secrets: Arc::new(MemoryStore::new()),
+            network: net.clone(),
+            events: events.clone(),
+            clock: Arc::new(SystemClock),
+            cipher: cipher.clone(),
+        },
+    )
+    .unwrap();
+    core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
+    Peer { core, events, net, _cipher: cipher, _dir: dir }
+}
 
 fn eventually(what: &str, mut ok: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(90);
@@ -528,4 +552,36 @@ fn two_members_join_a_call_and_signal_over_sync() {
     );
     owner.core.leave_call().unwrap();
     guest.core.leave_call().unwrap();
+}
+
+/// P0 (0.3.1, 2026-11-10): the owner's own identity, restored on a second
+/// device, joins its servers: an existing one by the short link, a new one
+/// by the full link, and reads what the first device posts.
+#[test]
+#[ignore = "needs a relay: set RELAY and run with --ignored"]
+fn the_same_identity_joins_from_a_second_device() {
+    let Ok(relay) = std::env::var("RELAY") else {
+        eprintln!("RELAY not set; skipped");
+        return;
+    };
+    let pc = peer("SamePc", OWNER, &relay);
+    let laptop = second_device("SameLaptop", OWNER, &relay);
+    for (name, short) in [("Existing", true), ("Brand new", false)] {
+        let server = pc.core.create_server(name, AgeRestriction::None).unwrap();
+        let made = pc.core.create_invite(&server.id, None, None).unwrap();
+        let link = if short { made.short_link.clone() } else { made.link.clone() };
+        let start = Instant::now();
+        eventually(&format!("the second device to join {name} ({})", if short { "short link" } else { "full link" }), || {
+            laptop.core.join_server(&link).unwrap();
+            laptop.core.list_servers().unwrap().iter().any(|s| s.id == server.id)
+        });
+        eprintln!("same identity: joined {name} in {:?}", start.elapsed());
+        let channel = pc.core.list_channels(&server.id).unwrap().remove(0).id;
+        pc.core.send_message(&channel, "from the pc", None).unwrap();
+        eventually(&format!("the second device to read {name}"), || {
+            laptop.core.sync_now().unwrap();
+            laptop.core.get_message_count(&channel).unwrap() >= 1
+        });
+        eprintln!("same identity: read {name} in {:?}", start.elapsed());
+    }
 }
