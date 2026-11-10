@@ -97,6 +97,11 @@ pub trait Network: Send + Sync {
     /// Every record of `server` that reachable peers hold. Empty when nobody
     /// is online.
     fn fetch(&self, server: ServerId) -> Vec<Record>;
+    /// Diagnostics (the join log): peers connected now, and how many of them
+    /// directly. None for a network that doesn't know.
+    fn link_counts(&self) -> Option<(usize, usize)> {
+        None
+    }
 
     /// GAP-4: the identity key for peer bindings, from unlock to lock.
     fn unlock(&self, key: &records::SigningKey) {
