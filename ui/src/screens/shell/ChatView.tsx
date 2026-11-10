@@ -6,7 +6,7 @@ import { isCoreError, useCore, type Member, type Message, type ServerSummary } f
 import { Dialog, Name, RICH } from '../../components/common';
 import { BackIcon, CloseIcon, EditIcon, HashIcon, ReplyIcon, SendIcon, UsersIcon, WifiOffIcon } from '../../components/icons';
 import { useUserTextProps } from '../../app/textDir';
-import { BODY_MAX, BODY_MAX_BYTES } from '../../core/sanitize';
+import { BODY_MAX, BODY_MAX_BYTES, isHeld } from '../../core/sanitize';
 
 /** The character counter shows from here on (B6/QA-17 acceptance: 3,800). */
 const COUNTER_FROM = 3800;
@@ -61,7 +61,17 @@ export function ChatView({
     setEditing(m);
   }, []);
   const onDelete = useCallback((m: Message) => setToDelete(m), []);
-  const onRetry = useCallback((m: Message) => void core.retryMessage(m.id).catch(() => {}), [core]);
+  const onRetry = useCallback(
+    (m: Message) => {
+      if (!isHeld(m)) return void core.retryMessage(m.id).catch(() => {});
+      // Held for its key and failed (#288): the core keeps it; send the text again.
+      void core
+        .sendMessage(m.channelId, m.body)
+        .then(() => store.window(m.channelId).markResent(m.id))
+        .catch(() => {});
+    },
+    [core, store],
+  );
 
   const editLast = () => {
     for (let i = win.count - 1; i >= Math.max(0, win.count - 50); i--) {

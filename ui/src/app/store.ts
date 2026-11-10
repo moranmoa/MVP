@@ -15,6 +15,9 @@ export class MessageWindow {
   ready = false;
   private messages = new Map<number, Message>();
   private loadingPages = new Set<number>();
+  private loadedPages = new Set<number>();
+  /** Failed held messages whose text was sent again (UI only, this session). */
+  private resent = new Set<Id>();
 
   constructor(
     private core: CoreApi,
@@ -29,7 +32,8 @@ export class MessageWindow {
   }
 
   get(index: number): Message | undefined {
-    return this.messages.get(index);
+    const m = this.messages.get(index);
+    return m && this.resent.has(m.id) ? { ...m, resent: true } : m;
   }
 
   /** Makes sure [start, end) is loaded; cheap to call on every render. */
@@ -37,7 +41,7 @@ export class MessageWindow {
     const first = Math.floor(Math.max(0, start) / PAGE);
     const last = Math.floor(Math.max(0, Math.min(end, this.count) - 1) / PAGE);
     for (let p = first; p <= last; p++) {
-      if (this.loadingPages.has(p) || this.messages.has(p * PAGE)) continue;
+      if (this.loadingPages.has(p) || this.loadedPages.has(p)) continue;
       this.loadingPages.add(p);
       void this.core.getMessages(this.channelId, p * PAGE, (p + 1) * PAGE).then((r) => {
         r.messages.forEach((m) => {
@@ -45,14 +49,42 @@ export class MessageWindow {
           if (!this.messages.has(m.index)) this.messages.set(m.index, m);
         });
         this.loadingPages.delete(p);
+        this.loadedPages.add(p);
         this.notify();
       });
     }
   }
 
   apply(m: Message): void {
+    if (m.replaces) return this.replace(m);
     this.messages.set(m.index, m);
     if (m.index >= this.count) this.count = m.index + 1;
+    this.notify();
+  }
+
+  /**
+   * A held message was sent (#288): drop the `pending-…` entry wherever it
+   * sits, put the real one at its index, and re-read what may have moved. The
+   * real index can differ, since the key may have brought other messages first.
+   */
+  private replace(m: Message): void {
+    const { replaces, ...real } = m;
+    let from = m.index;
+    for (const [i, x] of this.messages) if (x.id === replaces) from = Math.min(from, i);
+    for (const i of [...this.messages.keys()]) if (i >= from && i !== m.index) this.messages.delete(i);
+    for (const p of [...this.loadedPages]) if ((p + 1) * PAGE > from) this.loadedPages.delete(p);
+    this.messages.set(m.index, real);
+    if (m.index >= this.count) this.count = m.index + 1;
+    this.notify();
+    void this.core.getMessageCount(this.channelId).then((count) => {
+      this.count = count;
+      this.notify();
+    });
+  }
+
+  /** A failed held message was sent again as a new message. */
+  markResent(id: Id): void {
+    this.resent.add(id);
     this.notify();
   }
 }
@@ -69,7 +101,7 @@ export interface StoreState {
   channels: Record<Id, Channel[]>;
   members: Record<Id, Member[]>;
   update: UpdateInfo | null;
-  notice: { kind: 'encryption-renewed'; serverId: Id; at: number } | null;
+  notice: { kind: 'encryption-renewed' | 'rekey-waiting'; serverId: Id; at: number } | null;
   /** Shown once: a new version was installed, or the previous one is back. */
   updateNote: UpdateNote | null;
   /** My current call (voice v1), or null. */

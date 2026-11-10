@@ -231,10 +231,18 @@ export function cleanMember(m: Member): Member {
   };
 }
 
+/** A message held for its channel key (#288): `pending-` and 16 lower-case hex. */
+export const HELD_ID = /^pending-[0-9a-f]{16}$/;
+export const isHeld = (m: Pick<Message, 'id'>): boolean => HELD_ID.test(m.id);
+
 export function cleanMessage(m: Message): Message {
   const { text, clipped } = cleanText(m.body);
+  // Only the exact held-id shape is a replacement; anything else is dropped.
+  const replaces = typeof m.replaces === 'string' && HELD_ID.test(m.replaces) ? m.replaces : undefined;
+  const { replaces: _ignored, resent: _uiOnly, ...rest } = m;
   return {
-    ...m,
+    ...rest,
+    ...(replaces ? { replaces } : {}),
     body: text,
     clipped: clipped || undefined,
     replyTo: m.replyTo && { ...m.replyTo, excerpt: cleanExcerpt(m.replyTo.excerpt) },
@@ -325,6 +333,11 @@ const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[
   'members.changed': (p) => ({ ...p, members: p.members.map(cleanMember) }),
   'message.added': cleanMessage,
   'message.updated': cleanMessage,
+  // Only the kinds the UI knows; anything else is dropped.
+  'notice': (n) =>
+    (n?.kind === 'encryption-renewed' || n?.kind === 'rekey-waiting') && typeof n.serverId === 'string'
+      ? { kind: n.kind, serverId: n.serverId }
+      : null,
   'join.status': cleanJoin,
   'link.open': (p) => ({ link: cleanInviteLink(p?.link) }),
   'call.state': (c) => cleanCall(c),
