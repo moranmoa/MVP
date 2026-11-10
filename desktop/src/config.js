@@ -68,8 +68,7 @@ const MAX_BOOTSTRAP = 4;
  * a checkout. List the relay's QUIC address (`/udp/4001/quic-v1`) too: only a
  * QUIC connection to it shows us our public UDP address, which hole punching
  * over QUIC (#243) needs. Each must pass the same check as the relay; bad
- * entries are
- * dropped with a warning, and a list that isn't one is ignored.
+ * entries are dropped with a warning, and a list that isn't one is ignored.
  * @param {{ packaged: boolean, resourcesPath?: string, env?: object, warn?: (m: string) => void }} o
  * @returns {string[]}
  */
