@@ -1,9 +1,9 @@
 // B11 server settings (spec docs/ux/specs/B11-server-settings.md): one screen
 // for the owner, opened from the gear by the server name, the server's menu in
 // the rail, or the channel list. Only what the core API supports today is here:
-// the server's details (read only: there is no updateServer yet), channels,
-// the invite link and members. Age, removed accounts and the danger zone wait
-// for their core commands.
+// the name (rename, #261), channels, the invite link, members and the danger
+// zone (close the server, #261). Changing the age limit and removed accounts
+// wait for their core commands.
 
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
@@ -13,9 +13,10 @@ import { useCore, useCoreEvent, type Channel, type Invite, type Member, type Ser
 import { Avatar, Dialog, InviteBox, Name } from '../../components/common';
 import { GearIcon, HashIcon, PlusIcon } from '../../components/icons';
 import { displayName, ProfileCard } from './MemberList';
+import { ClosePanel, RenameForm } from './ServerLifecycle';
 
-export type ServerSettingsPage = 'general' | 'channels' | 'invite' | 'members';
-const PAGES: ServerSettingsPage[] = ['general', 'channels', 'invite', 'members'];
+export type ServerSettingsPage = 'general' | 'channels' | 'invite' | 'members' | 'danger';
+const PAGES: ServerSettingsPage[] = ['general', 'channels', 'invite', 'members', 'danger'];
 
 const NO_CHANNELS: Channel[] = [];
 const NO_MEMBERS: Member[] = [];
@@ -98,7 +99,7 @@ export function ServerSettings({
                   aria-selected={page === p}
                   aria-controls="server-settings-panel"
                   tabIndex={page === p ? 0 : -1}
-                  className={page === p ? 'active' : ''}
+                  className={[page === p ? 'active' : '', p === 'danger' ? 'danger-tab' : ''].filter(Boolean).join(' ')}
                   onClick={() => choose(p)}
                 >
                   <FormattedMessage id={`server.settings.nav.${p}`} />
@@ -115,6 +116,7 @@ export function ServerSettings({
           {page === 'channels' && <ChannelsPage server={server} onCreate={onCreateChannel} onEdit={onEditChannel} />}
           {page === 'invite' && <InvitePage server={server} />}
           {page === 'members' && <MembersPage server={server} />}
+          {page === 'danger' && <ClosePanel server={server} />}
         </section>
       </div>
     </Dialog>
@@ -124,14 +126,9 @@ export function ServerSettings({
 function GeneralPage({ server }: { server: ServerSummary }) {
   const age = server.ageRestriction === 'none' ? 'none' : server.ageRestriction.slice(0, 2);
   return (
-    <>
+    <div className="stack">
+      <RenameForm server={server} />
       <dl className="server-facts">
-        <dt>
-          <FormattedMessage id="server.settings.name" />
-        </dt>
-        <dd>
-          <Name>{server.name}</Name>
-        </dd>
         <dt>
           <FormattedMessage id="server.settings.age" />
         </dt>
@@ -142,9 +139,9 @@ function GeneralPage({ server }: { server: ServerSummary }) {
         </dd>
       </dl>
       <p className="muted small">
-        <FormattedMessage id="server.settings.readOnly" />
+        <FormattedMessage id="server.settings.ageReadOnly" />
       </p>
-    </>
+    </div>
   );
 }
 

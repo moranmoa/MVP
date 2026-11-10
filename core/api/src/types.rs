@@ -81,6 +81,10 @@ pub struct ServerSummary {
     pub invite_link: String,
     pub unread: bool,
     pub mentions: u32,
+    /// Server lifecycle: the owner closed it. It stays listed, read-only,
+    /// for 30 days after the close was received (additive).
+    #[serde(default)]
+    pub closed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +228,10 @@ pub enum ErrorCode {
     CallFull,
     /// Voice: relay-only is on, so calls are off.
     RelayOnly,
+    /// Server lifecycle: a member still runs a version that can't read a
+    /// rename, leave or delete (no `server-lifecycle-v1` cap); nothing was
+    /// signed.
+    UpdateNeeded,
     /// Rust addition: malformed command JSON or arguments.
     BadRequest,
     /// Rust addition: in the contract, not done by this core yet.
@@ -283,6 +291,11 @@ pub enum JoinStatus {
     AgeBlocked {
         link: String,
         required: AgeRestriction,
+    },
+    /// Server lifecycle: the server was closed by its owner (an old invite,
+    /// or one a stale peer still serves).
+    Closed {
+        link: String,
     },
 }
 
@@ -378,8 +391,19 @@ pub enum Event {
     ServerAdded(ServerSummary),
     #[serde(rename = "server.updated")]
     ServerUpdated(ServerSummary),
+    /// I'm no longer in the server. `reason` (additive): `left` or
+    /// `closed`; absent for a kick (as before).
+    /// Server lifecycle: the owner closed the server (read, or my own
+    /// `closeServer`). It stays listed, read-only, until its 30 days are up;
+    /// then `server.removed` (`closed`).
+    #[serde(rename = "server.closed", rename_all = "camelCase")]
+    ServerClosed { server_id: Id },
     #[serde(rename = "server.removed", rename_all = "camelCase")]
-    ServerRemoved { server_id: Id },
+    ServerRemoved {
+        server_id: Id,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        reason: Option<RemovedReason>,
+    },
     #[serde(rename = "channel.added")]
     ChannelAdded(Channel),
     #[serde(rename = "channel.removed", rename_all = "camelCase")]
@@ -437,6 +461,11 @@ pub struct RemovedMember {
 pub struct CreatedInvite {
     pub id: Id,
     pub link: String,
+    /// T8-02: the short v1 link (`mvs://join/` + at most 51 base58
+    /// characters). Additive: `link` stays v0 until release N+1 switches
+    /// creation to v1 (design §7).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub short_link: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<Timestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -457,6 +486,10 @@ pub struct InviteInfo {
     pub max_uses: u32,
     pub uses: u32,
     pub revoked: bool,
+    /// T8-02: its short v1 link, for an invite I made here that is still
+    /// live (its key is kept only on the inviter's device); absent otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub short_link: String,
 }
 
 /// Voice: a call, me first.
@@ -475,6 +508,17 @@ pub struct CallParticipant {
     /// A user ID.
     pub identity: Id,
     pub muted: bool,
+}
+
+/// Why `server.removed` fired (server lifecycle).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RemovedReason {
+    /// I left (`leaveServer`).
+    Left,
+    /// The owner closed (deleted) it, mine or read; sent when its 30 days
+    /// are up and the rest of it is purged.
+    Closed,
 }
 
 /// Voice: a server's one voice room and who is in it, from verified hellos.

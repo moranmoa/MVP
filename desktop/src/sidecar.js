@@ -18,6 +18,11 @@ const MAX_OUT_LINE = 1024 * 1024;
 const MAX_IN_LINE = 16 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const CRASH_LOOP = 5;
+
+// A start that failed because the file is not there (deleted or quarantined
+// after launch) is "missing", like a core absent at launch (QA-20), never a
+// crash loop: retrying cannot fix it, but it stays on in case the file returns.
+const startFailure = (e) => (e && e.code === 'ENOENT' ? 'missing' : 'start-failed');
 /** Commands that legitimately take long (key generation, OS auth prompts). */
 const SLOW = { createIdentity: 120_000, restoreIdentity: 120_000, getRecoveryWords: 120_000 };
 
@@ -45,13 +50,16 @@ class Sidecar {
    * @param {string|null} [o.relay] relay multiaddr, already checked (config.js)
    * @param {string[]} [o.bootstrap] the relay's direct multiaddrs, already checked (config.js)
    * @param {string[]} [o.extraArgs] further switches for mvs-core
+   * @param {string|null} [o.script] checkouts only: a .js stand-in for the core, run as `exe <script> ...` with ELECTRON_RUN_AS_NODE=1 (exe is then Electron itself)
    * @param {(name: string, payload: unknown) => void} o.onEvent
    * @param {(line: string) => void} [o.log] for stderr lines and lifecycle notes
    */
-  constructor({ exe, dataDir, relay = null, bootstrap = [], extraArgs = [], onEvent, onStatus = () => {}, log = () => {}, timeouts = {}, backoffBase = 500, spawnImpl = spawn }) {
+  constructor({ exe, dataDir, script = null, relay = null, bootstrap = [], extraArgs = [], onEvent, onStatus = () => {}, log = () => {}, timeouts = {}, backoffBase = 500, spawnImpl = spawn }) {
     if (!path.isAbsolute(exe)) throw new Error('mvs-core must be given by an absolute path');
     if (!path.isAbsolute(dataDir)) throw new Error('the data folder must be an absolute path');
     this.exe = exe;
+    if (script !== null && !path.isAbsolute(script)) throw new Error('the core script must be an absolute path');
+    this.script = script;
     this.dataDir = dataDir;
     // Optional: the relay multiaddr (config.js checks it) and extra switches
     // from other parts of the shell (e.g. the updater); strings only.
@@ -90,7 +98,7 @@ class Sidecar {
     if (this.stopped) return;
     this.restarts += 1;
     // Five failures in a row without ever answering: it will not come up by itself.
-    this.setStatus('down', this.restarts >= CRASH_LOOP ? 'crash-loop' : detail);
+    this.setStatus('down', this.restarts >= CRASH_LOOP && detail !== 'missing' ? 'crash-loop' : detail);
     const delay = Math.min(30_000, this.backoffBase * 2 ** Math.min(this.restarts - 1, 6));
     this.restartTimer = setTimeout(() => this.start(), delay);
   }
@@ -98,6 +106,7 @@ class Sidecar {
   start() {
     this.stopped = false;
     const args = [
+      ...(this.script ? [this.script] : []),
       '--data-dir',
       this.dataDir,
       ...(this.relay ? ['--relay', this.relay, ...this.bootstrap.flatMap((b) => ['--bootstrap', b])] : []),
@@ -109,7 +118,7 @@ class Sidecar {
         shell: false,
         windowsHide: true,
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: minimalEnv(),
+        env: this.script ? { ...minimalEnv(), ELECTRON_RUN_AS_NODE: '1' } : minimalEnv(),
       });
     } catch (e) {
       // Some failures throw instead of emitting "error" (on Windows, EFTYPE for
@@ -118,7 +127,7 @@ class Sidecar {
       this.log(`core failed to start: ${e.code || e.message}`);
       const none = {};
       this.child = none;
-      this.lost(none, 'start-failed');
+      this.lost(none, startFailure(e));
       return this;
     }
     this.child = child;
@@ -148,7 +157,7 @@ class Sidecar {
     // A spawn failure (not found, not executable) may come without an exit.
     child.on('error', (e) => {
       this.log(`core failed to start: ${e.code || e.message}`);
-      this.lost(child, 'start-failed');
+      this.lost(child, startFailure(e));
     });
     child.on('exit', (code, signal) => {
       if (this.child === child && !this.stopped) this.log(`core exited (${code ?? signal}); restarting`);

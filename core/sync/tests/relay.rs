@@ -44,6 +44,8 @@ fn start_relay_counting(
         .with_tokio()
         .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)
         .unwrap()
+        // QUIC on the same port number, as infra/relay listens on 4001/udp.
+        .with_quic()
         .with_behaviour(|key| {
             let peer_id = key.public().to_peer_id();
             let mut kad = kad::Behaviour::with_config(
@@ -75,6 +77,9 @@ fn start_relay_counting(
     // Reservations carry the relay's external addresses; a client refuses
     // one without (infra/relay sets them from EXTERNAL_ADDRS).
     swarm.add_external_address(addr);
+    // Reached over QUIC only as a bootstrap address (the punch test), so
+    // reservations keep the TCP address alone.
+    swarm.listen_on(format!("/ip4/127.0.0.1/udp/{port}/quic-v1").parse().unwrap()).unwrap();
     tokio::spawn(async move {
         loop {
             match swarm.select_next_some().await {
@@ -293,12 +298,32 @@ async fn bound_node(name: &str, relay: &Multiaddr, key: u8, allow_lan: bool, gat
 }
 
 /// [`bound_node`] with its events.
-async fn bound_node_events(
+async fn bound_node_events(name: &str, relay: &Multiaddr, key: u8, allow_lan: bool, gate: Arc<dyn ReadGate>) -> (Node, mpsc::Receiver<NodeEvent>) {
+    bound_node_on_events(name, relay, key, allow_lan, gate, "/ip4/127.0.0.1/tcp/0".parse().unwrap(), vec![]).await
+}
+
+/// [`bound_node`] listening on `listen`, dialling `bootstrap` too.
+async fn bound_node_on(
     name: &str,
     relay: &Multiaddr,
     key: u8,
     allow_lan: bool,
     gate: Arc<dyn ReadGate>,
+    listen: Multiaddr,
+    bootstrap: Vec<Multiaddr>,
+) -> Node {
+    bound_node_on_events(name, relay, key, allow_lan, gate, listen, bootstrap).await.0
+}
+
+/// [`bound_node_on`] with its events.
+async fn bound_node_on_events(
+    name: &str,
+    relay: &Multiaddr,
+    key: u8,
+    allow_lan: bool,
+    gate: Arc<dyn ReadGate>,
+    listen: Multiaddr,
+    bootstrap: Vec<Multiaddr>,
 ) -> (Node, mpsc::Receiver<NodeEvent>) {
     let (server, channel) = test_server();
     let dir = std::env::temp_dir().join(format!("sync-relay-{}-{name}", std::process::id()));
@@ -308,8 +333,8 @@ async fn bound_node_events(
         data_dir: dir,
         logs: vec![],
         authorizer: Arc::new(AcceptAll),
-        listen: "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
-        bootstrap: vec![],
+        listen,
+        bootstrap,
         allow_lan,
     };
     let access = Access {
@@ -695,4 +720,237 @@ async fn the_voice_rate_cap_holds() {
     assert!(got.iter().all(|(from, _)| *from == voice_id(25)));
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
+}
+
+/// T8-02 piece 3: a member's invite publication reaches the other members
+/// (`/mvs/invite-pub/1`), also one that binds later; anyone, a stranger
+/// with no server secret included, can ask for its envelope handle
+/// (`/mvs/invite/1`) and gets it, or the same empty answer for a handle
+/// nobody serves or one that was dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn invite_publications_reach_members_and_answer_anyone() {
+    let relay_key = identity::Keypair::generate_ed25519();
+    let port = free_port();
+    let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::from(relay_key.public())).parse().unwrap();
+    let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _relay = start_relay_counting(relay_key, port, circuits, true);
+    let server = test_server().0;
+    let id = |n: u8| records::PublicKey::from_bytes(SigningKey::from_bytes(&[n; 32]).verifying_key().to_bytes());
+
+    let (a, _a_events) = bound_node_events("invite-a", &relay, 21, false, Arc::new(AcceptAll)).await;
+    let (b, mut b_events) = bound_node_events("invite-b", &relay, 22, false, Arc::new(AcceptAll)).await;
+    let start = Instant::now();
+    while !a.presence(server).await.unwrap().online.contains(&id(22)) {
+        assert!(start.elapsed() < Duration::from_secs(60), "the members never bound");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Served and announced: B, a member, gets it as an event.
+    let (handle, publication) = ([0xab; 32], vec![0x5a; 300]);
+    assert!(a.serve_invite(server, handle, publication.clone(), true).await.unwrap());
+    let got = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(NodeEvent::InvitePublication { server: s, from, bytes }) = b_events.recv().await {
+                return (s, from, bytes);
+            }
+        }
+    })
+    .await
+    .expect("B never got the publication");
+    assert_eq!(got, (server, id(21), publication.clone()));
+    // First wins; over the size cap, empty, or a server we don't hold: refused.
+    assert!(!a.serve_invite(server, handle, vec![1; 10], false).await.unwrap());
+    assert!(!a.serve_invite(server, [1; 32], vec![1; sync::MAX_INVITE_PUBLICATION + 1], false).await.unwrap());
+    assert!(!a.serve_invite(server, [1; 32], vec![], false).await.unwrap());
+    assert!(!a.serve_invite(ServerId::from_bytes([3; 32]), [1; 32], vec![1; 10], false).await.unwrap());
+
+    // A member that binds later catches up, unannounced.
+    let (c, mut c_events) = bound_node_events("invite-c", &relay, 23, false, Arc::new(AcceptAll)).await;
+    let got = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if let Some(NodeEvent::InvitePublication { bytes, .. }) = c_events.recv().await {
+                return bytes;
+            }
+        }
+    })
+    .await
+    .expect("a late member never caught up");
+    assert_eq!(got, publication);
+
+    // A stranger (no secret, not bound) asks by handle.
+    let (stranger, _) = node_lan("invite-stranger", &relay, false).await;
+    let start = Instant::now();
+    loop {
+        let answers = stranger.fetch_invite(handle).await.unwrap();
+        if answers.contains(&publication) {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(60), "the stranger never got the envelope");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(stranger.fetch_invite([0xcd; 32]).await.unwrap().is_empty(), "nobody serves that handle");
+    a.drop_invite(handle).unwrap();
+    b.drop_invite(handle).unwrap();
+    c.drop_invite(handle).unwrap();
+    assert!(!stranger.fetch_invite(handle).await.unwrap().contains(&publication), "served after it was dropped");
+
+    for node in [a, b, c, stranger] {
+        node.shutdown().await.unwrap();
+    }
+}
+
+/// The QUIC punch: as above, but both peers listen on QUIC only and also
+/// reach the relay over QUIC (a bootstrap address, as devops' config lists
+/// it), so identify observes their QUIC address. A TCP candidate has nobody
+/// listening behind it, so going direct means a QUIC punch. QUIC dials leave
+/// from the listening socket, which is what makes this work on Windows too;
+/// a clean relayed fallback is still accepted there (CI runners' loopback
+/// firewall), as for TCP.
+#[tokio::test(flavor = "multi_thread")]
+async fn members_hole_punch_over_quic_or_stay_relayed() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("sync=debug,libp2p_dcutr=debug")
+        .with_test_writer()
+        .try_init();
+    let id = |n: u8| records::PublicKey::from_bytes(SigningKey::from_bytes(&[n; 32]).verifying_key().to_bytes());
+    let relay_key = identity::Keypair::generate_ed25519();
+    let relay_peer = PeerId::from(relay_key.public());
+    let port = free_port();
+    let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{relay_peer}").parse().unwrap();
+    let relay_quic: Multiaddr = format!("/ip4/127.0.0.1/udp/{port}/quic-v1/p2p/{relay_peer}").parse().unwrap();
+    let _relay = start_relay_counting(relay_key, port, Arc::default(), true);
+    let quic = || "/ip4/127.0.0.1/udp/0/quic-v1".parse::<Multiaddr>().unwrap();
+    let a = bound_node_on("quic-punch-a", &relay, 13, true, Arc::new(AcceptAll), quic(), vec![relay_quic.clone()]).await;
+    let b = bound_node_on("quic-punch-b", &relay, 14, true, Arc::new(AcceptAll), quic(), vec![relay_quic]).await;
+    // No F2 dial from either side: only a hole punch can go direct.
+    a.test_no_direct_dials().unwrap();
+    b.test_no_direct_dials().unwrap();
+    let start = Instant::now();
+    let punched = loop {
+        let (sa, sb) = (a.presence(test_server().0).await.unwrap(), b.presence(test_server().0).await.unwrap());
+        if sa.direct.contains(&id(14)) && sb.direct.contains(&id(13)) {
+            break true;
+        }
+        if start.elapsed() >= Duration::from_secs(60) {
+            assert!(cfg!(windows), "never punched over QUIC: A sees {sa:?}, B sees {sb:?}");
+            assert!(
+                sa.online.contains(&id(14)) && sb.online.contains(&id(13)),
+                "a failed punch dropped the link: A sees {sa:?}, B sees {sb:?}"
+            );
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    if punched {
+        assert_eq!(a.direct_peers().await.unwrap(), vec![b.peer_id()]);
+        eprintln!("punched over QUIC in {:?}", start.elapsed());
+    } else {
+        assert_eq!(a.peers().await.unwrap(), vec![b.peer_id()], "a failed punch closed the relayed connection");
+    }
+    a.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
+}
+
+/// QUIC listens on the TCP port (#200: one rule, one NAT mapping) and goes
+/// with TCP while relay-only; a non-member or a relay-only peer never goes
+/// direct over QUIC, even with the relay's QUIC address to learn its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn quic_follows_tcp_and_punches_only_members_off_relay_only() {
+    use libp2p::multiaddr::Protocol;
+    let _ = tracing_subscriber::fmt().with_env_filter("sync=debug").with_test_writer().try_init();
+    struct Nobody;
+    impl ReadGate for Nobody {
+        fn may_read(&self, _: &records::PublicKey, _: &ControlLog<'_>) -> bool {
+            false
+        }
+    }
+    let start_relay_here = || {
+        let relay_key = identity::Keypair::generate_ed25519();
+        let peer = PeerId::from(relay_key.public());
+        let port = free_port();
+        let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handle = start_relay_counting(relay_key, port, circuits.clone(), true);
+        let tcp: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{peer}").parse().unwrap();
+        let quic: Multiaddr = format!("/ip4/127.0.0.1/udp/{port}/quic-v1/p2p/{peer}").parse().unwrap();
+        (handle, circuits, tcp, quic)
+    };
+    let ports = |addrs: &[Multiaddr]| {
+        let (mut tcp, mut udp) = (None, None);
+        for a in addrs.iter().filter(|a| !a.iter().any(|p| p == Protocol::P2pCircuit)) {
+            for p in a.iter() {
+                match p {
+                    Protocol::Tcp(port) => tcp = Some(port),
+                    Protocol::Udp(port) if a.iter().any(|p| p == Protocol::QuicV1) => udp = Some(port),
+                    _ => {}
+                }
+            }
+        }
+        (tcp, udp)
+    };
+    let direct_listening = |addrs: &[Multiaddr]| addrs.iter().any(|a| !a.iter().any(|p| p == Protocol::P2pCircuit));
+
+    // TCP config: QUIC comes up beside it on the same port; relay-only drops
+    // both, and turning it off brings both back.
+    let (_relay, _, relay, _) = start_relay_here();
+    let a = bound_node("quic-port-a", &relay, 15, true, Arc::new(AcceptAll)).await;
+    let (tcp, udp) = wait_ports(&a, ports).await;
+    assert_eq!(tcp, udp, "QUIC on another port than TCP");
+    a.set_relay_only(true).unwrap();
+    let start = Instant::now();
+    while direct_listening(&a.listen_addrs().await.unwrap()) {
+        assert!(start.elapsed() < Duration::from_secs(10), "relay only, yet listening directly");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    a.set_relay_only(false).unwrap();
+    let (tcp2, udp2) = wait_ports(&a, ports).await;
+    // (On a first run TCP may take a new random port here; QUIC follows it.)
+    assert_eq!(tcp2, udp2, "QUIC on another port than TCP after relay-only");
+    a.shutdown().await.unwrap();
+
+    // QUIC-only peers that learn their QUIC address from the relay: neither
+    // non-members nor a relay-only member go direct.
+    let quic = || "/ip4/127.0.0.1/udp/0/quic-v1".parse::<Multiaddr>().unwrap();
+    for case in ["non-member", "relay-only"] {
+        let (_relay, circuits, relay, relay_quic) = start_relay_here();
+        let gate = || -> Arc<dyn ReadGate> { if case == "non-member" { Arc::new(Nobody) } else { Arc::new(AcceptAll) } };
+        let a = bound_node_on(&format!("quic-{case}-a"), &relay, 16, true, gate(), quic(), vec![relay_quic.clone()]).await;
+        if case == "relay-only" {
+            a.set_relay_only(true).unwrap();
+        }
+        let b = bound_node_on(&format!("quic-{case}-b"), &relay, 17, true, gate(), quic(), vec![relay_quic]).await;
+        // Only a punch could go direct.
+        a.test_no_direct_dials().unwrap();
+        b.test_no_direct_dials().unwrap();
+        let ids = [a.peer_id(), b.peer_id()];
+        let start = Instant::now();
+        while !circuits.lock().unwrap().iter().any(|(p, ok)| *ok && ids.contains(p)) {
+            assert!(start.elapsed() < Duration::from_secs(30), "{case}: never met through the relay");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert!(
+            a.direct_peers().await.unwrap().is_empty() && b.direct_peers().await.unwrap().is_empty(),
+            "{case}: punched over QUIC"
+        );
+        assert_eq!(a.peers().await.unwrap(), vec![b.peer_id()], "{case}: the relayed connection went");
+        if case == "relay-only" {
+            let listening = a.listen_addrs().await.unwrap();
+            assert!(!direct_listening(&listening), "relay only, yet listening directly: {listening:?}");
+        }
+        a.shutdown().await.unwrap();
+        b.shutdown().await.unwrap();
+    }
+}
+
+/// The TCP and QUIC ports `node` listens on directly, once it has both.
+async fn wait_ports(node: &Node, ports: impl Fn(&[Multiaddr]) -> (Option<u16>, Option<u16>)) -> (u16, u16) {
+    let start = Instant::now();
+    loop {
+        let addrs = node.listen_addrs().await.unwrap();
+        if let (Some(tcp), Some(udp)) = ports(&addrs) {
+            return (tcp, udp);
+        }
+        assert!(start.elapsed() < Duration::from_secs(10), "no QUIC listener beside TCP: {addrs:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }

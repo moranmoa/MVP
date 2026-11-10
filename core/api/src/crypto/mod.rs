@@ -129,6 +129,14 @@ fn cipher_error(error: Error) -> CipherError {
 }
 
 impl GroupCipher for GroupKeysCipher {
+    fn forget(&self, server: ServerId) {
+        let mut state = self.state.lock().expect("not poisoned");
+        state.channels.retain(|(s, _), _| *s != server);
+        state.members.remove(&server);
+        state.accepted.remove(&server);
+        state.known.remove(&server);
+    }
+
     /// Records the new member set. It doesn't rotate: service asks
     /// [`GroupCipher::rotate`] when `encrypt` says `RotationRequired`.
     fn membership_changed(&self, server: ServerId, members: &BTreeSet<PublicKey>) -> CipherOutcome {

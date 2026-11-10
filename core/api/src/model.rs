@@ -8,7 +8,6 @@ use records::{ChannelId, Kind, PublicKey, Record, RecordId, Scope, ServerId, Stu
 use serde::{Deserialize, Serialize};
 
 use crate::types::{AgeRestriction, ErrorCode, ProfileInput, Role};
-use zeroize::Zeroizing;
 
 // BLAKE3 derive_key contexts. Frozen for the alpha.
 const DEFAULT_CHANNEL_CTX: &str = "mvs 2026-11 default channel id v1";
@@ -16,9 +15,6 @@ const SHORT_CODE_CTX: &str = "mvs 2026-11 short code v1";
 
 /// Profile posts carry this tag, so ordinary posts are never read as one.
 const PROFILE_TAG: &str = "mvs/profile/v1";
-/// `mvs://join/<server id hex>/<invite record id hex>`. Not frozen.
-/// TODO(#46): a secret in the link, so the invite ID alone isn't enough.
-const INVITE_PREFIX: &str = "mvs://join/";
 pub(crate) const MAX_NAME_CHARS: usize = 100;
 
 const CODE_ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -155,53 +151,47 @@ pub(crate) struct GenesisBody {
 // records (relays too) until control-log content is encrypted.
 // TODO(profiles): updateProfile re-posts it to every server.
 
-/// `mvs://join/<server>/<invite>/<secret>`, all 64 hex. The secret (GAP-4)
-/// is a bearer credential: never logged, only copied by the user.
+/// A v0 link, `mvs://join/<server>/<invite>/<secret>`, all 64 hex
+/// (`crate::invite_link`, the one parser). The secret (GAP-4) is a bearer
+/// credential: never logged, only copied by the user.
 pub(crate) fn invite_link(server: ServerId, invite: RecordId, secret: &[u8; 32]) -> String {
-    format!(
-        "{INVITE_PREFIX}{}/{}/{}",
-        hex_id(server.as_bytes()),
-        hex_id(invite.as_bytes()),
-        hex::encode(secret)
-    )
-}
-
-/// `(server, invite, secret)` from an invite link; `None` without all three.
-pub(crate) fn parse_invite_link(link: &str) -> Option<(ServerId, RecordId, Zeroizing<[u8; 32]>)> {
-    let mut parts = link.strip_prefix(INVITE_PREFIX)?.split('/');
-    let (server, invite, secret) = (parts.next()?, parts.next()?, parts.next()?);
-    if parts.next().is_some() {
-        return None;
-    }
-    Some((
-        ServerId::from_bytes(parse_hex32(server)?),
-        RecordId::from_bytes(parse_hex32(invite)?),
-        Zeroizing::new(parse_hex32(secret)?),
-    ))
+    crate::invite_link::encode_v0(&server, &invite, secret).as_str().to_owned()
 }
 
 /// The first invite a new server gets: no expiry, no use limit.
 /// TODO(ui): invites with expiry and use limits, and revoking them.
 pub(crate) const FIRST_INVITE: Action = Action::Invite { expires_ms: 0, max_uses: 0 };
 
+/// Server lifecycle (#229): what a profile post says this version can read.
+/// Old versions ignore the field (`ProfileBody` takes unknown fields).
+pub(crate) const SERVER_LIFECYCLE_CAP: &str = "server-lifecycle-v1";
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProfileBody {
     mvs: String,
     display_name: String,
+    /// Absent before server lifecycle.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    caps: Vec<String>,
 }
 
-/// The post a member signs to tell the server their display name.
+/// The post a member signs to tell the server their display name, and
+/// what this version can read.
 pub(crate) fn profile_action(display_name: &str) -> Action {
-    let body = ProfileBody { mvs: PROFILE_TAG.to_owned(), display_name: display_name.to_owned() };
+    let body = ProfileBody {
+        mvs: PROFILE_TAG.to_owned(),
+        display_name: display_name.to_owned(),
+        caps: vec![SERVER_LIFECYCLE_CAP.to_owned()],
+    };
     Action::Post { text: serde_json::to_string(&body).expect("plain struct") }
 }
 
-/// The display name, if `record` is a profile post.
-fn parse_profile(record: &Record) -> Option<String> {
+/// The profile, if `record` is a profile post.
+fn parse_profile(record: &Record) -> Option<ProfileBody> {
     let Some(Action::Post { text }) = Action::from_record(record) else { return None };
     let body: ProfileBody = serde_json::from_str(&text).ok()?;
-    (body.mvs == PROFILE_TAG).then_some(body.display_name)
+    (body.mvs == PROFILE_TAG).then_some(body)
 }
 
 /// One server's records as held locally, with its resolver kept up to date
@@ -396,12 +386,29 @@ impl<'a> ServerView<'a> {
         let mut names: BTreeMap<PublicKey, String> = BTreeMap::new();
         for id in &self.state.posts {
             let Some(record) = by_id.get(id) else { continue };
-            if let Some(name) = parse_profile(record).filter(|n| authority::display_text_ok(n)) {
+            let name = parse_profile(record).map(|p| p.display_name);
+            if let Some(name) = name.filter(|n| authority::display_text_ok(n)) {
                 // Later profile posts (a new display name) win.
                 names.insert(record.author(), name);
             }
         }
         names
+    }
+
+    /// Server lifecycle's rollout gate (#229): whether each author's latest
+    /// profile post carries [`SERVER_LIFECYCLE_CAP`]. Members with no
+    /// profile post are absent (they count as needing an update).
+    pub fn lifecycle_caps(&self) -> BTreeMap<PublicKey, bool> {
+        let by_id: HashMap<RecordId, &Record> = self.records.iter().map(|r| (r.id(), r)).collect();
+        let mut caps = BTreeMap::new();
+        for id in &self.state.posts {
+            let Some(record) = by_id.get(id) else { continue };
+            if let Some(profile) = parse_profile(record) {
+                let ready = profile.caps.iter().any(|c| c == SERVER_LIFECYCLE_CAP);
+                caps.insert(record.author(), ready);
+            }
+        }
+        caps
     }
 
     pub fn members(&self) -> Vec<MemberInfo> {
@@ -440,6 +447,18 @@ impl<'a> ServerView<'a> {
         deps.extend(extra);
         deps.sort();
         deps
+    }
+
+    /// T8-02 (C1, S1): the author of invite `id` if a join through it would
+    /// be accepted at `now_ms` (authority's rule: not revoked, author not
+    /// kicked, uses left, not expired); `None` once it is dead.
+    pub fn live_invite_author(&self, id: RecordId, now_ms: u64) -> Option<PublicKey> {
+        let invite = self.state.invites.get(&id)?;
+        let live = !invite.revoked
+            && !self.is_kicked(&invite.author)
+            && (invite.max_uses == 0 || invite.uses < invite.max_uses)
+            && (invite.expires_ms == 0 || now_ms <= invite.expires_ms);
+        live.then_some(invite.author)
     }
 
     /// An invite to put in this server's link: one that still lets people

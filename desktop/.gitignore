@@ -2,3 +2,5 @@
 dist/
 # Written by the release workflow (relay address from MVS_RELAY_ADDR); never commit it.
 build/mvs-config.json
+# Written by the release workflow (T22, third-party-notices.mjs); never commit it.
+build/THIRD-PARTY-NOTICES.txt

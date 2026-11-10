@@ -13,6 +13,7 @@ export function ServerRail({
   onAdd,
   onOpenSettings,
   onOpenServerSettings,
+  onLeaveServer,
 }: {
   selected: Id | 'home';
   onSelect: (id: Id | 'home') => void;
@@ -20,6 +21,8 @@ export function ServerRail({
   onOpenSettings: () => void;
   /** Owner only (B11): opens that server's settings. */
   onOpenServerSettings: (id: Id) => void;
+  /** Any member but the owner (#261): opens the leave confirmation. */
+  onLeaveServer: (id: Id) => void;
 }) {
   const store = useAppStore();
   const servers = useStore(store, (s) => s.servers);
@@ -29,14 +32,16 @@ export function ServerRail({
   const listRef = useRef<HTMLUListElement>(null);
   const myId = useStore(store, (s) => s.identity?.id);
   const { bind, menu } = useContextMenu();
-  // B25 §4: the server menu in the rail. Leaving a server waits for a core command.
-  const serverItems = (s: ServerSummary): MenuItem[] => [
+  // B25 §4: the server menu in the rail. A closed server is read-only: no items.
+  const serverItems = (s: ServerSummary): MenuItem[] => s.closed ? [] : [
     {
       key: 'invite',
       label: intl.formatMessage({ id: 'menu.copyInvite' }),
       onSelect: async () => store.showFlash((await copyText(s.inviteLink)) ? 'common.copied' : 'menu.copyFailed'),
     },
     ...(s.ownerId === myId ? [{ key: 'settings', label: intl.formatMessage({ id: 'server.settings.open' }), onSelect: () => onOpenServerSettings(s.id) }] : []),
+    { kind: 'separator' },
+    ...(s.ownerId !== myId ? [{ key: 'leave', label: intl.formatMessage({ id: 'server.leave' }), danger: true, onSelect: () => onLeaveServer(s.id) }] : []),
   ];
 
   // Arrow keys move between rail buttons (one Tab stop for the whole list).
@@ -53,6 +58,7 @@ export function ServerRail({
   const label = (s: ServerSummary) =>
     [
       s.name,
+      s.closed ? intl.formatMessage({ id: 'server.closedTag' }) : null,
       s.mentions > 0 ? intl.formatMessage({ id: 'mentions.label' }, { count: s.mentions }) : null,
       s.unread ? intl.formatMessage({ id: 'unread.label' }) : null,
     ]

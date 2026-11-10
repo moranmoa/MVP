@@ -18,7 +18,7 @@ const sec = require('./security');
 const { toRequest } = require('./commands');
 const { Sidecar } = require('./sidecar');
 const deeplink = require('./deeplink');
-const { relayFor, bootstrapFor, logHost } = require('./config');
+const { relayFor, bootstrapFor, logHost, stunFor, stunHost } = require('./config');
 const update = require('./update');
 const { createLog } = require('./logfile');
 
@@ -62,6 +62,14 @@ const log = (line) => {
 };
 /** Where the core stands, for the "core unavailable" screen (T8-01). */
 let coreStatus = { state: 'starting' };
+/**
+ * Our STUN server for the page's WebRTC (#222), or null. It rides on every
+ * core.status (read-only; only our own pages get core.status), so the page
+ * never asks for it. Its host never reaches the log.
+ */
+const STUN_URL = stunFor({ packaged: app.isPackaged, resourcesPath: process.resourcesPath });
+if (stunHost(STUN_URL)) fileLog.hide(stunHost(STUN_URL));
+const statusForPage = (status) => ({ ...status, stunUrl: STUN_URL });
 /** V-C2: the microphone only while we are in a call (security.js). */
 const callGate = sec.createCallGate();
 
@@ -75,7 +83,7 @@ function toPages(name, payload) {
 function setCoreStatus(status) {
   callGate.onCoreStatus(status);
   coreStatus = status;
-  toPages('core.status', status);
+  toPages('core.status', statusForPage(status));
 }
 
 // In-app update (B8): on only in an installed copy that has mvs-launcher; the
@@ -101,8 +109,13 @@ function startCore() {
     const host = logHost(addr);
     if (host) fileLog.hide(host);
   }
+  // Checkouts only (tests): Windows cannot execute a .js stand-in for the core
+  // (EFTYPE), so it runs under this Electron in Node mode. Never in a packaged
+  // app, where the RunAsNode fuse is off anyway.
+  const jsCore = !app.isPackaged && process.platform === 'win32' && CORE_EXE.endsWith('.js');
   core = new Sidecar({
-    exe: CORE_EXE,
+    exe: jsCore ? process.execPath : CORE_EXE,
+    script: jsCore ? CORE_EXE : null,
     dataDir,
     // Without a relay the core runs offline (no invites, no chat with others).
     relay,
@@ -314,7 +327,7 @@ function createWindow() {
   win.webContents.on('did-finish-load', () => {
     flushInvite();
     // The page may have missed earlier changes; the preload keeps this for the UI.
-    if (sec.isInternalUrl(win.webContents.getURL())) win.webContents.send('core:event', 'core.status', coreStatus);
+    if (sec.isInternalUrl(win.webContents.getURL())) win.webContents.send('core:event', 'core.status', statusForPage(coreStatus));
     // Commit this version once the UI is up and the core answers (main only, once).
     if (!healthReported) {
       healthReported = true;

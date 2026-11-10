@@ -12,9 +12,9 @@ import { cleanCall, cleanVoiceRoom, guardCore } from '../core/sanitize';
 
 // jsdom has no WebRTC: the engine (piece D) has its own tests in src/voice. Here it
 // is an idle engine with a working mic; ?voiceSim drives the failure states.
-const fakeEngine = vi.hoisted(() => ({ peerFailed: {} as Record<string, 'failed' | 'refused'> }));
+const fakeEngine = vi.hoisted(() => ({ peerFailed: {} as Record<string, 'failed' | 'refused'>, stunUrls: [] as unknown[] }));
 vi.mock('../voice', () => ({
-  useVoiceEngine: () => ({
+  useVoiceEngine: (_call: unknown, _me: unknown, options?: { stunUrl?: string | null }) => (fakeEngine.stunUrls.push(options?.stunUrl), {
     ready: true,
     speaking: {},
     peerFailed: fakeEngine.peerFailed,
@@ -43,6 +43,28 @@ async function setup(options: MockOptions = {}, { ipNoticeSeen = true } = {}) {
     });
   return { core, entry, join };
 }
+
+describe('STUN for the voice engine (#222)', () => {
+  it('passes the shell STUN URL from core.status to the engine', async () => {
+    fakeEngine.stunUrls = [];
+    await setup({ stunUrl: 'stun:stun.example.test:3478' });
+    await waitFor(() => expect(fakeEngine.stunUrls.at(-1)).toBe('stun:stun.example.test:3478'));
+  });
+
+  it.each([undefined, 'turn:turn.example.test:3478', 'stun:user:pass@stun.example.test', 'stun:stun.example.test/x'])(
+    'passes null without one or for anything but a plain stun:/stuns: URL (%s)',
+    async (stunUrl) => {
+      fakeEngine.stunUrls = [];
+      await setup(stunUrl === undefined ? {} : { stunUrl });
+      // Let the shell's core.status (replayed on a timer) arrive.
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 10));
+      });
+      expect(fakeEngine.stunUrls.length).toBeGreaterThan(0);
+      expect(fakeEngine.stunUrls.every((u) => u === null)).toBe(true);
+    },
+  );
+});
 
 describe('voice room', () => {
   it('shows who is in the room before joining, and no Join in the channel header', async () => {

@@ -7,6 +7,7 @@
 // look-alike names), values that reach CSS or <img>, and sizes that freeze the
 // renderer.
 
+import { cleanStunUrl } from '../voice/sdp';
 import type { CoreApi, CoreEventName, CoreEvents } from './api';
 import type {
   AgeRestriction,
@@ -187,6 +188,7 @@ export function cleanServer(s: ServerSummary): ServerSummary {
     inviteLink: cleanLink(s.inviteLink),
     unread: s.unread === true,
     mentions: count(s.mentions),
+    closed: s.closed === true,
   };
 }
 
@@ -313,6 +315,8 @@ const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[
   'identity.changed': cleanIdentity,
   'server.added': cleanServer,
   'server.updated': cleanServer,
+  'server.removed': (p) => ({ serverId: id(p.serverId), reason: p.reason === 'left' || p.reason === 'closed' ? p.reason : undefined }),
+  'server.closed': (p) => ({ serverId: id(p.serverId) }),
   'channel.updated': cleanChannel,
   'channel.added': cleanChannel,
   'channel.removed': (p) => ({ serverId: p.serverId, channelId: p.channelId, name: cleanName(p.name, CHANNEL_NAME_MAX) || '…' }),
@@ -331,10 +335,15 @@ const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[
     if (kind !== 'ice' && s.fingerprintVerified !== true) return null;
     return { from: s.from, kind, payload: s.payload, fingerprintVerified: s.fingerprintVerified === true };
   },
-  'core.status': (s) => ({
-    state: s?.state === 'up' || s?.state === 'down' ? s.state : 'starting',
-    detail: (['missing', 'start-failed', 'crashed', 'crash-loop', 'keyring'] as const).find((d) => d === s?.detail),
-  }),
+  'core.status': (s) => {
+    // The STUN URL only if it is a plain stun:/stuns: one (TURN, credentials: dropped).
+    const stunUrl = cleanStunUrl(s?.stunUrl);
+    return {
+      state: s?.state === 'up' || s?.state === 'down' ? s.state : 'starting',
+      detail: (['missing', 'start-failed', 'crashed', 'crash-loop', 'keyring'] as const).find((d) => d === s?.detail),
+      ...(stunUrl ? { stunUrl } : {}),
+    };
+  },
   'update.ready': (u) => ({ version: cleanName(u.version, 32), waitingForCall: u.waitingForCall === true }),
   // Release notes come from the signed manifest, but they are still shown as
   // plain text only, clipped like a message.
@@ -364,6 +373,8 @@ export function guardCore(core: CoreApi): CoreApi {
     updateChannel: wrap(core.updateChannel, cleanChannel),
     listMembers: wrap(core.listMembers, (l) => l.map(cleanMember)),
     createServer: wrap(core.createServer, cleanServer),
+    renameServer: wrap(core.renameServer, cleanServer),
+    getUpdateNeeded: wrap(core.getUpdateNeeded, (l) => (Array.isArray(l) ? l.filter((x): x is string => typeof x === 'string').map(id) : [])),
     createInvite: wrap(core.createInvite, (r) => ({ ...r, id: id(r.id), link: cleanLink(r.link), expiresAt: when(r.expiresAt) })),
     listInvites: wrap(core.listInvites, (l) => l.map(cleanInvite)),
     joinServer: wrap(core.joinServer, cleanJoin),
