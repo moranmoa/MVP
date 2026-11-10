@@ -334,6 +334,14 @@ impl Network for SyncNetwork {
             }
         }
     }
+
+    /// Forgets that `server` is open here. TODO(server lifecycle, piece 3,
+    /// dev-sync): `Node::close_server` unsubscribes its topics and drops its
+    /// pending records; until then the node keeps its logs open (the core
+    /// no longer reads them).
+    fn close_server(&self, server: ServerId) {
+        self.opened.lock().expect("not poisoned").remove(&server);
+    }
 }
 
 #[cfg(test)]

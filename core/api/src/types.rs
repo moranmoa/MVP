@@ -224,6 +224,10 @@ pub enum ErrorCode {
     CallFull,
     /// Voice: relay-only is on, so calls are off.
     RelayOnly,
+    /// Server lifecycle: a member still runs a version that can't read a
+    /// rename, leave or delete (no `server-lifecycle-v1` cap); nothing was
+    /// signed.
+    UpdateNeeded,
     /// Rust addition: malformed command JSON or arguments.
     BadRequest,
     /// Rust addition: in the contract, not done by this core yet.
@@ -378,8 +382,14 @@ pub enum Event {
     ServerAdded(ServerSummary),
     #[serde(rename = "server.updated")]
     ServerUpdated(ServerSummary),
+    /// I'm no longer in the server. `reason` (additive): `left` or
+    /// `deleted`; absent for a kick (as before).
     #[serde(rename = "server.removed", rename_all = "camelCase")]
-    ServerRemoved { server_id: Id },
+    ServerRemoved {
+        server_id: Id,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        reason: Option<RemovedReason>,
+    },
     #[serde(rename = "channel.added")]
     ChannelAdded(Channel),
     #[serde(rename = "channel.removed", rename_all = "camelCase")]
@@ -470,6 +480,16 @@ pub struct CallParticipant {
     /// A user ID.
     pub identity: Id,
     pub muted: bool,
+}
+
+/// Why `server.removed` fired (server lifecycle).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RemovedReason {
+    /// I left (`leaveServer`).
+    Left,
+    /// The owner deleted it (`closeServer`), mine or read.
+    Deleted,
 }
 
 /// Voice: the WebRTC signalling `sendSignal` carries.

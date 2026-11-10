@@ -249,6 +249,25 @@ impl Db {
             .map_err(internal)
     }
 
+    /// Server lifecycle (#229, the security lead's rule 5): everything this
+    /// device holds for `server`, in one transaction: its records, stubs and
+    /// their send states, its sealed sync secret, and its row. "Removed from
+    /// your devices", not erased: other members keep their copies.
+    pub fn purge_server(&mut self, server: ServerId) -> Result<(), CoreError> {
+        let id = server.as_bytes().as_slice();
+        let tx = self.conn.transaction().map_err(internal)?;
+        for sql in [
+            "DELETE FROM send_states WHERE id IN (SELECT id FROM records WHERE server = ?1)",
+            "DELETE FROM records WHERE server = ?1",
+            "DELETE FROM stubs WHERE server = ?1",
+            "DELETE FROM servers WHERE id = ?1",
+        ] {
+            tx.execute(sql, [id]).map_err(internal)?;
+        }
+        tx.execute("DELETE FROM kv WHERE key = ?1", [secret_key(server)]).map_err(internal)?;
+        tx.commit().map_err(internal)
+    }
+
     pub fn remove_server(&self, server: ServerId) -> Result<(), CoreError> {
         self.conn
             .execute("DELETE FROM servers WHERE id = ?1", [server.as_bytes().as_slice()])

@@ -590,6 +590,69 @@ impl Core {
         self.control_action(server_id, Action::kick(parse_user(user_id)?))
     }
 
+    // ---- server lifecycle (#229, #251) -----------------------------------
+    //
+    // Every command checks the rollout gate (`update-needed`) before it
+    // signs: an older member would refuse the record and stall on every
+    // control record after it. Each syncs first, so the gate (and a
+    // close's causal past) is as current as the network allows.
+
+    /// `renameServer`: the owner or an admin. The name is trimmed, then must
+    /// pass the strict server-name rule (`bad-request`).
+    pub fn rename_server(&self, server_id: &str, name: &str) -> CoreResult<ServerSummary> {
+        let name = name.trim();
+        if !authority::server_name_ok(name) {
+            return Err(ErrorCode::BadRequest.into());
+        }
+        let server = parse_server(server_id)?;
+        let _ = self.sync_now();
+        self.run(|inner, ports, events| {
+            inner.load_mine(server)?;
+            inner.lifecycle_role(server, authority::Role::Admin)?;
+            inner.lifecycle_gate(server)?;
+            inner.publish_control(ports, server, &Action::ServerEdit { name: name.to_owned() })?;
+            let summary = inner.summary(server)?;
+            events.push(Event::ServerUpdated(summary.clone()));
+            Ok(summary)
+        })
+    }
+
+    /// `leaveServer`: any member but the owner (`not-allowed`; the owner
+    /// deletes instead). The `Leave` goes out, so the others re-key; then
+    /// the server leaves this device (`server.removed`, `left`). A leaver
+    /// isn't banned: a new invite lets them back, as a plain member.
+    pub fn leave_server(&self, server_id: &str) -> CoreResult<()> {
+        let server = parse_server(server_id)?;
+        let _ = self.sync_now();
+        self.run(|inner, ports, events| {
+            inner.load_mine(server)?;
+            let me = inner.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+            if inner.view(server)?.state.role(me) == authority::Role::Owner {
+                return Err(ErrorCode::NotAllowed.into());
+            }
+            inner.lifecycle_gate(server)?;
+            inner.publish_control(ports, server, &Action::Leave { cut: Default::default() })?;
+            inner.purge_server(ports, server, RemovedReason::Left, events)
+        })
+    }
+
+    /// `closeServer`: the owner deletes the server for good. Syncs first,
+    /// so recent records are in the close's past (only those stay); then
+    /// the close goes out and the server leaves this device
+    /// (`server.removed`, `deleted`). Other members purge it when they read
+    /// the close.
+    pub fn close_server(&self, server_id: &str) -> CoreResult<()> {
+        let server = parse_server(server_id)?;
+        let _ = self.sync_now();
+        self.run(|inner, ports, events| {
+            inner.load_mine(server)?;
+            inner.lifecycle_role(server, authority::Role::Owner)?;
+            inner.lifecycle_gate(server)?;
+            inner.publish_control(ports, server, &Action::ServerClose)?;
+            inner.purge_server(ports, server, RemovedReason::Deleted, events)
+        })
+    }
+
     /// B11: the owner creates a channel. `name-taken` if another channel of
     /// the server has the name; `bad-request` for a name authority refuses.
     pub fn create_channel(&self, server_id: &str, name: &str, adult: bool) -> CoreResult<Channel> {
@@ -751,36 +814,7 @@ impl Core {
             if matches!(&action, Action::Kick { target, .. } if *target == me.key()) {
                 return Err(ErrorCode::NotAllowed.into());
             }
-            let view = inner.view(server)?;
-            // A revoke-invite lists its invite in its deps.
-            let extra = match &action {
-                Action::RevokeInvite { invite } => Some(*invite),
-                _ => None,
-            };
-            let record = authority::sign_control(
-                me.identity.signing_key(),
-                server,
-                view.next_seq(&me.key()),
-                view.deps(extra),
-                ports.clock.now_ms(),
-                &action,
-            )
-            .map_err(|_| ErrorCode::BadRequest)?;
-            // Dry run on the live resolver. Its deps are our heads, so it
-            // joins at once; if `authority` doesn't accept it, it was never
-            // stored or sent, and the log is rebuilt from the store so it
-            // leaves no trace.
-            // TODO(records B4): `Resolver::would_accept` instead.
-            let log = inner.logs.get_mut(&server).expect("loaded above");
-            let joined = log.add(record.clone());
-            if !log.accepted(&record.id()) {
-                inner.logs.remove(&server);
-                return Err(ErrorCode::NotAllowed.into());
-            }
-            for record in &joined {
-                inner.db.put_record(record)?;
-            }
-            ports.network.publish(&record);
+            let record = inner.publish_control(ports, server, &action)?;
             if matches!(action, Action::Invite { .. } | Action::RevokeInvite { .. }) {
                 // The server's link may name another invite now.
                 events.push(Event::ServerUpdated(inner.summary(server)?));
@@ -1116,17 +1150,31 @@ impl Core {
                 }
                 inner.load(server)?;
                 inner.seed_announced(&*ports.cipher, server)?;
+                let name_before = inner.view(server)?.state.server_name.clone();
                 let mut changed = false;
                 for record in records {
                     if record.server() == server {
                         changed |= inner.store(server, record)?;
                     }
                 }
+                // Server lifecycle: the owner deleted it; it leaves this device.
+                if inner.view(server)?.state.closed.is_some() {
+                    inner.purge_server(ports, server, RemovedReason::Deleted, events)?;
+                    continue;
+                }
+                if inner.view(server)?.state.server_name != name_before {
+                    events.push(Event::ServerUpdated(inner.summary(server)?));
+                }
+                // Release N: say this version reads lifecycle records. Never
+                // aborts the other servers; the next round retries.
+                let _ = inner.post_caps(ports, server);
                 let after = inner.view(server)?;
                 if after.is_kicked(&me) {
                     inner.db.remove_server(server)?;
-                    events
-                        .push(Event::ServerRemoved { server_id: model::hex_id(server.as_bytes()) });
+                    events.push(Event::ServerRemoved {
+                        server_id: model::hex_id(server.as_bytes()),
+                        reason: None,
+                    });
                 } else if changed {
                     events.push(Event::MembersChanged {
                         server_id: model::hex_id(server.as_bytes()),
@@ -1887,6 +1935,127 @@ impl Inner {
         })
     }
 
+    /// Signs `action` on our heads in loaded `server`, dry-runs it on the
+    /// live resolver, then stores and publishes it. Its deps are our heads,
+    /// so it joins at once; if `authority` doesn't accept it, it was never
+    /// stored or sent (`not-allowed`), and the log is rebuilt from the store
+    /// so it leaves no trace.
+    // TODO(records B4): `Resolver::would_accept` instead.
+    fn publish_control(
+        &mut self,
+        ports: &Ports,
+        server: ServerId,
+        action: &Action,
+    ) -> CoreResult<Record> {
+        let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?;
+        let view = self.view(server)?;
+        // A revoke-invite lists its invite in its deps.
+        let extra = match action {
+            Action::RevokeInvite { invite } => Some(*invite),
+            _ => None,
+        };
+        let record = authority::sign_control(
+            me.identity.signing_key(),
+            server,
+            view.next_seq(&me.key()),
+            view.deps(extra),
+            ports.clock.now_ms(),
+            action,
+        )
+        .map_err(|_| ErrorCode::BadRequest)?;
+        let log = self.logs.get_mut(&server).ok_or(ErrorCode::Internal)?;
+        let joined = log.add(record.clone());
+        if !log.accepted(&record.id()) {
+            self.logs.remove(&server);
+            return Err(ErrorCode::NotAllowed.into());
+        }
+        for record in &joined {
+            self.db.put_record(record)?;
+        }
+        ports.network.publish(&record);
+        Ok(record)
+    }
+
+    /// `not-allowed` below `role` in loaded `server` (before the gate, so a
+    /// member learns they can't, not that others must update).
+    fn lifecycle_role(&self, server: ServerId, role: authority::Role) -> CoreResult<()> {
+        let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+        if self.view(server)?.state.role(me) < role {
+            return Err(ErrorCode::NotAllowed.into());
+        }
+        Ok(())
+    }
+
+    /// Server lifecycle's rollout gate (#229): `update-needed` unless every
+    /// other current member's latest profile post carries
+    /// `server-lifecycle-v1` (no profile post counts as needing an update).
+    /// This version reads them itself. Checked before anything is signed.
+    fn lifecycle_gate(&self, server: ServerId) -> CoreResult<()> {
+        let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+        let view = self.view(server)?;
+        let caps = view.lifecycle_caps();
+        let behind = view
+            .state
+            .members
+            .iter()
+            .filter(|m| **m != me && !view.state.kicked.contains(m))
+            .any(|m| caps.get(m) != Some(&true));
+        if behind {
+            return Err(ErrorCode::UpdateNeeded.into());
+        }
+        Ok(())
+    }
+
+    /// Release N of server lifecycle: my latest profile post in `server`
+    /// lacks the cap (posted by an older version), so post it again, once.
+    fn post_caps(&mut self, ports: &Ports, server: ServerId) -> CoreResult<()> {
+        let Some(me) = self.me.as_ref() else { return Ok(()) };
+        let (key, name) = (me.key(), me.profile.display_name.clone());
+        let view = self.view(server)?;
+        let member = view.state.is_member(key) && !view.state.kicked.contains(&key);
+        if !member || view.state.closed.is_some() || view.lifecycle_caps().get(&key) == Some(&true)
+        {
+            return Ok(());
+        }
+        self.publish_control(ports, server, &model::profile_action(&name)).map(drop)
+    }
+
+    /// Server lifecycle (#229, the security lead's rule 5): after I leave,
+    /// or the server is deleted, removes it from this device. My call there
+    /// ends first (with a bye); then its records, sync secret, channel keys
+    /// and sync subscription go, and every per-server loop forgets it.
+    /// `server.removed` follows. Not erasure: other members keep copies.
+    fn purge_server(
+        &mut self,
+        ports: &Ports,
+        server: ServerId,
+        reason: RemovedReason,
+        events: &mut Events,
+    ) -> CoreResult<()> {
+        if self.calls.in_server(server) {
+            if let Some(key) = self.me.as_ref().map(|me| me.identity.signing_key().clone()) {
+                let mut calls = std::mem::take(&mut self.calls);
+                let mut ctx = voice::Ctx { key: &key, now: ports.clock.now_ms(), events };
+                calls.leave(&mut ctx, self);
+                self.calls = calls;
+            }
+        }
+        self.calls.forget_server(server);
+        self.db.purge_server(server)?;
+        ports.cipher.forget(server);
+        ports.network.close_server(server);
+        self.logs.remove(&server);
+        self.announced.remove(&server);
+        self.presence_seen.remove(&server);
+        self.keyed_for.retain(|(s, _), _| *s != server);
+        self.rekey_after.retain(|(s, _), _| *s != server);
+        events.push(Event::ServerRemoved {
+            server_id: model::hex_id(server.as_bytes()),
+            reason: Some(reason),
+        });
+        Ok(())
+    }
+
     /// Loads `server`'s log from the store unless it is already in memory.
     fn load(&mut self, server: ServerId) -> CoreResult<()> {
         if !self.logs.contains_key(&server) {
@@ -2051,9 +2220,11 @@ impl ServerView<'_> {
             (Some(invite), Some(secret)) => model::invite_link(self.id, invite, secret),
             _ => String::new(),
         };
+        // The latest accepted rename, else the genesis name.
+        let name = self.state.server_name.clone().unwrap_or_else(|| self.genesis.name.clone());
         ServerSummary {
-            name: self.genesis.name.clone(),
-            initials: model::initials(&self.genesis.name),
+            initials: model::initials(&name),
+            name,
             color: model::color_for(self.id.as_bytes()),
             age_restriction: self.genesis.age_restriction,
             owner_id: model::hex_id(self.owner.as_bytes()),

@@ -2315,3 +2315,133 @@ fn a_call_holds_five_and_kicked_members_are_ignored() {
     let state = owner.core.join_call(&general).unwrap();
     assert!(!who(&state).contains(&kicked_id.as_str()));
 }
+
+/// Server lifecycle (#229, #251), api piece: who may rename, leave and
+/// delete; the rollout gate (an older member, or one with no profile post,
+/// gives `update-needed` before anything is signed); and the purge.
+#[test]
+fn servers_are_renamed_left_and_deleted_behind_the_rollout_gate() {
+    let world = World::new();
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let guest = world.peer();
+    let guest_id = sign_up(&guest, "Guest").id;
+    let third = world.peer();
+    sign_up(&third, "Third");
+    let server = owner.core.create_server("Old name", AgeRestriction::None).unwrap();
+    for peer in [&guest, &third] {
+        peer.core.join_server(&server.invite_link).unwrap();
+    }
+    for peer in [&owner, &guest, &third] {
+        peer.core.sync_now().unwrap();
+    }
+    let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+
+    // Rename: trimmed, strict rule, owner or admin only.
+    assert_eq!(
+        guest.core.rename_server(&server.id, "Mine now").unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+    for bad in ["   ", "a\u{202E}b", &"x".repeat(101)] {
+        assert_eq!(
+            owner.core.rename_server(&server.id, bad).unwrap_err().code,
+            ErrorCode::BadRequest
+        );
+    }
+    let renamed = owner.core.rename_server(&server.id, "  New name ").unwrap();
+    assert_eq!(renamed.name, "New name");
+    guest.events.take();
+    guest.core.sync_now().unwrap();
+    let updated: Vec<String> = guest
+        .events
+        .take()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::ServerUpdated(s) => Some(s.name),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(updated, ["New name"]);
+    assert_eq!(guest.core.list_servers().unwrap()[0].name, "New name");
+
+    // The gate: a member on an older version (a fixed key here) joins with
+    // no profile post, then posts one without the cap.
+    let invite = model_invite(&server.invite_link);
+    let old = SigningKey::from_bytes(&[42; 32]);
+    let mut deps: BTreeSet<_> = world.network.fetch(server_key).iter().map(|r| r.id()).collect();
+    deps.insert(invite);
+    let join = authority::sign_control(
+        &old,
+        server_key,
+        1,
+        deps.into_iter().collect(),
+        1,
+        &authority::Action::Join { invite },
+    )
+    .unwrap();
+    world.network.publish(&join);
+    owner.core.sync_now().unwrap();
+    let signed = world.network.fetch(server_key).len();
+    assert_eq!(
+        owner.core.rename_server(&server.id, "Blocked").unwrap_err().code,
+        ErrorCode::UpdateNeeded,
+        "a member with no profile post"
+    );
+    let profile = |caps: &str, seq| {
+        let text = format!(r#"{{"mvs":"mvs/profile/v1","displayName":"Old"{caps}}}"#);
+        let heads = world.network.fetch(server_key).iter().map(|r| r.id()).collect();
+        authority::sign_control(&old, server_key, seq, heads, 2, &authority::Action::Post { text })
+            .unwrap()
+    };
+    world.network.publish(&profile("", 2));
+    owner.core.sync_now().unwrap();
+    for code in [
+        owner.core.rename_server(&server.id, "Blocked").unwrap_err().code,
+        guest.core.leave_server(&server.id).unwrap_err().code,
+        owner.core.close_server(&server.id).unwrap_err().code,
+    ] {
+        assert_eq!(code, ErrorCode::UpdateNeeded, "an older member's profile");
+    }
+    assert_eq!(world.network.fetch(server_key).len(), signed + 1, "signed past the gate");
+    // It updates: the cap in its latest profile post opens the gate.
+    world.network.publish(&profile(r#","caps":["server-lifecycle-v1"]"#, 3));
+    for peer in [&owner, &guest, &third] {
+        peer.core.sync_now().unwrap();
+    }
+
+    // Leave: not the owner; a member leaves and the server leaves their
+    // device; the others see them gone.
+    assert_eq!(owner.core.leave_server(&server.id).unwrap_err().code, ErrorCode::NotAllowed);
+    guest.events.take();
+    guest.core.leave_server(&server.id).unwrap();
+    assert!(guest.events.take().contains(&Event::ServerRemoved {
+        server_id: server.id.clone(),
+        reason: Some(RemovedReason::Left),
+    }));
+    assert!(guest.core.list_servers().unwrap().is_empty());
+    assert_eq!(guest.core.get_messages(&channel, 0, 9).unwrap_err().code, ErrorCode::NotFound);
+    owner.core.sync_now().unwrap();
+    assert!(!owner.core.list_members(&server.id).unwrap().iter().any(|m| m.id == guest_id));
+
+    // Delete: the owner only; the owner's device and, once they read it,
+    // every member's purge it.
+    assert_eq!(third.core.close_server(&server.id).unwrap_err().code, ErrorCode::NotAllowed);
+    owner.events.take();
+    owner.core.close_server(&server.id).unwrap();
+    let deleted =
+        Event::ServerRemoved { server_id: server.id.clone(), reason: Some(RemovedReason::Deleted) };
+    assert!(owner.events.take().contains(&deleted));
+    assert!(owner.core.list_servers().unwrap().is_empty());
+    third.events.take();
+    third.core.sync_now().unwrap();
+    assert!(third.events.take().contains(&deleted));
+    assert!(third.core.list_servers().unwrap().is_empty());
+    assert_eq!(third.core.list_channels(&server.id).unwrap_err().code, ErrorCode::NotFound);
+}
+
+/// The invite record ID an invite link names.
+fn model_invite(link: &str) -> records::RecordId {
+    let invite = link.strip_prefix("mvs://join/").unwrap().split('/').nth(1).unwrap();
+    records::RecordId::from_bytes(hex::decode(invite).unwrap().try_into().unwrap())
+}

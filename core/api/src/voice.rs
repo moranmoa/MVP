@@ -240,6 +240,20 @@ impl Calls {
         self.mine.is_some()
     }
 
+    /// In a call in `server`.
+    pub fn in_server(&self, server: ServerId) -> bool {
+        self.mine.as_ref().is_some_and(|m| m.server == server)
+    }
+
+    /// Server lifecycle: forgets who is in `server`'s calls (after leaving
+    /// mine there, see `Core`'s purge).
+    pub fn forget_server(&mut self, server: ServerId) {
+        if self.in_server(server) {
+            self.mine = None;
+        }
+        self.rooms.retain(|_, room| room.server != server);
+    }
+
     fn net(&self) -> CoreResult<&Arc<dyn VoiceNet>> {
         self.net.as_ref().ok_or_else(|| ErrorCode::NotImplemented.into())
     }

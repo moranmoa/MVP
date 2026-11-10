@@ -134,6 +134,18 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 - `Member.connection: 'direct' | 'relay' | null` (#187): how we reach an online member, a direct connection (LAN) or through the relay; `null` for us and for members who are offline. A change fires `members.changed`.
 - `CoreError.code`: `'bad-request' | 'not-implemented' | 'internal'`, and `'keyring-unavailable'` (QA-20): the OS keychain (Secret Service on Linux) is missing or unusable. The core still starts; `getIdentity` and anything needing the identity reject with it, and the UI shows the keyring cause.
 - `NoticeKind`: `'rekey-waiting'`, sent when removed members still hold a channel key and only a moderator can renew it. Until a moderator does, sending there answers `not-allowed`.
+- Server lifecycle (#229 design, #251 authority; `docs/design/server-rename-leave-delete.md`):
+  - `renameServer(serverId, name)` returns the updated `ServerSummary` and fires `server.updated` (here, and for every member when they read it). The name is trimmed, then must pass the strict server-name rule (1–100 code points, no bidi, control or zero-width characters). The owner or an admin only.
+  - `leaveServer(serverId)` returns `null`. Any member but the owner (who deletes instead). The `Leave` goes out, so the others re-key; then the server leaves this device and `server.removed { serverId, reason: 'left' }` fires. The leaver isn't banned, and comes back through a new invite as a plain member.
+  - `closeServer(serverId)` returns `null`. The owner deletes the server for good: the core syncs first, then sends the close, and the server leaves this device. Every member's core purges it when it reads the close, with `server.removed { serverId, reason: 'deleted' }`.
+  - Purge: the server's records, sync secret, channel keys, sync subscription, and any call in it. "Removed from your devices", not erased: other members keep their copies.
+  - `server.removed` gains an optional `reason: 'left' | 'deleted'`. It's absent for a kick, as before.
+  - Errors:
+    - `not-found`: a server I'm not in.
+    - `not-allowed`: not permitted (role), or the owner leaving.
+    - `bad-request`: a name that fails the rule.
+    - `update-needed`: a current member's latest profile post doesn't carry `caps: ['server-lifecycle-v1']`, or they have no profile post. Nothing was signed. An older member would refuse the record and stall on every control record after it.
+  - Profile posts now carry `caps: ['server-lifecycle-v1']`, and older versions ignore the field. A core re-posts its profile once where its latest post lacks the cap.
 - `syncNow()`: test-only until `sync` drives updates. It shouldn't ship in
   the UI.
 
