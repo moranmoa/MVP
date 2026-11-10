@@ -16,8 +16,6 @@ export class MessageWindow {
   private messages = new Map<number, Message>();
   private loadingPages = new Set<number>();
   private loadedPages = new Set<number>();
-  /** Failed held messages whose text was sent again (UI only, this session). */
-  private resent = new Set<Id>();
 
   constructor(
     private core: CoreApi,
@@ -32,8 +30,7 @@ export class MessageWindow {
   }
 
   get(index: number): Message | undefined {
-    const m = this.messages.get(index);
-    return m && this.resent.has(m.id) ? { ...m, resent: true } : m;
+    return this.messages.get(index);
   }
 
   /** Makes sure [start, end) is loaded; cheap to call on every render. */
@@ -71,20 +68,34 @@ export class MessageWindow {
     const { replaces, ...real } = m;
     let from = m.index;
     for (const [i, x] of this.messages) if (x.id === replaces) from = Math.min(from, i);
-    for (const i of [...this.messages.keys()]) if (i >= from && i !== m.index) this.messages.delete(i);
-    for (const p of [...this.loadedPages]) if ((p + 1) * PAGE > from) this.loadedPages.delete(p);
+    this.forgetFrom(from, m.index);
     this.messages.set(m.index, real);
     if (m.index >= this.count) this.count = m.index + 1;
     this.notify();
-    void this.core.getMessageCount(this.channelId).then((count) => {
-      this.count = count;
-      this.notify();
-    });
+    void this.recount();
   }
 
-  /** A failed held message was sent again as a new message. */
-  markResent(id: Id): void {
-    this.resent.add(id);
+  /**
+   * A held message was discarded (#288, discardMessage fires no event): it
+   * leaves the list, and what came after it moves up one.
+   */
+  removeHeld(id: Id): void {
+    const at = [...this.messages].find(([, x]) => x.id === id)?.[0];
+    if (at === undefined) return void this.recount();
+    this.forgetFrom(at);
+    this.count = Math.max(0, this.count - 1);
+    this.notify();
+    void this.recount();
+  }
+
+  /** Drops what is cached from `from` on (but `keep`), to be loaded again. */
+  private forgetFrom(from: number, keep?: number): void {
+    for (const i of [...this.messages.keys()]) if (i >= from && i !== keep) this.messages.delete(i);
+    for (const p of [...this.loadedPages]) if ((p + 1) * PAGE > from) this.loadedPages.delete(p);
+  }
+
+  private async recount(): Promise<void> {
+    this.count = await this.core.getMessageCount(this.channelId);
     this.notify();
   }
 }

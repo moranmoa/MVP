@@ -294,7 +294,6 @@
   "chat.state.held": "Sending…",
   "chat.state.heldFailed": "Not sent: you don't have access to this channel yet",
   "chat.state.sendAgain": "Send again",
-  "chat.state.resent": "Sent again below",
   "chat.offline": "Nobody from the server is online right now. You can read what's already saved here and write – messages will send when someone connects.",
   "chat.jumpToLatest": "Jump to latest",
   "chat.blocked": "Message from a blocked user",

@@ -2,7 +2,7 @@
 // held ("Sending…"), replaced by the real record when the key comes, or fails
 // after the wait, with "Send again".
 
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { App } from '../app/App';
 import type { Settings } from '../app/settings';
@@ -40,12 +40,11 @@ async function send(text: string) {
 }
 
 describe('messages held for their key: sanitizer', () => {
-  it('keeps a well-formed replaces, drops any other, and never takes resent from the core', () => {
+  it('keeps a well-formed replaces and drops any other', () => {
     expect(cleanMessage(msg(1, { replaces: HELD })).replaces).toBe(HELD);
     for (const bad of ['pending-XYZ', 'pending-0123', `${HELD}0`, 'm7', 42 as unknown as string]) {
       expect('replaces' in cleanMessage(msg(1, { replaces: bad }))).toBe(false);
     }
-    expect('resent' in cleanMessage(msg(1, { resent: true }))).toBe(false);
   });
 
   it('a pending- id passes through message.added and message.updated', () => {
@@ -70,7 +69,11 @@ describe('messages held for their key: sanitizer', () => {
     guardCore(bare).on('notice', (n) => seen.push(n));
     handlers.get('notice')!({ kind: 'rekey-waiting', serverId: 's' });
     handlers.get('notice')!({ kind: 'surprise', serverId: 's' });
-    expect(seen).toEqual([{ kind: 'rekey-waiting', serverId: 's' }]);
+    handlers.get('notice')!({ kind: 'rekey-waiting', serverId: 'x'.repeat(500) });
+    expect(seen).toEqual([
+      { kind: 'rekey-waiting', serverId: 's' },
+      { kind: 'rekey-waiting', serverId: 'x'.repeat(128) }, // through id()
+    ]);
   });
 });
 
@@ -105,6 +108,18 @@ describe('messages held for their key: the message window', () => {
     expect(w.get(10)?.id).toBe('mine');
     expect(w.get(11)).toBeUndefined(); // the other held one may have moved: loaded again
   });
+
+  it('a discarded held message leaves; what followed is re-read and the count drops', async () => {
+    const w = windowWith(11);
+    w.apply(msg(9));
+    w.apply(msg(10, { id: HELD, sendState: 'failed' }));
+    w.apply(msg(11, { id: 'after' }));
+    w.removeHeld(HELD);
+    expect(w.get(9)?.id).toBe('m9');
+    expect(w.get(10)).toBeUndefined();
+    expect(w.get(11)).toBeUndefined();
+    expect(w.count).toBe(11);
+  });
 });
 
 describe('messages held for their key: in the chat', () => {
@@ -132,11 +147,24 @@ describe('messages held for their key: in the chat', () => {
     // No reply, edit or delete on a message that never reached the network.
     expect(document.querySelector('.msg.failed .msg-actions')).toBeNull();
     const before = await core.getMessageCount('c-general');
+    const failedId = (await core.getMessages('c-general', before - 1, before)).messages[0].id;
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Send again' }));
     });
-    expect(await core.getMessageCount('c-general')).toBe(before + 1);
-    expect((await core.getMessages('c-general', before, before + 1)).messages[0].body).toBe('no key yet');
-    expect(await screen.findByText('Sent again below')).toBeTruthy();
+    // Discarded, then sent as a new message: still one copy, not two.
+    expect(await core.getMessageCount('c-general')).toBe(before);
+    const listed = (await core.getMessages('c-general', 0, before)).messages;
+    expect(listed.filter((m) => m.body === 'no key yet')).toHaveLength(1);
+    expect(listed.some((m) => m.id === failedId)).toBe(false);
+    // After a reload the old failed one doesn't come back.
+    cleanup();
+    render(<App core={core} initialSettings={en} />);
+    await screen.findByRole('textbox', { name: /^Message / });
+    expect((await screen.findAllByText('no key yet')).length).toBe(1);
+  });
+
+  it('discardMessage: not-found for anything but a held message', async () => {
+    const core = new MockCore({ demo: true, speed: 0, simulateActivity: false });
+    await expect(core.discardMessage('c-general#3')).rejects.toMatchObject({ code: 'not-found' });
   });
 });

@@ -64,10 +64,13 @@ export function ChatView({
   const onRetry = useCallback(
     (m: Message) => {
       if (!isHeld(m)) return void core.retryMessage(m.id).catch(() => {});
-      // Held for its key and failed (#288): the core keeps it; send the text again.
+      // Held for its key and failed (#288): drop it (the core would keep it until
+      // a restart), then send the text again as a new message.
       void core
-        .sendMessage(m.channelId, m.body)
-        .then(() => store.window(m.channelId).markResent(m.id))
+        .discardMessage(m.id)
+        .catch(() => null)
+        .then(() => store.window(m.channelId).removeHeld(m.id))
+        .then(() => core.sendMessage(m.channelId, m.body))
         .catch(() => {});
     },
     [core, store],

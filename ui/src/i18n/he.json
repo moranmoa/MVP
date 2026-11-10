@@ -294,7 +294,6 @@
   "chat.state.held": "נשלחת…",
   "chat.state.heldFailed": "לא נשלחה: עדיין אין גישה לערוץ הזה",
   "chat.state.sendAgain": "שליחה שוב",
-  "chat.state.resent": "נשלחה שוב למטה",
   "chat.offline": "אף אחד מהשרת לא מחובר כרגע. אפשר לקרוא את מה שכבר שמור אצלך ולכתוב – ההודעות יישלחו כשמישהו יתחבר.",
   "chat.jumpToLatest": "קפיצה להודעות האחרונות",
   "chat.blocked": "הודעה ממשתמש חסום",

@@ -239,7 +239,7 @@ export function cleanMessage(m: Message): Message {
   const { text, clipped } = cleanText(m.body);
   // Only the exact held-id shape is a replacement; anything else is dropped.
   const replaces = typeof m.replaces === 'string' && HELD_ID.test(m.replaces) ? m.replaces : undefined;
-  const { replaces: _ignored, resent: _uiOnly, ...rest } = m;
+  const { replaces: _ignored, ...rest } = m;
   return {
     ...rest,
     ...(replaces ? { replaces } : {}),
@@ -336,7 +336,7 @@ const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[
   // Only the kinds the UI knows; anything else is dropped.
   'notice': (n) =>
     (n?.kind === 'encryption-renewed' || n?.kind === 'rekey-waiting') && typeof n.serverId === 'string'
-      ? { kind: n.kind, serverId: n.serverId }
+      ? { kind: n.kind, serverId: id(n.serverId) }
       : null,
   'join.status': cleanJoin,
   'link.open': (p) => ({ link: cleanInviteLink(p?.link) }),

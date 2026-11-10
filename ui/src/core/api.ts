@@ -103,6 +103,12 @@ export interface CoreCommands {
   editMessage(messageId: Id, body: string): Promise<void>;
   deleteMessage(messageId: Id): Promise<void>;
   retryMessage(messageId: Id): Promise<void>;
+  /**
+   * #288: drops a held or failed `pending-…` message and wipes its text. No
+   * event: the caller removes it. `not-found` for any other id. "Send again" is
+   * this plus a new sendMessage.
+   */
+  discardMessage(messageId: Id): Promise<null>;
   markRead(channelId: Id): Promise<void>;
 
   // Safety

@@ -170,8 +170,6 @@ export interface Message {
    * key (#288): the `pending-…` id of the held entry this message replaces.
    */
   replaces?: Id;
-  /** Set by the UI: a failed held message whose text was sent again as a new message. */
-  resent?: boolean;
 }
 
 export interface MessageRange {
