@@ -19,6 +19,10 @@ const newFingerprint = () => {
   return Array.from({ length: 32 }, (_, i) => (i === 0 ? n : 'AB')).join(':');
 };
 
+/** An offer from a peer with a mic: one audio m-line, sendrecv. */
+const audioOffer = (fp = newFingerprint()) =>
+  `v=0\r\na=fingerprint:sha-256 ${fp}\r\na=setup:actpass\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\na=sendrecv\r\n`;
+
 class FakeTrack {
   kind = 'audio';
   enabled = true;
@@ -36,6 +40,23 @@ class FakeStream {
   getTracks() {
     return this.tracks;
   }
+}
+
+interface FakeSender {
+  track: FakeTrack | null;
+  streams: FakeStream[];
+  replaceTrack: (t: FakeTrack | null) => Promise<void>;
+  setStreams: (...s: FakeStream[]) => void;
+}
+
+interface FakeTransceiver {
+  mid: string | null;
+  direction: string;
+  stopped: boolean;
+  codecs: unknown;
+  sender: FakeSender;
+  receiver: { track: { kind: string } };
+  setCodecPreferences: (c: unknown) => void;
 }
 
 /** Every fake connection, so a test can look at them and at who presented what certificate. */
@@ -56,31 +77,55 @@ class FakePC {
   iceGatheringState: RTCIceGatheringState = 'complete';
   closed = false;
   candidates: RTCIceCandidateInit[] = [];
-  senders: { track: FakeTrack | null; replaceTrack: (t: FakeTrack | null) => Promise<void> }[] = [];
-  transceivers: { direction: string; codecs: unknown }[] = [];
+  senders: FakeSender[] = [];
+  transceivers: FakeTransceiver[] = [];
   ontrack: ((e: { track: FakeTrack; streams: FakeStream[] }) => void) | null = null;
   onconnectionstatechange: (() => void) | null = null;
 
   constructor(readonly config: RTCConfiguration) {
     allPcs.push(this);
   }
-  addTransceiver(trackOrKind: FakeTrack | string, init: { direction: string }) {
-    const t = { direction: init.direction, codecs: null as unknown, setCodecPreferences: (c: unknown) => (t.codecs = c) };
-    this.transceivers.push(t);
-    const sender = {
-      track: typeof trackOrKind === 'string' ? null : trackOrKind,
-      replaceTrack: async (nt: FakeTrack | null) => void (sender.track = nt),
+  private transceiver(direction: string, track: FakeTrack | null, mid: string | null): FakeTransceiver {
+    const sender: FakeSender = {
+      track,
+      streams: [],
+      replaceTrack: async (nt) => void (sender.track = nt),
+      setStreams: (...s) => void (sender.streams = s),
     };
+    const t: FakeTransceiver = {
+      mid,
+      direction,
+      stopped: false,
+      codecs: null,
+      sender,
+      receiver: { track: { kind: 'audio' } },
+      setCodecPreferences: (c) => void (t.codecs = c),
+    };
+    this.transceivers.push(t);
     this.senders.push(sender);
     return t;
+  }
+  addTransceiver(trackOrKind: FakeTrack | string, init: { direction: string }) {
+    return this.transceiver(init.direction, typeof trackOrKind === 'string' ? null : trackOrKind, null);
+  }
+  getTransceivers() {
+    return this.transceivers;
   }
   getSenders() {
     return this.senders;
   }
+  /** The transceiver of the one audio m-line ("0"), once negotiated. */
+  bound(): FakeTransceiver | undefined {
+    return this.transceivers.find((t) => t.mid === '0');
+  }
   private sdp(type: string) {
-    return `v=0\r\no=- 1 2 IN IP4 0.0.0.0\r\na=fingerprint:sha-256 ${this.fingerprint}\r\na=setup:${type === 'offer' ? 'actpass' : 'active'}\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n`;
+    const direction = this.bound()?.direction ?? 'inactive';
+    return `v=0\r\no=- 1 2 IN IP4 0.0.0.0\r\na=fingerprint:sha-256 ${this.fingerprint}\r\na=setup:${type === 'offer' ? 'actpass' : 'active'}\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\na=${direction}\r\n`;
   }
   async createOffer() {
+    // The first transceiver without a mid gets the m-line.
+    const t = this.transceivers.find((x) => x.mid === null);
+    if (t && !this.bound()) t.mid = '0';
     return { type: 'offer' as const, sdp: this.sdp('offer') };
   }
   async createAnswer() {
@@ -94,7 +139,14 @@ class FakePC {
   async setRemoteDescription(d: RTCSessionDescriptionInit) {
     this.remoteDescription = { type: d.type, sdp: this.rewriteRemote ? this.rewriteRemote(d.sdp!) : d.sdp };
     this.signalingState = d.type === 'offer' ? 'have-remote-offer' : 'stable';
+    // Like Chromium: a transceiver added with addTransceiver before the offer
+    // is NOT bound to the offer's m-line; a new receive-only one is (QA-21).
+    if (d.type === 'offer' && !this.bound() && /\r\nm=audio /.test(d.sdp ?? '')) this.transceiver('recvonly', null, '0');
     this.maybeConnect();
+  }
+  /** Whether the remote side sends audio, from its m-line direction. */
+  private remoteSends(): boolean {
+    return /a=(sendrecv|sendonly)\r\n/.test(this.remoteDescription?.sdp ?? '');
   }
   async addIceCandidate(c: RTCIceCandidateInit) {
     this.candidates.push(c);
@@ -118,7 +170,7 @@ class FakePC {
     if (this.signalingState !== 'stable' || !this.localDescription || !this.remoteDescription) return;
     setTimeout(() => {
       if (this.closed) return;
-      this.ontrack?.({ track: new FakeTrack(), streams: [new FakeStream()] });
+      if (this.remoteSends()) this.ontrack?.({ track: new FakeTrack(), streams: [new FakeStream()] });
       this.connectionState = 'connected';
       this.onconnectionstatechange?.();
     }, 0);
@@ -315,6 +367,67 @@ describe('voice engine', () => {
       { identity: A, state: 'connected' },
       { identity: B, state: 'connected' },
     ]);
+  });
+
+  it('QA-21: the answerer sends its mic on the offer\'s m-line (sendrecv), so audio flows both ways', async () => {
+    const { hx, hy, cx, cy, ex, ey } = pair();
+    await ex.attach(cx.state(), A);
+    await ey.attach(cy.state(), B);
+    await flush();
+    const answerer = hy.pcs[0]!;
+    // One transceiver only: bound to m-line "0", sending the mic, Opus.
+    expect(answerer.transceivers).toHaveLength(1);
+    expect(answerer.transceivers[0]).toMatchObject({ mid: '0', direction: 'sendrecv', codecs: [{ mimeType: 'audio/opus' }] });
+    expect(answerer.transceivers[0]!.sender.track).toBe(hy.mics[0]!.tracks[0]);
+    expect(answerer.transceivers[0]!.sender.streams).toEqual([hy.mics[0]]);
+    expect(cy.sent[0]!.payload).toContain('a=sendrecv');
+    // Each side plays the other: the offerer hears the answerer too.
+    expect(hx.audios).toHaveLength(1);
+    expect(hy.audios).toHaveLength(1);
+  });
+
+  it('an answerer without a mic only receives, and a mic chosen later asks for a rejoin', async () => {
+    const hx = fakeEnv();
+    const hy = fakeEnv({ micError: 'NotAllowedError' });
+    const cx = new FakeCore(A, [A, B]);
+    const cy = new FakeCore(B, [B, A]);
+    cx.wire = (to, kind, payload) => to === B && setTimeout(() => cy.emitSignal({ from: A, kind, payload, fingerprintVerified: true }), 0);
+    cy.wire = (to, kind, payload) => to === A && setTimeout(() => cx.emitSignal({ from: B, kind, payload, fingerprintVerified: true }), 0);
+    const ex = createVoiceEngine(cx, { env: hx.env });
+    const ey = createVoiceEngine(cy, { env: hy.env });
+    const errors = record<VoiceError>((cb) => ey.on('error', cb));
+    await ex.attach(cx.state(), A);
+    await ey.attach(cy.state(), B);
+    await flush();
+    expect(hy.pcs[0]!.transceivers).toHaveLength(1);
+    expect(hy.pcs[0]!.transceivers[0]).toMatchObject({ mid: '0', direction: 'recvonly' });
+    expect(hy.pcs[0]!.transceivers[0]!.sender.track).toBeNull();
+    expect(hy.audios).toHaveLength(1); // B hears A
+    expect(hx.audios).toHaveLength(0); // A gets nothing from B, as expected
+    await ey.setInputDevice('mic1');
+    expect(errors).toEqual([{ code: 'mic-denied' }, { code: 'rejoin-to-talk' }]);
+  });
+
+  it('a new input device replaces the track the answerer sends', async () => {
+    const { hy, cx, cy, ex, ey } = pair();
+    await ex.attach(cx.state(), A);
+    await ey.attach(cy.state(), B);
+    await flush();
+    await ey.setInputDevice('mic1');
+    expect(hy.pcs[0]!.transceivers[0]!.sender.track).toBe(hy.mics[1]!.tracks[0]);
+  });
+
+  it('the answerer drops an offer without an audio m-line', async () => {
+    const h = fakeEnv();
+    const core = new FakeCore(B, [B, A]);
+    const engine = createVoiceEngine(core, { env: h.env });
+    const errors = record<VoiceError>((cb) => engine.on('error', cb));
+    await engine.attach(core.state(), B);
+    core.emitSignal({ from: A, kind: 'offer', payload: `v=0\r\na=fingerprint:sha-256 ${newFingerprint()}\r\n`, fingerprintVerified: true });
+    await flush();
+    expect(h.pcs[0]!.closed).toBe(true);
+    expect(core.sent).toEqual([]);
+    expect(errors).toEqual([{ code: 'peer-failed', peer: A }]);
   });
 
   it('glare: an offer from the higher identity is ignored by the lower one', async () => {
@@ -643,9 +756,7 @@ describe('voice engine', () => {
       pc.setLocalDescription = async (d) => void (pc.localDescription = d); // never connects
       return pc as unknown as RTCPeerConnection;
     };
-    core.emitSignal({ from: A, kind: 'offer', payload: `v=0
-a=fingerprint:sha-256 ${newFingerprint()}
-`, fingerprintVerified: true });
+    core.emitSignal({ from: A, kind: 'offer', payload: audioOffer(), fingerprintVerified: true });
     await flush();
     expect(h.pcs[0]!.closed).toBe(false);
     await new Promise((r) => setTimeout(r, 400));
