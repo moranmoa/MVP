@@ -34,6 +34,13 @@ struct ServerArg {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RenameServerArgs {
+    server_id: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ChannelIdArg {
     channel_id: String,
 }
@@ -263,6 +270,14 @@ impl Core {
 
             "markRead" => Ok(Value::Null),
             "blockUser" => ok(self.block_user(&args::<UserArg>(raw)?.user_id)),
+            // Server lifecycle (#251).
+            "renameServer" => {
+                let a: RenameServerArgs = args(raw)?;
+                ok(self.rename_server(&a.server_id, &a.name))
+            }
+            "leaveServer" => ok(self.leave_server(&args::<ServerArg>(raw)?.server_id)),
+            "closeServer" => ok(self.close_server(&args::<ServerArg>(raw)?.server_id)),
+            "getUpdateNeeded" => ok(self.get_update_needed(&args::<ServerArg>(raw)?.server_id)),
             "kickMember" => {
                 let a: ServerUserArgs = args(raw)?;
                 ok(self.kick_member(&a.server_id, &a.user_id))

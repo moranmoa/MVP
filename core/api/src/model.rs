@@ -162,24 +162,36 @@ pub(crate) fn invite_link(server: ServerId, invite: RecordId, secret: &[u8; 32])
 /// TODO(ui): invites with expiry and use limits, and revoking them.
 pub(crate) const FIRST_INVITE: Action = Action::Invite { expires_ms: 0, max_uses: 0 };
 
+/// Server lifecycle (#229): what a profile post says this version can read.
+/// Old versions ignore the field (`ProfileBody` takes unknown fields).
+pub(crate) const SERVER_LIFECYCLE_CAP: &str = "server-lifecycle-v1";
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProfileBody {
     mvs: String,
     display_name: String,
+    /// Absent before server lifecycle.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    caps: Vec<String>,
 }
 
-/// The post a member signs to tell the server their display name.
+/// The post a member signs to tell the server their display name, and
+/// what this version can read.
 pub(crate) fn profile_action(display_name: &str) -> Action {
-    let body = ProfileBody { mvs: PROFILE_TAG.to_owned(), display_name: display_name.to_owned() };
+    let body = ProfileBody {
+        mvs: PROFILE_TAG.to_owned(),
+        display_name: display_name.to_owned(),
+        caps: vec![SERVER_LIFECYCLE_CAP.to_owned()],
+    };
     Action::Post { text: serde_json::to_string(&body).expect("plain struct") }
 }
 
-/// The display name, if `record` is a profile post.
-fn parse_profile(record: &Record) -> Option<String> {
+/// The profile, if `record` is a profile post.
+fn parse_profile(record: &Record) -> Option<ProfileBody> {
     let Some(Action::Post { text }) = Action::from_record(record) else { return None };
     let body: ProfileBody = serde_json::from_str(&text).ok()?;
-    (body.mvs == PROFILE_TAG).then_some(body.display_name)
+    (body.mvs == PROFILE_TAG).then_some(body)
 }
 
 /// One server's records as held locally, with its resolver kept up to date
@@ -374,12 +386,29 @@ impl<'a> ServerView<'a> {
         let mut names: BTreeMap<PublicKey, String> = BTreeMap::new();
         for id in &self.state.posts {
             let Some(record) = by_id.get(id) else { continue };
-            if let Some(name) = parse_profile(record).filter(|n| authority::display_text_ok(n)) {
+            let name = parse_profile(record).map(|p| p.display_name);
+            if let Some(name) = name.filter(|n| authority::display_text_ok(n)) {
                 // Later profile posts (a new display name) win.
                 names.insert(record.author(), name);
             }
         }
         names
+    }
+
+    /// Server lifecycle's rollout gate (#229): whether each author's latest
+    /// profile post carries [`SERVER_LIFECYCLE_CAP`]. Members with no
+    /// profile post are absent (they count as needing an update).
+    pub fn lifecycle_caps(&self) -> BTreeMap<PublicKey, bool> {
+        let by_id: HashMap<RecordId, &Record> = self.records.iter().map(|r| (r.id(), r)).collect();
+        let mut caps = BTreeMap::new();
+        for id in &self.state.posts {
+            let Some(record) = by_id.get(id) else { continue };
+            if let Some(profile) = parse_profile(record) {
+                let ready = profile.caps.iter().any(|c| c == SERVER_LIFECYCLE_CAP);
+                caps.insert(record.author(), ready);
+            }
+        }
+        caps
     }
 
     pub fn members(&self) -> Vec<MemberInfo> {
