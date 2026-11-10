@@ -1728,6 +1728,11 @@ fn a_message_held_without_a_key_fails_after_two_minutes() {
     guest.core.sync_now().unwrap();
     assert!(!guest.events.take().iter().any(|e| matches!(e, Event::MessageUpdated(_))));
 
+    // Discarded (sec-lead): gone from the list; its text with it.
+    guest.core.discard_message(&held.id).unwrap();
+    assert!(guest.core.get_messages(&channel, 0, 9).unwrap().messages.is_empty());
+    assert_eq!(guest.core.discard_message(&held.id).unwrap_err().code, ErrorCode::NotFound);
+
     // Bounded: at most MAX_KEY_PENDING held at once per channel (the failed
     // one doesn't count); then the plain refusal.
     for i in 0..api::MAX_KEY_PENDING {

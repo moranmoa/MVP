@@ -1316,6 +1316,18 @@ impl Core {
         })
     }
 
+    /// Drops a message held for its key (`pending-…`, pending or failed)
+    /// before it was sent: its text is wiped from memory now, and nothing
+    /// was ever sent. For "send again" (discard, then a new `sendMessage`)
+    /// or dismissing a failed one. `not-found` for any other ID, or one
+    /// already sent or discarded.
+    pub fn discard_message(&self, message_id: &str) -> CoreResult<()> {
+        let mut inner = self.lock();
+        let at = inner.key_pending.iter().position(|p| p.id == message_id).ok_or(ErrorCode::NotFound)?;
+        inner.key_pending.remove(at);
+        Ok(())
+    }
+
     /// The author, or a moderator or above who outranks them. The message
     /// keeps its place as a tombstone (`deleted: true`, no text).
     pub fn delete_message(&self, message_id: &str) -> CoreResult<()> {

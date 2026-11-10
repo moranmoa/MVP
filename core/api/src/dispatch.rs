@@ -264,6 +264,7 @@ impl Core {
                 ok(self.edit_message(&a.message_id, &a.body))
             }
             "deleteMessage" => ok(self.delete_message(&args::<MessageIdArg>(raw)?.message_id)),
+            "discardMessage" => ok(self.discard_message(&args::<MessageIdArg>(raw)?.message_id)),
             "retryMessage" => ok(self.retry_message(&args::<MessageIdArg>(raw)?.message_id)),
             "listMembers" => ok(self.list_members(&args::<ServerArg>(raw)?.server_id)),
             "createServer" => {

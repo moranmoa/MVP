@@ -172,7 +172,7 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
   - With no key after **2 minutes**, or if I can no longer send there (kicked, left, closed), it turns failed:
     - `message.updated` with the same `pending-…` ID and `sendState: 'failed'`;
     - and `notice: rekey-waiting` for the server.
-    - It stays listed, failed, until a restart. The user can send the text again.
+    - It stays listed, failed, until a restart or `discardMessage(messageId)`, which drops a held or failed `pending-…` message and wipes its text (`not-found` for any other ID). "Send again" is `discardMessage` plus a new `sendMessage`.
   - `Message.replaces?: string` is new, and appears only on that one `message.updated`.
   - A moderator or above never gets a pending message: they make the key on the way. A non-member, or someone kicked, still gets `not-allowed` at once.
 - `CoreError.code`: `'bad-request' | 'not-implemented' | 'internal'`, and `'keyring-unavailable'` (QA-20): the OS keychain (Secret Service on Linux) is missing or unusable. The core still starts; `getIdentity` and anything needing the identity reject with it, and the UI shows the keyring cause.
