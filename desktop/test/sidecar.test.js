@@ -133,14 +133,14 @@ test('no core: requests answer core-unavailable', async () => {
 const { EventEmitter } = require('node:events');
 
 /** A child that fails the way `how` says, every time it is started. */
-function failing(how) {
+function failing(how, code = 'EACCES') {
   return () => {
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     child.stdin = { write() {}, end() {} };
     child.kill = () => {};
-    setImmediate(() => (how === 'spawn' ? child.emit('error', Object.assign(new Error('x'), { code: 'ENOENT' })) : child.emit('exit', 1, null)));
+    setImmediate(() => (how === 'spawn' ? child.emit('error', Object.assign(new Error('x'), { code })) : child.emit('exit', 1, null)));
     return child;
   };
 }
@@ -175,6 +175,29 @@ test('a core that cannot be started: down, start-failed, and requests say why', 
   assert.deepEqual(statuses[0], { state: 'down', detail: 'start-failed' });
   assert.deepEqual(await core.request('getIdentity', {}), { error: { code: 'core-unavailable', detail: 'start-failed' } });
   core.stop();
+});
+
+test('an exe gone after launch (ENOENT, emitted or thrown): missing, never crash-loop', async () => {
+  const thrower = () => {
+    throw Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
+  };
+  for (const spawnImpl of [failing('spawn', 'ENOENT'), thrower]) {
+    const statuses = [];
+    let starts = 0;
+    const counted = (...a) => {
+      starts += 1;
+      return spawnImpl(...a);
+    };
+    const core = new Sidecar({ exe: FAKE, dataDir: DATA, onEvent() {}, onStatus: (s) => statuses.push(s), backoffBase: 20, spawnImpl: counted }).start();
+    // Ask between attempts (no start in flight): by the 7th the next retry is
+    // over a second away. A request during an attempt gets core-restarted.
+    await until(() => starts > 6 && core.child === null);
+    assert.deepEqual(await core.request('getIdentity', {}), { error: { code: 'core-unavailable', detail: 'missing' } });
+    core.stop();
+    // Repeated identical statuses are not re-sent: one "missing", and no
+    // crash-loop after more than five failed starts.
+    assert.deepEqual(statuses, [{ state: 'down', detail: 'missing' }]);
+  }
 });
 
 test('five crashes in a row without an answer: crash-loop', async () => {
