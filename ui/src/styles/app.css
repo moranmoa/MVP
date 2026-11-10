@@ -2829,6 +2829,82 @@ input.switch:disabled {
   border-block-start: 1px solid var(--border);
 }
 
+/* G-01: reorder the servers in the rail. */
+.rail li[data-server-li] {
+  position: relative;
+}
+
+.rail.dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.rail li.drag-source .rail-button {
+  opacity: 0.4;
+}
+
+.rail li.drop-before::before,
+.rail li.drop-after::after {
+  content: '';
+  position: absolute;
+  inset-inline: 0.5rem;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+}
+
+.rail li.drop-before::before {
+  inset-block-start: -0.3125rem;
+}
+
+.rail li.drop-after::after {
+  inset-block-end: -0.3125rem;
+}
+
+.rail-drag-ghost {
+  position: fixed;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  width: 3rem;
+  height: 3rem;
+  margin: -1.5rem 0 0 -1.5rem;
+  border-radius: 50%;
+  background: var(--server-color, var(--bg-main));
+  color: #fff;
+  font-weight: 700;
+  opacity: 0.85;
+  pointer-events: none;
+  box-shadow: 0 6px 16px rgb(0 0 0 / 0.25);
+}
+
+/* Phone: arrange mode, with 44px arrows next to each server and Done on top. */
+.rail.arranging {
+  position: relative;
+  z-index: 5;
+  width: 8rem;
+}
+
+.rail.arranging li[data-server-li] {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.rail-arrange {
+  display: flex;
+  flex-direction: column;
+}
+
+.rail-arrange .icon-button {
+  width: 2.75rem;
+  height: 2.75rem;
+}
+
+.rail-arrange-done {
+  margin: 0.75rem 0.5rem 0;
+}
+
 /* G-11: the owner reorders the channels. The handle sits at the start side. */
 .channel-row {
   position: relative;

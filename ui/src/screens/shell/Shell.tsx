@@ -3,6 +3,7 @@ import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import { phoneQuery, useMediaQuery } from '../../app/media';
+import { sortByOrder } from '../../app/serverOrder';
 import { useSettings } from '../../app/settings';
 import { paragraphs, useUiDir } from '../../app/textDir';
 import { useCore, useCoreEvent, type Id } from '../../core';
@@ -35,7 +36,7 @@ export function Shell() {
   const serverGone = useStore(store, (s) => s.serverGone);
   const uiDir = useUiDir();
   const intl = useIntl();
-  const { uiScale } = useSettings().settings;
+  const { uiScale, serverOrder = [] } = useSettings().settings;
 
   const [serverId, setServerId] = useState<Id | 'home'>(() => servers[0]?.id ?? 'home');
   const [channelByServer, setChannelByServer] = useState<Record<Id, Id>>({});
@@ -142,11 +143,12 @@ export function Shell() {
   // Alt+Up / Alt+Down move between channels, Ctrl+Alt+Up / Down between servers.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+      // Alt+Shift+arrows move a server in the rail (G-01), handled there.
+      if (!e.altKey || e.shiftKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
       const dir = e.key === 'ArrowUp' ? -1 : 1;
       e.preventDefault();
       if (e.ctrlKey) {
-        const ids: (Id | 'home')[] = ['home', ...servers.map((s) => s.id)];
+        const ids: (Id | 'home')[] = ['home', ...sortByOrder(servers, serverOrder).map((s) => s.id)];
         const next = ids[(ids.indexOf(serverId) + dir + ids.length) % ids.length];
         setServerId(next);
       } else if (server && channels?.length && channelId) {
@@ -157,7 +159,7 @@ export function Shell() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [servers, serverId, server, channels, channelId]);
+  }, [servers, serverOrder, serverId, server, channels, channelId]);
 
   const toggleMembers = () => {
     if (phone) {
