@@ -787,7 +787,6 @@ async fn build_swarm(
             let gossipsub = gossipsub::Behaviour::new_with_subscription_filter(
                 gossipsub::MessageAuthenticity::Signed(key.clone()),
                 gossip_config,
-                None,
                 MaxCountSubscriptionFilter {
                     filter: LogTopics,
                     max_subscribed_topics: MAX_PEER_TOPICS,
@@ -1725,7 +1724,7 @@ impl Task {
                     acceptance,
                 );
             }
-            SwarmEvent::Behaviour(BehaviourEvent::Sync(request_response::Event::Message { peer, message })) => {
+            SwarmEvent::Behaviour(BehaviourEvent::Sync(request_response::Event::Message { peer, message, .. })) => {
                 match message {
                     request_response::Message::Request { request, channel, .. } => self.on_request(peer, request, channel),
                     request_response::Message::Response { request_id, response } => {
@@ -1738,6 +1737,7 @@ impl Task {
             SwarmEvent::Behaviour(BehaviourEvent::Voice(request_response::Event::Message {
                 peer,
                 message: request_response::Message::Request { request, channel, .. },
+                ..
             })) => self.on_voice(peer, request, channel),
             SwarmEvent::Behaviour(BehaviourEvent::Voice(request_response::Event::OutboundFailure {
                 peer, error, ..
@@ -1755,6 +1755,7 @@ impl Task {
                 peer,
                 request_id,
                 error,
+                ..
             })) => {
                 debug!(%peer, %error, "pull failed");
                 // The anti-entropy timer retries.
