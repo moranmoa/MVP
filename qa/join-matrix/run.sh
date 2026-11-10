@@ -8,6 +8,7 @@
 #   SAME_LAN=1 ...      both on one Docker network (a home LAN: direct dials work)
 #   RELAY_ONLY=a|b|both ...  setRelayOnly(true) on that side before create/join
 #   PRESERVERS=60 MSGS=5 ROUNDS=5 ...  the owner first makes 60 servers with 5 messages each
+#   QUIET_START=1 ...  the joiner starts only after the owner has made them
 #                       (a long-used identity), then 5 joins in a row, each to a new server
 #
 # Release cores come from qa/upgrade/run.sh's download (SHA256SUMS checked).
@@ -61,6 +62,11 @@ side() { # role
     mvs-voice-e2e-app sh -c "chmod 777 /rendezvous; runuser -u pwuser -- dbus-run-session -- sh -c 'echo -n test | gnome-keyring-daemon --unlock --components=secrets >/dev/null && node /qa/join.mjs'" >/dev/null
 }
 side a
+# QUIET_START=1: the joiner starts only once the owner has made its servers,
+# so the two first meet with nothing being written.
+if [ -n "${QUIET_START:-}" ]; then
+  for _ in $(seq 1800); do [ -f "$rv/rv/a.prepared.json" ] && break; sleep 0.5; done
+fi
 side b
 docker wait "$P-a" "$P-b" >/dev/null
 for r in a b; do
