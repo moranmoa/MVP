@@ -244,6 +244,7 @@ async function mediaProbe(names = Object.keys(PROBES)) {
 // ---- the scenario ------------------------------------------------------------
 
 let ok = true;
+let serverId;
 try {
   log('setting up the account');
   await invoke('createIdentity', { locale: 'he', country: 'IL', birthDate: '1995-03-03' });
@@ -255,6 +256,7 @@ try {
 
   if (ROLE === 'a') {
     const server = await invoke('createServer', { name: SERVER, ageRestriction: 'none' });
+    serverId = server.id;
     put('invite', { link: server.inviteLink });
     log('server created, invite handed over');
     await take('joined');
@@ -267,6 +269,7 @@ try {
       return `${((Date.now() - started) / 1000).toFixed(1)} s`;
     });
     if (!ok1) throw new Error('join failed');
+    serverId = (await invoke('listServers')).find((s) => s.name === SERVER).id;
     put('joined');
   }
 
@@ -461,11 +464,74 @@ try {
     await page.locator('.call-bar').waitFor({ state: 'detached', timeout: 10_000 });
   });
 
-  // Last, because Chromium may kill the renderer for it: the legacy desktop
-  // capture, while in a call (the microphone is allowed then).
+  // V4: both back in the room, then the owner kicks B.
   await entry().click();
   await page.locator('.call-bar').waitFor({ timeout: 15_000 });
-  await check('V5.5', 'desktop audio (legacy chromeMediaSource) refused while in a call', async () => {
+  await until('both in roster', () => rosterHas([NAME.a, NAME.b]), 30_000).catch(() => {});
+  const room = await invoke('getVoiceRoom', serverId);
+  put('in-for-kick');
+  await take('in-for-kick');
+  if (ROLE === 'a') {
+    const members = await invoke('listMembers', serverId);
+    const b = members.find((m) => m.displayName === NAME.b);
+    if (!b) throw new Error(`B is not in the member list: ${JSON.stringify(members.map((m) => m.displayName))}`);
+    const at = Date.now();
+    await invoke('kickMember', serverId, b.id);
+    put('kicked', { at });
+    await check('V4.1', 'the kicked member leaves the owner\'s roster within a tick or two (SYNC_EVERY is 2 s)', async () => {
+      await until('B gone', () => rosterHas([NAME.a]), 15_000, 100);
+      const s = (Date.now() - at) / 1000;
+      // The 30 s hello timeout would mean the kick didn't purge the entry.
+      if (s > 5) throw new Error(`${s.toFixed(1)} s`);
+      return `${s.toFixed(1)} s`;
+    });
+    await check('V4.1', 'the owner\'s connection to the kicked member ends', () =>
+      until('no live connection', async () => !(await live()).some((c) => c.state === 'connected'), 30_000),
+    );
+    await check('V4.4', 'the owner is still in the call, alone', async () => {
+      if (!(await page.locator('.call-bar').count())) throw new Error('the owner\'s call ended');
+      const r = await invoke('getVoiceRoom', serverId);
+      if (r.participants.length !== 1) throw new Error(JSON.stringify(r.participants));
+    });
+    await take('kick-checked');
+  } else {
+    const { at } = await take('kicked');
+    await check('V4.3', 'the kicked member\'s call ends', async () => {
+      await page.locator('.call-bar').waitFor({ state: 'detached', timeout: 15_000 });
+      return `${((Date.now() - at) / 1000).toFixed(1)} s after the kick`;
+    });
+    await check('V4.1', 'the kicked member\'s connection ends', () =>
+      until('no live connection', async () => !(await live()).some((c) => c.state === 'connected'), 30_000),
+    );
+    const refused = async (what, fn) => {
+      try {
+        await fn();
+      } catch (e) {
+        if (/not-allowed|not-found/.test(e.message)) return e.message;
+        throw e;
+      }
+      throw new Error(`${what} was allowed`);
+    };
+    await check('V4.2', 'the kicked member can\'t read the room or join the call again', async () => {
+      const r1 = await until('getVoiceRoom refused', () => refused('getVoiceRoom', () => invoke('getVoiceRoom', serverId)), 15_000);
+      const r2 = await refused('joinCall', () => invoke('joinCall', room.roomId));
+      return `${r1}; ${r2}`;
+    });
+    await check('V4.3', 'the kicked member no longer sees the room\'s roster', async () => {
+      await until('no roster', async () => (await roster().count()) === 0, 15_000);
+    });
+    await check('V5.9', 'no microphone after being kicked (V-C2)', async () => {
+      const p = await mediaProbe(['mic']);
+      if (p.mic === 'granted') throw new Error(p.mic);
+      return p.mic;
+    });
+    put('kick-checked');
+  }
+
+  // Last, because Chromium may kill the renderer for it: the legacy desktop
+  // capture, while in a call (the microphone is allowed then). The owner
+  // only: B was kicked.
+  if (ROLE === 'a') await check('V5.5', 'desktop audio (legacy chromeMediaSource) refused while in a call', async () => {
     const res = await probeOne('desktopAudio');
     if (res === 'granted') throw new Error(res);
     const crashed = await page.evaluate(() => 1).then(() => false, () => true);
