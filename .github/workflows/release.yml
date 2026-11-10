@@ -27,6 +27,7 @@ on:
       - .github/scripts/changelog-section.mjs
       - CHANGELOG.md
       - .github/scripts/manifest-body.mjs
+      - .github/scripts/third-party-notices.mjs
       - desktop/package.json
       - desktop/package-lock.json
       - desktop/build/**
@@ -143,9 +144,9 @@ jobs:
           # Platform names are the keys of the manifest's `artifacts` map.
           # Windows is built natively: electron-builder's NSIS step needs
           # wine anywhere else.
-          - { platform: windows-x86_64, os: windows-latest, target: x86_64-pc-windows-msvc, core: mvs-core.exe }
+          - { platform: windows-x86_64, os: windows-latest, target: x86_64-pc-windows-msvc, core: mvs-core.exe, crates: "api,updater" }
           # Oldest still-supported runner = oldest glibc we link against.
-          - { platform: linux-x86_64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, core: mvs-core }
+          - { platform: linux-x86_64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, core: mvs-core, crates: api }
     env:
       VERSION: ${{ needs.check.outputs.version }}
     defaults:
@@ -248,6 +249,22 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: "22"
+      # T22: third-party notices for everything this installer ships, from the
+      # lockfiles: the core's Rust crates for this platform (normal deps of the
+      # binaries built above) and the ui's npm packages (bundled by Vite).
+      # Electron/Chromium ship their own LICENSE.electron.txt and
+      # LICENSES.chromium.html (checked in Collect). The ui install here is
+      # only for its packages' licence files; ui/dist comes from the ui job.
+      - name: Third-party notices
+        run: |
+          parts="$RUNNER_TEMP/notices"
+          mkdir -p "$parts"
+          (cd core && cargo metadata --format-version 1 --locked --filter-platform "${{ matrix.target }}" > "$parts/metadata.json")
+          node .github/scripts/third-party-notices.mjs cargo "$parts/metadata.json" "${{ matrix.crates }}" "$parts/core (Rust crates).txt"
+          (cd ui && npm ci --ignore-scripts --no-audit --no-fund)
+          node .github/scripts/third-party-notices.mjs npm ui/package-lock.json ui "$parts/ui (npm packages).txt"
+          node .github/scripts/third-party-notices.mjs merge desktop/build/THIRD-PARTY-NOTICES.txt "$parts/core (Rust crates).txt" "$parts/ui (npm packages).txt"
+
       - name: Package (electron-builder, unsigned)
         working-directory: desktop
         env:
@@ -274,6 +291,12 @@ jobs:
           base="mvs-${VERSION}-${{ matrix.platform }}"
           mkdir -p out
           shopt -s nullglob
+          # Licences ship inside the app (T22): ours generated above, Electron's own.
+          for f in resources/THIRD-PARTY-NOTICES.txt LICENSE.electron.txt LICENSES.chromium.html; do
+            for d in desktop/dist/*-unpacked; do
+              [ -s "$d/$f" ] || { echo "::error::$f missing from $d"; exit 1; }
+            done
+          done
           case "${{ matrix.platform }}" in
             windows-*)
               cp "$(one desktop/dist/*Setup*.exe)" "out/${base}-setup.exe"
