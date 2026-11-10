@@ -77,7 +77,7 @@ describe('context menus (B25)', () => {
     const row = within(channels()).getByRole('button', { name: /^clips/ });
     expect(row.getAttribute('aria-haspopup')).toBe('menu');
     fireEvent.contextMenu(row, { clientX: 10, clientY: 10 });
-    expect(screen.getByRole('menu', { name: 'Actions for #⁨clips⁩' })).toBeTruthy();
+    expect(screen.getByRole('menu', { name: 'Actions for ⁨#clips⁩' })).toBeTruthy();
     expect(menuItems()).toEqual(['Mark as read', 'Rename', 'Copy channel ID', 'Delete channel']);
     expect(screen.getAllByRole('separator').length).toBe(2);
     expect(document.activeElement?.textContent).toBe('Mark as read');
@@ -111,7 +111,7 @@ describe('context menus (B25)', () => {
     const { channels } = await setup();
     fireEvent.contextMenu(within(channels()).getByRole('button', { name: /^clips/ }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Delete channel' }));
-    expect(screen.getByText('Delete #⁨clips⁩?')).toBeTruthy();
+    expect(screen.getByText('Delete ⁨#clips⁩?')).toBeTruthy();
     expect(screen.queryByLabelText('Channel name')).toBeNull();
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Delete channel' }));
@@ -251,13 +251,18 @@ describe('message menu (B25 §2)', () => {
     const { channels } = await setup();
     const myName = screen.getByRole('complementary', { name: 'Channels' }).querySelector('.me-name')!.textContent!;
     const others = () => screen.getAllByRole('article').filter((a) => a.getAttribute('aria-haspopup') && !a.textContent?.includes(myName));
-    fireEvent.contextMenu(others()[0]);
-    expect(menuItems()).toEqual(['Reply', 'Copy text', 'Copy message ID', 'Delete']);
+    // The rows render after the first fetch, and after a server switch the old
+    // server's rows can linger for a moment: retry until this server's menu shows.
+    await waitFor(() => {
+      fireEvent.contextMenu(others()[0]);
+      expect(menuItems()).toEqual(['Reply', 'Copy text', 'Copy message ID', 'Delete']);
+    });
     fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
 
     await openOtherServer(channels);
-    await waitFor(() => expect(others().length).toBeGreaterThan(0));
-    fireEvent.contextMenu(others()[0]);
-    expect(menuItems()).toEqual(['Reply', 'Copy text', 'Copy message ID']);
+    await waitFor(() => {
+      fireEvent.contextMenu(others()[0]);
+      expect(menuItems()).toEqual(['Reply', 'Copy text', 'Copy message ID']);
+    });
   });
 });

@@ -66,10 +66,10 @@ describe('channels (owner)', () => {
     fireEvent.click(within(channels()).getByRole('button', { name: /^clips/ }));
     fireEvent.click(within(channels()).getByRole('button', { name: 'Edit channel: clips' }));
     fireEvent.click(screen.getByRole('button', { name: 'Delete channel' }));
-    expect(screen.getByText('Delete #⁨clips⁩?')).toBeTruthy();
+    expect(screen.getByText('Delete ⁨#clips⁩?')).toBeTruthy();
     await submit('Delete channel');
     await waitFor(() => expect(within(channels()).queryByRole('button', { name: /^clips/ })).toBeNull());
-    expect(screen.getByRole('status').textContent).toBe('#⁨clips⁩ was deleted.');
+    expect(screen.getByRole('status').textContent).toBe('⁨#clips⁩ was deleted.');
     expect(within(channels()).getByRole('button', { name: /^כללי/ }).getAttribute('aria-current')).toBe('page');
   });
 
