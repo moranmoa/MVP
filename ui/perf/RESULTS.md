@@ -12,9 +12,13 @@
 
 - The pending echo is 44–64 ms p50, and its p95 reaches 120 ms.
 - Channel switches take 156–329 ms p50.
-- Scrolling misses about half its frames. The main thread runs 280–477 long
-  tasks during the scroll; the virtual list never shows placeholders, so the
-  time goes into rendering rows, not into waiting for data.
+- Scrolling missed about half its frames in these runs, but most of that
+  was a busy shared Docker host. Measured again on a quiet host, it misses
+  5–24% with 0–70 long tasks; see "Scroll at 4× (P2)".
+- The echo and switch numbers at 4× come from the same runs and may be
+  inflated the same way. On a quiet host (current code, 4 full runs at 4×)
+  the echo was 33–43 ms p50, so within target, and switches took 107–191 ms
+  p50.
 
 Measured on 2026-11-10 with headless Chromium 141 (the engine inside the
 Electron shell), in the Playwright Docker image on a 12-CPU desktop, against
@@ -96,6 +100,93 @@ noise of a shared Docker host (other builds were running).
   pacing is the browser's, not a monitor's. A display at more than 60 Hz
   needs its own check.
 
+## Scroll at 4× (P2): investigation, before and after
+
+**Result: no code change. The "about half the frames drop" figure was mostly
+CPU taken by other containers on the shared Docker host.** On a quieter host
+the current code met the P2 acceptance (under 15% of frames over 20 ms,
+under 50 long tasks) in 4 of 6 runs (5.2–10.7%, 0–12 long tasks). The other
+two were 15.5% (11 long tasks) and 24.1% (70). None came near half. Of the
+changes tried, the obvious one, a per-row height estimate, made scrolling
+worse, and none of the others beat the noise, so none is proposed. A clean
+verdict needs a quiet machine, not this shared one.
+
+### Host load
+
+The Docker VM is shared by every agent's builds. 4× throttling amplifies any
+CPU taken from the browser. The harness now records the VM's 1-minute load
+average and warns when it is above half the CPU count.
+
+Current code at 4×, every run that recorded the load (before → after the
+run). A 1-minute average lags, so it only roughly tracks what the browser
+competed with:
+
+| Run | Host load | Frames over 20 ms | Long tasks (count, total) |
+|---|---|---|---|
+| scroll only | 3.0 → 2.8 | 5.2% | 0 |
+| scroll only | 5.0 → 4.0 | 6.4% | 0 |
+| full harness | 8.1 → 5.4 | 10.7% | 12, 0.7 s |
+| full harness | 2.8 → 4.2 | 24.1% | 70, 5.5 s |
+| scroll only (busy warning) | 8.6 → 7.3 | 27.6% | 66, 3.9 s |
+| full harness (other agents building) | 4.5 → 16.7 | 41.9% | 275, 30 s |
+| B14 runs above (load not recorded) | – | 46.9–54.6% | 280–477, 19–50 s |
+
+Two earlier full runs, made before the load was recorded but while the host
+was idle, gave 7.2% and 15.5% (8 and 11 long tasks).
+
+### What was tried
+
+1. **A per-row estimate.** The list estimated every row at 56 px; real rows
+   are 60 px (header), 55 px (grouped) or 81 px (reply), measured. The idea
+   was that matching estimates mean fewer corrections, each of which costs a
+   layout while scrolling. Each row's estimate was computed from its message.
+2. **`contain: layout style` on `.row`**, so a mounted row is laid out on
+   its own. There is no paint containment, because the hover toolbar sticks
+   out above the row.
+3. **A constant 60 px estimate**, alone and with 2.
+
+Interleaved runs (each variant is a prebuilt `dist`, run in turn so all see
+the same host load), scroll only, 4×, host load 2–5:
+
+| Build | Frames over 20 ms (2 runs) | Long tasks (2 runs) |
+|---|---|---|
+| current code | 6.4%, 5.2% | 0, 0 |
+| 1. per-row estimate | **49.4%, 44.2%** | 28, 0 |
+| 2. containment | 11.8%, 3.9% | 42, 0 |
+| 3. constant 60 px | 7.8%, 21.6% | 0, 20 |
+| 3 + 2 | 11.8%, 13.6% | 0, 33 |
+
+The full harness at 4× (3 interleaved pairs, current code vs 1 + 2) shows
+the same thing. With 1 + 2 the median frame is 33.3 ms in every run (53–59%
+of frames over 20 ms), against 16.7 ms for the current code.
+
+- **Why the per-row estimate hurts.** TanStack calls `estimateSize` for
+  every row not yet measured, which is thousands of rows in a 5,000-message
+  channel, each time it recomputes positions. A function that looks up two
+  messages costs more on every frame than the corrections it saves. Any
+  future estimate must stay a constant, or be cached per index.
+- **Variants 2 and 3** are within the run-to-run noise of the current code.
+  There is no measured gain, so they are not worth a change.
+
+Where the time goes (`node perf/profile.mjs`, the CPU profiler during the
+4× scroll, quiet host): about 40% browser-native style, layout and paint;
+15% forced layout in the scroll driver (layout the browser would do anyway);
+6% TanStack position recomputes; React rendering, `formatDate` and the
+direction checks about 1% each. Rows are already memoised (`MessageRow` is
+`memo`, with stable props), and TanStack 3.19 already skips measuring rows
+on mount while scrolling. The two fixes the task suggested are therefore in
+place.
+
+### Reproduce the comparison
+
+```bash
+docker compose run --rm -e PERF_ONLY=scroll -e PERF_THROTTLE=4 shots npm run perf
+```
+
+To compare builds, build each into a folder (`npx vite build --outDir
+perf/out/dist-x`) and run with `-e PERF_DIST=perf/out/dist-x`, alternating
+between builds. Only compare runs without the busy-host warning.
+
 ## Findings for dev-ui
 
 These are not filed as issues yet; the numbers above are the evidence.
@@ -103,9 +194,9 @@ These are not filed as issues yet; the numbers above are the evidence.
 1. **Pending echo misses 50 ms on a slow CPU** (4×: p50 44–64, p95 54–120
    ms). On a normal CPU the DOM update itself is 4–6 ms and the rest is
    waiting for the next frame, so the gap at 4× is render work.
-2. **Scrolling a long channel drops about half its frames on a slow CPU**,
-   with hundreds of long tasks and no data waits (0% placeholders). Row
-   rendering and measuring (`measureElement` on every row) is the likely
-   place to look.
+2. **Scrolling a long channel on a slow CPU: withdrawn.** The first runs
+   (about half the frames dropped) were inflated by a busy shared host. On
+   a quiet host the current code meets the P2 target; see "Scroll at 4×
+   (P2)" above.
 3. **Channel switch takes 150–330 ms p50 on a slow CPU** (p95 up to
    550 ms), against 34–64 ms at full speed.
