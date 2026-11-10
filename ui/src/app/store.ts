@@ -15,6 +15,7 @@ export class MessageWindow {
   ready = false;
   private messages = new Map<number, Message>();
   private loadingPages = new Set<number>();
+  private loadedPages = new Set<number>();
 
   constructor(
     private core: CoreApi,
@@ -37,7 +38,7 @@ export class MessageWindow {
     const first = Math.floor(Math.max(0, start) / PAGE);
     const last = Math.floor(Math.max(0, Math.min(end, this.count) - 1) / PAGE);
     for (let p = first; p <= last; p++) {
-      if (this.loadingPages.has(p) || this.messages.has(p * PAGE)) continue;
+      if (this.loadingPages.has(p) || this.loadedPages.has(p)) continue;
       this.loadingPages.add(p);
       void this.core.getMessages(this.channelId, p * PAGE, (p + 1) * PAGE).then((r) => {
         r.messages.forEach((m) => {
@@ -45,14 +46,56 @@ export class MessageWindow {
           if (!this.messages.has(m.index)) this.messages.set(m.index, m);
         });
         this.loadingPages.delete(p);
+        this.loadedPages.add(p);
         this.notify();
       });
     }
   }
 
   apply(m: Message): void {
+    if (m.replaces) return this.replace(m);
     this.messages.set(m.index, m);
     if (m.index >= this.count) this.count = m.index + 1;
+    this.notify();
+  }
+
+  /**
+   * A held message was sent (#288): drop the `pending-…` entry wherever it
+   * sits, put the real one at its index, and re-read what may have moved. The
+   * real index can differ, since the key may have brought other messages first.
+   */
+  private replace(m: Message): void {
+    const { replaces, ...real } = m;
+    let from = m.index;
+    for (const [i, x] of this.messages) if (x.id === replaces) from = Math.min(from, i);
+    this.forgetFrom(from, m.index);
+    this.messages.set(m.index, real);
+    if (m.index >= this.count) this.count = m.index + 1;
+    this.notify();
+    void this.recount();
+  }
+
+  /**
+   * A held message was discarded (#288, discardMessage fires no event): it
+   * leaves the list, and what came after it moves up one.
+   */
+  removeHeld(id: Id): void {
+    const at = [...this.messages].find(([, x]) => x.id === id)?.[0];
+    if (at === undefined) return void this.recount();
+    this.forgetFrom(at);
+    this.count = Math.max(0, this.count - 1);
+    this.notify();
+    void this.recount();
+  }
+
+  /** Drops what is cached from `from` on (but `keep`), to be loaded again. */
+  private forgetFrom(from: number, keep?: number): void {
+    for (const i of [...this.messages.keys()]) if (i >= from && i !== keep) this.messages.delete(i);
+    for (const p of [...this.loadedPages]) if ((p + 1) * PAGE > from) this.loadedPages.delete(p);
+  }
+
+  private async recount(): Promise<void> {
+    this.count = await this.core.getMessageCount(this.channelId);
     this.notify();
   }
 }
@@ -179,7 +222,8 @@ export class Store {
       }),
       on('voice.room', (r) => this.setRoom(r)),
       on('update.rolledBack', (u) => this.set({ updateNote: { kind: 'rolledBack', ...u } })),
-      on('notice', (n) => this.set({ notice: { ...n, at: Date.now() } })),
+      // rekey-waiting: the failed message's own line says why; no toast (UX, #289).
+      on('notice', (n) => n.kind !== 'rekey-waiting' && this.set({ notice: { ...n, kind: n.kind, at: Date.now() } })),
     );
     return () => {
       this.unsubs.forEach((u) => u());

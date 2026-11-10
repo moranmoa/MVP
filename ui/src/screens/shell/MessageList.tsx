@@ -6,6 +6,7 @@ import { memo, useCallback, useMemo, useEffect, useLayoutEffect, useRef, useStat
 import { FormattedMessage, useIntl } from 'react-intl';
 import type { MessageWindow } from '../../app/store';
 import type { Member, Message } from '../../core';
+import { isHeld } from '../../core/sanitize';
 import { Avatar, Code, Name } from '../../components/common';
 import {
   AlertIcon,
@@ -71,7 +72,16 @@ export function MessageList({
   const messageItems = (m: Message): MenuItem[] =>
     m.deleted || (memberMap.get(m.authorId)?.blocked && !revealed.has(m.authorId))
       ? []
-      : [
+      : isHeld(m)
+        ? // Not on the network yet: no id to reply to, edit or delete.
+          [
+            {
+              key: 'copy',
+              label: intl.formatMessage({ id: 'menu.copyText' }),
+              onSelect: async () => store.showFlash((await copyText(m.body)) ? 'common.copied' : 'menu.copyFailed'),
+            },
+          ]
+        : [
           { key: 'reply', label: intl.formatMessage({ id: 'chat.reply' }), onSelect: () => handlers.onReply(m) },
           {
             key: 'copy',
@@ -411,6 +421,7 @@ const MessageRow = memo(function MessageRow({
           {mine && m.sendState && <SendStateView message={m} onRetry={onRetry} tab={tab} />}
         </div>
       </div>
+      {!isHeld(m) && (
       <div className="msg-actions" role="toolbar" aria-label={name}>
         <button type="button" tabIndex={tab} onClick={() => onReply(m)} aria-label={intl.formatMessage({ id: 'chat.reply' })} title={intl.formatMessage({ id: 'chat.reply' })}>
           <ReplyIcon />
@@ -433,12 +444,14 @@ const MessageRow = memo(function MessageRow({
           </button>
         )}
       </div>
+      )}
     </div>
   );
 });
 
 function SendStateView({ message, onRetry, tab }: { message: Message; onRetry: (m: Message) => void; tab: number }) {
   const intl = useIntl();
+  if (isHeld(message)) return <HeldStateView message={message} onRetry={onRetry} tab={tab} />;
   switch (message.sendState) {
     case 'pending':
       return (
@@ -477,4 +490,29 @@ function SendStateView({ message, onRetry, tab }: { message: Message; onRetry: (
     default:
       return null;
   }
+}
+
+/**
+ * A message held for its channel key (#288). Normally sent in under a second:
+ * "Sending…". With no key after 2 minutes it fails; "Try again" discards it
+ * and sends the text as a new message.
+ */
+function HeldStateView({ message, onRetry, tab }: { message: Message; onRetry: (m: Message) => void; tab: number }) {
+  if (message.sendState === 'failed') {
+    return (
+      <span className="send-state failed held">
+        <AlertIcon />
+        <FormattedMessage id="chat.state.heldFailed" />
+        <button type="button" className="link small" tabIndex={tab} onClick={() => onRetry(message)}>
+          <FormattedMessage id="common.retry" />
+        </button>
+      </span>
+    );
+  }
+  return (
+    <span className="send-state pending held">
+      <ClockIcon />
+      <FormattedMessage id="chat.state.held" />
+    </span>
+  );
 }

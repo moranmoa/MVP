@@ -60,6 +60,12 @@ export interface MockOptions {
   coreDown?: 'missing' | 'start-failed' | 'crashed' | 'crash-loop' | 'keyring';
   /** joinCall rejects with this code, for the error states (screenshots). */
   callError?: 'call-full' | 'relay-only' | 'not-implemented';
+  /**
+   * As a member who just joined, before the channel key arrives (#288): sends
+   * come back held (`pending-…`), then are sent (`arrive`), fail (`fail`), or
+   * stay held (`wait`, for screenshots).
+   */
+  keyPending?: 'arrive' | 'fail' | 'wait';
   /** Every demo voice room starts with 5 people in it (full). */
   roomFull?: boolean;
   /** Start with relay-only on (#272): no direct connections, calls off. */
@@ -563,6 +569,41 @@ export class MockCore implements CoreApi {
     return s.members.some((m) => m.id !== this.identity?.id && m.presence === 'online');
   }
 
+  /**
+   * #288: a message held for its key. It is listed at once as `pending-…`; then
+   * the key comes (the real message replaces it) or, after the wait (2 minutes
+   * in the core, ~2 s here), it fails with a rekey-waiting notice.
+   */
+  private heldSeq = 0;
+
+  private sendHeld(ch: ChannelState, index: number, body: string): Message {
+    const held: Message = {
+      id: `pending-${(++this.heldSeq).toString(16).padStart(16, '0')}`,
+      channelId: ch.channel.id,
+      index,
+      authorId: this.identity!.id,
+      body,
+      createdAt: Date.now(),
+      sendState: 'pending',
+    };
+    this.put(ch, held, true);
+    if (this.options.keyPending === 'wait') return held;
+    if (this.options.keyPending === 'fail') {
+      this.later(2000, () => {
+        this.put(ch, { ...held, sendState: 'failed' }, false);
+        this.emit('notice', { kind: 'rekey-waiting', serverId: ch.channel.serverId });
+      });
+    } else {
+      this.later(900, () => {
+        const real: Message = { ...held, id: this.messageId(ch.channel.id, index), sendState: 'sent' };
+        ch.overrides.set(index, real);
+        this.emit('message.updated', { ...real, replaces: held.id });
+        this.later(700, () => this.put(ch, { ...real, sendState: 'received' }, false));
+      });
+    }
+    return held;
+  }
+
   /** Walks a local message through pending → sent → received. */
   private deliver(ch: ChannelState, index: number): void {
     const s = this.serverOf(ch);
@@ -929,6 +970,7 @@ export class MockCore implements CoreApi {
     if (this.servers.get(ch.channel.serverId)?.summary.closed) throw err({ code: 'not-allowed' });
     const index = this.count(ch);
     ch.appendedCount++;
+    if (this.options.keyPending) return this.sendHeld(ch, index, body);
     const msg: Message = {
       id: this.messageId(channelId, index),
       channelId,
@@ -966,6 +1008,23 @@ export class MockCore implements CoreApi {
     const mine = m.authorId === this.identity?.id;
     if (!mine && s.summary.ownerId !== this.identity?.id) throw err({ code: 'not-allowed' });
     this.put(ch, { ...m, body: '', deleted: true, replyTo: undefined }, false);
+  }
+
+  async discardMessage(messageId: Id): Promise<null> {
+    for (const ch of this.channelIndex.values()) {
+      const at = [...ch.overrides.values()].find((m) => m.id === messageId && /^pending-/.test(m.id))?.index;
+      if (at === undefined) continue;
+      const later = [...ch.overrides.values()].filter((m) => m.index > at).sort((a, b) => a.index - b.index);
+      ch.overrides.delete(at);
+      for (const m of later) {
+        ch.overrides.delete(m.index);
+        const index = m.index - 1;
+        ch.overrides.set(index, { ...m, index, id: /^pending-/.test(m.id) ? m.id : this.messageId(ch.channel.id, index) });
+      }
+      ch.appendedCount--;
+      return null;
+    }
+    throw err({ code: 'not-found' });
   }
 
   async retryMessage(messageId: Id): Promise<void> {

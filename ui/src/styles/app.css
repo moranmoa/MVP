@@ -2654,3 +2654,12 @@ input.switch:disabled {
     transition: none;
   }
 }
+
+/* #289: the held message's Try again is a 24px target. */
+.send-state.held .link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.5rem;
+  min-width: 1.5rem;
+  padding-inline: 0.25rem;
+}

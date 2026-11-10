@@ -165,6 +165,11 @@ export interface Message {
   mentionsMe?: boolean;
   /** Set by the UI when the text was too long or had too many lines to show in full. */
   clipped?: boolean;
+  /**
+   * Only on the one message.updated that sends a message held for its channel
+   * key (#288): the `pending-…` id of the held entry this message replaces.
+   */
+  replaces?: Id;
 }
 
 export interface MessageRange {
