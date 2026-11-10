@@ -27,6 +27,8 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
+# MIT OR Apache-2.0. Already in the tree (libp2p-identity); T8-02 invite links.
+bs58 = "0.5"
 zeroize = "1"
 # MIT. SQLite itself is public domain. Same version and features as `sync`.
 rusqlite = { version = "0.32", features = ["bundled"] }
