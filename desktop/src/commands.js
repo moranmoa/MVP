@@ -15,7 +15,7 @@ const COMMANDS = Object.freeze({
   getRecoveryChallenge: [],
   checkRecoveryWords: ['answers'],
   getRecoveryWords: [],
-  restoreIdentity: ['words'],
+  restoreIdentity: ['words', 'input'],
   updateProfile: ['input'],
   // Servers and channels
   listServers: [],

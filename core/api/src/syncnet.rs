@@ -269,6 +269,11 @@ impl VoiceNet for SyncNetwork {
 }
 
 impl Network for SyncNetwork {
+    fn link_counts(&self) -> Option<(usize, usize)> {
+        let peers = self.runtime.block_on(self.node.peers()).ok()?.len();
+        Some((peers, self.direct_peers().len()))
+    }
+
     fn set_relay_only(&self, on: bool) {
         if let Err(e) = self.node.set_relay_only(on) {
             tracing::warn!(%e, "relay-only not applied");

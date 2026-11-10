@@ -36,9 +36,19 @@ const ENV_KEEP = [
   'DBUS_SESSION_BUS_ADDRESS', 'XDG_RUNTIME_DIR', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME',
 ];
 
+/**
+ * MVS_DEBUG_LOG=1 (off by default; desktop/README.md): the core logs sync's
+ * debug lines and the join steps to stderr, which main.js writes to mvs.log
+ * through logfile.js (peer IDs, server IDs, IPs and hosts redacted). A fixed
+ * filter: never the user's own RUST_LOG, so never api's requests, words or
+ * identity.
+ */
+const DEBUG_LOG_FILTER = 'off,mvs::join=info,sync=debug';
+
 function minimalEnv(env = process.env) {
   const out = {};
   for (const k of ENV_KEEP) if (env[k] !== undefined) out[k] = env[k];
+  if (env.MVS_DEBUG_LOG === '1') out.RUST_LOG = DEBUG_LOG_FILTER;
   return out;
 }
 

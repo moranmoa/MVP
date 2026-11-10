@@ -166,13 +166,21 @@ export function ChannelSidebar({
       </nav>
       <CallBar myId={identity.id} engine={engine} />
       <footer className="me-panel">
-        <Avatar name={identity.displayName || identity.shortCode} color={identity.avatarColor} src={identity.avatarDataUrl} size={32} presence="online" />
-        <div className="me-text">
-          <span className="me-name">
-            <Name>{identity.displayName || identity.shortCode}</Name>
+        <button
+          type="button"
+          className="me-profile"
+          onClick={() => store.openSettings('account')}
+          aria-label={intl.formatMessage({ id: 'profile.edit.open' })}
+          title={intl.formatMessage({ id: 'profile.edit.open' })}
+        >
+          <Avatar name={identity.displayName || identity.shortCode} color={identity.avatarColor} src={identity.avatarDataUrl} size={32} presence="online" />
+          <span className="me-text">
+            <span className="me-name">
+              <Name>{identity.displayName || identity.shortCode}</Name>
+            </span>
+            <Code value={identity.shortCode} />
           </span>
-          <Code value={identity.shortCode} label={intl.formatMessage({ id: 'chat.code' }, { code: identity.shortCode })} />
-        </div>
+        </button>
         <button
           type="button"
           className="icon-button"
