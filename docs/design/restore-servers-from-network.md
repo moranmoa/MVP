@@ -185,10 +185,12 @@ The owner wants users to be able to link an email and sign in with an email and 
 - **Trade-offs:**
   - **Offline guessing:** anyone who can fetch the envelope (anyone who knows the email) can guess passwords offline. Argon2id only slows that down, and a weak password falls. The envelope opens the whole account.
   - **Mitigation:** make the password itself OPRF-hardened (OPAQUE-style), with the bootstraps as rate-limited online oracles. Guessing then needs the network, and it's throttled. That needs a running service (the bootstraps) but no account database.
+  - The OPRF is a **threshold** OPRF across at least 2 bootstraps, so no single one can guess offline. The password feature **stays off while there is only one bootstrap** (Security Lead).
   - The password stays optional, with a strength check. The 12 words remain the root.
   - **Email enumeration:** prevented by the OPRF plus rate limits, with a constant "not found".
 - **Email verification:** sending mail needs a mail-sending service, which is the one central piece. Without verification, the email is just a lookup name the user picks:
   - Restoring still needs the password, so that's safe.
   - But someone could claim a handle for another person's email first, and the first `w` per handle wins.
   - A verification service run by the bootstraps (a signed one-time code by email) prevents that, at the cost of a service that learns emails.
+  - The verifier is **opt-in** (Security Lead), with its own privacy note: it learns the email and when it was verified, and it never sees the handle-to-tag link or the backup.
   - **Password reset** without a custodian is impossible by design: the words are the only reset.
