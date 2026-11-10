@@ -112,6 +112,8 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
     - one from someone who couldn't join that call themselves;
     - an offer or answer without a fingerprint.
   - Presence: a hello every 10 s, a bye on leaving, and a participant dropped after 30 s of silence.
+    - Hellos and byes go only to members who could join that call themselves, so a call in an 18+ channel isn't shown to anyone else.
+    - A full call's refusal counts only if it comes from someone already in that call, within 10 s of joining.
   - `applyUpdate` answers `not-allowed` during a call.
 - `CoreError.code`, voice: `'call-full' | 'relay-only'`.
 - Invites (#208), all moderator and up (`not-allowed` below that):

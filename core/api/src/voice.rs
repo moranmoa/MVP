@@ -44,8 +44,12 @@ pub const CLOCK_WINDOW_MS: u64 = 120_000;
 pub const HELLO_EVERY_MS: u64 = 10_000;
 pub const HELLO_TIMEOUT_MS: u64 = 30_000;
 /// Nonces remembered for replay checks, within the clock window; past this
-/// the oldest go.
+/// the oldest go. Dropping by count is safe only because piece A caps the
+/// blob rate per peer: no sender can push a live nonce out of the cache
+/// within the window. Keep the two in step.
 const MAX_NONCES: usize = 4096;
+/// How long after joining a `full` may still turn us away.
+const JOINING_MS: u64 = HELLO_EVERY_MS;
 
 /// Sync's voice transport (piece A). Received blobs come back through
 /// `Core::voice_received`.
@@ -201,6 +205,7 @@ struct Mine {
     server: ServerId,
     channel: ChannelId,
     muted: bool,
+    joined_at: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -267,7 +272,7 @@ impl Calls {
         if self.others(channel) >= MAX_PARTICIPANTS {
             return Err(ErrorCode::CallFull.into());
         }
-        self.mine = Some(Mine { server, channel, muted: false });
+        self.mine = Some(Mine { server, channel, muted: false, joined_at: ctx.now });
         self.hello(ctx, members, None);
         let state = self.state(ctx.me()).expect("in a call");
         ctx.events.push(Event::CallState(state.clone()));
@@ -277,7 +282,7 @@ impl Calls {
     pub fn leave(&mut self, ctx: &mut Ctx, members: &mut dyn Members) {
         let Some(mine) = self.mine.take() else { return };
         let body = self.body(ctx, WireKind::Bye, mine.server, mine.channel, None);
-        self.broadcast(ctx, members, mine.server, body);
+        self.broadcast(ctx, members, mine.server, mine.channel, body);
         ctx.events.push(Event::CallState(CallState {
             channel_id: model::hex_id(mine.channel.as_bytes()),
             participants: Vec::new(),
@@ -381,8 +386,19 @@ impl Calls {
                     ctx.events.push(Event::CallState(self.state(me).expect("in a call")));
                 }
             }
-            WireKind::Full if in_this_call && signal.to == Some(me) => {
-                // A full call refused us.
+            WireKind::Full => {
+                // A full call refused us: only believed from someone already
+                // in that call, and only while we are still joining.
+                let joining = self.mine.as_ref().is_some_and(|m| {
+                    in_this_call && ctx.now.saturating_sub(m.joined_at) <= JOINING_MS
+                });
+                let known = self
+                    .rooms
+                    .get(&signal.channel)
+                    .is_some_and(|room| room.peers.contains_key(&signal.from));
+                if !joining || !known || signal.to != Some(me) {
+                    return tracing::debug!("voice: ignored a full from outside the call");
+                }
                 self.mine = None;
                 ctx.events.push(Event::CallState(CallState {
                     channel_id: model::hex_id(signal.channel.as_bytes()),
@@ -390,7 +406,6 @@ impl Calls {
                     full: true,
                 }));
             }
-            WireKind::Full => {}
             WireKind::Offer | WireKind::Answer | WireKind::Ice => {
                 let known = self
                     .rooms
@@ -464,7 +479,7 @@ impl Calls {
             Some(to) => self.send(ctx, to, &body),
             None => {
                 self.last_hello = ctx.now;
-                self.broadcast(ctx, members, server, body);
+                self.broadcast(ctx, members, server, channel, body);
             }
         }
     }
@@ -499,11 +514,22 @@ impl Calls {
         }
     }
 
-    fn broadcast(&self, ctx: &Ctx, members: &mut dyn Members, server: ServerId, body: Body) {
+    /// To the server's reachable members who could join this call
+    /// themselves: a call in an 18+ channel isn't shown to anyone else.
+    fn broadcast(
+        &self,
+        ctx: &Ctx,
+        members: &mut dyn Members,
+        server: ServerId,
+        channel: ChannelId,
+        body: Body,
+    ) {
         let Some(net) = &self.net else { return };
         let blob = seal(ctx.key, &body);
         for to in members.audience(server) {
-            net.send(to, blob.clone());
+            if members.may_call(to, server, channel) {
+                net.send(to, blob.clone());
+            }
         }
     }
 
@@ -629,6 +655,87 @@ mod tests {
             calls.fresh(nonce, NOW);
         }
         assert!(calls.nonces.len() <= MAX_NONCES && calls.seen.len() == calls.nonces.len());
+    }
+
+    #[derive(Default)]
+    struct Net(std::sync::Mutex<Vec<PublicKey>>);
+
+    impl VoiceNet for Net {
+        fn send(&self, to: PublicKey, _: Vec<u8>) {
+            self.0.lock().unwrap().push(to);
+        }
+    }
+
+    /// Everyone may call except `barred`.
+    struct Club {
+        all: Vec<PublicKey>,
+        barred: Vec<PublicKey>,
+    }
+
+    impl Members for Club {
+        fn may_call(&mut self, who: PublicKey, _: ServerId, _: ChannelId) -> bool {
+            !self.barred.contains(&who)
+        }
+
+        fn audience(&mut self, _: ServerId) -> Vec<PublicKey> {
+            self.all.clone()
+        }
+    }
+
+    fn pk(n: u8) -> PublicKey {
+        PublicKey::from_bytes(key(n).verifying_key().to_bytes())
+    }
+
+    fn signal(from: u8, kind: WireKind, to: Option<u8>, ts: u64, nonce: u8) -> Vec<u8> {
+        let mut body = body(&key(from), ts);
+        body.kind = kind;
+        body.to = to.map(|to| hex::encode(pk(to).as_bytes()));
+        body.nonce = hex::encode([nonce; 16]);
+        body.payload.clear();
+        seal(&key(from), &body)
+    }
+
+    const SERVER: ServerId = ServerId::from_bytes([1; 32]);
+    const CHANNEL: ChannelId = ChannelId::from_bytes([2; 32]);
+
+    #[test]
+    fn hello_and_bye_reach_only_those_who_may_call() {
+        let net = Arc::new(Net::default());
+        let mut calls = Calls::default();
+        calls.set_net(net.clone());
+        let mut club = Club { all: vec![pk(2), pk(3)], barred: vec![pk(3)] };
+        let mut events = Vec::new();
+        let mut ctx = Ctx { key: &key(1), now: NOW, events: &mut events };
+        calls.join(&mut ctx, &mut club, SERVER, CHANNEL).unwrap();
+        calls.leave(&mut ctx, &mut club);
+        assert_eq!(*net.0.lock().unwrap(), [pk(2), pk(2)], "an 18+ call shown to a minor");
+    }
+
+    #[test]
+    fn full_counts_only_from_the_call_and_only_while_joining() {
+        let joined = || {
+            let mut calls = Calls::default();
+            calls.set_net(Arc::new(Net::default()));
+            let mut club = Club { all: vec![pk(2), pk(4)], barred: vec![] };
+            let mut events = Vec::new();
+            let mut ctx = Ctx { key: &key(1), now: NOW, events: &mut events };
+            // Peer 2 is in the call; peer 4 isn't.
+            calls.received(&mut ctx, &mut club, None, &signal(2, WireKind::Hello, None, NOW, 1));
+            calls.join(&mut ctx, &mut club, SERVER, CHANNEL).unwrap();
+            (calls, club)
+        };
+        let full = |calls: &mut Calls, club: &mut Club, from, at, nonce| {
+            let mut events = Vec::new();
+            let mut ctx = Ctx { key: &key(1), now: at, events: &mut events };
+            calls.received(&mut ctx, club, None, &signal(from, WireKind::Full, Some(1), at, nonce));
+            calls.in_call()
+        };
+
+        let (mut calls, mut club) = joined();
+        assert!(full(&mut calls, &mut club, 4, NOW + 1, 2), "a stranger's full counted");
+        assert!(full(&mut calls, &mut club, 2, NOW + JOINING_MS + 1, 3), "a late full counted");
+        let (mut calls, mut club) = joined();
+        assert!(!full(&mut calls, &mut club, 2, NOW + 1, 4), "a joining full was ignored");
     }
 
     #[test]
