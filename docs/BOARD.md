@@ -162,7 +162,7 @@ Merged since the first board: everything up to #201 except the open PRs above. S
 | G-21 | New-messages divider and jump to it (local + core index, GAPS §2.3) (reviews: tech-lead, product-lead (+ ux visual)) | dev-ui + dev-identity (index) | todo | – | – | M | 0.4.0 |
 | G-24 | @mentions (UI + core format, GAPS §2.5) (reviews: tech-lead, product-lead (+ ux visual), sec-lead (format)) | dev-ui + dev-identity (format) | todo | – | – | M | 0.4.0 |
 | G-05 | Mention badge in the rail, separate from the new-messages dot (`mentionsMe` exists) (reviews: tech-lead, product-lead (+ ux visual)) | dev-ui | todo | – | G-24 | S | 0.4.0 |
-| G-61 | Notifications and mute (local + shell, GAPS §2.4); includes the taskbar part (reviews: tech-lead, product-lead (+ ux visual)) | dev-ui + dev-voice-shell | todo | – | – | M | 0.4.0 |
+| G-61 | Notifications and mute (local + shell, GAPS §2.4) (reviews: tech-lead, product-lead (+ ux visual)) | dev-ui + dev-voice-shell | todo | – | – | M | 0.4.0 |
 | G-17 | Mute a channel (reviews: tech-lead, product-lead (+ ux visual)) | dev-ui | todo | – | G-61 | S | 0.4.0 |
 | G-03 | Mute a server, greyed in the rail (reviews: tech-lead, product-lead (+ ux visual)) | dev-ui | todo | – | G-61 | S | 0.4.0 |
 | G-04 | Mark all as read for a server, from the context menu (reviews: tech-lead, product-lead (+ ux visual)) | dev-ui | todo | – | G-21 | S | 0.4.0 |
