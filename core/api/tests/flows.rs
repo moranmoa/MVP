@@ -1818,6 +1818,38 @@ fn ten_joins_in_five_seconds_make_at_most_three_rotations() {
     assert_eq!(owner.core.get_message_count(&channel).unwrap(), 10);
 }
 
+/// The Tech Lead's hot-loop fix: the wait for a due re-key never drops
+/// below 250 ms, and a rotator who is demoted stops waiting at once (no
+/// due re-key left to spin the sync loop on).
+#[test]
+fn a_waiting_re_key_never_spins_and_a_demoted_rotator_stops_waiting() {
+    let world = World::new();
+    let (owner, server, _) = keyed_server(&world, "Spin");
+    let moderator = joiner(&world, &server, "Mod");
+    let mod_id = moderator.core.get_identity().unwrap().unwrap().id;
+    owner.core.sync_now().unwrap();
+    owner.core.grant_role(&server.id, &mod_id, Role::Moderator).unwrap();
+    moderator.core.sync_now().unwrap();
+
+    // Only the moderator syncs: it spends its 3 tokens, then waits.
+    for i in 0..4 {
+        joiner(&world, &server, &format!("J{i}"));
+        moderator.core.sync_now().unwrap();
+    }
+    assert!(moderator.core.next_rekey_in().is_some(), "the moderator isn't waiting");
+
+    // Past due, and the re-key hasn't happened yet: still at least 250 ms.
+    advance(&world, 2 * JOIN_REKEY_REFILL_MS);
+    assert_eq!(moderator.core.next_rekey_in(), Some(REKEY_WAKE_FLOOR));
+
+    // Demoted: the next round clears the wait.
+    owner.core.revoke_role(&server.id, &mod_id).unwrap();
+    moderator.core.sync_now().unwrap();
+    assert_eq!(moderator.core.next_rekey_in(), None, "a demoted rotator still waits");
+    moderator.core.sync_now().unwrap();
+    assert_eq!(moderator.core.next_rekey_in(), None);
+}
+
 /// A kick never waits for a token: with the bucket empty, it re-keys at
 /// once, and that re-key covers a joiner who was waiting too.
 #[test]

@@ -71,6 +71,8 @@ pub const SYNC_EVERY: Duration = Duration::from_secs(2);
 pub const JOIN_RETRY_FIRST: Duration = Duration::from_secs(2);
 pub const JOIN_RETRY_MAX: Duration = Duration::from_secs(30);
 pub const JOIN_RETRY_FOR: Duration = Duration::from_secs(10 * 60);
+/// The shortest wait the sync loop takes for a due join re-key.
+pub const REKEY_WAKE_FLOOR: Duration = Duration::from_millis(250);
 
 struct Me {
     /// Held only until the recovery check passes, so the UI can show and
@@ -1090,7 +1092,9 @@ impl Core {
 
     /// How long until the next join re-key token is due on a server whose
     /// joiners wait for one (GAP-8); `None` when nobody waits. The sync loop
-    /// wakes then, so the shared re-key fires on time.
+    /// wakes then, so the shared re-key fires on time. Never below
+    /// [`REKEY_WAKE_FLOOR`], so a re-key that keeps not happening can't spin
+    /// the loop into back-to-back syncs.
     pub fn next_rekey_in(&self) -> Option<Duration> {
         let now = self.ports.clock.now_ms();
         let inner = self.lock();
@@ -1100,6 +1104,7 @@ impl Core {
             .filter_map(|server| inner.join_buckets.get(server))
             .map(|bucket| Duration::from_millis(bucket.due().saturating_sub(now)))
             .min()
+            .map(|due| due.max(REKEY_WAKE_FLOOR))
     }
 
     /// Rust addition (`syncNow`): pulls every server's records from the
@@ -1140,6 +1145,7 @@ impl Core {
                 }
                 let after = inner.view(server)?;
                 if after.is_kicked(&me) {
+                    inner.join_waiting.remove(&server);
                     inner.db.remove_server(server)?;
                     events
                         .push(Event::ServerRemoved { server_id: model::hex_id(server.as_bytes()) });
@@ -1159,8 +1165,11 @@ impl Core {
                     inner.announce(&*ports.cipher, server, events)?;
                     inner.prune(ports, server)?;
                 } else if inner.may_rotate(server)? {
-                    // A join re-key a batch window deferred: retried each round.
+                    // A join re-key the token bucket deferred: retried each round.
                     let _ = inner.rekey(ports, server, events);
+                } else {
+                    // No longer a rotator (demoted): nothing of ours waits.
+                    inner.join_waiting.remove(&server);
                 }
                 // M2: someone came online or went offline (members only).
                 if inner.db.has_server(server)? && inner.presence_changed(server)? && !changed {
@@ -1720,6 +1729,9 @@ impl Inner {
     /// joins: re-keyed for the new members as the server's token bucket
     /// allows (`crate::rekey`).
     fn rekey(&mut self, ports: &Ports, server: ServerId, events: &mut Events) -> CoreResult<()> {
+        // Waiting only if this round says so: an early return or error (no
+        // longer a member, may no longer rotate) never leaves it waiting.
+        self.join_waiting.remove(&server);
         let Some(me) = self.me.as_ref().map(Me::key) else { return Ok(()) };
         let view = self.view(server)?;
         if !view.state.is_member(me) {
@@ -1766,7 +1778,6 @@ impl Inner {
             events.push(Event::Notice { kind, server_id: server_id.clone() });
         }
         if joined.is_empty() {
-            self.join_waiting.remove(&server);
             return Ok(());
         }
         // GAP-8 (`rekey`): a token re-keys now; without one, everyone who
@@ -1777,7 +1788,6 @@ impl Inner {
             self.join_waiting.insert(server);
             return Ok(());
         }
-        self.join_waiting.remove(&server);
         for channel in joined {
             // Fail closed, as for a kick: a failed rotation is never announced
             // as one, and the UI learns the channel waits.
