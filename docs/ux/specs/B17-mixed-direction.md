@@ -74,9 +74,10 @@ export function paragraphs(text: string, uiDir: Dir): { text: string; dir: Dir }
 
 **כלל:** כל משתנה ב-ICU שהערך שלו **לא** מספר בלבד עטוף ב-FSI (U+2068) ו-PDI (U+2069), בתוך קובץ ה-JSON עצמו: `"⁨{channel}⁩"`.
 
+- **שם ערוץ עם `#`:** ה-`#` הוא חלק מהשם, ולכן הוא **בתוך** העטיפה: `"⁨#{channel}⁩"`. מחוץ לעטיפה, ב-RTL הוא קופץ לסוף ("clips#"), כמו שנראה ב-#235.
 - משתנים שחייבים עטיפה: `channel`, `name`, `server`, `code`, `version`, `used`, `limit`, `positions`, `age`, וכל משתנה חדש שהוא טקסט.
 - פטורים (מספר בלבד): `step`, `total`, `n`, `count`, `size`, ו-`#` בתוך plural.
-- **בדיקה ב-`i18n.test.ts`:** לכל מחרוזת ב-he וב-en, כל `{x}` (מחוץ לרשימת הפטורים ולא בתוך `{x, plural…}`) חייב להופיע בדיוק כ-`⁨{x}⁩`. מחרוזת שמפרה את זה מכשילה את הבדיקה.
+- **בדיקה ב-`i18n.test.ts`:** לכל מחרוזת ב-he וב-en, כל `{x}` (מחוץ לרשימת הפטורים ולא בתוך `{x, plural…}`) חייב להופיע בדיוק כ-`⁨{x}⁩`, או כ-`⁨#{x}⁩` לשם ערוץ. מחרוזת שמפרה את זה מכשילה את הבדיקה.
 - `sanitize.ts` מסיר FSI/PDI מטקסט של peers. העטיפה נוספת **בתבנית** ולא בערך, ולכן אין התנגשות. אסור להריץ `sanitize` על פלט של `formatMessage`.
 
 **`settings.storage.used` (U4):** הערכים `used` ו-`limit` מעוצבים עם `Intl.NumberFormat(locale, { style: 'unit', unit: 'megabyte' | 'gigabyte', unitDisplay: 'short' })` ונעטפים ב-FSI/PDI. כך "451 MB" נשאר בסדר הנכון בתוך משפט עברי.

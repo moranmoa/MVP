@@ -17,7 +17,7 @@ const sec = require('./security');
 const { toRequest } = require('./commands');
 const { Sidecar } = require('./sidecar');
 const deeplink = require('./deeplink');
-const { relayFor } = require('./config');
+const { relayFor, bootstrapFor, logHost } = require('./config');
 const update = require('./update');
 const { createLog } = require('./logfile');
 
@@ -82,14 +82,19 @@ function startCore() {
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   if (process.platform !== 'win32') fs.chmodSync(dataDir, 0o700);
   const relay = relayFor({ packaged: app.isPackaged, resourcesPath: process.resourcesPath });
-  // The relay's host must never reach the log, not even as a bare name.
-  const host = relay && /^\/dns(?:4|6|addr)?\/([^/]+)/.exec(relay);
-  if (host) fileLog.hide(host[1]);
+  // The relay's host (DNS name or IP) must never reach the log, not even
+  // bare; nor its direct addresses (#219).
+  const bootstrap = bootstrapFor({ packaged: app.isPackaged, resourcesPath: process.resourcesPath });
+  for (const addr of [relay, ...bootstrap]) {
+    const host = logHost(addr);
+    if (host) fileLog.hide(host);
+  }
   core = new Sidecar({
     exe: CORE_EXE,
     dataDir,
     // Without a relay the core runs offline (no invites, no chat with others).
     relay,
+    bootstrap,
     extraArgs: update.coreArgs(UPDATE),
     onEvent: toPages,
     onStatus: setCoreStatus,
