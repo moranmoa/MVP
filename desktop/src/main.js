@@ -16,6 +16,7 @@ const path = require('node:path');
 const { app, BrowserWindow, Menu, clipboard, crashReporter, dialog, ipcMain, protocol, session, shell } = require('electron');
 const sec = require('./security');
 const { toRequest } = require('./commands');
+const signout = require('./signout');
 const { Sidecar } = require('./sidecar');
 const deeplink = require('./deeplink');
 const { relayFor, bootstrapFor, logHost, stunFor, stunHost } = require('./config');
@@ -146,6 +147,24 @@ function serveCoreIpc() {
       return update.restartToUpdate(UPDATE, (c, a) => core.request(c, a), () => {
         app.relaunch({ execPath: UPDATE.launcher, args: [] });
         app.quit();
+      });
+    }
+    // #304: without the words, a native confirm first; after ok, the page's
+    // storage and the log go too (see signout.js).
+    if (req.cmd === 'signOut') {
+      const win = BrowserWindow.fromWebContents(event.sender);
+      return signout.signOut({
+        args: req.args,
+        confirmWithoutWords: async () => (await dialog.showMessageBox(win, signout.WITHOUT_WORDS_DIALOG)).response === 1,
+        request: () => core.request(req.cmd, req.args),
+        clearStorage: async () => {
+          await event.sender.session.clearStorageData({
+            origin: sec.ORIGIN,
+            storages: ['localstorage', 'indexdb', 'cachestorage', 'serviceworkers', 'cookies', 'websql', 'shadercache'],
+          });
+          await event.sender.session.clearCache();
+        },
+        clearLogs: () => signout.clearLogFiles(app.getPath('logs')),
       });
     }
     // The call gate sees joinCall's answer before the page does, so the
