@@ -82,6 +82,7 @@ What this means for the fix:
   - the joiner pulls the channel log as soon as the owner's subscription is seen, which fixes leg 2.
 - **`want`/`unwant`** is the backstop.
 - **Batching** needs a decision from the security lead. Options: rotate at once for the first few joins per window (for example 3 a minute) and batch only past that, or keep the window and accept a wait of up to 18 s for clustered joins. Piece 4 alone (an exact wake) saves at most one 2 s round.
+- **Decided (security lead, 2026-11-10):** a token bucket per server replaces the GAP-8 window: 3 join re-keys up front, refilled at 1 per 15 s, a join re-keys at once while a token is left, and with the bucket empty the waiting joins share one re-key fired exactly when the next token is due; kicks, leaves and revokes never wait and spend no token. The api side is #250; the sync side waits for T3.
 
 ## How it was measured (to rerun)
 - Use `core/api/tests/two_peers.sh` as the template, with its own container and network names, and nothing pointed at the live relay. The probe adds `core/api/tests/first_post_probe.rs`, with two `#[ignore]` tests: `probe_fresh_pairs` (`ROUNDS`, default 10) and `probe_close_joins`.
