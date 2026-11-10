@@ -472,7 +472,7 @@ async function checkBidi(p, name, lang, partial = false) {
   const box = p.getByRole('textbox', { name: /כתיבה ב/ });
   await box.waitFor();
   const placeholder = await box.getAttribute('placeholder');
-  if (placeholder !== 'כתיבה ב-#\u2068clips\u2069') problems.push(`72: composer placeholder is "${placeholder}"`);
+  if (placeholder !== 'כתיבה ב-\u2068#clips\u2069') problems.push(`72: composer placeholder is "${placeholder}"`);
   await shot(p, '72-composer-he-latin-channel');
   await box.fill('GG על המשחק');
   if ((await box.getAttribute('dir')) !== 'rtl') problems.push('73: composer with "GG על המשחק" is not RTL');

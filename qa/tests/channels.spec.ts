@@ -13,7 +13,7 @@ const ch = {
   submit: 'יצירה',
   delete: 'מחיקת הערוץ',
   cannotDeleteDefault: 'אי אפשר למחוק את הערוץ הראשון של השרת',
-  deleted: (name: string) => `הערוץ #⁨${name}⁩ נמחק.`,
+  deleted: (name: string) => `הערוץ ⁨#${name}⁩ נמחק.`,
 };
 
 function channelList(page: Page) {

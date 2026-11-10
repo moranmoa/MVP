@@ -89,9 +89,9 @@ describe('context menus on a phone (B25 §5)', () => {
     render(<App core={new MockCore({ demo: true, speed: 0, simulateActivity: false })} initialSettings={en} />);
     const row = await screen.findByRole('button', { name: /^clips/ });
     fireEvent.contextMenu(row);
-    const menu = screen.getByRole('menu', { name: 'Actions for #⁨clips⁩' });
+    const menu = screen.getByRole('menu', { name: 'Actions for ⁨#clips⁩' });
     expect(menu.classList.contains('sheet')).toBe(true);
-    expect(menu.querySelector('.context-menu-title')?.textContent).toBe('Actions for #⁨clips⁩');
+    expect(menu.querySelector('.context-menu-title')?.textContent).toBe('Actions for ⁨#clips⁩');
     expect(menu.getAttribute('style')).toBeNull();
     expect(document.activeElement?.getAttribute('role')).toBe('menuitem');
     fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
