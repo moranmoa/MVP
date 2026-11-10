@@ -8,6 +8,7 @@
 // dir; the keychain holds no entry it held before; a restart has no identity.
 
 import { execSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,8 +22,17 @@ const result = (ok, text, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'} ${text}${detail ? ` (${detail})` : ''}`);
 };
 
+let starts = 0;
+const bootLog = [];
+// Each start's stderr (RUST_LOG=info) is kept: the boot-time wipe or keychain lines.
 function core() {
-  const child = spawn(CORE, ['--data-dir', DATA], { stdio: ['pipe', 'pipe', 'ignore'] });
+  const n = ++starts;
+  const child = spawn(CORE, ['--data-dir', DATA], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, RUST_LOG: 'info' } });
+  createInterface({ input: child.stderr }).on('line', (l) => {
+    if (!/sign|wipe|delet|remov|keychain|keyring|offline|marker|unavailable|fresh/i.test(l)) return;
+    bootLog.push({ n, l });
+    console.log(`  core start ${n}: ${l.replace(/^[0-9TZ:.-]+ +/, '')}`);
+  });
   const waiting = new Map();
   let next = 1;
   createInterface({ input: child.stdout }).on('line', (line) => {
@@ -64,7 +74,8 @@ const files = () => (existsSync(DATA) ? readdirSync(DATA).sort() : []);
 const db = () => {
   try {
     const s = statSync(join(DATA, 'core.db'));
-    return `inode ${s.ino} size ${s.size}`;
+    const hash = createHash('sha256').update(readFileSync(join(DATA, 'core.db'))).digest('hex').slice(0, 16);
+    return `inode ${s.ino} size ${s.size} mtime ${s.mtime.toISOString()} sha256 ${hash}…`;
   } catch {
     return 'none';
   }
@@ -85,7 +96,8 @@ try {
 
   const keysBefore = keychain();
   const filesBefore = files();
-  console.log(`core.db before: ${db()}`);
+  const dbBefore = db();
+  console.log(`core.db before: ${dbBefore}`);
   result(filesBefore.includes('core.db'), 'before: core.db exists', filesBefore.join(' '));
   result(keysBefore.length > 0, 'before: the keychain holds the identity', `${keysBefore.filter((l) => l.startsWith('label')).length} item(s)`);
 
@@ -100,9 +112,14 @@ try {
   await c.call('signOut', { words });
   await c.close();
 
+  const before = dbBefore;
   const after = files();
   console.log(`core.db right after sign-out (core stopped): ${db()}`);
-  for (const f of ['core.db', 'core.db-wal', 'core.db-shm', 'sync']) result(!after.includes(f), `after: no ${f}`, after.join(' ') || 'data dir empty');
+  // Design (#304): core.db may stay until the next start, which wipes it when
+  // the "signed-out" marker is there and then starts fresh.
+  const pending = after.includes('signed-out');
+  result(!after.includes('core.db') || pending, 'after: core.db gone, or marked for the wipe at the next start', after.join(' ') || 'data dir empty');
+  for (const f of ['core.db-wal', 'core.db-shm', 'sync']) result(!after.includes(f), `after: no ${f}`, after.join(' ') || 'data dir empty');
   const keysAfter = keychain();
   const left = keysBefore.filter((k) => k.startsWith('label') && keysAfter.includes(k));
   result(left.length === 0, 'after: no keychain entry of this identity is left', left.join('; ') || `${keysAfter.filter((l) => l.startsWith('label')).length} item(s) in the keyring`);
@@ -118,10 +135,13 @@ try {
     for (const t of ['sign-out check', 'before sign-out', 'Sign-out QA']) console.log(`  leftover core.db contains "${t}" in plain text: ${raw.includes(Buffer.from(t))}`);
   }
   await again.close();
-  // The sign-out may finish on the next start (the "signed-out" marker is the intent).
   const fin = files();
-  for (const f of ['core.db', 'core.db-wal', 'core.db-shm', 'sync', 'signed-out']) {
-    if (after.includes(f)) result(!fin.includes(f) || (f === 'core.db' && fin.includes(f) && !after.includes('signed-out')), `after the restart: no old ${f}`, fin.join(' ') || 'data dir empty');
+  if (pending) {
+    result(!fin.includes('signed-out'), 'after the restart: the marker is gone (the wipe ran)', fin.join(' ') || 'data dir empty');
+    result(bootLog.some((b) => b.n === 2 && /signed out; starting fresh/.test(b.l)), 'after the restart: the core logged "signed out; starting fresh"');
+    // A fresh core.db may reuse the freed inode number; its content must differ.
+    const now = db();
+    result(now === 'none' || now.split('sha256 ')[1] !== before.split('sha256 ')[1], 'after the restart: core.db is a fresh file, not the old one', `before ${before.split('sha256 ')[1]}, now ${now.split('sha256 ')[1] ?? 'none'}`);
   }
 } catch (e) {
   result(false, 'the check stopped', e.message);
