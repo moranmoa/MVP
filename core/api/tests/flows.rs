@@ -3716,3 +3716,39 @@ fn turning_eighteen_with_the_same_birth_date_does_not_wait() {
     kim.core.join_server(&night.invite_link).unwrap();
     assert_eq!(kim.core.list_servers().unwrap().len(), 2);
 }
+
+/// Security Lead (#306): a 15-year-old restores with a date that makes them
+/// 18 tomorrow. It agrees with their "not adult" claim, but that proves
+/// nothing: the day after, their "18th birthday" is a raise from a changed
+/// date, so it waits 30 days like any other.
+#[test]
+fn a_restored_date_just_under_eighteen_still_waits() {
+    let world = World::new();
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let open = owner.core.create_server("Open", AgeRestriction::None).unwrap();
+    let night = owner.core.create_server("Night", AgeRestriction::Eighteen).unwrap();
+    // Teo is 15 (NOW is 2026-11-03), claims "not adult" in Open.
+    let teo = world.peer();
+    let created = teo.core.create_identity(born("2011-06-01")).unwrap();
+    let teo_id = created.identity.id.clone();
+    teo.core.join_server(&open.invite_link).unwrap();
+    assert_eq!(claims_by(&world, &open.id, &teo_id), [false]);
+
+    // Restored with 2008-11-04: 17 today, 18 tomorrow. Agrees for now.
+    let laptop = world.peer();
+    laptop.core.restore_identity_with(created.words.clone(), Some(born("2008-11-04"))).unwrap();
+    laptop.core.join_server(&open.invite_link).unwrap();
+    assert_eq!(claims_by(&world, &open.id, &teo_id), [false]);
+    assert_eq!(laptop.core.get_identity().unwrap().unwrap().pending_birth_date, None);
+
+    // The "birthday": leave and rejoin. The raise waits; no "adult" goes out.
+    advance(&world, 2 * 86_400_000);
+    laptop.core.leave_server(&open.id).unwrap();
+    laptop.core.sync_now().unwrap();
+    laptop.core.join_server(&open.invite_link).unwrap();
+    assert_eq!(claims_by(&world, &open.id, &teo_id), [false], "the restored date skipped the wait");
+    assert!(laptop.core.get_identity().unwrap().unwrap().pending_birth_date.is_some());
+    laptop.core.join_server(&night.invite_link).unwrap();
+    assert!(!laptop.core.list_servers().unwrap().iter().any(|s| s.id == night.id), "18+ during the wait");
+}

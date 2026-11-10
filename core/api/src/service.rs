@@ -1945,13 +1945,13 @@ impl Inner {
             // A raise is a *changed* date (a restore entered it again): with
             // the date my claims came from, turning 18 is just a birthday.
             let raise = prior == Some(false) && by_date && !pending && !profile.birth_date_trusted;
-            // A server's claim that agrees with the date (or a lowering from
-            // it) makes the date the one my claims come from. A server with
-            // no claim proves nothing.
-            let agrees = !profile.birth_date_trusted
-                && !pending
-                && prior.is_some()
-                && (prior == Some(by_date) || !by_date);
+            // Only an *adult* agreement (a server already holds "adult" and
+            // the date says adult) makes a restored date the one my claims
+            // come from. A "not adult" agreement proves nothing: a date a day
+            // short of 18 would agree, then skip the wait the next day
+            // (Security Lead). Nor does a server with no claim.
+            let agrees =
+                !profile.birth_date_trusted && !pending && prior == Some(true) && by_date;
             if agrees {
                 trust = true;
             }
