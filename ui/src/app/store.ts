@@ -277,6 +277,12 @@ export class Store {
     return w;
   }
 
+  /** #304: this computer forgot the identity. Back to "create or restore". */
+  signedOut(): void {
+    this.windows.clear();
+    this.set({ identity: null, servers: [], channels: {}, members: {}, call: null, callError: null, voiceRooms: {}, notice: null });
+  }
+
   setIdentity(identity: Identity | null): void {
     this.set({ identity });
   }

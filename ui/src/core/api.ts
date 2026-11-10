@@ -63,6 +63,16 @@ export interface CoreCommands {
    */
   restoreIdentity(words: string[], input?: NewIdentityInput): Promise<Identity>;
   updateProfile(input: ProfileInput): Promise<Identity>;
+  /**
+   * #304: removes this identity from this computer (the account stays on the
+   * network). Proof: this identity's 12 words, or `withoutWords` to accept
+   * losing it. Rejects invalid-words (with positions), not-allowed (another
+   * account's words), keyring-unavailable (nothing changed), bad-request,
+   * not-found. On desktop, withoutWords first asks in a native dialog; declining
+   * gives cancelled. On ok the core exits and the shell restarts it, and the
+   * shell clears the page's storage and its log.
+   */
+  signOut(words?: string[], withoutWords?: boolean): Promise<null>;
 
   // Servers and channels
   listServers(): Promise<ServerSummary[]>;

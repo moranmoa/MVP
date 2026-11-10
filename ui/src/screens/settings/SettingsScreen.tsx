@@ -9,6 +9,7 @@ import { CheckIcon, ShieldIcon } from '../../components/icons';
 import { LOCALES } from '../../i18n';
 import { textDir, useUiDir } from '../../app/textDir';
 import { ProfileEditor, type ProfileEditorHandle } from './ProfileEditor';
+import { SignOutButton } from './SignOut';
 
 type Section = 'account' | 'privacy' | 'language' | 'appearance' | 'storage' | 'diagnostics' | 'about';
 const SECTIONS: Section[] = ['account', 'privacy', 'language', 'appearance', 'storage', 'diagnostics', 'about'];
@@ -151,6 +152,10 @@ function AccountSection({
           </div>
         </div>
       )}
+      <h4>
+        <FormattedMessage id="signOut.heading" />
+      </h4>
+      <SignOutButton />
     </div>
   );
 }

@@ -66,6 +66,8 @@ export interface MockOptions {
    * stay held (`wait`, for screenshots).
    */
   keyPending?: 'arrive' | 'fail' | 'wait';
+  /** signOut is refused by the OS keychain (#304: nothing changes). */
+  signOutKeyring?: boolean;
   /** updateProfile fails (B11e: the save error state). */
   profileError?: boolean;
   /** Every demo voice room starts with 5 people in it (full). */
@@ -705,6 +707,26 @@ export class MockCore implements CoreApi {
     this.persisted = { identity: this.identity, createdServers: [], joinedDemo: false, demo: false };
     this.save();
     return this.identity;
+  }
+
+  async signOut(words?: string[], withoutWords?: boolean): Promise<null> {
+    await this.wait(300);
+    if (!this.identity) throw err({ code: 'not-found' });
+    if (words) {
+      const clean = words.map((w) => w.trim().toLowerCase());
+      const bad = clean.flatMap((w, i) => (WORDS.includes(w) ? [] : [i + 1]));
+      if (clean.length !== 12 || bad.length) throw err({ code: 'invalid-words', positions: bad });
+      if (clean.join(' ') !== this.words.join(' ')) throw err({ code: 'not-allowed' });
+    } else if (withoutWords !== true) throw err({ code: 'bad-request' });
+    if (this.options.signOutKeyring) throw err({ code: 'keyring-unavailable' }); // nothing changed
+    this.leaveCall();
+    this.identity = null;
+    this.words = [];
+    this.persisted = null;
+    this.servers.clear();
+    this.channelIndex.clear();
+    this.options.storage?.removeItem(STORAGE_KEY);
+    return null;
   }
 
   async updateProfile(input: ProfileInput): Promise<Identity> {
