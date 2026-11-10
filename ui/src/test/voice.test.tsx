@@ -1,12 +1,14 @@
-// Voice v1, piece E (#223): join a call from a channel, see who is in it,
-// mute, leave, and the reasons a join can fail.
+// Voice v1: piece E (#223) and E2, the voice room amendment. Every server has
+// one voice room in the channel sidebar ("Join chat"); everyone sees who is in
+// it, can join, mute and leave; text channels don't carry calls.
 
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { App } from '../app/App';
+import { Store } from '../app/store';
 import type { Settings } from '../app/settings';
 import { MockCore, type MockOptions } from '../core/mock';
-import { cleanCall, guardCore } from '../core/sanitize';
+import { cleanCall, cleanVoiceRoom, guardCore } from '../core/sanitize';
 
 const settings: Settings = { locale: 'en', theme: 'light', uiScale: 1, fontSize: 15 };
 
@@ -14,22 +16,36 @@ async function setup(options: MockOptions = {}) {
   const core = new MockCore({ demo: true, speed: 0, simulateActivity: false, ...options });
   render(<App core={core} initialSettings={settings} />);
   await screen.findByRole('textbox', { name: /^Message / });
+  const entry = () => screen.getByRole('button', { name: /^(Join chat|You're in the chat)/ });
+  await screen.findByRole('button', { name: /^Join chat/ });
   const join = async () =>
     act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Join call' }));
+      fireEvent.click(entry());
     });
-  return { core, join };
+  return { core, entry, join };
 }
 
-describe('calls', () => {
-  it('joins from the channel header: call bar, speaker icon on the channel, no second Join', async () => {
-    const { join } = await setup();
+describe('voice room', () => {
+  it('shows who is in the room before joining, and no Join in the channel header', async () => {
+    const { entry } = await setup();
+    expect(entry().getAttribute('aria-label')).toBe('Join chat, 2 of 5 inside');
+    expect(entry().getAttribute('aria-disabled')).toBeNull();
+    const roster = await screen.findByRole('list', { name: 'In the voice chat' });
+    expect(within(roster).getAllByRole('listitem')).toHaveLength(2);
+    expect(within(roster).getAllByRole('img', { name: 'Microphone off' })).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Join call' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Voice call' })).toBeNull();
+  });
+
+  it('joins from the sidebar entry: call bar, me in the roster', async () => {
+    const { entry, join } = await setup();
     await join();
     const bar = screen.getByRole('region', { name: 'Voice call' });
-    expect(bar.textContent).toContain('In a call in #⁨כללי⁩');
-    expect(within(bar).getAllByRole('listitem')).toHaveLength(3); // me + two online members
-    expect(screen.getByRole('img', { name: 'Call in progress here' })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Join call' })).toBeNull();
+    expect(bar.textContent).toContain('In the voice chat');
+    expect(within(bar).getAllByRole('listitem')).toHaveLength(3); // me + the two already inside
+    expect(entry().getAttribute('aria-label')).toBe("You're in the chat, 3 of 5 inside");
+    expect(entry().getAttribute('aria-disabled')).toBe('true');
+    expect(within(screen.getByRole('list', { name: 'In the voice chat' })).getAllByRole('listitem')).toHaveLength(3);
   });
 
   it('mutes and unmutes me, and leaves', async () => {
@@ -44,16 +60,35 @@ describe('calls', () => {
     });
     expect(within(bar).getByRole('button', { name: 'Mute' }).getAttribute('aria-pressed')).toBe('true');
     expect(within(bar).getAllByRole('img', { name: 'Microphone off' })).toHaveLength(before + 1);
+    // The roster everyone sees follows the mute too.
+    const roster = screen.getByRole('list', { name: 'In the voice chat' });
+    expect(within(roster).getAllByRole('img', { name: 'Microphone off' })).toHaveLength(before + 1);
     await act(async () => {
       fireEvent.click(within(bar).getByRole('button', { name: 'Leave call' }));
     });
     expect(screen.queryByRole('region', { name: 'Voice call' })).toBeNull();
-    expect(screen.queryByRole('img', { name: 'Call in progress here' })).toBeNull();
-    expect(screen.getByRole('button', { name: 'Join call' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Join chat, 2 of 5 inside' })).toBeTruthy();
+  });
+
+  it('a full room is disabled, with the reason, and a click does nothing', async () => {
+    const { entry, join } = await setup({ roomFull: true });
+    expect(entry().getAttribute('aria-disabled')).toBe('true');
+    const reason = document.getElementById(entry().getAttribute('aria-describedby')!);
+    expect(reason?.textContent).toBe('The call is full: up to 5 people.');
+    await join();
+    expect(screen.queryByRole('region', { name: 'Voice call' })).toBeNull();
+  });
+
+  it('relay-only: the refused join disables the entry and says why', async () => {
+    const { entry, join } = await setup({ callError: 'relay-only' });
+    await join();
+    expect(entry().getAttribute('aria-disabled')).toBe('true');
+    const reason = document.getElementById(entry().getAttribute('aria-describedby')!);
+    expect(reason?.textContent).toContain('Calls are off in relay-only mode: in a call, computers connect directly');
+    expect(screen.queryByRole('region', { name: 'Voice call' })).toBeNull();
   });
 
   it.each([
-    ['relay-only', 'Calls are off in relay-only mode: in a call, computers connect directly'],
     ['call-full', 'The call is full: up to 5 people.'],
     ['not-implemented', "Calls aren't available in this version yet."],
   ] as const)('says why a join failed: %s', async (code, text) => {
@@ -61,6 +96,69 @@ describe('calls', () => {
     await join();
     expect(document.querySelector('.call-blocked')?.textContent).toContain(text);
     expect(screen.queryByRole('region', { name: 'Voice call' })).toBeNull();
+  });
+
+  it('no microphone: stays in the call to listen, muted for everyone, and says so', async () => {
+    window.history.pushState({}, '', '/?voiceSim=noMic');
+    try {
+      const { join } = await setup();
+      await join();
+      const bar = screen.getByRole('region', { name: 'Voice call' });
+      await within(bar).findByText(/^No microphone: you can listen/);
+      const mute = within(bar).getByRole('button', { name: 'Mute' });
+      await waitFor(() => expect(mute.getAttribute('aria-pressed')).toBe('true'));
+      expect(mute.getAttribute('aria-disabled')).toBe('true');
+      await act(async () => {
+        fireEvent.click(mute); // can't unmute without a microphone
+      });
+      expect(within(bar).getByRole('button', { name: 'Mute' }).getAttribute('aria-pressed')).toBe('true');
+      // The others see me muted in the room roster too.
+      const roster = screen.getByRole('list', { name: 'In the voice chat' });
+      expect(within(roster).getAllByRole('img', { name: 'Microphone off' })).toHaveLength(2);
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
+
+  it("someone the engine can't reach shows \"couldn't connect directly\" and stays in the call", async () => {
+    window.history.pushState({}, '', '/?voiceSim=peerFailed');
+    try {
+      const { join } = await setup();
+      await join();
+      const bar = screen.getByRole('region', { name: 'Voice call' });
+      expect(within(bar).getAllByText("couldn't connect directly")).toHaveLength(1);
+      expect(within(bar).getAllByRole('listitem')).toHaveLength(3);
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
+
+  it('a call the core ends while relay-only is on shows the relay-only reason', async () => {
+    const core = new MockCore({ demo: true, speed: 0, simulateActivity: false });
+    const store = new Store(core);
+    store.start();
+    await store.init();
+    const [server] = await core.listServers();
+    const room = await core.getVoiceRoom(server.id);
+    await store.joinCall(room.roomId);
+    expect(store.getState().call).not.toBeNull();
+    // My own Leave isn't news.
+    await store.leaveCall();
+    expect(store.getState().callError).toBeNull();
+    await store.joinCall(room.roomId);
+    store.setRelayOnly(true);
+    await core.leaveCall(); // as the core does when relay-only goes on
+    expect(store.getState().call).toBeNull();
+    expect(store.getState().callError).toBe('relay-only');
+  });
+
+  it('text channels no longer carry calls', async () => {
+    const { core } = await setup();
+    const [server] = await core.listServers();
+    const [channel] = await core.listChannels(server.id);
+    await expect(core.joinCall(channel.id)).rejects.toMatchObject({ code: 'not-allowed' });
+    const room = await core.getVoiceRoom(server.id);
+    await expect(core.joinCall(room.roomId)).resolves.toMatchObject({ channelId: room.roomId });
   });
 
   it('cleanCall keeps at most 5 people and drops anything malformed', () => {
@@ -78,6 +176,39 @@ describe('calls', () => {
     expect(c.participants[0]).toEqual({ identity: id('1'), muted: true });
     expect(c.participants.every((p, i) => i === 0 || p.muted === false)).toBe(true);
     expect(c.full).toBe(false);
+  });
+
+  it('cleanVoiceRoom drops a room with a bad id, too many people or unknown fields', () => {
+    const id = (c: string) => c.repeat(64);
+    const p = (d: string, muted = false) => ({ userId: id(d), muted });
+    const ok = { serverId: id('a'), roomId: id('b'), participants: [p('1', true), p('2')] };
+    expect(cleanVoiceRoom(ok)).toEqual(ok);
+    expect(cleanVoiceRoom({ ...ok, participants: [] })).toEqual({ ...ok, participants: [] });
+    for (const bad of [
+      null,
+      'room',
+      { ...ok, roomId: 'b‮'.repeat(3) }, // not an id
+      { ...ok, serverId: id('A') }, // upper-case hex
+      { ...ok, participants: ['1', '2', '3', '4', '5', '6'].map((d) => p(d)) }, // 6 people
+      { ...ok, participants: [p('1'), p('1')] }, // twice
+      { ...ok, participants: [{ ...p('1'), muted: 'no' }] },
+      { ...ok, participants: [{ ...p('1'), addr: '10.0.0.1' }] }, // unknown field
+      { ...ok, extra: 1 }, // unknown field
+      { ...ok, participants: 'x' },
+    ]) {
+      expect(cleanVoiceRoom(bad)).toBeNull();
+    }
+  });
+
+  it('a malformed voice.room event is dropped; a good one updates the roster', async () => {
+    const handlers = new Map<string, (p: unknown) => void>();
+    const bare = { on: (e: string, h: (p: unknown) => void) => (handlers.set(e, h), () => {}) } as unknown as Parameters<typeof guardCore>[0];
+    const seen: unknown[] = [];
+    guardCore(bare).on('voice.room', (r) => seen.push(r));
+    const send = handlers.get('voice.room')!;
+    send({ serverId: 'a'.repeat(64), roomId: 'b'.repeat(64), participants: [{ userId: 'c'.repeat(64), muted: false }] });
+    send({ serverId: 'a'.repeat(64), roomId: '<img>', participants: [] });
+    expect(seen).toHaveLength(1);
   });
 
   it('drops a malformed call.signal instead of passing on a cleaned-up guess', () => {

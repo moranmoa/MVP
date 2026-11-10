@@ -4,8 +4,8 @@ import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import type { Channel, Id, ServerSummary } from '../../core';
 import { Avatar, Badge, Code, InviteBox, Name } from '../../components/common';
-import { GearIcon, HashIcon, LinkIcon, PlusIcon, SpeakerIcon } from '../../components/icons';
-import { CallBar } from './CallBar';
+import { GearIcon, HashIcon, LinkIcon, PlusIcon } from '../../components/icons';
+import { CallBar, VoiceRoomEntry } from './CallBar';
 import { useContextMenu, type MenuItem } from '../../components/ContextMenu';
 import { copyText } from '../../app/clipboard';
 import { useCore } from '../../core';
@@ -42,7 +42,6 @@ export function ChannelSidebar({
   // desktop page can't write the clipboard by itself, see app/clipboard.ts).
   const [showInvite, setShowInvite] = useState(false);
   const owner = server.ownerId === identity.id;
-  const callChannel = useStore(store, (s) => s.call?.channelId);
   const core = useCore();
   const { bind, menu } = useContextMenu();
   // B25 §3: the channel menu. Rename and delete are also behind the channel's gear.
@@ -137,11 +136,6 @@ export function ChannelSidebar({
                   <span className="channel-name">
                     <bdi>{c.name}</bdi>
                   </span>
-                  {c.id === callChannel && (
-                    <span className="call-here" role="img" aria-label={intl.formatMessage({ id: 'call.active' })} title={intl.formatMessage({ id: 'call.active' })}>
-                      <SpeakerIcon />
-                    </span>
-                  )}
                   {c.adult && (
                     <span className="adult-tag" aria-hidden="true">
                       18+
@@ -164,6 +158,7 @@ export function ChannelSidebar({
             );
           })}
         </ul>
+        <VoiceRoomEntry serverId={server.id} myId={identity.id} />
       </nav>
       <CallBar myId={identity.id} />
       <footer className="me-panel">

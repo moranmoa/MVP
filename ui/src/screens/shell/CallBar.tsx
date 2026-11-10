@@ -1,12 +1,14 @@
-// Voice v1, piece E (#223): the UI around a call. Join from a channel's
-// header, see who is in it, mute, leave. The audio itself (microphone,
+// Voice v1, piece E (#223) and E2 (voice-room amendment): the UI around a call.
+// Join the server's voice room from the channel sidebar, see who is in it,
+// mute, leave. The audio itself (microphone,
 // WebRTC, speaking levels) is the voice engine's, piece D in ui/src/voice.
 
+import { useEffect } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import { Avatar, Name } from '../../components/common';
-import { AlertIcon, HangUpIcon, MicIcon, MicOffIcon, PhoneIcon } from '../../components/icons';
+import { AlertIcon, HangUpIcon, MicIcon, MicOffIcon, PhoneIcon, SpeakerIcon } from '../../components/icons';
 import { useCore, type CallState, type Id, type Member } from '../../core';
 
 /**
@@ -26,9 +28,28 @@ interface VoiceEngine {
   outputId?: string;
   setInput: (id: string) => void;
   setOutput: (id: string) => void;
+  /** People the engine couldn't reach directly (its per-peer `peer-failed`). Asked of piece D. */
+  peerFailed: Record<Id, boolean>;
 }
-function useVoiceEngine(_call: CallState | null): VoiceEngine {
-  return { ready: true, speaking: {}, setMicMuted: () => {}, inputs: [], outputs: [], setInput: () => {}, setOutput: () => {} };
+/**
+ * The stub has no audio. For demos and QA it can act out the engine's failure
+ * states: `?voiceSim=noMic` (no microphone) or `?voiceSim=peerFailed` (the
+ * first other person can't be reached directly).
+ */
+function useVoiceEngine(call: CallState | null, myId: Id): VoiceEngine {
+  const sim = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('voiceSim') : null;
+  const other = call?.participants.find((p) => p.identity !== myId)?.identity;
+  return {
+    ready: true,
+    error: call && sim === 'noMic' ? 'no-device' : undefined,
+    speaking: {},
+    setMicMuted: () => {},
+    inputs: [],
+    outputs: [],
+    setInput: () => {},
+    setOutput: () => {},
+    peerFailed: sim === 'peerFailed' && other ? { [other]: true } : {},
+  };
 }
 
 /** The short code the app shows for someone not (yet) in the member list. */
@@ -44,26 +65,91 @@ const ERROR_TEXT: Record<string, string> = {
   'not-allowed': 'call.error.notAllowed',
 };
 
-/** "Join call" in a channel's header; hidden while I'm in this channel's call. */
-export function JoinCallButton({ channelId }: { channelId: Id }) {
+const NO_MEMBERS: Member[] = [];
+const ROOM_MAX = 5;
+
+/**
+ * The server's voice room in the channel sidebar: "Join chat" with a speaker
+ * icon, and who is inside under it, for every member. Disabled, with the reason
+ * under it, when the room is full or calls are off (relay-only).
+ */
+export function VoiceRoomEntry({ serverId, myId }: { serverId: Id; myId: Id }) {
   const store = useAppStore();
   const intl = useIntl();
-  const inThis = useStore(store, (s) => s.call?.channelId === channelId);
-  if (inThis) return null;
+  const room = useStore(store, (s) => s.voiceRooms[serverId]);
+  const members = useStore(store, (s) => s.members[serverId] ?? NO_MEMBERS);
+  const relayOnly = useStore(store, (s) => s.relayOnly);
+  const callError = useStore(store, (s) => s.callError);
+  // Events are hints: re-read the room whenever this server comes on screen.
+  useEffect(() => {
+    void store.loadVoiceRoom(serverId);
+  }, [store, serverId]);
+
+  const people = room?.participants ?? [];
+  const inRoom = people.some((p) => p.userId === myId);
+  const blocked = relayOnly ? 'call.error.relayOnly' : !inRoom && people.length >= ROOM_MAX ? 'call.error.full' : null;
+  const byId = new Map(members.map((m) => [m.id, m]));
+  const reasonId = `voice-room-reason-${serverId}`;
+  const label = [
+    intl.formatMessage({ id: inRoom ? 'call.roomIn' : 'call.room' }),
+    people.length ? intl.formatMessage({ id: 'call.roomCount' }, { count: people.length, max: ROOM_MAX }) : null,
+  ]
+    .filter(Boolean)
+    .join(', ');
+
   return (
-    <button
-      type="button"
-      className="icon-button join-call"
-      onClick={() => void store.joinCall(channelId)}
-      aria-label={intl.formatMessage({ id: 'call.join' })}
-      title={intl.formatMessage({ id: 'call.join' })}
-    >
-      <PhoneIcon />
-    </button>
+    <div className="voice-room">
+      <button
+        type="button"
+        className={`channel voice-room-entry ${inRoom ? 'in-room' : ''}`}
+        aria-label={label}
+        aria-disabled={blocked || inRoom ? true : undefined}
+        aria-describedby={blocked ? reasonId : undefined}
+        disabled={!room}
+        onClick={() => {
+          if (room && !blocked && !inRoom) void store.joinCall(room.roomId);
+        }}
+      >
+        <SpeakerIcon />
+        <span className="channel-name">
+          <FormattedMessage id={inRoom ? 'call.roomIn' : 'call.room'} />
+        </span>
+        {people.length > 0 && (
+          <span className="voice-room-count" aria-hidden="true">
+            {people.length}/{ROOM_MAX}
+          </span>
+        )}
+      </button>
+      {blocked && (
+        <p id={reasonId} className="voice-room-reason">
+          <FormattedMessage id={blocked} />
+        </p>
+      )}
+      {!blocked && callError && <CallError />}
+      {people.length > 0 && (
+        <ul className="voice-room-people" aria-label={intl.formatMessage({ id: 'call.roomPeople' })}>
+          {people.map((p) => {
+            const m = byId.get(p.userId);
+            const name = m?.displayName || codeOf(p.userId);
+            return (
+              <li key={p.userId}>
+                <Avatar name={name} color={m?.avatarColor ?? '#888'} size={20} />
+                <Name>{name}</Name>
+                {p.muted && (
+                  <span className="call-muted" role="img" aria-label={intl.formatMessage({ id: 'call.micOff' })}>
+                    <MicOffIcon />
+                  </span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
   );
 }
 
-/** Why joining failed, under the channel header, until dismissed or retried. */
+/** Why joining failed, under the voice room entry, until dismissed or retried. */
 export function CallError() {
   const store = useAppStore();
   const intl = useIntl();
@@ -83,33 +169,29 @@ export function CallError() {
 }
 
 /** My call: where, who, mute and leave. In the channel sidebar, above my panel. */
-const NO_MEMBERS: Member[] = [];
-
 export function CallBar({ myId }: { myId: Id }) {
   const store = useAppStore();
   const core = useCore();
   const intl = useIntl();
   const call = useStore(store, (s) => s.call);
-  // The call may be in another server than the one on screen.
-  const members = useStore(store, (s) => {
-    const id = s.call?.channelId;
-    const serverId = Object.keys(s.channels).find((k) => s.channels[k].some((c) => c.id === id));
-    return (serverId && s.members[serverId]) || NO_MEMBERS;
-  });
-  const channelName = useStore(store, (s) => {
-    const id = s.call?.channelId;
-    for (const list of Object.values(s.channels)) {
-      const c = list.find((x) => x.id === id);
-      if (c) return c.name;
-    }
-    return '';
-  });
-  const engine = useVoiceEngine(call);
+  // The call may be in another server's room than the one on screen.
+  const serverId = useStore(store, (s) => Object.values(s.voiceRooms).find((r) => r.roomId === s.call?.channelId)?.serverId);
+  const members = useStore(store, (s) => (serverId && s.members[serverId]) || NO_MEMBERS);
+  const serverName = useStore(store, (s) => s.servers.find((x) => x.id === serverId)?.name ?? '');
+  const engine = useVoiceEngine(call, myId);
+  // No microphone (none, permission denied, or unplugged mid-call): stay in the
+  // call to listen, and show the others I'm muted (#232 V5.7/V5.8).
+  const noMic = !!call && (engine.error === 'no-device' || engine.error === 'mic-denied');
+  const meMuted = !!call?.participants.find((p) => p.identity === myId)?.muted;
+  useEffect(() => {
+    if (noMic && !meMuted) void core.setMuted(true).catch(() => {});
+  }, [noMic, meMuted, core]);
   if (!call) return null;
 
   const me = call.participants.find((p) => p.identity === myId);
   const byId = new Map(members.map((m) => [m.id, m]));
   const toggleMute = () => {
+    if (noMic) return;
     const muted = !me?.muted;
     engine.setMicMuted(muted);
     void core.setMuted(muted).catch(() => {});
@@ -119,7 +201,7 @@ export function CallBar({ myId }: { myId: Id }) {
     <section className="call-bar" aria-label={intl.formatMessage({ id: 'call.label' })}>
       <p className="call-where">
         <PhoneIcon />
-        <FormattedMessage id="call.inCall" values={{ channel: channelName }} />
+        <FormattedMessage id="call.inCall" values={{ server: serverName }} />
       </p>
       <ul className="call-people">
         {call.participants.map((p) => {
@@ -128,7 +210,14 @@ export function CallBar({ myId }: { myId: Id }) {
           return (
             <li key={p.identity} className={engine.speaking[p.identity] ? 'speaking' : undefined}>
               <Avatar name={name} color={m?.avatarColor ?? '#888'} size={24} />
-              <Name>{name}</Name>
+              <span className="call-person">
+                <Name>{name}</Name>
+                {engine.peerFailed[p.identity] && p.identity !== myId && (
+                  <span className="call-peer-failed">
+                    <FormattedMessage id="call.peerFailed" />
+                  </span>
+                )}
+              </span>
               {p.muted && (
                 <span className="call-muted" role="img" aria-label={intl.formatMessage({ id: 'call.micOff' })}>
                   <MicOffIcon />
@@ -138,11 +227,19 @@ export function CallBar({ myId }: { myId: Id }) {
           );
         })}
       </ul>
+      {noMic && (
+        <p id="call-no-mic" className="call-no-mic" role="status">
+          <MicOffIcon />
+          <FormattedMessage id="call.noMic" />
+        </p>
+      )}
       <div className="call-actions">
         <button
           type="button"
           className={`icon-button call-mute ${me?.muted ? 'muted' : ''}`}
           aria-pressed={!!me?.muted}
+          aria-disabled={noMic || undefined}
+          aria-describedby={noMic ? 'call-no-mic' : undefined}
           aria-label={intl.formatMessage({ id: 'call.mute' })}
           title={intl.formatMessage({ id: 'call.mute' })}
           onClick={toggleMute}
