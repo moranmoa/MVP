@@ -137,9 +137,12 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 - Server lifecycle (#229 design, #251 authority; `docs/design/server-rename-leave-delete.md`):
   - `renameServer(serverId, name)` returns the updated `ServerSummary` and fires `server.updated` (here, and for every member when they read it). The name is trimmed, then must pass the strict server-name rule (1–100 code points, no bidi, control or zero-width characters). The owner or an admin only.
   - `leaveServer(serverId)` returns `null`. Any member but the owner (who deletes instead). The `Leave` goes out, so the others re-key; then the server leaves this device and `server.removed { serverId, reason: 'left' }` fires. The leaver isn't banned, and comes back through a new invite as a plain member.
-  - `closeServer(serverId)` returns `null`. The owner deletes the server for good: the core syncs first, then sends the close, and the server leaves this device. Every member's core purges it when it reads the close, with `server.removed { serverId, reason: 'deleted' }`.
-  - Purge: the server's records, sync secret, channel keys, sync subscription, and any call in it. "Removed from your devices", not erased: other members keep their copies.
-  - `server.removed` gains an optional `reason: 'left' | 'deleted'`. It's absent for a kick, as before.
+  - `closeServer(serverId)` returns `null`. The owner deletes the server for good: the core syncs first, then sends the close.
+    - On the owner's core, and on every member's when it reads the close, the server is closed, not purged at once. `server.closed { serverId }` fires; any call there ends; its keys and sync subscription go, and it's no longer synced. It stays in `listServers`, read-only, with `ServerSummary.closed: true` (additive).
+    - 30 days (`CLOSED_RETENTION_MS`) after the close was received, the rest is purged and `server.removed { serverId, reason: 'closed' }` fires. Its genesis and close record are kept forever, so the server reads as closed, never unknown.
+    - An old invite, from someone who was in it or a stranger a stale peer still serves, gives `join.status` `{ phase: 'closed', link }`.
+  - Purge (a leave, or a closed server's 30 days): the server's records, sync secret, channel keys, sync subscription, and any call in it. "Removed from your devices", not erased: other members keep their copies.
+  - `server.removed` gains an optional `reason: 'left' | 'closed'`. It's absent for a kick, as before.
   - Errors:
     - `not-found`: a server I'm not in.
     - `not-allowed`: not permitted (role), or the owner leaving.

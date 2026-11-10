@@ -33,8 +33,8 @@ pub use ports::{
     LoopbackNetwork, Network, Opened, PendingGroupKeys, Ports, Reach, SharedSecrets, SystemClock,
 };
 pub use service::{
-    Config, Core, CHALLENGE_POSITIONS, JOIN_REKEY_MIN_MS, JOIN_RETRY_FIRST, JOIN_RETRY_FOR,
-    JOIN_RETRY_MAX, MAX_CHECK_FAILURES, SYNC_EVERY,
+    Config, Core, CHALLENGE_POSITIONS, CLOSED_RETENTION_MS, JOIN_REKEY_MIN_MS, JOIN_RETRY_FIRST,
+    JOIN_RETRY_FOR, JOIN_RETRY_MAX, MAX_CHECK_FAILURES, SYNC_EVERY,
 };
 pub use types::*;
 pub use voice::{

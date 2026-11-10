@@ -81,6 +81,10 @@ pub struct ServerSummary {
     pub invite_link: String,
     pub unread: bool,
     pub mentions: u32,
+    /// Server lifecycle: the owner closed it. It stays listed, read-only,
+    /// for 30 days after the close was received (additive).
+    #[serde(default)]
+    pub closed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -288,6 +292,11 @@ pub enum JoinStatus {
         link: String,
         required: AgeRestriction,
     },
+    /// Server lifecycle: the server was closed by its owner (an old invite,
+    /// or one a stale peer still serves).
+    Closed {
+        link: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -383,7 +392,12 @@ pub enum Event {
     #[serde(rename = "server.updated")]
     ServerUpdated(ServerSummary),
     /// I'm no longer in the server. `reason` (additive): `left` or
-    /// `deleted`; absent for a kick (as before).
+    /// `closed`; absent for a kick (as before).
+    /// Server lifecycle: the owner closed the server (read, or my own
+    /// `closeServer`). It stays listed, read-only, until its 30 days are up;
+    /// then `server.removed` (`closed`).
+    #[serde(rename = "server.closed", rename_all = "camelCase")]
+    ServerClosed { server_id: Id },
     #[serde(rename = "server.removed", rename_all = "camelCase")]
     ServerRemoved {
         server_id: Id,
@@ -488,8 +502,9 @@ pub struct CallParticipant {
 pub enum RemovedReason {
     /// I left (`leaveServer`).
     Left,
-    /// The owner deleted it (`closeServer`), mine or read.
-    Deleted,
+    /// The owner closed (deleted) it, mine or read; sent when its 30 days
+    /// are up and the rest of it is purged.
+    Closed,
 }
 
 /// Voice: the WebRTC signalling `sendSignal` carries.

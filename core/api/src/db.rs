@@ -39,6 +39,10 @@ const SECRET_AD: &[u8] = b"mvs/api/server-secret/v1";
 fn secret_key(server: ServerId) -> String {
     format!("server-secret/{}", hex::encode(server.as_bytes()))
 }
+
+fn closed_key(server: ServerId) -> String {
+    format!("closed-at/{}", hex::encode(server.as_bytes()))
+}
 const NONCE_LEN: usize = 24;
 
 pub(crate) struct Db {
@@ -253,8 +257,26 @@ impl Db {
     /// device holds for `server`, in one transaction: its records, stubs and
     /// their send states, its sealed sync secret, and its row. "Removed from
     /// your devices", not erased: other members keep their copies.
-    pub fn purge_server(&mut self, server: ServerId) -> Result<(), CoreError> {
+    ///
+    /// `keep`: records that stay (a closed server's genesis and close, kept
+    /// forever so the server reads as closed, not unknown).
+    pub fn purge_server(&mut self, server: ServerId, keep: &[RecordId]) -> Result<(), CoreError> {
         let id = server.as_bytes().as_slice();
+        let kept: Vec<Vec<u8>> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT bytes FROM records WHERE id = ?1 AND server = ?2")
+                .map_err(internal)?;
+            let mut kept = Vec::new();
+            for record in keep {
+                let bytes: Option<Vec<u8>> = stmt
+                    .query_row(params![record.as_bytes().as_slice(), id], |row| row.get(0))
+                    .optional()
+                    .map_err(internal)?;
+                kept.extend(bytes.map(|b| [record.as_bytes().as_slice(), &b].concat()));
+            }
+            kept
+        };
         let tx = self.conn.transaction().map_err(internal)?;
         for sql in [
             "DELETE FROM send_states WHERE id IN (SELECT id FROM records WHERE server = ?1)",
@@ -264,8 +286,43 @@ impl Db {
         ] {
             tx.execute(sql, [id]).map_err(internal)?;
         }
+        for row in &kept {
+            let (record, bytes) = row.split_at(32);
+            tx.execute(
+                "INSERT INTO records (id, server, bytes) VALUES (?1, ?2, ?3)",
+                params![record, id, bytes],
+            )
+            .map_err(internal)?;
+        }
         tx.execute("DELETE FROM kv WHERE key = ?1", [secret_key(server)]).map_err(internal)?;
         tx.commit().map_err(internal)
+    }
+
+    /// Server lifecycle: `server` was closed (read or mine) at `at` (when
+    /// we received it). A tombstone kept forever: an old invite or a stale
+    /// peer then reads as "closed", and its sync secret is gone.
+    pub fn mark_closed(&self, server: ServerId, at: u64) -> Result<(), CoreError> {
+        self.delete(&secret_key(server))?;
+        self.set(&closed_key(server), &at.to_le_bytes())
+    }
+
+    /// When `server`'s close was received, if it was.
+    pub fn closed_at(&self, server: ServerId) -> Result<Option<u64>, CoreError> {
+        Ok(self
+            .get(&closed_key(server))?
+            .and_then(|v| Some(u64::from_le_bytes(v.try_into().ok()?))))
+    }
+
+    /// Closed servers still listed (within their 30 days), with when their
+    /// close was received.
+    pub fn closed_servers(&self) -> Result<Vec<(ServerId, u64)>, CoreError> {
+        let mut out = Vec::new();
+        for server in self.servers()? {
+            if let Some(at) = self.closed_at(server)? {
+                out.push((server, at));
+            }
+        }
+        Ok(out)
     }
 
     pub fn remove_server(&self, server: ServerId) -> Result<(), CoreError> {
@@ -322,5 +379,49 @@ impl Db {
         let size: i64 =
             self.conn.query_row("PRAGMA page_size", [], |row| row.get(0)).map_err(internal)?;
         Ok((pages * size) as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use authority::Action;
+    use records::SigningKey;
+
+    /// A closed server's last purge keeps exactly the records asked for
+    /// (its genesis and close); a leave keeps none. The tombstone stays.
+    #[test]
+    fn a_purge_keeps_only_what_it_is_told_to() {
+        let mut db = Db::open(None).unwrap();
+        let owner = SigningKey::from_bytes(&[1; 32]);
+        let genesis = authority::sign_genesis(&owner, [2; 16], 1, b"{}").unwrap();
+        let server = genesis.server();
+        let post = |seq, text: &str| {
+            authority::sign_control(
+                &owner,
+                server,
+                seq,
+                vec![genesis.id()],
+                2,
+                &Action::Post { text: text.into() },
+            )
+            .unwrap()
+        };
+        let (a, b) = (post(1, "a"), post(2, "b"));
+        db.put_records(&[genesis.clone(), a.clone(), b.clone()]).unwrap();
+        db.add_server(server, 1).unwrap();
+        db.mark_closed(server, 5).unwrap();
+        assert_eq!(db.closed_servers().unwrap(), [(server, 5)]);
+
+        db.purge_server(server, &[genesis.id(), b.id()]).unwrap();
+        let left: Vec<RecordId> = db.records(server).unwrap().iter().map(Record::id).collect();
+        assert_eq!(left.len(), 2);
+        assert!(left.contains(&genesis.id()) && left.contains(&b.id()) && !left.contains(&a.id()));
+        assert!(!db.has_server(server).unwrap());
+        assert_eq!(db.closed_at(server).unwrap(), Some(5), "the tombstone went");
+        assert!(db.closed_servers().unwrap().is_empty());
+
+        db.purge_server(server, &[]).unwrap();
+        assert!(db.records(server).unwrap().is_empty());
     }
 }

@@ -70,6 +70,9 @@ pub const SYNC_EVERY: Duration = Duration::from_secs(2);
 pub const JOIN_RETRY_FIRST: Duration = Duration::from_secs(2);
 pub const JOIN_RETRY_MAX: Duration = Duration::from_secs(30);
 pub const JOIN_RETRY_FOR: Duration = Duration::from_secs(10 * 60);
+/// Server lifecycle: how long a closed server stays listed, read-only,
+/// after its close was received (the Tech Lead's #229 answer).
+pub const CLOSED_RETENTION_MS: u64 = 30 * 24 * 3600 * 1000;
 /// Join re-keys are batched: at least this long apart per channel, plus
 /// up to `JOIN_REKEY_JITTER_MS`: 15 s ± 20% (12-18 s). Kicks stay immediate.
 pub const JOIN_REKEY_MIN_MS: u64 = 12_000;
@@ -521,6 +524,10 @@ impl Core {
         let Some((server, invite, secret)) = model::parse_invite_link(link) else {
             return Ok(JoinStatus::Invalid { link: link.to_owned() });
         };
+        // A server closed while we were in it: never opened again.
+        if self.lock().db.closed_at(server)?.is_some() {
+            return Ok(JoinStatus::Closed { link: link.to_owned() });
+        }
         // GAP-4: only the secret lets us ask for the server's logs.
         let general = BTreeSet::from([model::default_channel(server)]);
         self.ports.network.open_server(server, &secret, &general);
@@ -632,15 +639,14 @@ impl Core {
             }
             inner.lifecycle_gate(server)?;
             inner.publish_control(ports, server, &Action::Leave { cut: Default::default() })?;
-            inner.purge_server(ports, server, RemovedReason::Left, events)
+            inner.purge_server(ports, server, RemovedReason::Left, &[], events)
         })
     }
 
     /// `closeServer`: the owner deletes the server for good. Syncs first,
     /// so recent records are in the close's past (only those stay); then
-    /// the close goes out and the server leaves this device
-    /// (`server.removed`, `deleted`). Other members purge it when they read
-    /// the close.
+    /// the close goes out and the server is closed here (`server.closed`,
+    /// see `close_locally`), as it is for every member when they read it.
     pub fn close_server(&self, server_id: &str) -> CoreResult<()> {
         let server = parse_server(server_id)?;
         let _ = self.sync_now();
@@ -649,7 +655,7 @@ impl Core {
             inner.lifecycle_role(server, authority::Role::Owner)?;
             inner.lifecycle_gate(server)?;
             inner.publish_control(ports, server, &Action::ServerClose)?;
-            inner.purge_server(ports, server, RemovedReason::Deleted, events)
+            inner.close_locally(ports, server, events)
         })
     }
 
@@ -1130,7 +1136,9 @@ impl Core {
             if inner.me.is_none() {
                 return Ok(());
             }
-            let servers = inner.db.servers()?;
+            // A closed server is no longer synced.
+            let mut servers = inner.db.servers()?;
+            servers.retain(|s| inner.db.closed_at(*s).ok().flatten().is_none());
             // GAP-4: (re)open each server with its secret and channels first.
             for server in &servers {
                 inner.load(*server)?;
@@ -1144,6 +1152,9 @@ impl Core {
         self.run(|inner, ports, events| {
             let Some(me) = inner.me.as_ref() else { return Ok(()) };
             let me = me.key();
+            // Closed servers past their 30 days: purged but for their
+            // genesis and close.
+            inner.expire_closed(ports, events)?;
             for (server, records) in fetched {
                 if !inner.db.has_server(server)? {
                     continue;
@@ -1159,7 +1170,7 @@ impl Core {
                 }
                 // Server lifecycle: the owner deleted it; it leaves this device.
                 if inner.view(server)?.state.closed.is_some() {
-                    inner.purge_server(ports, server, RemovedReason::Deleted, events)?;
+                    inner.close_locally(ports, server, events)?;
                     continue;
                 }
                 if inner.view(server)?.state.server_name != name_before {
@@ -2025,13 +2036,66 @@ impl Inner {
     /// ends first (with a bye); then its records, sync secret, channel keys
     /// and sync subscription go, and every per-server loop forgets it.
     /// `server.removed` follows. Not erasure: other members keep copies.
+    ///
+    /// `keep`: for a closed server's last purge, its genesis and close.
     fn purge_server(
         &mut self,
         ports: &Ports,
         server: ServerId,
         reason: RemovedReason,
+        keep: &[RecordId],
         events: &mut Events,
     ) -> CoreResult<()> {
+        self.stop_using(ports, server, events);
+        self.db.purge_server(server, keep)?;
+        self.logs.remove(&server);
+        self.announced.remove(&server);
+        events.push(Event::ServerRemoved {
+            server_id: model::hex_id(server.as_bytes()),
+            reason: Some(reason),
+        });
+        Ok(())
+    }
+
+    /// Server lifecycle: the owner closed `server` (read, or my own close).
+    /// It isn't purged at once (the Tech Lead's #229 answer): any call there
+    /// ends, its keys and sync subscription go, and it's no longer synced;
+    /// it stays listed, read-only (`closed`), for [`CLOSED_RETENTION_MS`]
+    /// after we received the close. Then the rest goes, and its genesis and
+    /// close stay forever, so it reads as closed, never unknown.
+    fn close_locally(
+        &mut self,
+        ports: &Ports,
+        server: ServerId,
+        events: &mut Events,
+    ) -> CoreResult<()> {
+        self.stop_using(ports, server, events);
+        self.db.mark_closed(server, ports.clock.now_ms())?;
+        events.push(Event::ServerClosed { server_id: model::hex_id(server.as_bytes()) });
+        Ok(())
+    }
+
+    /// Closed servers whose 30 days are up: purged but for their genesis
+    /// and close (`server.removed`, `closed`).
+    fn expire_closed(&mut self, ports: &Ports, events: &mut Events) -> CoreResult<()> {
+        let now = ports.clock.now_ms();
+        for (server, at) in self.db.closed_servers()? {
+            if now.saturating_sub(at) < CLOSED_RETENTION_MS {
+                continue;
+            }
+            self.load(server)?;
+            let log = self.logs.get(&server).ok_or(ErrorCode::Internal)?;
+            let genesis = log.records.iter().find(|r| r.kind() == Kind::Genesis).map(Record::id);
+            let close = log.resolver.state().closed;
+            let keep: Vec<RecordId> = genesis.into_iter().chain(close).collect();
+            self.purge_server(ports, server, RemovedReason::Closed, &keep, events)?;
+        }
+        Ok(())
+    }
+
+    /// What every way out of a server shares: my call there ends (with a
+    /// bye), and its keys, sync subscription and per-server state go.
+    fn stop_using(&mut self, ports: &Ports, server: ServerId, events: &mut Events) {
         if self.calls.in_server(server) {
             if let Some(key) = self.me.as_ref().map(|me| me.identity.signing_key().clone()) {
                 let mut calls = std::mem::take(&mut self.calls);
@@ -2041,19 +2105,11 @@ impl Inner {
             }
         }
         self.calls.forget_server(server);
-        self.db.purge_server(server)?;
         ports.cipher.forget(server);
         ports.network.close_server(server);
-        self.logs.remove(&server);
-        self.announced.remove(&server);
         self.presence_seen.remove(&server);
         self.keyed_for.retain(|(s, _), _| *s != server);
         self.rekey_after.retain(|(s, _), _| *s != server);
-        events.push(Event::ServerRemoved {
-            server_id: model::hex_id(server.as_bytes()),
-            reason: Some(reason),
-        });
-        Ok(())
     }
 
     /// Loads `server`'s log from the store unless it is already in memory.
@@ -2154,6 +2210,11 @@ impl Inner {
         let Some(view) = ServerView::build(server, &log) else {
             return Ok(JoinStatus::Invalid { link });
         };
+        // Server lifecycle: an old invite (or a stale peer) for a server its
+        // owner closed. Its genesis and close say so: closed, not unknown.
+        if view.state.closed.is_some() {
+            return Ok(JoinStatus::Closed { link });
+        }
         let required = view.genesis.age_restriction;
         let age = model::age_on(&me.profile.birth_date, ports.clock.now_ms());
         if required.min_age() > 0 && age.is_none_or(|age| age < required.min_age()) {
@@ -2231,6 +2292,7 @@ impl ServerView<'_> {
             invite_link,
             unread: false,
             mentions: 0,
+            closed: self.state.closed.is_some(),
             id,
         }
     }

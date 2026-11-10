@@ -54,6 +54,7 @@ fn names(events: &[Event]) -> Vec<&'static str> {
             Event::ServerAdded(_) => "server.added",
             Event::ServerUpdated(_) => "server.updated",
             Event::ServerRemoved { .. } => "server.removed",
+            Event::ServerClosed { .. } => "server.closed",
             Event::ChannelUpdated(_) => "channel.updated",
             Event::ChannelAdded(_) => "channel.added",
             Event::ChannelRemoved { .. } => "channel.removed",
@@ -2424,20 +2425,66 @@ fn servers_are_renamed_left_and_deleted_behind_the_rollout_gate() {
     owner.core.sync_now().unwrap();
     assert!(!owner.core.list_members(&server.id).unwrap().iter().any(|m| m.id == guest_id));
 
-    // Delete: the owner only; the owner's device and, once they read it,
-    // every member's purge it.
+    // Delete: the owner only. Not purged at once (the Tech Lead's #229
+    // answer): closed, read-only, still listed; no longer synced.
     assert_eq!(third.core.close_server(&server.id).unwrap_err().code, ErrorCode::NotAllowed);
     owner.events.take();
     owner.core.close_server(&server.id).unwrap();
-    let deleted =
-        Event::ServerRemoved { server_id: server.id.clone(), reason: Some(RemovedReason::Deleted) };
-    assert!(owner.events.take().contains(&deleted));
-    assert!(owner.core.list_servers().unwrap().is_empty());
+    let closed = Event::ServerClosed { server_id: server.id.clone() };
+    assert!(owner.events.take().contains(&closed));
     third.events.take();
     third.core.sync_now().unwrap();
-    assert!(third.events.take().contains(&deleted));
+    assert!(third.events.take().contains(&closed));
+    for peer in [&owner, &third] {
+        let listed = peer.core.list_servers().unwrap();
+        assert_eq!((listed.len(), listed[0].closed), (1, true));
+        assert_eq!(peer.core.list_channels(&server.id).unwrap().len(), 1, "history gone at once");
+    }
+    // A closed server isn't synced: a record a stale peer still serves
+    // isn't read.
+    let late = authority::sign_control(
+        &old,
+        server_key,
+        9,
+        world.network.fetch(server_key).iter().map(|r| r.id()).collect(),
+        3,
+        &authority::Action::Post { text: "late".into() },
+    )
+    .unwrap();
+    world.network.publish(&late);
+    third.events.take();
+    third.core.sync_now().unwrap();
+    assert!(third.events.take().is_empty(), "a closed server was synced");
+
+    // An old invite, for someone who was never in it: closed, not unknown.
+    let stranger = world.peer();
+    sign_up(&stranger, "Stranger");
+    stranger.core.join_server(&server.invite_link).unwrap();
+    assert!(matches!(
+        stranger.events.take().last(),
+        Some(Event::JoinStatus(JoinStatus::Closed { .. }))
+    ));
+    assert!(stranger.core.list_servers().unwrap().is_empty());
+
+    // 30 days after the close was received, the rest goes; the genesis and
+    // the close stay, so the old invite still reads as closed.
+    *world.clock.0.lock().unwrap() += CLOSED_RETENTION_MS - 10_000;
+    third.events.take();
+    third.core.sync_now().unwrap();
+    assert_eq!(third.core.list_servers().unwrap().len(), 1, "purged before 30 days");
+    *world.clock.0.lock().unwrap() += 20_000;
+    third.core.sync_now().unwrap();
+    let removed =
+        Event::ServerRemoved { server_id: server.id.clone(), reason: Some(RemovedReason::Closed) };
+    assert!(third.events.take().contains(&removed));
     assert!(third.core.list_servers().unwrap().is_empty());
     assert_eq!(third.core.list_channels(&server.id).unwrap_err().code, ErrorCode::NotFound);
+    third.core.join_server(&server.invite_link).unwrap();
+    assert!(matches!(
+        third.events.take().last(),
+        Some(Event::JoinStatus(JoinStatus::Closed { .. }))
+    ));
+    assert!(third.core.list_servers().unwrap().is_empty());
 }
 
 /// The invite record ID an invite link names.
