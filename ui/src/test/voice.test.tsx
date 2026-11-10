@@ -18,8 +18,9 @@ async function setup(options: MockOptions = {}, { ipNoticeSeen = true } = {}) {
   const core = new MockCore({ demo: true, speed: 0, simulateActivity: false, ...options });
   render(<App core={core} initialSettings={settings} />);
   await screen.findByRole('textbox', { name: /^Message / });
-  const entry = () => screen.getByRole('button', { name: /^(Join chat|You're in the chat)/ });
-  await screen.findByRole('button', { name: /^Join chat/ });
+  const ENTRY = /^(Join chat|You're in the chat|The chat is full)/;
+  const entry = () => screen.getByRole('button', { name: ENTRY });
+  await screen.findByRole('button', { name: ENTRY });
   const join = async () =>
     act(async () => {
       fireEvent.click(entry());
@@ -88,12 +89,12 @@ describe('voice room', () => {
     });
   });
 
-  it('joins from the sidebar entry: call bar, me in the roster', async () => {
+  it('joins from the sidebar entry: call bar, me in the roster, names shown once', async () => {
     const { entry, join } = await setup();
     await join();
     const bar = screen.getByRole('region', { name: 'Voice call' });
     expect(bar.textContent).toContain('In the voice chat');
-    expect(within(bar).getAllByRole('listitem')).toHaveLength(3); // me + the two already inside
+    expect(within(bar).queryAllByRole('listitem')).toHaveLength(0); // names only in the roster
     expect(entry().getAttribute('aria-label')).toBe("You're in the chat, 3 of 5 inside");
     expect(entry().getAttribute('aria-disabled')).toBe('true');
     expect(within(screen.getByRole('list', { name: 'In the voice chat' })).getAllByRole('listitem')).toHaveLength(3);
@@ -103,16 +104,15 @@ describe('voice room', () => {
     const { join } = await setup();
     await join();
     const bar = screen.getByRole('region', { name: 'Voice call' });
-    const before = within(bar).queryAllByRole('img', { name: 'Microphone off' }).length;
+    const roster = screen.getByRole('list', { name: 'In the voice chat' });
+    const before = within(roster).queryAllByRole('img', { name: 'Microphone off' }).length;
     const mute = within(bar).getByRole('button', { name: 'Mute' });
     expect(mute.getAttribute('aria-pressed')).toBe('false');
     await act(async () => {
       fireEvent.click(mute);
     });
     expect(within(bar).getByRole('button', { name: 'Mute' }).getAttribute('aria-pressed')).toBe('true');
-    expect(within(bar).getAllByRole('img', { name: 'Microphone off' })).toHaveLength(before + 1);
-    // The roster everyone sees follows the mute too.
-    const roster = screen.getByRole('list', { name: 'In the voice chat' });
+    // The roster everyone sees follows the mute.
     expect(within(roster).getAllByRole('img', { name: 'Microphone off' })).toHaveLength(before + 1);
     await act(async () => {
       fireEvent.click(within(bar).getByRole('button', { name: 'Leave call' }));
@@ -124,6 +124,7 @@ describe('voice room', () => {
   it('a full room is disabled, with the reason, and a click does nothing', async () => {
     const { entry, join } = await setup({ roomFull: true });
     expect(entry().getAttribute('aria-disabled')).toBe('true');
+    expect(entry().getAttribute('aria-label')).toBe('The chat is full, 5 of 5 inside');
     const reason = document.getElementById(entry().getAttribute('aria-describedby')!);
     expect(reason?.textContent).toBe('The call is full: up to 5 people.');
     await join();
@@ -159,6 +160,7 @@ describe('voice room', () => {
       const mute = within(bar).getByRole('button', { name: 'Mute' });
       await waitFor(() => expect(mute.getAttribute('aria-pressed')).toBe('true'));
       expect(mute.getAttribute('aria-disabled')).toBe('true');
+      expect(mute.getAttribute('title')).toMatch(/^No microphone/);
       await act(async () => {
         fireEvent.click(mute); // can't unmute without a microphone
       });
@@ -189,9 +191,26 @@ describe('voice room', () => {
     try {
       const { join } = await setup();
       await join();
-      const bar = screen.getByRole('region', { name: 'Voice call' });
-      expect(within(bar).getAllByText("can't be heard: no direct connection")).toHaveLength(1);
-      expect(within(bar).getAllByRole('listitem')).toHaveLength(3);
+      const roster = screen.getByRole('list', { name: 'In the voice chat' });
+      const failed = within(roster).getAllByText('No voice connection');
+      expect(failed).toHaveLength(1);
+      expect(failed[0].getAttribute('title')).toBe("You can't hear each other.");
+      expect(within(roster).getAllByRole('listitem')).toHaveLength(3);
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
+
+  it('a connection refused by a security check says so, with its own hint', async () => {
+    window.history.pushState({}, '', '/?voiceSim=peerRefused');
+    try {
+      const { join } = await setup();
+      await join();
+      const roster = screen.getByRole('list', { name: 'In the voice chat' });
+      const refused = within(roster).getAllByText('Connection blocked for security');
+      expect(refused).toHaveLength(1);
+      expect(refused[0].getAttribute('title')).toMatch(/security check/);
+      expect(within(roster).queryByText('No voice connection')).toBeNull();
     } finally {
       window.history.pushState({}, '', '/');
     }

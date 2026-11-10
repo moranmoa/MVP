@@ -14,7 +14,8 @@ const BASE = `http://localhost:${PORT}/`;
 mkdirSync(OUT, { recursive: true });
 if (!process.argv.includes('--no-build')) execSync('npx vite build', { stdio: 'inherit' });
 const server = await preview({ preview: { port: PORT, strictPort: true, host: '127.0.0.1' }, logLevel: 'warn' });
-const browser = await chromium.launch();
+// A fake microphone, so the voice engine (piece D) finds one in call shots.
+const browser = await chromium.launch({ args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
 
 // Problems found while driving the built app; any of them fails the run.
 const problems = [];
@@ -431,6 +432,7 @@ async function joinRoom(p, ok = 'הבנתי') {
 for (const [sim, name, wait] of [
   ['noMic', '247-call-no-mic-he', '.call-no-mic'],
   ['peerFailed', '248-call-peer-failed-he', '.call-peer-failed'],
+  ['peerRefused', '249-call-peer-refused-he', '.call-peer-failed.refused'],
 ]) {
   const p = await chat(`?demo=1&still=1&lang=he&theme=light&update=999999&voiceSim=${sim}`, 'x');
   await joinRoom(p);

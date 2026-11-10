@@ -2516,3 +2516,15 @@ kbd {
   opacity: 0.6;
   cursor: default;
 }
+
+.voice-room-people li.speaking .avatar {
+  box-shadow: 0 0 0 2px var(--success);
+}
+
+.voice-room-entry .voice-room-count {
+  cursor: help;
+}
+
+.call-peer-failed.refused {
+  color: var(--danger);
+}
