@@ -3966,3 +3966,129 @@ fn a_restored_date_just_under_eighteen_still_waits() {
     laptop.core.join_server(&night.invite_link).unwrap();
     assert!(!laptop.core.list_servers().unwrap().iter().any(|s| s.id == night.id), "18+ during the wait");
 }
+
+/// Restore servers, phase A (#291): every sync round seals my server list
+/// for the holders (here the loopback network). A restore on a clean
+/// computer fetches it and rejoins each server as the same member: no new
+/// join, profile or age claim, still the owner of mine. A server I left
+/// isn't entered again.
+#[test]
+fn a_restore_brings_my_servers_back_from_the_backup() {
+    let world = World::new();
+    let me = world.peer();
+    let created = me.core.create_identity(adult()).unwrap();
+    assert!(answer(&me, &created.words, &[]).1.unwrap().ok);
+    let my_id = me
+        .core
+        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None })
+        .unwrap()
+        .id;
+    let bob = world.peer();
+    sign_up(&bob, "Bob");
+    let mine: Vec<ServerSummary> =
+        (0..3).map(|i| me.core.create_server(&format!("Mine {i}"), AgeRestriction::None).unwrap()).collect();
+    let bobs = bob.core.create_server("Bob's", AgeRestriction::None).unwrap();
+    let left = bob.core.create_server("Left", AgeRestriction::None).unwrap();
+    me.core.join_server(&bobs.invite_link).unwrap();
+    me.core.join_server(&left.invite_link).unwrap();
+    me.core.sync_now().unwrap();
+    me.core.leave_server(&left.id).unwrap();
+    me.core.sync_now().unwrap();
+    bob.core.sync_now().unwrap();
+    let mut expected: Vec<String> = mine.iter().map(|s| s.id.clone()).chain([bobs.id.clone()]).collect();
+    expected.sort();
+    let posts = |server: &str| {
+        (records_by(&world, server, &my_id, Kind::Join), records_by(&world, server, &my_id, Kind::Post))
+    };
+    let before: Vec<_> = expected.iter().map(|s| posts(s)).collect();
+
+    // A clean computer, the same words.
+    let laptop = world.peer();
+    laptop.core.restore_identity(created.words.clone()).unwrap();
+    let mut back: Vec<String> = laptop.core.list_servers().unwrap().into_iter().map(|s| s.id).collect();
+    back.sort();
+    assert_eq!(back, expected, "the left server came back, or one is missing");
+    let after: Vec<_> = expected.iter().map(|s| posts(s)).collect();
+    assert_eq!(after, before, "a rejoin posted over what the servers hold");
+    for server in &mine {
+        let owner = laptop.core.list_servers().unwrap().into_iter().find(|s| s.id == server.id).unwrap().owner_id;
+        assert_eq!(owner, my_id);
+    }
+    // Nothing more to do: the next rounds don't re-add or re-post.
+    laptop.core.sync_now().unwrap();
+    assert_eq!(laptop.core.list_servers().unwrap().len(), expected.len());
+
+    // Another account's words find nothing of mine.
+    let stranger = world.peer();
+    stranger.core.restore_identity(LEGAL.split(' ').map(String::from).collect()).unwrap();
+    assert!(stranger.core.list_servers().unwrap().is_empty());
+}
+
+/// A network that counts backup fetches and puts.
+struct CountingNet {
+    world: Arc<LoopbackNetwork>,
+    fetches: std::sync::atomic::AtomicUsize,
+    puts: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingNet {
+    fn counts(&self) -> (usize, usize) {
+        use std::sync::atomic::Ordering::SeqCst;
+        (self.fetches.load(SeqCst), self.puts.load(SeqCst))
+    }
+}
+
+impl Network for CountingNet {
+    fn publish(&self, record: &records::Record) {
+        self.world.publish(record);
+    }
+    fn fetch(&self, server: ServerId) -> Vec<records::Record> {
+        self.world.fetch(server)
+    }
+    fn fetch_invite(&self, handle: [u8; 32]) -> Vec<Vec<u8>> {
+        self.world.fetch_invite(handle)
+    }
+    fn put_backup(&self, tag: [u8; 32], blob: &[u8]) {
+        self.puts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.world.put_backup(tag, blob);
+    }
+    fn fetch_backup(&self, tag: [u8; 32]) -> Vec<Vec<u8>> {
+        self.fetches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.world.fetch_backup(tag)
+    }
+}
+
+/// Tech Lead (#317): the backup is fetched and put only when my server set
+/// changed, at login (the first round after start), or every 24 h. Rounds
+/// with nothing new fetch and put nothing (a real holder allows 60 fetches
+/// an hour; rounds come every 2 s).
+#[test]
+fn unchanged_rounds_neither_fetch_nor_put_the_backup() {
+    let world = World::new();
+    let secrets = Arc::new(MemoryStore::new());
+    let net = Arc::new(CountingNet {
+        world: world.network.clone(),
+        fetches: Default::default(),
+        puts: Default::default(),
+    });
+    let me = world.peer_on(net.clone(), secrets.clone(), None, Arc::new(PendingGroupKeys));
+    sign_up(&me, "MoA");
+    me.core.create_server("One", AgeRestriction::None).unwrap();
+    me.core.sync_now().unwrap();
+    assert_eq!(net.counts(), (1, 1), "login round");
+    for _ in 0..20 {
+        advance(&world, 2_000);
+        me.core.sync_now().unwrap();
+    }
+    assert_eq!(net.counts(), (1, 1), "rounds with nothing new fetched or put");
+    // A change: one fetch, one put.
+    me.core.create_server("Two", AgeRestriction::None).unwrap();
+    me.core.sync_now().unwrap();
+    me.core.sync_now().unwrap();
+    assert_eq!(net.counts(), (2, 2));
+    // 24 h later, unchanged: put again (holders keep it, copies heal).
+    advance(&world, api::BACKUP_REPUBLISH_MS);
+    me.core.sync_now().unwrap();
+    me.core.sync_now().unwrap();
+    assert_eq!(net.counts(), (3, 3));
+}
