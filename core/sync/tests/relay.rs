@@ -487,15 +487,27 @@ async fn members_hole_punch_from_relayed_to_direct_or_stay_relayed() {
         b.test_no_direct_dials().unwrap();
         let start = Instant::now();
         if allow_lan {
-            loop {
+            // Windows never completes the TCP simultaneous open that a DCUtR
+            // punch is (see `try_direct`), so there the punch may fail. That is
+            // still a pass, as long as it fails cleanly: the pair stays
+            // connected and online through the relay. Elsewhere it must punch.
+            let punched = loop {
                 let (sa, sb) = (a.presence(test_server().0).await.unwrap(), b.presence(test_server().0).await.unwrap());
                 if sa.direct.contains(&id(12)) && sb.direct.contains(&id(11)) {
-                    break;
+                    break true;
                 }
-                assert!(start.elapsed() < Duration::from_secs(60), "never punched: A sees {sa:?}, B sees {sb:?}");
+                if start.elapsed() >= Duration::from_secs(60) {
+                    assert!(cfg!(windows), "never punched: A sees {sa:?}, B sees {sb:?}");
+                    assert!(sa.online.contains(&id(12)) && sb.online.contains(&id(11)), "a failed punch dropped the link: A sees {sa:?}, B sees {sb:?}");
+                    break false;
+                }
                 tokio::time::sleep(Duration::from_millis(100)).await;
+            };
+            if punched {
+                assert_eq!(a.direct_peers().await.unwrap(), vec![b.peer_id()]);
+            } else {
+                assert_eq!(a.peers().await.unwrap(), vec![b.peer_id()], "a failed punch closed the relayed connection");
             }
-            assert_eq!(a.direct_peers().await.unwrap(), vec![b.peer_id()]);
         } else {
             let ids = [a.peer_id(), b.peer_id()];
             while !circuits.lock().unwrap().iter().any(|(p, ok)| *ok && ids.contains(p)) {
