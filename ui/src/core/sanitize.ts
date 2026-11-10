@@ -281,7 +281,8 @@ export function cleanCall(c: CallState): CallState {
   };
 }
 
-const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[E] } = {
+/** A cleaner may return null to drop the event altogether. */
+const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[E] | null } = {
   'identity.changed': cleanIdentity,
   'server.added': cleanServer,
   'server.updated': cleanServer,
@@ -294,12 +295,14 @@ const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[
   'join.status': cleanJoin,
   'link.open': (p) => ({ link: cleanInviteLink(p?.link) }),
   'call.state': (c) => cleanCall(c),
-  'call.signal': (s) => ({
-    from: cleanHexId(s?.from),
-    kind: (['offer', 'answer', 'ice'] as const).find((k) => k === s?.kind) ?? 'ice',
-    payload: typeof s?.payload === 'string' && s.payload.length <= 12 * 1024 ? s.payload : '',
-    fingerprintVerified: s?.fingerprintVerified === true,
-  }),
+  // For the voice engine: anything malformed is dropped, never coerced.
+  'call.signal': (s) => {
+    const kind = (['offer', 'answer', 'ice'] as const).find((k) => k === s?.kind);
+    if (!kind || typeof s?.from !== 'string' || !/^[0-9a-f]{64}$/.test(s.from)) return null;
+    if (typeof s.payload !== 'string' || s.payload.length > 12 * 1024) return null;
+    if (kind !== 'ice' && s.fingerprintVerified !== true) return null;
+    return { from: s.from, kind, payload: s.payload, fingerprintVerified: s.fingerprintVerified === true };
+  },
   'core.status': (s) => ({
     state: s?.state === 'up' || s?.state === 'down' ? s.state : 'starting',
     detail: (['missing', 'start-failed', 'crashed', 'crash-loop', 'keyring'] as const).find((d) => d === s?.detail),
@@ -340,8 +343,16 @@ export function guardCore(core: CoreApi): CoreApi {
     getMessages: wrap(core.getMessages, cleanRange),
     sendMessage: wrap(core.sendMessage, cleanMessage),
     on: <E extends CoreEventName>(event: E, handler: (p: CoreEvents[E]) => void) => {
-      const clean = EVENT_CLEANERS[event] as ((p: CoreEvents[E]) => CoreEvents[E]) | undefined;
-      return core.on(event, clean ? (p) => handler(clean(p)) : handler);
+      const clean = EVENT_CLEANERS[event] as ((p: CoreEvents[E]) => CoreEvents[E] | null) | undefined;
+      return core.on(
+        event,
+        clean
+          ? (p) => {
+              const c = clean(p);
+              if (c !== null) handler(c);
+            }
+          : handler,
+      );
     },
   };
   // Everything else (commands that only send) goes straight to the core.

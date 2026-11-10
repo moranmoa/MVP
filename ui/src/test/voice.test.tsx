@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { App } from '../app/App';
 import type { Settings } from '../app/settings';
 import { MockCore, type MockOptions } from '../core/mock';
-import { cleanCall } from '../core/sanitize';
+import { cleanCall, guardCore } from '../core/sanitize';
 
 const settings: Settings = { locale: 'en', theme: 'light', uiScale: 1, fontSize: 15 };
 
@@ -37,10 +37,12 @@ describe('calls', () => {
     await join();
     const bar = screen.getByRole('region', { name: 'Voice call' });
     const before = within(bar).queryAllByRole('img', { name: 'Microphone off' }).length;
+    const mute = within(bar).getByRole('button', { name: 'Mute' });
+    expect(mute.getAttribute('aria-pressed')).toBe('false');
     await act(async () => {
-      fireEvent.click(within(bar).getByRole('button', { name: 'Mute' }));
+      fireEvent.click(mute);
     });
-    expect(within(bar).getByRole('button', { name: 'Unmute' }).getAttribute('aria-pressed')).toBe('true');
+    expect(within(bar).getByRole('button', { name: 'Mute' }).getAttribute('aria-pressed')).toBe('true');
     expect(within(bar).getAllByRole('img', { name: 'Microphone off' })).toHaveLength(before + 1);
     await act(async () => {
       fireEvent.click(within(bar).getByRole('button', { name: 'Leave call' }));
@@ -51,13 +53,13 @@ describe('calls', () => {
   });
 
   it.each([
-    ['relay-only', 'Calls are off in relay-only mode, to protect your privacy'],
+    ['relay-only', 'Calls are off in relay-only mode: in a call, computers connect directly'],
     ['call-full', 'The call is full: up to 5 people.'],
     ['not-implemented', "Calls aren't available in this version yet."],
   ] as const)('says why a join failed: %s', async (code, text) => {
     const { join } = await setup({ callError: code });
     await join();
-    expect(screen.getByRole('alert').textContent).toContain(text);
+    expect(document.querySelector('.call-blocked')?.textContent).toContain(text);
     expect(screen.queryByRole('region', { name: 'Voice call' })).toBeNull();
   });
 
@@ -76,5 +78,21 @@ describe('calls', () => {
     expect(c.participants[0]).toEqual({ identity: id('1'), muted: true });
     expect(c.participants.every((p, i) => i === 0 || p.muted === false)).toBe(true);
     expect(c.full).toBe(false);
+  });
+
+  it('drops a malformed call.signal instead of passing on a cleaned-up guess', () => {
+    const handlers = new Map<string, (p: unknown) => void>();
+    const bare = { on: (e: string, h: (p: unknown) => void) => (handlers.set(e, h), () => {}) } as unknown as Parameters<typeof guardCore>[0];
+    const seen: unknown[] = [];
+    guardCore(bare).on('call.signal', (p) => seen.push(p));
+    const send = handlers.get('call.signal')!;
+    const from = 'b'.repeat(64);
+    send({ from, kind: 'offer', payload: 'v=0', fingerprintVerified: true }); // fine
+    send({ from, kind: 'ice', payload: 'candidate', fingerprintVerified: true }); // fine
+    send({ from, kind: 'hello', payload: 'x', fingerprintVerified: true }); // unknown kind
+    send({ from, kind: 'ice', payload: 'x'.repeat(12 * 1024 + 1), fingerprintVerified: true }); // too big
+    send({ from: 'not-hex', kind: 'ice', payload: 'x', fingerprintVerified: true }); // bad sender
+    send({ from, kind: 'answer', payload: 'v=0', fingerprintVerified: false }); // unverified
+    expect(seen.map((s) => (s as { kind: string }).kind)).toEqual(['offer', 'ice']);
   });
 });

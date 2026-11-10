@@ -6,7 +6,7 @@ import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import { Avatar, Name } from '../../components/common';
-import { MicOffIcon, PhoneIcon } from '../../components/icons';
+import { AlertIcon, HangUpIcon, MicIcon, MicOffIcon, PhoneIcon } from '../../components/icons';
 import { useCore, type CallState, type Id, type Member } from '../../core';
 
 /**
@@ -70,7 +70,8 @@ export function CallError() {
   const code = useStore(store, (s) => s.callError);
   if (!code) return null;
   return (
-    <div className="call-error" role="alert">
+    <div className="offline-banner call-blocked" role="status">
+      <AlertIcon />
       <span>
         <FormattedMessage id={ERROR_TEXT[code] ?? 'call.error.other'} />
       </span>
@@ -138,11 +139,24 @@ export function CallBar({ myId }: { myId: Id }) {
         })}
       </ul>
       <div className="call-actions">
-        <button type="button" className="secondary small" aria-pressed={!!me?.muted} onClick={toggleMute}>
-          <FormattedMessage id={me?.muted ? 'call.unmute' : 'call.mute'} />
+        <button
+          type="button"
+          className={`icon-button call-mute ${me?.muted ? 'muted' : ''}`}
+          aria-pressed={!!me?.muted}
+          aria-label={intl.formatMessage({ id: 'call.mute' })}
+          title={intl.formatMessage({ id: 'call.mute' })}
+          onClick={toggleMute}
+        >
+          {me?.muted ? <MicOffIcon /> : <MicIcon />}
         </button>
-        <button type="button" className="danger small" onClick={() => void store.leaveCall()}>
-          <FormattedMessage id="call.leave" />
+        <button
+          type="button"
+          className="icon-button call-leave"
+          aria-label={intl.formatMessage({ id: 'call.leave' })}
+          title={intl.formatMessage({ id: 'call.leave' })}
+          onClick={() => void store.leaveCall()}
+        >
+          <HangUpIcon />
         </button>
       </div>
     </section>

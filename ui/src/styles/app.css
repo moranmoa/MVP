@@ -2423,13 +2423,21 @@ kbd {
   color: var(--success);
 }
 
-.call-error {
-  display: flex;
-  align-items: center;
+
+.call-actions .icon-button {
+  width: 2.75rem;
+  height: 2.75rem;
+}
+
+.call-actions .call-mute.muted {
+  color: var(--danger);
+}
+
+.call-leave {
+  background: var(--danger);
+  color: #fff;
+}
+
+.call-blocked {
   justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.5rem 1rem;
-  background: var(--bg-hover);
-  color: var(--danger, var(--text));
-  font-size: 0.875rem;
 }

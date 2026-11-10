@@ -388,7 +388,7 @@ for (const [detail, name] of [
   const bar = p.getByRole('region', { name: 'שיחה קולית' });
   await bar.waitFor();
   await bar.getByRole('button', { name: 'השתקה' }).click();
-  await bar.getByRole('button', { name: 'ביטול השתקה' }).waitFor();
+  await bar.locator('button[aria-pressed="true"]').waitFor();
   await shot(p, '240-call-bar-he');
   await p.close();
 }
@@ -399,7 +399,7 @@ for (const [code, name] of [
 ]) {
   const p = await chat(`?demo=1&still=1&lang=he&theme=light&update=999999&callError=${code}`, 'x');
   await p.getByRole('button', { name: 'הצטרפות לשיחה' }).click();
-  await p.locator('.call-error').waitFor();
+  await p.locator('.call-blocked').waitFor();
   await shot(p, name);
   await p.close();
 }

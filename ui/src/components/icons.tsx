@@ -57,6 +57,16 @@ export const SpeakerIcon = (p: IconProps) => (
     <path d="M4 9h4l5-4v14l-5-4H4zM16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12" />
   </Icon>
 );
+export const MicIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M12 3a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v3" />
+  </Icon>
+);
+export const HangUpIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M3 14.5c5-4.7 13-4.7 18 0l-2.4 2.4-3.1-1.6v-2.4a11 11 0 0 0-7 0v2.4l-3.1 1.6z" />
+  </Icon>
+);
 export const MicOffIcon = (p: IconProps) => (
   <Icon {...p}>
     <path d="M9 9v2a3 3 0 0 0 5.1 2.1M15 10V5a3 3 0 0 0-5.7-1.3M19 11a7 7 0 0 1-1.2 3.9M5 11a7 7 0 0 0 11 5.7M12 18v3M3 3l18 18" />
