@@ -91,6 +91,7 @@ try {
         for (let m = 1; m <= MSGS; m++) await call('sendMessage', { channelId: ch, body: `message ${m} in server ${i}` });
       }
       if (PRESERVERS) log(`pre-created ${PRESERVERS} servers x ${MSGS} messages in ${((Date.now() - t1) / 1000).toFixed(1)} s`);
+      put('prepared');
       for (let r = 1; r <= ROUNDS; r++) {
         const s = await call('createServer', { input: { name: `join matrix ${r}`, ageRestriction: 'none' } });
         const channel = (await call('listChannels', { serverId: s.id }))[0].id;
