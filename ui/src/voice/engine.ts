@@ -339,17 +339,17 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
       offerer ? answerTimeoutMs * 2 ** (attempt - 1) : connectTimeoutMs,
     );
 
-    const track = micTrack();
-    const transceiver = track
-      ? pc.addTransceiver(track, { direction: 'sendrecv', streams: local ? [local] : [] })
-      : pc.addTransceiver('audio', { direction: 'recvonly' });
-    const opus = env.opusCodecs();
-    if (opus?.length) {
-      try {
-        transceiver.setCodecPreferences(opus);
-      } catch {
-        // the browser negotiates its default (Opus first in Chromium)
-      }
+    // The offerer creates the audio m-line. The answerer must not: a
+    // transceiver added before the offer is applied is not bound to the
+    // offer's m-line in Chromium, and the answer then goes out recvonly
+    // (QA-21: one-way audio). It takes the offer's transceiver instead, in
+    // bindAnswerTransceiver.
+    if (offerer) {
+      const track = micTrack();
+      const transceiver = track
+        ? pc.addTransceiver(track, { direction: 'sendrecv', streams: local ? [local] : [] })
+        : pc.addTransceiver('audio', { direction: 'recvonly' });
+      preferOpus(transceiver);
     }
 
     pc.ontrack = (e) => {
@@ -492,6 +492,38 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
   }
 
   /** Applies a verified offer or answer; false (and the peer dropped) on a fingerprint problem. */
+  function preferOpus(transceiver: RTCRtpTransceiver) {
+    const opus = env.opusCodecs();
+    if (!opus?.length) return;
+    try {
+      transceiver.setCodecPreferences(opus);
+    } catch {
+      // the browser negotiates its default (Opus first in Chromium)
+    }
+  }
+
+  /**
+   * Answerer, after the offer is applied: the transceiver of the offer's audio
+   * m-line sends my mic (sendrecv), or only receives without one. False when
+   * the offer has no audio m-line.
+   */
+  async function bindAnswerTransceiver(peer: Peer): Promise<boolean> {
+    const transceiver = peer.pc
+      .getTransceivers()
+      .find((t) => t.mid !== null && t.currentDirection !== 'stopped' && t.receiver.track?.kind === 'audio');
+    if (!transceiver) return false;
+    const track = micTrack();
+    if (track) {
+      await transceiver.sender.replaceTrack(track);
+      if (local) transceiver.sender.setStreams?.(local);
+      transceiver.direction = 'sendrecv';
+    } else {
+      transceiver.direction = 'recvonly';
+    }
+    preferOpus(transceiver);
+    return true;
+  }
+
   async function applyRemote(peer: Peer, type: 'offer' | 'answer', sdp: string): Promise<boolean> {
     const fingerprint = soleFingerprint(sdp);
     if (!fingerprint) {
@@ -534,6 +566,9 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
         if (peers.size >= MAX_PEERS) return;
         const peer = createPeer(signal.from, false);
         if (!(await applyRemote(peer, 'offer', signal.payload))) return;
+        if (peer.closed) return;
+        if (!(await bindAnswerTransceiver(peer))) return dropPeer(peer, 'peer-failed');
+        if (peer.closed) return;
         await sendDescription(peer, 'answer');
       } else if (signal.kind === 'answer') {
         if (!existing || !existing.offerer || existing.pc.signalingState !== 'have-local-offer') return;
