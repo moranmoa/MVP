@@ -104,15 +104,19 @@ impl SyncNetwork {
     /// Starts a node in `data_dir` (its `store.db` and `node.key`) that
     /// reaches peers through `relay`.
     pub fn start(relay: Multiaddr, data_dir: &Path, gate: Arc<MemberGate>) -> anyhow::Result<Self> {
-        Self::start_with_bootstrap(relay, Vec::new(), data_dir, gate)
+        Self::start_with_bootstrap(relay, Vec::new(), false, data_dir, gate)
     }
 
     /// Like [`SyncNetwork::start`], also dialling `bootstrap` directly (each
     /// checked by [`relay_addr`]): the relay's plain TCP address, so that
     /// identify observes our public address for hole punching (#219).
+    /// `relay_only`: the stored setting ([`crate::stored_relay_only`]); the
+    /// node starts with it, so a relay-only start never listens or dials
+    /// directly.
     pub fn start_with_bootstrap(
         relay: Multiaddr,
         bootstrap: Vec<Multiaddr>,
+        relay_only: bool,
         data_dir: &Path,
         gate: Arc<MemberGate>,
     ) -> anyhow::Result<Self> {
@@ -128,6 +132,10 @@ impl SyncNetwork {
             // F2: a direct LAN connection to a peer that proved it shares a
             // server with us (sync never takes LAN addresses from the DHT).
             allow_lan: true,
+            // GAP-6r: relay-only from the first moment (no direct listener,
+            // no bootstrap dial, no punching); `set_relay_only` toggles it
+            // later.
+            relay_only,
         };
         // GAP-4: our pulls carry bindings signed with the identity key (once
         // unlocked), and channel logs are served to members only.
@@ -261,6 +269,12 @@ impl VoiceNet for SyncNetwork {
 }
 
 impl Network for SyncNetwork {
+    fn set_relay_only(&self, on: bool) {
+        if let Err(e) = self.node.set_relay_only(on) {
+            tracing::warn!(%e, "relay-only not applied");
+        }
+    }
+
     /// The server must have been opened (`open_server`): logs are never
     /// opened by their plain names, which anyone could ask for (GAP-4).
     fn publish(&self, record: &Record) {
@@ -413,6 +427,73 @@ mod tests {
         assert_eq!(net.read(&log_name(other, Scope::Control)), Vec::<Record>::new());
         let fetched = net.fetch(genesis.server());
         assert_eq!(fetched.iter().map(Record::id).collect::<Vec<_>>(), [genesis.id()]);
+        drop(net);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// GAP-6r blocker 0 (#272): started with the stored relay-only setting,
+    /// the node never listens directly and never dials its bootstrap
+    /// address; started without it, it does listen (so the check means
+    /// something).
+    #[test]
+    fn a_relay_only_start_makes_no_direct_listen_or_dial() {
+        use libp2p::multiaddr::Protocol;
+        use std::time::{Duration, Instant};
+
+        let relay: Multiaddr =
+            "/ip4/127.0.0.1/tcp/9/p2p/12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc"
+                .parse()
+                .unwrap();
+        let direct = |net: &SyncNetwork| -> Vec<Multiaddr> {
+            let addrs = net.runtime.block_on(net.node.listen_addrs()).unwrap();
+            addrs.into_iter().filter(|a| !a.iter().any(|p| p == Protocol::P2pCircuit)).collect()
+        };
+        let start = |name: &str, relay_only: bool, bootstrap: Vec<Multiaddr>| {
+            let dir = std::env::temp_dir()
+                .join(format!("mvs-syncnet-relayonly-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let net = SyncNetwork::start_with_bootstrap(
+                relay.clone(),
+                bootstrap,
+                relay_only,
+                &dir,
+                Arc::new(MemberGate::new()),
+            )
+            .unwrap();
+            (net, dir)
+        };
+
+        // Without relay-only: a direct listener shows up.
+        let (net, dir) = start("off", false, Vec::new());
+        let since = Instant::now();
+        while direct(&net).is_empty() {
+            assert!(since.elapsed() < Duration::from_secs(10), "never listened directly");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        drop(net);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Relay-only from the start: a bootstrap address that counts every
+        // connection to it, and no direct listener at any point.
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.set_nonblocking(true).unwrap();
+        let bootstrap: Multiaddr = format!(
+            "/ip4/127.0.0.1/tcp/{}/p2p/12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc",
+            probe.local_addr().unwrap().port()
+        )
+        .parse()
+        .unwrap();
+        let (net, dir) = start("on", true, vec![bootstrap]);
+        let since = Instant::now();
+        while since.elapsed() < Duration::from_secs(3) {
+            assert_eq!(direct(&net), Vec::<Multiaddr>::new(), "relay-only, yet listening directly");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let mut dialled = 0;
+        while probe.accept().is_ok() {
+            dialled += 1;
+        }
+        assert_eq!(dialled, 0, "a relay-only start dialled its bootstrap address");
         drop(net);
         let _ = std::fs::remove_dir_all(&dir);
     }

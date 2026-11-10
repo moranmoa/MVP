@@ -336,6 +336,18 @@ describe('voice room', () => {
     }
   });
 
+  it('cleanVoiceRoom and cleanCall read relayOnly (#272): only a boolean, passed on only when true', () => {
+    const id = (c: string) => c.repeat(64);
+    const room = { serverId: id('a'), roomId: id('b'), participants: [] };
+    // #272 adds the field to every room: it must not get the room dropped.
+    expect(cleanVoiceRoom({ ...room, relayOnly: true })).toEqual({ ...room, relayOnly: true });
+    expect(cleanVoiceRoom({ ...room, relayOnly: false })).toEqual(room);
+    expect(cleanVoiceRoom({ ...room, relayOnly: 'yes' })).toBeNull();
+    const call = { channelId: id('b'), participants: [], full: false };
+    expect(cleanCall({ ...call, relayOnly: true }).relayOnly).toBe(true);
+    expect(cleanCall({ ...call, relayOnly: 'yes' as unknown as boolean }).relayOnly).toBeUndefined();
+  });
+
   it('a malformed voice.room event is dropped; a good one updates the roster', async () => {
     const handlers = new Map<string, (p: unknown) => void>();
     const bare = { on: (e: string, h: (p: unknown) => void) => (handlers.set(e, h), () => {}) } as unknown as Parameters<typeof guardCore>[0];

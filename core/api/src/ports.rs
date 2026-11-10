@@ -181,6 +181,13 @@ pub trait Network: Send + Sync {
     fn close_server(&self, server: ServerId) {
         let _ = server;
     }
+
+    /// GAP-6r: the user's relay-only setting, at start and on each change.
+    /// On: no direct listener, no direct dials, peers through relay circuits
+    /// only.
+    fn set_relay_only(&self, on: bool) {
+        let _ = on;
+    }
 }
 
 /// An envelope handle, its server and the publication served under it.
