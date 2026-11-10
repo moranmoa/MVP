@@ -1,6 +1,6 @@
 # Short invite links (T8-02)
 
-Status: **design, for review** (tech-lead, sec-lead). No code yet.
+Status: **design**. The Security Lead approved it with amendments S1–S6, folded in below (marked **[S1]**…**[S6]**). The Tech Lead's §8 decision is pending. No code yet.
 Goal: an invite link of **at most 60 characters after `mvs://join/`**, in base58 with a checksum. This is a contract change (core ↔ UI ↔ desktop deep links).
 
 ## 1. Today's link
@@ -50,7 +50,17 @@ Keys derived from k:
 - Plaintext: `server ID (32) ‖ invite record ID (32) ‖ server secret (32)`.
 - 136 bytes in all.
 
-The envelope and `h` travel **inside the invite's control record**: `Action::Invite` gains `handle: [u8; 32]` and `envelope: bytes` (≤ 256, opaque to authority). Every member that holds the control log can then serve the envelope, not just the inviter. A revoked invite stops being served.
+The envelope and `h` travel **inside the invite's control record**: `Action::Invite` gains `handle: [u8; 32]` and `envelope: bytes` (≤ 256, opaque to authority). Every member that holds the control log can then serve the envelope, not just the inviter.
+
+**[S6] Record rules:**
+- `handle` and `envelope` are optional, but **both or neither**: decode rejects a record with one and not the other.
+- The encoding is canonical.
+- Each invite record grows by about 170 bytes (32 + 136 + framing), well inside `MAX_RECORD_BYTES`.
+- Old records parse without them.
+
+**[S1] Serve only live invites.** A member serves `h` only while authority says the invite is live: not revoked, not expired, uses left. It withdraws `h` on revocation, on expiry and when the last use is taken, and re-evaluates whenever authority's state changes. A peer never answers for an invite authority says is dead.
+
+**[S5] Server secret rotation ends outstanding v1 links.** Envelopes seal the secret of the moment, so after a rotation (GAP-4b) members stop serving every invite whose envelope is stale. The admin creates new invites, with new links, for anyone still to join. This is deliberate: rotation is meant to cut off holders of the old secret. The UI says so when rotating.
 
 **Versioning**: unknown versions are refused with a clear status ("this link needs a newer MVS"), never guessed. A new layout gets a new version byte and new KDF labels.
 
@@ -62,7 +72,13 @@ The envelope and `h` travel **inside the invite's control record**: `Action::Inv
 2. Ask connected peers for the envelope named `h`. Retried with #215's backoff while nobody has it.
 3. Open the envelope. Refuse it unless `server ID` starts with the link's prefix.
 4. From here it's today's join: `open_server(server, secret)`, pull the control log, check the genesis against the server ID.
-5. **Bind the link to its invite**: the invite record named in the envelope must be in the control log (an admin signed it, as authority already checks) and must carry this same `h`. Otherwise the join is refused as `invalid`.
+5. **[S3] Bind the link to its invite**, exactly:
+   - The invite record must be the one the envelope names.
+   - Authority must accept it: its signer is an admin at that point, and it is not voided, revoked or expired, with uses left.
+   - Its `handle` must equal `h`.
+   - Then **re-open `record.envelope` under `e`** and require byte-for-byte the same plaintext as the envelope that was served. So the secret actually used is the admin-signed one, not whatever a peer handed over.
+   - Any failure: the join is refused as `invalid`.
+   - The genesis check against the full ServerId (step 4) stays.
 6. `Join { invite }` as today.
 
 ## 5. Security
@@ -78,13 +94,29 @@ What a link holder (or a member) can do:
   - Pointing at **another server**: blocked by the 16-byte prefix. A matching ServerId needs about 2^128 grinding of `ServerId::derive`.
   - Pointing at **the same server with a fake secret**: the joiner pulls nothing. That's a denial of service only, and the joiner keeps asking other peers.
   - Pointing at **another invite** of the same server (to dodge an expiry or use limit): blocked by step 5. The named invite record must carry `h`, and only an admin can write one.
-- **Revocation** stops new envelopes from being served. Anyone who already opened one keeps the server secret. That's unchanged from today (one secret per server); re-keying on kick is a separate GAP item.
+- **Brute-force k offline** with `h` and an envelope (members, or a peer that saw a request): 2^128 work, and N live invites only make it N·2^-128 per try.
+- **Revocation** stops new envelopes from being served. Anyone who already opened one keeps the server secret. That's unchanged from today (one secret per server); re-keying on kick is a separate GAP item. A revoked or expired v1 link becomes useless even to a holder who hadn't opened it yet, which v0 links can't offer.
+- **What a leaked link gives** is the same as v0: the server secret (control log, presence, gossip topics; GAP-4/4b), not message keys, which go only to members. The holder can join while the invite is live.
+
+**[S2] Responder rules** (`/mvs/invite/1`; PR-CHECKLIST §4):
+- Answer only an exact `h` match, with no listing or prefix search.
+- "Not found" is one constant response, whether or not the peer is in that server.
+- Per-peer and global request caps, as for pulls.
+- Envelope at most 256 bytes.
+
+Residual, recorded under GAP-4b: anyone who knows `h` (a link holder, or a non-member peer the joiner asked) can tell which connected peers are members of that server while the invite is live. That's the same exposure as topic handles today, and it ends with expiry or revocation.
+
+**[S4] k at rest is as sensitive as the server secret.**
+- It's stored encrypted under the identity storage key (GAP-11), never logged, `Zeroizing`, with a redacted `Debug`.
+- The UI may display the link but must not persist it.
+
+**Typos and case:** the checksum also catches a link whose case was changed. The UI then says "copy the link exactly", not just "invalid".
 
 What changes for privacy:
 - The link shows a 16-byte server ID prefix, not the full ID (today: the full ID and the secret in plain hex).
 - The envelope moves the secret off the link. A link pasted into a chat is now worth exactly as much as before: it still opens the secret. It is not worth more.
 
-For the sec-lead to decide: 16 bytes of k (128-bit) against 20 (also fits: 41 bytes = at most 56 characters).
+k is **16 bytes** (sec-lead, §8 Q1): 128 bits matches the rest of the system (Ed25519, XChaCha). 20 bytes would add length and no meaningful margin.
 
 ## 6. Compatibility
 
@@ -92,6 +124,7 @@ For the sec-lead to decide: 16 bytes of k (128-bit) against 20 (also fits: 41 by
 - **Create v1 only one release later.** Release N parses both and still creates v0. Release N+1 creates v1. Testers on N can then open N+1's links.
   - An older app given a v1 link reports `invalid`. The release notes say to update.
 - Invites created before N+1 have no `handle`/`envelope`. Their v0 link stays valid. The owner can make a new invite to get a short link.
+- **v0 parsing is dropped at the open alpha** (sec-lead, §8 Q3). v0 links carry the secret in plain hex and live on in chat history, so they shouldn't be supported for good.
 - **Base58 is case-sensitive.** `cleanInviteLink` lower-cases today, and must not do that for v1. Deep links keep the path's case on Windows and Linux (Electron argv). Users must copy the link, not retype it.
 
 ## 7. Code pieces
@@ -102,9 +135,9 @@ For the sec-lead to decide: 16 bytes of k (128-bit) against 20 (also fits: 41 by
 | KDFs, envelope | `core/api/src/crypto/` (new `invite.rs`) | `h`, `e`, seal and open (XChaCha20-Poly1305, as `core/sync/src/access.rs` seals gossip); pinned-vector tests like `handles_and_keys_are_pinned_and_domain_separated`. |
 | create | `core/api/src/service.rs` (the server summary's `invite_link`, about line 2051, and invite creation); `core/api/src/db.rs` | A fresh k per invite, kept in the inviter's db so the link can be shown again; `Action::Invite` with `handle` and `envelope`. |
 | join | `core/api/src/service.rs` `join_server`/`try_join` | The v1 path (§4): fetch the envelope, prefix check, the invite-carries-`h` check; #215 retries it. |
-| serve | `core/api/src/service.rs` (control-log load) | Tell sync to serve `h → envelope` for every live invite in our servers' control logs; withdraw on revoke. |
+| serve | `core/api/src/service.rs` (control-log load) | Tell sync to serve `h → envelope` for every live invite in our servers' control logs. Withdraw on revoke, expiry, uses running out and secret rotation; re-evaluate on every authority change (S1, S5). |
 | port | `core/api/src/ports.rs`, `core/api/src/syncnet.rs` | `Network::serve_invite(h, envelope)`, `withdraw_invite(h)`, `fetch_invite(h) -> Option<Vec<u8>>`. |
-| wire | `core/sync/src/node.rs` (+ its request/response types) | Ask connected peers for `h`, answer from the served map. Envelope ≤ 256 bytes; per-peer request caps as for pulls. No server secret is needed to ask or answer. |
+| wire | `core/sync/src/node.rs` (+ its request/response types) | A `/mvs/invite/1` request/response: ask connected peers for `h`, answer from the served map. Exact match only, one constant "not found", per-peer and global caps, envelope ≤ 256 bytes (S2). No server secret is needed to ask or answer. |
 | authority | `core/authority` (owner: core-5) | `Action::Invite` gains `handle` and `envelope` (optional, size-capped, opaque to the rules). Old records parse without them. |
 | UI parser | `ui/src/core/sanitize.ts` `cleanInviteLink`, `ui/src/core/types.ts`, `ui/src/core/mock.ts` | Accept v0 (lower-cased as today) and v1 (`^mvs://join/[1-9A-HJ-NP-Za-km-z]{40,59}$`, case kept). The checksum is checked in core, not the UI. |
 | UI tests | `ui/src/test/invite.test.tsx`, `ui/src/test/linkOpen.test.tsx`, `ui/src/core/ipc.test.ts` | v1 accepted with its case kept; v0 still accepted; too long, wrong alphabet and `/` inside refused. |
@@ -113,8 +146,17 @@ For the sec-lead to decide: 16 bytes of k (128-bit) against 20 (also fits: 41 by
 
 Order: authority field → api crypto + model (pinned vectors) → sync wire → api join/serve → UI and desktop parsers (release N, still creating v0) → switch creation to v1 (N+1).
 
-## 8. Open questions
+**[S6] Tests:**
+- Pinned vectors for `h`, `e`, the checksum and base58.
+- Hostile cases: wrong version, bad checksum, a `/` inside the payload, a link of 52+ characters, the wrong server-ID prefix, and a record whose `handle` doesn't match `h`.
+- A mixed-case base58 link through `desktop/src/deeplink.js`.
+- Use `bs58` if it passes `cargo deny`; otherwise an in-house version with the vectors.
 
-1. k: 16 or 20 bytes (§5)?
-2. Envelope inside `Action::Invite` (members serve it), or kept by the inviter only (no authority change, but no join while the inviter is offline)? This note proposes the former.
-3. Keep v0 parsing for good, or drop it at the open alpha?
+## 8. Decisions
+
+| Question | Sec-lead | Tech Lead |
+|---|---|---|
+| Q1. k: 16 or 20 bytes? | 16 bytes | pending |
+| Q2. Envelope inside `Action::Invite`, or kept by the inviter only? | inside `Action::Invite`: joins work while the inviter is offline, and it's admin-signed, as S3 needs | pending |
+| Q3. Keep v0 parsing for good? | no: drop it at the open alpha, and stop creating v0 at N+1 | pending |
+| S5. Secret rotation? | rotation ends outstanding v1 links | pending |
