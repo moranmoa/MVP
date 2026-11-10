@@ -337,6 +337,10 @@ impl Network for SyncNetwork {
         self.send_states.lock().expect("not poisoned").get(&id).copied()
     }
 
+    fn wake(&self) {
+        SyncNetwork::wake(self);
+    }
+
     fn prune(&self, id: records::RecordId) {
         if let Err(e) = self.runtime.block_on(self.node.prune(id)) {
             eprintln!("mvs-core: sync can't prune a record: {e}");

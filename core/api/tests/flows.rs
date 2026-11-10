@@ -1608,6 +1608,48 @@ fn send_states_survive_a_restart() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// v0.3.0 smoke (QA): a joiner sends the moment the join resolves, before
+/// the owner's re-key has reached it. The send waits for the key (the
+/// owner's background sync makes it, the joiner's brings it in), and never
+/// surfaces `not-allowed` to a legit member.
+#[test]
+fn a_joiners_first_send_right_after_the_join_succeeds() {
+    use api::crypto::GroupKeysCipher;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let world = World::new();
+    let open = |words: &str, name: &str| {
+        let cipher = Arc::new(GroupKeysCipher::locked());
+        let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
+        peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        peer.core.update_profile(profile).unwrap();
+        peer
+    };
+    let owner = open(OWNER_WORDS, "Owner");
+    let guest = open(LEGAL, "Guest");
+    let server = owner.core.create_server("Instant", AgeRestriction::None).unwrap();
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        // Both apps' background sync loops.
+        for peer in [&owner, &guest] {
+            let stop = &stop;
+            scope.spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let _ = peer.core.sync_now();
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            });
+        }
+        guest.core.join_server(&server.invite_link).unwrap();
+        assert!(guest.core.list_servers().unwrap().iter().any(|s| s.id == server.id));
+        let channel = guest.core.list_channels(&server.id).unwrap().remove(0).id;
+        let sent = guest.core.send_message(&channel, "typed at once", None);
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(sent.map(|m| m.body).map_err(|e| e.code), Ok("typed at once".to_owned()));
+    });
+}
+
 /// v0.2.0 smoke: a member who joins writes first, and the owner never
 /// sends. The owner's sync sees the join and keys the channel for the new
 /// member set, so the joiner can write (and the owner can read it).
