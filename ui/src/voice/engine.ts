@@ -369,6 +369,7 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
 
   /** The offerer offers again on a fresh connection while it has tries left. */
   function retryOrFail(peer: Peer) {
+    if (peer.closed) return; // already dropped or retried (stale async work)
     const next = peer.attempt + 1;
     if (peer.offerer && next <= OFFER_ATTEMPTS && active && members.has(peer.id) && !refused.has(peer.id)) {
       dropPeer(peer);
@@ -486,7 +487,7 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
     try {
       await sendDescription(peer, 'offer');
     } catch {
-      dropPeer(peer, 'peer-failed');
+      retryOrFail(peer);
     }
   }
 
@@ -556,7 +557,7 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
       }
     } catch {
       const peer = peers.get(signal.from);
-      if (peer) dropPeer(peer, 'peer-failed');
+      if (peer) retryOrFail(peer);
     }
   }
 

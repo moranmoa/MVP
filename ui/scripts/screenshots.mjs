@@ -472,7 +472,7 @@ async function checkBidi(p, name, lang, partial = false) {
   const box = p.getByRole('textbox', { name: /כתיבה ב/ });
   await box.waitFor();
   const placeholder = await box.getAttribute('placeholder');
-  if (placeholder !== 'כתיבה ב-#\u2068clips\u2069') problems.push(`72: composer placeholder is "${placeholder}"`);
+  if (placeholder !== 'כתיבה ב-\u2068#clips\u2069') problems.push(`72: composer placeholder is "${placeholder}"`);
   await shot(p, '72-composer-he-latin-channel');
   await box.fill('GG על המשחק');
   if ((await box.getAttribute('dir')) !== 'rtl') problems.push('73: composer with "GG על המשחק" is not RTL');
@@ -659,6 +659,33 @@ for (const [lang, t] of [
   await p.getByRole('button', { name: 'Server settings' }).click();
   await p.getByRole('tab', { name: 'General' }).waitFor();
   await shot(p, '186-server-settings-en-light');
+  await p.close();
+}
+// Invites (#214). The B11 spec's 183–185 (removed accounts, unsaved changes,
+// phone list) wait for core support, so the invite page takes those numbers.
+{
+  const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999', 'x');
+  await p.getByRole('button', { name: 'הגדרות השרת' }).click();
+  await p.getByRole('tab', { name: 'לינק הזמנה' }).click();
+  const panel = p.getByRole('tabpanel');
+  await panel.getByText(/^3 שימושים/).waitFor();
+  await shot(p, '183-server-settings-invites-he');
+  await panel.getByLabel('תוקף').selectOption('day');
+  await panel.getByLabel('מספר שימושים').selectOption('5');
+  await panel.getByRole('button', { name: 'יצירת לינק' }).click();
+  await panel.getByText(/0 מתוך 5 שימושים/).waitFor();
+  await shot(p, '184-server-settings-invite-created-he');
+  await panel.getByRole('button', { name: 'ביטול הלינק' }).first().click();
+  await panel.getByRole('group').waitFor();
+  await shot(p, '185-server-settings-invite-revoke-he');
+  await p.close();
+}
+// B25 §5: on a phone the menu is a bottom sheet.
+{
+  const p = await page('?demo=1&still=1&lang=he&theme=light&update=999999', PHONE);
+  await p.getByRole('button', { name: /^clips/ }).click({ button: 'right' });
+  await p.getByRole('menu').waitFor();
+  await shot(p, '176-menu-sheet-phone-he');
   await p.close();
 }
 
