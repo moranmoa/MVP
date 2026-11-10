@@ -7,7 +7,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
-const { relayFor, validRelay, MAX_RELAY } = require('../src/config');
+const { relayFor, bootstrapFor, validRelay, logHost, MAX_RELAY, MAX_BOOTSTRAP } = require('../src/config');
+const { createLog } = require('../src/logfile');
 const { Sidecar } = require('../src/sidecar');
 
 const ID = '12D3KooW' + 'A'.repeat(44);
@@ -96,4 +97,57 @@ test('extra switches are appended and must be strings', () => {
   assert.deepEqual(spawnedArgs({ relay: RELAY, extraArgs: ['--update-root', '/u'] }), ['--data-dir', data, '--relay', RELAY, '--update-root', '/u']);
   assert.throws(() => spawnedArgs({ extraArgs: [42] }), /strings/);
   assert.throws(() => spawnedArgs({ extraArgs: '--x' }), /strings/);
+});
+
+const TCP = `/dns4/relay-direct.example.org/tcp/4001/p2p/${ID}`;
+
+test('packaged: bootstrap comes from resources/mvs-config.json, checked like the relay', () => {
+  const warnings = [];
+  const warn = (m) => warnings.push(m);
+  assert.deepEqual(bootstrapFor({ packaged: true, resourcesPath: resources(JSON.stringify({ relay: RELAY, bootstrap: [TCP] })) }), [TCP]);
+  assert.deepEqual(bootstrapFor({ packaged: true, resourcesPath: resources(JSON.stringify({ relay: RELAY })), warn }), []);
+  assert.deepEqual(bootstrapFor({ packaged: true, resourcesPath: resources(), warn }), []);
+  assert.deepEqual(warnings, [], 'absent bootstrap is not a warning');
+  const mixed = { bootstrap: [TCP, '/dns4/x/tcp/4001', `${TCP} --inspect`, 42] };
+  assert.deepEqual(bootstrapFor({ packaged: true, resourcesPath: resources(JSON.stringify(mixed)), warn }), [TCP]);
+  assert.deepEqual(bootstrapFor({ packaged: true, resourcesPath: resources('{"bootstrap":"/x"}'), warn }), []);
+  const many = { bootstrap: Array(MAX_BOOTSTRAP + 2).fill(TCP) };
+  assert.equal(bootstrapFor({ packaged: true, resourcesPath: resources(JSON.stringify(many)), warn }).length, MAX_BOOTSTRAP);
+  assert.equal(warnings.length, 3);
+});
+
+test('checkout: bootstrap comes from MVS_BOOTSTRAP only', () => {
+  const dir = resources(JSON.stringify({ bootstrap: [TCP] }));
+  assert.deepEqual(bootstrapFor({ packaged: false, resourcesPath: dir, env: {} }), []);
+  assert.deepEqual(bootstrapFor({ packaged: false, env: { MVS_BOOTSTRAP: `${TCP},${TCP}` } }), [TCP, TCP]);
+});
+
+test('mvs-core gets --bootstrap after --relay, and only with a relay', () => {
+  const data = path.resolve('/data');
+  assert.deepEqual(spawnedArgs({ relay: RELAY, bootstrap: [TCP] }), ['--data-dir', data, '--relay', RELAY, '--bootstrap', TCP]);
+  assert.deepEqual(spawnedArgs({ relay: null, bootstrap: [TCP] }), ['--data-dir', data]);
+  assert.throws(() => spawnedArgs({ bootstrap: [42] }), /strings/);
+  assert.throws(() => spawnedArgs({ bootstrap: TCP }), /strings/);
+});
+
+test('relay and bootstrap hosts, DNS or IP, never reach the file log', () => {
+  const peer = '12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc';
+  assert.equal(logHost(`/dns4/relay.example.org/tcp/443/wss/p2p/${peer}`), 'relay.example.org');
+  assert.equal(logHost(`/ip4/198.51.100.7/tcp/4001/p2p/${peer}`), '198.51.100.7');
+  assert.equal(logHost(`/ip6/2001:db8::7/udp/4001/quic-v1/p2p/${peer}`), '2001:db8::7');
+  assert.equal(logHost(`/p2p/${peer}`), null);
+  assert.equal(logHost(null), null);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mvs-loghost-'));
+  try {
+    const log = createLog(dir);
+    for (const addr of [`/ip4/198.51.100.7/tcp/4001/p2p/${peer}`, `/ip6/2001:db8::7/udp/4001/quic-v1/p2p/${peer}`]) {
+      log.hide(logHost(addr));
+    }
+    // Glued to other text, past the generic IP redaction's word boundaries.
+    log('core: dial failed to v198.51.100.7x and [2001:db8::7]:4001');
+    const text = fs.readFileSync(path.join(dir, 'mvs.log'), 'utf8');
+    assert.ok(!text.includes('198.51.100.7') && !text.includes('2001:db8::7'), text);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

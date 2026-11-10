@@ -97,6 +97,18 @@ impl SyncNetwork {
     /// Starts a node in `data_dir` (its `store.db` and `node.key`) that
     /// reaches peers through `relay`.
     pub fn start(relay: Multiaddr, data_dir: &Path, gate: Arc<MemberGate>) -> anyhow::Result<Self> {
+        Self::start_with_bootstrap(relay, Vec::new(), data_dir, gate)
+    }
+
+    /// Like [`SyncNetwork::start`], also dialling `bootstrap` directly (each
+    /// checked by [`relay_addr`]): the relay's plain TCP address, so that
+    /// identify observes our public address for hole punching (#219).
+    pub fn start_with_bootstrap(
+        relay: Multiaddr,
+        bootstrap: Vec<Multiaddr>,
+        data_dir: &Path,
+        gate: Arc<MemberGate>,
+    ) -> anyhow::Result<Self> {
         let runtime =
             tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
         let config = NodeConfig {
@@ -105,7 +117,7 @@ impl SyncNetwork {
             logs: Vec::new(),
             authorizer: gate,
             listen: "/ip4/0.0.0.0/tcp/0".parse().expect("valid multiaddr"),
-            bootstrap: Vec::new(),
+            bootstrap,
             // F2: a direct LAN connection to a peer that proved it shares a
             // server with us (sync never takes LAN addresses from the DHT).
             allow_lan: true,
