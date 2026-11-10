@@ -67,7 +67,7 @@ Report failures as in `docs/qa/v0.2.5-smoke.md`: the case ID, expected vs actual
 | V3.1 | Relay-only mode is on, and you open a server. | "Join chat" is **disabled**, and its tooltip says calls are off in relay-only mode. The roster is still visible. | PW+ (mock: relay-only flag on the room entry) |
 | V3.2 | You call `joinCall` anyway. | The **core** refuses with `relay-only`, and the UI shows the relay-only reason line. **The disabled entry is only cosmetic.** | PW (`?callError=relay-only`) + **U** (core) + **M** |
 | V3.3 | Relay-only, first call ever on this computer. | **No IP notice** dialog, only the reason line (#225 §1). | PW+ |
-| V3.4 | Turn relay-only on while in a call. | You leave the call, or the call is refused on the next tick, and the bar explains why. **Confirm the intended behaviour with dev-identity**; the contract doesn't say. | **M** (open question) |
+| V3.4 | Turn relay-only on while in a call. | Within about 1 s (one tick) the core leaves and sends a "bye", so you drop off every other roster at once. `call.state` goes empty, the bar goes away, and the relay-only reason line shows. Rejoining is refused with `relay-only`. **Blocked on piece B**: main doesn't do this yet. | **M** + **U** (core, once B lands) |
 | V3.5 | Relay-only, during a call that other members are in. | No direct connection from this machine to the participants (check with `netstat`, or the relay logs: no new circuit is used for media). | **M** |
 
 ## V4. A kicked member drops off the roster at once
@@ -89,8 +89,8 @@ Report failures as in `docs/qa/v0.2.5-smoke.md`: the case ID, expected vs actual
 | V5.4 | Screen and window capture: `getDisplayMedia`. | Refused. | **E2E-D** + **U** |
 | V5.5 | Desktop or system audio (`getDisplayMedia({audio:true})`, `chromeMediaSource: 'desktop'`). | Refused. Nothing but the mic is captured. | **E2E-D** (add the case if missing) + **M** (play music during a call, B must not hear it except through A's mic) |
 | V5.6 | Any other origin or a subframe asks for the mic (e.g. an iframe from a link preview). | Refused. | **U** |
-| V5.7 | The OS mic permission is denied for MVS. | Joining shows a clear "no microphone" message. The app doesn't crash. You can still listen, if the engine supports it; otherwise the join is refused with a reason. | **M** |
-| V5.8 | No mic device at all, or it's unplugged mid-call. | Same as V5.7. On unplug the call keeps going muted and shows a notice. | **M** |
+| V5.7 | The OS mic permission is denied for MVS. | The join succeeds and you can listen (receive-only). The app sets you muted, so others see the mic-off icon, and it shows a "no microphone" notice. No crash. | **M** |
+| V5.8 | No mic device at all, or it's unplugged mid-call. | Same as V5.7. On unplug, from that moment you're muted with the notice, and you keep hearing the others. | **M** |
 | V5.9 | **V-C2 (after #230's follow-up):** look at the OS "mic in use" indicator. | It shows only while you're in a call, and goes off within about 2 s of leaving. **Before V-C2 ships, record what happens; it's not a failure.** | **M** |
 | V5.10 | The web build (`ui/` in a browser, not the desktop shell). | The browser's own prompt, scoped to the site. This plan covers the desktop app only. | (out of scope) |
 
@@ -129,7 +129,7 @@ The relay must see the clients' real public addresses (host networking) before D
 | --- | --- | --- | --- |
 | V7b.0 | Precondition: #220 is deployed and checked. | The relay logs show a public remote address for the hotspot client, and `circuits_denied` is flat. Devops confirms first. | devops |
 | V7b.1 | A at home, B on a phone hotspot, both join. | Audio both ways within 10 s, through the STUN server (#222) and a direct path. Record whether the indicator shows direct. | **M** |
-| V7b.2 | Same, but with the direct path impossible (symmetric NAT on both sides, or blocked UDP). | The join fails with a clear message, or audio fails cleanly. There's no relay fallback for media in v1. No crash, and the roster still clears. **Record the actual behaviour.** | **M** |
+| V7b.2 | Same, but with the direct path impossible for some pairs (symmetric NAT on both sides, or blocked UDP). | The join succeeds and the person stays in the roster. After the connect timeout, **only the pairs that can't reach each other** show "couldn't connect directly" on that person. Everyone else hears each other. There's no media relay fallback in v1, and no crash. **Record which pairs failed and each side's NAT type.** | **M** |
 | V7b.3 | 3 people: home, hotspot, and a third network. | Everyone hears everyone (mesh). | **M** |
 | V7b.4 | 5 people across at least 2 networks, 10 minutes. | As V2.9. | **M** |
 | V7b.5 | Privacy check during V7b.1: run `netstat` on A. | Only participants' IPs appear for media. Members who aren't in the call don't get A's IP from the roster: the roster carries no addresses, per the contract. | **M** |
@@ -164,8 +164,8 @@ The relay must see the clients' real public addresses (host networking) before D
 
 It is written once piece E's room entry merges.
 
-## Open questions
+## Answered questions (tech lead, on #232)
 
-1. V3.4: what happens to a running call when relay-only is turned on? (dev-identity / the tech lead)
-2. V5.7: can someone without a microphone join to listen? (product)
-3. V7b.2: what exactly does the user see when no direct path exists, given there's no media relay in v1? (dev-voice-shell / UX)
+1. **V3.4, relay-only turned on mid-call:** the core leaves within one tick and sends a "bye", and rejoining is refused. This is blocked on piece B.
+2. **V5.7/V5.8, no microphone:** the join succeeds, receive-only. You're shown as muted, with a "no microphone" notice.
+3. **V7b.2, no direct path:** the join succeeds. Only the pairs that can't connect show "couldn't connect directly", and there's no media relay.
