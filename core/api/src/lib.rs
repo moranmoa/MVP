@@ -18,6 +18,7 @@ mod dispatch;
 mod gate;
 mod model;
 mod ports;
+mod rekey;
 mod service;
 pub mod sidecar;
 pub mod syncnet;
@@ -32,9 +33,10 @@ pub use ports::{
     CipherError, CipherOutcome, Clock, CollectingSink, EventSink, FixedClock, GroupCipher,
     LoopbackNetwork, Network, Opened, PendingGroupKeys, Ports, Reach, SharedSecrets, SystemClock,
 };
+pub use rekey::{JOIN_REKEY_BURST, JOIN_REKEY_REFILL_MS};
 pub use service::{
-    Config, Core, CHALLENGE_POSITIONS, JOIN_REKEY_MIN_MS, JOIN_RETRY_FIRST, JOIN_RETRY_FOR,
-    JOIN_RETRY_MAX, MAX_CHECK_FAILURES, SYNC_EVERY,
+    Config, Core, CHALLENGE_POSITIONS, JOIN_RETRY_FIRST, JOIN_RETRY_FOR, JOIN_RETRY_MAX,
+    MAX_CHECK_FAILURES, SYNC_EVERY,
 };
 pub use types::*;
 pub use voice::{
