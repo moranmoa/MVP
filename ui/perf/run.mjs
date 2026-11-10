@@ -216,8 +216,10 @@ function frameStats(r) {
     frames: f.length,
     ...stats(f),
     p99: round([...f].sort((a, b) => a - b)[Math.floor(0.99 * f.length)]),
-    over_16_7ms_pct: over(16.7),
-    over_33_3ms_pct: over(33.3),
+    // 60 Hz frames are 16.7 ms; timer jitter puts many at 16.7–16.8, so a
+    // frame counts as missed above 20 ms, and as two missed above 34 ms.
+    missed_frame_pct: over(20),
+    missed_two_pct: over(34),
     placeholder_frames_pct: round((100 * r.placeholderFrames) / f.length),
     long_tasks: r.longTasks.length,
     long_task_ms: round(r.longTasks.reduce((a, b) => a + b, 0)),
@@ -266,7 +268,7 @@ row(`pending echo, to screen (target < ${ECHO_TARGET_MS})`, (r) => pq(r.echo.pai
 row('channel switch, to a small channel (300–500 msgs)', (r) => pq(r.channel_switch.to_small));
 row('channel switch, to a large channel (5,000–100,000 msgs)', (r) => pq(r.channel_switch.to_large));
 row('scroll 5,000 msgs: frame time', (r) => `${r.scroll_5000.p50} / ${r.scroll_5000.p95} (p99 ${r.scroll_5000.p99})`);
-row('scroll: frames over 16.7 / 33.3 ms', (r) => `${r.scroll_5000.over_16_7ms_pct}% / ${r.scroll_5000.over_33_3ms_pct}%`);
+row('scroll: frames over 20 / 34 ms (missed 1 / 2+ frames)', (r) => `${r.scroll_5000.missed_frame_pct}% / ${r.scroll_5000.missed_two_pct}%`);
 row('scroll: frames showing placeholders', (r) => `${r.scroll_5000.placeholder_frames_pct}%`);
 row('scroll: long tasks (count, total ms)', (r) => `${r.scroll_5000.long_tasks}, ${r.scroll_5000.long_task_ms}`);
 row('scroll: frames, reached the top', (r) => `${r.scroll_5000.frames}, ${r.scroll_5000.reached_top ? 'yes' : 'no'}`);
