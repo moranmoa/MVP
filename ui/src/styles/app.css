@@ -1662,6 +1662,12 @@ legend {
   opacity: 1;
 }
 
+/* The gear sits over the end of the row: keep the unread dot, the mention
+   badge and the 18+ tag clear of it (on touch it is always shown). */
+.channel-row.has-edit .channel {
+  padding-inline-end: 2.5rem;
+}
+
 @media (hover: none) {
   .channel-row .channel-edit {
     opacity: 1;
