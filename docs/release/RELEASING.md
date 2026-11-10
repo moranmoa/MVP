@@ -188,7 +188,45 @@ PowerShell on your normal (online) PC, in the repo:
 2. **Wait for the Release workflow** (Actions tab). Its summary lists the
    checksums. The release is a draft: only repo collaborators can see it.
 
-3. **Download and check** the draft's files:
+3. **Sign and publish, in one command** (steps 3–6 below, done for you):
+
+   ```powershell
+   # Dry run first: every check and the build, no key, nothing signed or uploaded.
+   .\.github\scripts\publish-release.ps1 -Tag v0.1.0 -WhatIf
+   # Then for real. Every release goes to beta; add -Channel alpha for stable.
+   .\.github\scripts\publish-release.ps1 -Tag v0.1.0 -Key E:\mvs-keys\root.key
+   ```
+
+   [`publish-release.ps1`](../../.github/scripts/publish-release.ps1) does this:
+   - It downloads the draft (or pre-release) and checks every file against
+     `SHA256SUMS`, and the channel's manifest body against both: version,
+     channel, and each payload's hash and size.
+   - It restamps the body when it is older than 2 days.
+   - It builds `updater` from the tag's own source. The tag must be on
+     `origin/main`, and the source comes from `git archive` of the tag. It
+     never uses a downloaded binary.
+   - It shows a summary (version, channel, hashes, expiry, the first lines of
+     the notes) and asks you to **type the version** to go on.
+   - It signs, then runs `updater verify` against the tag's
+     `core/updater/trust/root.json`, each payload included.
+   - It publishes the release as a pre-release, then runs
+     `publish-update.ps1` for the channel (step 6).
+   - Any failed check stops it with a message, and nothing after that step
+     runs.
+
+   **The key.** It comes from `-Key` or `$env:MVS_ROOT_KEY`, and the script
+   never prints, copies or uploads it. It refuses a key inside the
+   repository, and refuses to run in CI. With this script the key is used on
+   the online PC: plug the key drive in only for the run, and never keep the
+   key on a synced folder. Never put the path in the repo, a script or
+   `$PROFILE`. If you would rather keep the key on an offline machine, do
+   steps 3–6 by hand as below.
+
+   After a root rotation, add `-Roots E:\mvs-keys\root-2.json`.
+
+   The manual steps, for reference or for offline signing:
+
+   **Download and check** the draft's files:
 
    ```powershell
    gh release download v0.1.0 --repo moranmoa/MVP --dir release-v0.1.0
