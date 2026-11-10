@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use api::sidecar::{self, Lines};
 use api::syncnet::SyncNetwork;
-use api::{Config, Core, LoopbackNetwork, MemberGate, Network, Ports, SystemClock};
 use api::update::{UpdateSetup, Updates};
+use api::{Config, Core, LoopbackNetwork, MemberGate, Network, Ports, SystemClock};
 use identity::OsKeychain;
 use updater::source::{HttpsSource, UpdateSource};
 use updater::{Baseline, UpdateDirs, Version};
@@ -28,7 +28,8 @@ const APP_VERSION: Option<&str> = option_env!("MVS_APP_VERSION");
 
 /// In-app update for an install at `root`, or why it stays off.
 fn updates(root: PathBuf, data_dir: PathBuf) -> Result<Updates, &'static str> {
-    let installed: Version = APP_VERSION.and_then(|v| v.parse().ok()).ok_or("this build has no MVS_APP_VERSION")?;
+    let installed: Version =
+        APP_VERSION.and_then(|v| v.parse().ok()).ok_or("this build has no MVS_APP_VERSION")?;
     if !root.is_absolute() {
         return Err("--update-root isn't absolute");
     }
@@ -41,7 +42,9 @@ fn updates(root: PathBuf, data_dir: PathBuf) -> Result<Updates, &'static str> {
         installed,
         baseline: Baseline::default(),
         root: None,
-        source: Arc::new(|channel| HttpsSource::release(channel).map(|s| Box::new(s) as Box<dyn UpdateSource>)),
+        source: Arc::new(|channel| {
+            HttpsSource::release(channel).map(|s| Box::new(s) as Box<dyn UpdateSource>)
+        }),
     }))
 }
 
@@ -164,6 +167,8 @@ fn main() -> ExitCode {
         }
         let served = sidecar::serve(core, io::stdin().lock(), &out);
         core.stop_updates();
+        // Quitting leaves any call (its bye goes out).
+        let _ = core.leave_call();
         stop.store(true, Ordering::SeqCst);
         if let Some(net) = &sync {
             net.wake();

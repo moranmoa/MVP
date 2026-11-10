@@ -161,6 +161,18 @@ struct RevokeInviteArgs {
 }
 
 #[derive(Deserialize)]
+struct MutedArg {
+    muted: bool,
+}
+
+#[derive(Deserialize)]
+struct SignalArgs {
+    to: String,
+    kind: SignalKind,
+    payload: String,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UserArg {
     user_id: String,
@@ -302,6 +314,15 @@ impl Core {
                 ok(self.revoke_role(&a.server_id, &a.user_id))
             }
             "syncNow" => ok(self.sync_now()),
+
+            // Voice (piece B).
+            "joinCall" => ok(self.join_call(&args::<ChannelIdArg>(raw)?.channel_id)),
+            "leaveCall" => ok(self.leave_call()),
+            "setMuted" => ok(self.set_muted(args::<MutedArg>(raw)?.muted)),
+            "sendSignal" => {
+                let a: SignalArgs = args(raw)?;
+                ok(self.send_signal(&a.to, a.kind, a.payload))
+            }
             // In-app update (B8-5). Main/core only: never in CoreCommands or
             // the renderer allow-list (A2). `not-implemented` without
             // `--update-root`.

@@ -21,6 +21,7 @@ export * from './types';
  *   ?installed=1     a new version was just installed, with release notes
  *   ?rolledBack=1    the last update failed and the previous version is back
  *   ?coreDown=<detail> the desktop shell reports the core down (missing, start-failed, crashed, crash-loop)
+ *   ?callError=<code> joinCall fails with call-full, relay-only or not-implemented
  *   ?inCall=1        restartToUpdate is refused as during a call (not-allowed)
  *   ?fresh=1         forget the stored mock account
  *   ?hostile=1       add attacker-style names and messages (security demo)
@@ -46,6 +47,7 @@ export function createCore(search = typeof location !== 'undefined' ? location.s
     updateRolledBack: params.has('rolledBack'),
     inCall: params.has('inCall'),
     coreDown: (params.get('coreDown') as MockOptions['coreDown']) ?? undefined,
+    callError: (params.get('callError') as MockOptions['callError']) ?? undefined,
     storage,
   });
 }

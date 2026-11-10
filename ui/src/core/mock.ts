@@ -7,6 +7,7 @@
 
 import type { CoreApi, CoreEventName, CoreEvents, Unsubscribe } from './api';
 import type {
+  CallState,
   AgeRestriction,
   AppInfo,
   Channel,
@@ -55,6 +56,8 @@ export interface MockOptions {
   inCall?: boolean;
   /** As the desktop shell would: report the core down, for the T8-01 screen. */
   coreDown?: 'missing' | 'start-failed' | 'crashed' | 'crash-loop' | 'keyring';
+  /** joinCall rejects with this code, for the error states (screenshots). */
+  callError?: 'call-full' | 'relay-only' | 'not-implemented';
   /** Add members and messages written the way an attacker would (see SECURITY.md). */
   hostile?: boolean;
   /** `getRecoveryWords()` fails, to show the load error state. */
@@ -915,6 +918,55 @@ export class MockCore implements CoreApi {
       s.members = s.members.map((m) => (m.id === userId ? { ...m, blocked: !m.blocked } : m));
       this.emit('members.changed', { serverId: s.summary.id, members: s.members });
     }
+  }
+
+  // ---- voice v1 (#223): calls only, no audio in the mock ----------------------------
+
+  private call: CallState | null = null;
+
+  private emitCall(): void {
+    this.emit('call.state', this.call ?? { channelId: '', participants: [], full: false });
+  }
+
+  async joinCall(channelId: Id): Promise<CallState> {
+    await this.wait(200);
+    if (this.options.callError) throw err({ code: this.options.callError });
+    const ch = this.channelIndex.get(channelId);
+    if (!ch) throw err({ code: 'not-found' });
+    const s = this.serverOf(ch);
+    // Me plus up to two others who are online, so the demo has a call to show.
+    const others = s.members.filter((m) => m.id !== this.identity!.id && m.presence === 'online').slice(0, 2);
+    this.call = {
+      channelId,
+      participants: [{ identity: this.identity!.id, muted: false }, ...others.map((m, i) => ({ identity: m.id, muted: i === 1 }))],
+      full: false,
+    };
+    this.emitCall();
+    return this.call;
+  }
+
+  async leaveCall(): Promise<null> {
+    if (this.call) {
+      this.call = { ...this.call, participants: [], full: false };
+      this.emitCall();
+      this.call = null;
+    }
+    return null;
+  }
+
+  async setMuted(muted: boolean): Promise<null> {
+    if (!this.call) throw err({ code: 'not-allowed' });
+    this.call = {
+      ...this.call,
+      participants: this.call.participants.map((p) => (p.identity === this.identity!.id ? { ...p, muted } : p)),
+    };
+    this.emitCall();
+    return null;
+  }
+
+  async sendSignal(): Promise<null> {
+    if (!this.call) throw err({ code: 'not-allowed' });
+    return null;
   }
 
   async kickMember(serverId: Id, userId: Id): Promise<void> {
