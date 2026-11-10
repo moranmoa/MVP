@@ -3245,3 +3245,66 @@ fn a_leave_waits_in_the_outbox_until_the_gate_opens() {
     drop(guest);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Security Lead (restore design): one computer per call. My identity on a
+/// second computer is in the room, so joining here answers
+/// `in-call-elsewhere` until it leaves; my own hello echoed back to me
+/// doesn't count, and the other members see me once.
+#[test]
+fn a_call_on_my_other_computer_blocks_joining_here() {
+    let world = World::new();
+    let pc = world.peer();
+    let created = pc.core.create_identity(adult()).unwrap();
+    assert!(answer(&pc, &created.words, &[]).1.unwrap().ok);
+    let me = pc
+        .core
+        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None })
+        .unwrap()
+        .id;
+    let carol = world.peer();
+    let carol_id = sign_up(&carol, "Carol").id;
+    let server = pc.core.create_server("Talk", AgeRestriction::None).unwrap();
+    carol.core.join_server(&server.invite_link).unwrap();
+    let laptop = world.peer();
+    laptop.core.restore_identity(created.words.clone()).unwrap();
+    laptop.core.join_server(&server.invite_link).unwrap();
+    for peer in [&pc, &carol, &laptop] {
+        peer.core.sync_now().unwrap();
+    }
+    let room = pc.core.get_voice_room(&server.id).unwrap().room_id;
+    // A hub per computer: what's sent to my identity reaches both of mine.
+    let (pc_hub, laptop_hub, carol_hub) =
+        (Arc::new(VoiceHub::default()), Arc::new(VoiceHub::default()), Arc::new(VoiceHub::default()));
+    pc_hub.connect(&pc, &me);
+    laptop_hub.connect(&laptop, &me);
+    carol_hub.connect(&carol, &carol_id);
+    let deliver = |hub: &VoiceHub| {
+        for (from, to, blob) in std::mem::take(&mut *hub.queue.lock().unwrap()) {
+            if to == user_key(&me) {
+                // Both of my computers; one of them is the sender (an echo).
+                pc.core.voice_received(Some(from), &blob);
+                laptop.core.voice_received(Some(from), &blob);
+            } else if to == user_key(&carol_id) {
+                carol.core.voice_received(Some(from), &blob);
+            }
+        }
+    };
+
+    pc.core.join_call(&room).unwrap();
+    deliver(&pc_hub);
+    // The echo didn't count on the PC: it's still in the call, can re-join.
+    assert!(pc.core.in_call());
+    pc.core.join_call(&room).unwrap();
+    // The laptop is refused; Carol sees me once.
+    assert_eq!(laptop.core.join_call(&room).unwrap_err().code, ErrorCode::InCallElsewhere);
+    assert!(!laptop.core.in_call());
+    let seen = carol.core.get_voice_room(&server.id).unwrap();
+    assert_eq!(seen.participants.iter().map(|p| p.user_id.as_str()).collect::<Vec<_>>(), [me.as_str()]);
+
+    // The PC leaves (a bye to both of mine): the laptop may join now.
+    pc.core.leave_call().unwrap();
+    deliver(&pc_hub);
+    laptop.core.join_call(&room).unwrap();
+    deliver(&laptop_hub);
+    assert_eq!(pc.core.join_call(&room).unwrap_err().code, ErrorCode::InCallElsewhere);
+}

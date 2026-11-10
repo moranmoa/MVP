@@ -232,6 +232,10 @@ pub enum ErrorCode {
     CallFull,
     /// Voice: relay-only is on, so calls are off.
     RelayOnly,
+    /// Voice: my own identity is already in this room from another
+    /// computer (same recovery words). One computer per call until linked
+    /// devices (phase 3).
+    InCallElsewhere,
     /// Server lifecycle: a member still runs a version that can't read a
     /// rename, leave or delete (no `server-lifecycle-v1` cap); nothing was
     /// signed.
