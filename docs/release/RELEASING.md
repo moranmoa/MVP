@@ -207,19 +207,25 @@ PowerShell on your normal (online) PC, in the repo:
      never uses a downloaded binary.
    - It shows a summary (version, channel, hashes, expiry, the first lines of
      the notes) and asks you to **type the version** to go on.
-   - It signs, then runs `updater verify` against the tag's
-     `core/updater/trust/root.json`, each payload included.
+   - Only then does it ask you to **connect the key drive**. It checks the
+     key, signs, and runs `updater verify` against the tag's
+     `core/updater/trust/root.json`, each payload included. Then it asks you
+     to **remove the drive** before anything is uploaded.
    - It publishes the release as a pre-release, then runs
      `publish-update.ps1` for the channel (step 6).
    - Any failed check stops it with a message, and nothing after that step
      runs.
 
    **The key.** It comes from `-Key` or `$env:MVS_ROOT_KEY`, and the script
-   never prints, copies or uploads it. It refuses a key inside the
-   repository, and refuses to run in CI. With this script the key is used on
-   the online PC: plug the key drive in only for the run, and never keep the
-   key on a synced folder. Never put the path in the repo, a script or
-   `$PROFILE`. If you would rather keep the key on an offline machine, do
+   never prints, copies or uploads it. It reads `MVS_ROOT_KEY` once and
+   clears it from the session before running anything else, so git, gh,
+   cargo build scripts and node never see it. It refuses to run in CI. It
+   also refuses a key inside the repository or in a OneDrive, Dropbox or
+   Google Drive folder, and warns when the drive isn't removable. With this
+   script the key is used on the online PC, which is fine for the closed
+   alpha (SECURITY.md): keep it on an **encrypted removable drive**,
+   connected only when the script asks. Never put the path in the repo, a
+   script or `$PROFILE`. If you would rather keep the key on an offline machine, do
    steps 3–6 by hand as below.
 
    After a root rotation, add `-Roots E:\mvs-keys\root-2.json`.

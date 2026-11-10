@@ -4,8 +4,10 @@
 #
 #   .\.github\scripts\publish-release.ps1 -Tag v0.3.1 [-Channel beta|alpha] [-Key <path>] [-WhatIf]
 #
-# The key comes from -Key or $env:MVS_ROOT_KEY. This script never prints,
-# copies or uploads it, and refuses a key inside the repository.
+# The key comes from -Key or $env:MVS_ROOT_KEY, on an encrypted removable
+# drive that is connected only while signing (core/updater/SECURITY.md). This
+# script never prints, copies or uploads it, and refuses a key inside the
+# repository or in a synced folder.
 #
 # 1. Downloads the tag's draft or pre-release and checks every file against
 #    SHA256SUMS, and the channel's manifest body against both.
@@ -13,8 +15,9 @@
 # 3. Builds `updater` from the tag's own source (git archive of the tag, which
 #    must be on origin/main). Never a downloaded binary.
 # 4. Shows a summary and asks you to type the version to go on.
-# 5. Signs with the key, then `updater verify` against the tag's
-#    core/updater/trust/root.json, the payloads included.
+# 5. Only now: asks you to connect the key drive, checks the key, signs, and
+#    runs `updater verify` against the tag's core/updater/trust/root.json,
+#    the payloads included. Then asks you to remove the drive.
 # 6. Publishes the release (--draft=false --prerelease), then runs
 #    publish-update.ps1 for the channel.
 # Any failure stops it before anything is signed or uploaded.
@@ -24,14 +27,18 @@
 param(
   [Parameter(Mandatory)][ValidatePattern('^v\d+\.\d+\.\d+$')][string]$Tag,
   [ValidateSet('beta', 'alpha')][string]$Channel = 'beta',
-  [string]$Key = $env:MVS_ROOT_KEY,
+  [string]$Key,
   # Root rotations (root-2.json, ...), oldest first; passed to verify and
-  # uploaded by publish-update.ps1.
+  # uploaded by publish-update.ps1. Read while the key drive is connected.
   [string[]]$Roots = @(),
   [int]$RestampAfterHours = 48,
   [switch]$WhatIf,
   [string]$Repo = 'moranmoa/MVP'
 )
+# Read the key's path once, then drop it from the environment before any
+# native command runs: git, gh, cargo (build scripts) and node never see it.
+if (-not $Key) { $Key = $env:MVS_ROOT_KEY }
+Remove-Item Env:\MVS_ROOT_KEY -ErrorAction SilentlyContinue
 $ErrorActionPreference = 'Stop'
 # Hebrew notes in the summary.
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
@@ -59,20 +66,10 @@ if ($env:CI -or $env:GITHUB_ACTIONS) { Fail 'this script is for the owner''s own
 $repoRoot = (git -C $PSScriptRoot rev-parse --show-toplevel)
 if ($LASTEXITCODE -ne 0 -or -not $repoRoot) { Fail 'run it from a checkout of the repository' }
 $repoRoot = [IO.Path]::GetFullPath($repoRoot)
-foreach ($r in $Roots) { if (-not (Test-Path -PathType Leaf $r)) { Fail "root rotation file not found: $r" } }
 
-$keyPath = $null
-if (-not $WhatIf) {
-  # The key's path is never printed: messages say "the key" only.
-  if (-not $Key) { Fail 'no signing key: pass -Key <path> or set $env:MVS_ROOT_KEY' }
-  if (-not (Test-Path -PathType Leaf -LiteralPath $Key)) { Fail 'the signing key (-Key / MVS_ROOT_KEY) is not a file that exists' }
-  $keyPath = (Resolve-Path -LiteralPath $Key).ProviderPath
-  if ($keyPath.StartsWith($repoRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
-    Fail 'the signing key is inside the repository checkout; keep it on removable or encrypted storage'
-  }
-  Ok 'signing key found (path not shown)'
-}
 Run 'gh is not logged in (gh auth login)' { gh auth status *> $null }
+# Only that a key is named; the drive is connected later, for signing only.
+if (-not $WhatIf -and -not $Key) { Fail 'no signing key: pass -Key <path> or set $env:MVS_ROOT_KEY' }
 
 $work = Join-Path ([IO.Path]::GetTempPath()) ("mvs-release-$version-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory $work | Out-Null
@@ -180,7 +177,7 @@ if ($Roots.Count) { Write-Host "  rotations $(($Roots | ForEach-Object { Split-P
 
 if ($WhatIf) {
   Step 'WhatIf: stopping before signing and uploading'
-  Write-Host "  would sign manifest-body-$Channel.json with the key"
+  Write-Host "  would ask you to connect the key drive, check the key, and sign manifest-body-$Channel.json"
   Write-Host "  would run: updater verify --root <tag>/core/updater/trust/root.json, each payload included"
   if ($rel.isDraft) { Write-Host "  would run: gh release edit $Tag --draft=false --prerelease" }
   Write-Host "  would run: publish-update.ps1 -Tag $Tag -Channel $Channel"
@@ -191,7 +188,46 @@ if ($WhatIf) {
 $answer = Read-Host "`nType the version ($version) to sign and publish it to $Channel, anything else to stop"
 if ($answer.Trim() -ne $version) { Fail 'not confirmed' }
 
-# --- 6. Sign and verify -----------------------------------------------------
+# --- 6. Key drive, sign and verify ------------------------------------------
+# Everything that needs the network or runs third-party code is done. The
+# key's path is never printed: messages say "the key" only.
+Step 'Key drive'
+if (-not $Key) { Fail 'no signing key: pass -Key <path> or set $env:MVS_ROOT_KEY' }
+[void](Read-Host 'Connect the key drive now, then press Enter')
+if (-not (Test-Path -PathType Leaf -LiteralPath $Key)) { Fail 'the signing key (-Key / MVS_ROOT_KEY) is not a file that exists: is the drive connected?' }
+$keyPath = (Resolve-Path -LiteralPath $Key).ProviderPath
+$sep = [IO.Path]::DirectorySeparatorChar
+if ($keyPath.StartsWith($repoRoot + $sep, [StringComparison]::OrdinalIgnoreCase)) {
+  Fail 'the signing key is inside the repository checkout; keep it on an encrypted removable drive'
+}
+# Synced folders upload the key: OneDrive (any of its variables), Dropbox,
+# Google Drive.
+$synced = @($env:OneDrive, $env:OneDriveConsumer, $env:OneDriveCommercial) | Where-Object { $_ }
+foreach ($s in $synced) {
+  if ($keyPath.StartsWith([IO.Path]::GetFullPath($s).TrimEnd($sep) + $sep, [StringComparison]::OrdinalIgnoreCase)) {
+    Fail 'the signing key is in a OneDrive folder; keep it on an encrypted removable drive'
+  }
+}
+if ($keyPath -match '(?i)[\\/](OneDrive[^\\/]*|Dropbox|Google Drive|GoogleDrive|My Drive)[\\/]') {
+  Fail 'the signing key is in a synced folder (OneDrive, Dropbox or Google Drive); keep it on an encrypted removable drive'
+}
+$keyRoot = [IO.Path]::GetPathRoot($keyPath)
+$driveType = $null
+try { $driveType = ([IO.DriveInfo]::new($keyRoot)).DriveType } catch { }
+if ("$driveType" -ne 'Removable') {
+  Write-Host "warning: the key is not on a removable drive ($(if ($driveType) { $driveType } else { 'unknown type' })). SECURITY.md wants an encrypted removable drive, connected only while signing." -ForegroundColor Yellow
+}
+Ok 'signing key found (path not shown)'
+# Root rotations are public; copy them now so the drive can go before the upload.
+$rotations = @()
+foreach ($r in $Roots) {
+  if (-not (Test-Path -PathType Leaf -LiteralPath $r)) { Fail "root rotation file not found: $r" }
+  $copy = Join-Path $work (Split-Path -Leaf $r)
+  Copy-Item -LiteralPath $r $copy
+  $rotations += $copy
+}
+$Roots = $rotations
+
 Step 'Signing'
 $manifest = Join-Path $work "manifest-$Channel.json"
 $prev = $ErrorActionPreference
@@ -210,6 +246,9 @@ foreach ($p in $payloads) {
   Run "updater verify ($($p.Platform))" { & $updater @verifyArgs }
 }
 Ok 'signature, root chain, expiry and payload hashes verified'
+$keyPath = $null
+$Key = $null
+[void](Read-Host "`nRemove the key drive now, then press Enter to upload")
 
 # --- 7. Publish -------------------------------------------------------------
 Step 'Publishing'
