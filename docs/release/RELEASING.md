@@ -309,6 +309,14 @@ PowerShell on your normal (online) PC, in the repo:
    the manifests list only `windows-*`. The Linux `.tar.gz` stays a plain
    release file.
 
+   **First run on a channel:** `update-<channel>` doesn't exist yet, so the
+   script creates it ("… does not exist yet: creating it"); that is expected.
+   It works in Windows PowerShell 5.1 and in PowerShell 7: every `gh` and
+   `updater` call is judged by its exit code, not by what it writes to stderr
+   (before 0.3.3, 5.1 stopped with "release not found" on the first run).
+   Any failed download, create or upload stops the script before it prints
+   "published".
+
 ## Keeping a release alive
 
 Electron bumps follow [ELECTRON-UPGRADE.md](ELECTRON-UPGRADE.md): the Windows

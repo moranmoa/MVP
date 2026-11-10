@@ -20,6 +20,21 @@ param(
   [string]$Repo = 'moranmoa/MVP'
 )
 $ErrorActionPreference = 'Stop'
+
+# Runs a native program (gh, the updater) and returns its exit code. Windows
+# PowerShell 5.1 turns any stderr line of a native program into a terminating
+# error under 'Stop', even when it exits 0 (gh writes "release not found" to
+# stderr on a first run): so stderr is allowed here, and the exit code decides.
+function Invoke-Native {
+  param([Parameter(Mandatory)][string]$Exe, [string[]]$ArgList = @(), [switch]$Quiet)
+  $old = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    if ($Quiet) { & $Exe @ArgList *> $null }
+    else { & $Exe @ArgList 2>&1 | ForEach-Object { Write-Host "$_" } }
+  } finally { $ErrorActionPreference = $old }
+  return $LASTEXITCODE
+}
 $version = $Tag.Substring(1)
 
 # Verify the signature, root chain and expiry with the updater itself, so a
@@ -29,8 +44,7 @@ if (-not (Get-Command $Updater -ErrorAction SilentlyContinue)) {
 }
 $verifyArgs = @('verify', '--manifest', $Manifest, '--root', $Root)
 foreach ($r in $Roots) { $verifyArgs += @('--root-update', $r) }
-& $Updater @verifyArgs
-if ($LASTEXITCODE -ne 0) { throw "updater verify failed: not publishing $Manifest" }
+if ((Invoke-Native $Updater $verifyArgs) -ne 0) { throw "updater verify failed: not publishing $Manifest" }
 "ok: updater verify accepted the signature, root chain and expiry"
 
 $signed = Get-Content -Raw $Manifest | ConvertFrom-Json
@@ -47,7 +61,9 @@ $files = @()
 foreach ($p in $body.artifacts.PSObject.Properties) {
   # The updater fetches and unpacks only mvs-<version>-<platform>.zip.
   $name = "mvs-$version-$($p.Name).zip"
-  gh release download $Tag --repo $Repo --pattern $name --dir $work --clobber
+  if ((Invoke-Native gh @('release', 'download', $Tag, '--repo', $Repo, '--pattern', $name, '--dir', $work, '--clobber')) -ne 0) {
+    throw "could not download $name from release $Tag"
+  }
   $path = Join-Path $work $name
   $hash = (Get-FileHash $path -Algorithm SHA256).Hash.ToLower()
   if ($hash -ne $p.Value.sha256) { throw "$name sha256 $hash does not match the manifest" }
@@ -59,13 +75,18 @@ foreach ($p in $body.artifacts.PSObject.Properties) {
 # The fixed-tag channel release: created once, a pre-release so it never
 # shows as "Latest".
 $rel = "update-$Channel"
-gh release view $rel --repo $Repo *> $null
-if ($LASTEXITCODE -ne 0) {
-  gh release create $rel --repo $Repo --prerelease --title "Update channel: $Channel" `
-    --notes "Signed update manifest for the $Channel channel, polled by the app. Not an installer."
+# A first run has no channel release yet: gh exits non-zero, and we create it.
+if ((Invoke-Native gh @('release', 'view', $rel, '--repo', $Repo) -Quiet) -ne 0) {
+  "$rel does not exist yet: creating it (pre-release)"
+  $notes = "Signed update manifest for the $Channel channel, polled by the app. Not an installer."
+  if ((Invoke-Native gh @('release', 'create', $rel, '--repo', $Repo, '--prerelease', '--title', "Update channel: $Channel", '--notes', $notes)) -ne 0) {
+    throw "could not create release $rel"
+  }
 }
 $manifestCopy = Join-Path $work 'manifest.json'
 Copy-Item $Manifest $manifestCopy -Force
 $upload = @($manifestCopy) + $files + $Roots
-gh release upload $rel --repo $Repo --clobber @upload
+if ((Invoke-Native gh (@('release', 'upload', $rel, '--repo', $Repo, '--clobber') + $upload)) -ne 0) {
+  throw "upload to $rel failed: check the release before telling anyone it is published"
+}
 "published to $rel : $(($upload | ForEach-Object { Split-Path -Leaf $_ }) -join ', ')"
