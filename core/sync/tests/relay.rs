@@ -152,6 +152,7 @@ async fn node_lan(name: &str, relay: &Multiaddr, allow_lan: bool) -> (Node, mpsc
         listen: "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
         bootstrap: vec![],
         allow_lan,
+        relay_only: false,
     };
     let (node, mut events) = Node::start(config).await.unwrap();
     let (tx, rx) = mpsc::unbounded_channel();
@@ -299,7 +300,7 @@ async fn bound_node(name: &str, relay: &Multiaddr, key: u8, allow_lan: bool, gat
 
 /// [`bound_node`] with its events.
 async fn bound_node_events(name: &str, relay: &Multiaddr, key: u8, allow_lan: bool, gate: Arc<dyn ReadGate>) -> (Node, mpsc::Receiver<NodeEvent>) {
-    bound_node_on_events(name, relay, key, allow_lan, gate, "/ip4/127.0.0.1/tcp/0".parse().unwrap(), vec![]).await
+    bound_node_on_events(name, relay, key, allow_lan, gate, "/ip4/127.0.0.1/tcp/0".parse().unwrap(), vec![], false).await
 }
 
 /// [`bound_node`] listening on `listen`, dialling `bootstrap` too.
@@ -312,10 +313,11 @@ async fn bound_node_on(
     listen: Multiaddr,
     bootstrap: Vec<Multiaddr>,
 ) -> Node {
-    bound_node_on_events(name, relay, key, allow_lan, gate, listen, bootstrap).await.0
+    bound_node_on_events(name, relay, key, allow_lan, gate, listen, bootstrap, false).await.0
 }
 
-/// [`bound_node_on`] with its events.
+/// [`bound_node_on`] with its events, and `relay_only` from the start.
+#[allow(clippy::too_many_arguments)]
 async fn bound_node_on_events(
     name: &str,
     relay: &Multiaddr,
@@ -324,6 +326,7 @@ async fn bound_node_on_events(
     gate: Arc<dyn ReadGate>,
     listen: Multiaddr,
     bootstrap: Vec<Multiaddr>,
+    relay_only: bool,
 ) -> (Node, mpsc::Receiver<NodeEvent>) {
     let (server, channel) = test_server();
     let dir = std::env::temp_dir().join(format!("sync-relay-{}-{name}", std::process::id()));
@@ -336,6 +339,7 @@ async fn bound_node_on_events(
         listen,
         bootstrap,
         allow_lan,
+        relay_only,
     };
     let access = Access {
         binder: Some(Arc::new(SigningKey::from_bytes(&[key; 32]))),
@@ -953,4 +957,85 @@ async fn wait_ports(node: &Node, ports: impl Fn(&[Multiaddr]) -> (Option<u16>, O
         assert!(start.elapsed() < Duration::from_secs(10), "no QUIC listener beside TCP: {addrs:?}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// GAP-6r: relay-only from the start (`NodeConfig::relay_only`) never listens
+/// directly, never dials its bootstrap addresses and never goes direct; and
+/// turning relay-only on closes direct connections already open, the peers
+/// staying connected through the relay.
+#[tokio::test(flavor = "multi_thread")]
+async fn relay_only_from_start_never_goes_direct_and_turning_it_on_closes_direct_links() {
+    use libp2p::multiaddr::Protocol;
+    let _ = tracing_subscriber::fmt().with_env_filter("sync=debug").with_test_writer().try_init();
+    let id = |n: u8| records::PublicKey::from_bytes(SigningKey::from_bytes(&[n; 32]).verifying_key().to_bytes());
+    let only_circuits = |addrs: &[Multiaddr]| addrs.iter().all(|a| a.iter().any(|p| p == Protocol::P2pCircuit));
+    let relay_here = || {
+        let relay_key = identity::Keypair::generate_ed25519();
+        let port = free_port();
+        let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::from(relay_key.public())).parse().unwrap();
+        let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handle = start_relay_counting(relay_key, port, circuits.clone(), true);
+        (handle, circuits, relay)
+    };
+
+    // From the start: a bootstrap address that counts every connection to it.
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    probe.set_nonblocking(true).unwrap();
+    let bootstrap: Multiaddr =
+        format!("/ip4/127.0.0.1/tcp/{}/p2p/{}", probe.local_addr().unwrap().port(), PeerId::random()).parse().unwrap();
+    let (_relay, circuits, relay) = relay_here();
+    let tcp = || "/ip4/127.0.0.1/tcp/0".parse::<Multiaddr>().unwrap();
+    let (a, _) = bound_node_on_events("ro-start-a", &relay, 30, true, Arc::new(AcceptAll), tcp(), vec![bootstrap], true).await;
+    let listening = a.listen_addrs().await.unwrap();
+    assert!(only_circuits(&listening), "relay only from the start, yet listening directly: {listening:?}");
+    let b = bound_node("ro-start-b", &relay, 31, true, Arc::new(AcceptAll)).await;
+    let ids = [a.peer_id(), b.peer_id()];
+    let start = Instant::now();
+    while !circuits.lock().unwrap().iter().any(|(p, ok)| *ok && ids.contains(p)) {
+        assert!(start.elapsed() < Duration::from_secs(30), "relay-only peer never met through the relay");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert!(a.direct_peers().await.unwrap().is_empty() && b.direct_peers().await.unwrap().is_empty(), "went direct");
+    assert_eq!(a.peers().await.unwrap(), vec![b.peer_id()], "not connected through the relay");
+    let seen = a.presence(test_server().0).await.unwrap();
+    assert!(seen.online.contains(&id(31)) && seen.direct.is_empty(), "{seen:?}");
+    let listening = a.listen_addrs().await.unwrap();
+    assert!(only_circuits(&listening), "relay only, yet listening directly: {listening:?}");
+    let mut dialled = 0;
+    while probe.accept().is_ok() {
+        dialled += 1;
+    }
+    assert_eq!(dialled, 0, "a relay-only node dialled its bootstrap address");
+    a.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
+
+    // Turned on later: two members on one LAN go direct, then relay-only on
+    // one side closes that link and both stay connected through the relay.
+    let (_relay, _, relay) = relay_here();
+    let a = bound_node("ro-switch-a", &relay, 32, true, Arc::new(AcceptAll)).await;
+    let b = bound_node("ro-switch-b", &relay, 33, true, Arc::new(AcceptAll)).await;
+    let start = Instant::now();
+    while a.direct_peers().await.unwrap() != vec![b.peer_id()] {
+        assert!(start.elapsed() < Duration::from_secs(60), "never went direct on one LAN");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    a.set_relay_only(true).unwrap();
+    let start = Instant::now();
+    loop {
+        let (da, db) = (a.direct_peers().await.unwrap(), b.direct_peers().await.unwrap());
+        let seen = a.presence(test_server().0).await.unwrap();
+        if da.is_empty() && db.is_empty() && a.peers().await.unwrap() == vec![b.peer_id()] && seen.online.contains(&id(33)) && seen.direct.is_empty() {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(30), "still direct or not relayed: A direct {da:?}, B direct {db:?}, A sees {seen:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // And it stays that way: B's F2 dial finds no listener, a late direct
+    // connection is closed on arrival.
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert!(a.direct_peers().await.unwrap().is_empty() && b.direct_peers().await.unwrap().is_empty(), "went direct again");
+    assert_eq!(a.peers().await.unwrap(), vec![b.peer_id()], "the relayed link went");
+    a.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
 }

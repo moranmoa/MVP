@@ -191,6 +191,11 @@ pub struct NodeConfig {
     /// bound peer reports may be dialled to turn a relayed connection into a
     /// direct one. LAN addresses never come from, or go to, the DHT.
     pub allow_lan: bool,
+    /// "Relay only" (GAP-6) from the start: no direct listener (TCP or
+    /// QUIC), no start-up dial of `bootstrap`, no hole punching. Only the
+    /// relay connection and its circuits. The same as `Node::set_relay_only(true)`
+    /// right after start, without the moment in between.
+    pub relay_only: bool,
 }
 
 /// Who may read servers opened with [`Node::open_server`] (GAP-4). Without
@@ -510,9 +515,17 @@ impl Node {
         // hold the port for a moment: try it for about 2 s before giving up on
         // it, so the port the user allowed in the firewall is kept.
         let mut attempt = 0;
+        // Relay-only from the start: no direct listener at all (it comes up,
+        // with QUIC beside it, if relay-only is turned off later).
+        if config.relay_only {
+            swarm.behaviour_mut().punch.set_enabled(false);
+        }
         let (listener, listen) = loop {
+            if config.relay_only {
+                break (None, listen);
+            }
             match swarm.listen_on(listen.clone()) {
-                Ok(id) => break (id, listen),
+                Ok(id) => break (Some(id), listen),
                 Err(err) if listen != config.listen && attempt < SAVED_PORT_TRIES => {
                     attempt += 1;
                     debug!(%err, attempt, "the saved listen port is busy; trying again");
@@ -520,13 +533,17 @@ impl Node {
                 }
                 Err(err) if listen != config.listen => {
                     warn!(%err, "the saved listen port is taken: listening on a random one this time");
-                    break (swarm.listen_on(config.listen.clone())?, config.listen.clone());
+                    break (Some(swarm.listen_on(config.listen.clone())?), config.listen.clone());
                 }
                 Err(err) => return Err(err.into()),
             }
         };
-        for addr in &config.bootstrap {
-            let _ = swarm.dial(DialOpts::unknown_peer_id().address(addr.clone()).build());
+        // Bootstrap peers are dialled directly: not while relay-only (as in
+        // `discover`), so a relay-only node's first dial is the relay's.
+        if !config.relay_only {
+            for addr in &config.bootstrap {
+                let _ = swarm.dial(DialOpts::unknown_peer_id().address(addr.clone()).build());
+            }
         }
         swarm.behaviour_mut().kad.add_address(&relay_peer, config.relay.clone());
         swarm.dial(config.relay.clone())?;
@@ -579,13 +596,13 @@ impl Node {
             acks: Acks::new(ACKS_PER_AUTHOR, MAX_ACK_AUTHORS, ACK_TTL),
             soon: HashSet::new(),
             direct_candidates: HashMap::new(),
-            relay_only: false,
+            relay_only: config.relay_only,
             fallback_at: HashMap::new(),
             fallback_done: HashSet::new(),
             direct_dials: true,
             listen: listen.clone(),
             port_file,
-            listener: Some(listener),
+            listener,
             quic_listener: None,
             relayed_preferred: HashSet::new(),
             dial_backoff: backoff,
@@ -1592,6 +1609,22 @@ impl Task {
                 self.swarm.remove_listener(id);
             }
             self.direct_candidates.clear();
+            // GAP-6r blocker 1: direct connections already open go too (the
+            // relay's own excepted). A peer with a parked relayed connection
+            // is relayed again at once (ConnectionClosed); one without meets
+            // us through a circuit at the next discovery round.
+            let direct: Vec<ConnectionId> = self
+                .direct
+                .iter()
+                .filter(|(peer, _)| **peer != self.relay_peer)
+                .flat_map(|(_, conns)| conns.iter().copied())
+                .collect();
+            if !direct.is_empty() {
+                info!(count = direct.len(), "relay only: closing direct connections");
+            }
+            for id in direct {
+                self.swarm.close_connection(id);
+            }
         } else {
             match self.swarm.listen_on(self.listen.clone()) {
                 Ok(id) => self.listener = Some(id),
@@ -1788,6 +1821,14 @@ impl Task {
                 }
                 if !self.admit_by_ip(connection_id, &endpoint) {
                     debug!(%peer_id, "too many connections from one address");
+                    self.swarm.close_connection(connection_id);
+                    return;
+                }
+                // Relay-only: a direct connection to anyone but the relay
+                // (a dial or punch already under way when it was turned on)
+                // is closed as soon as it opens.
+                if self.relay_only && peer_id != self.relay_peer && !is_relayed(&endpoint) {
+                    debug!(%peer_id, "relay only: closing a direct connection");
                     self.swarm.close_connection(connection_id);
                     return;
                 }
@@ -3023,6 +3064,7 @@ mod tests {
             listen: "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
             bootstrap: Vec::new(),
             allow_lan: true,
+            relay_only: false,
         };
         let (first, _) = Node::start(config()).await.unwrap();
         let port = port_of(&first).await;
@@ -3064,6 +3106,7 @@ mod tests {
             listen: "/ip4/0.0.0.0/tcp/0".parse().unwrap(),
             bootstrap: Vec::new(),
             allow_lan: true,
+            relay_only: false,
         };
         let (node, _events) = Node::start(config).await.unwrap();
         port_of(&node).await;
@@ -3302,6 +3345,7 @@ mod tests {
             listen: format!("/ip4/127.0.0.1/tcp/{}", listen.unwrap_or(0)).parse().unwrap(),
             bootstrap: bootstrap.map(|p| format!("/ip4/127.0.0.1/tcp/{p}").parse().unwrap()).into_iter().collect(),
             allow_lan: true,
+            relay_only: false,
         };
         Node::start_with(config, access).await.unwrap()
     }
@@ -3495,6 +3539,7 @@ mod tests {
                 listen: listen.parse().unwrap(),
                 bootstrap,
                 allow_lan: true,
+                relay_only: false,
             }
         };
         let (a, _a_events) = Node::start(node("a", "/ip4/127.0.0.1/tcp/0/ws".into(), vec![])).await.unwrap();
