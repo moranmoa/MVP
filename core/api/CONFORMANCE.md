@@ -81,7 +81,7 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 | The mock's `getRecoveryWords` answers at any time | The Rust core answers only until the check passes, then `not-allowed` (until the app lock, #31); the mock should too |
 | The mock accepts any `updateProfile` input | The Rust core refuses oversize fields and any avatar other than a base64 PNG, JPEG, WebP or GIF `data:` URL (`bad-request`) |
 | The mock has no `grantRole` / `revokeRole` | Add them to `CoreCommands` (proposed below) |
-| The mock's `sendMessage` resolves at once | The Rust core: a plain member who just joined has no channel key until a moderator's re-key reaches them. `sendMessage` then waits for it, up to 5 s, before `not-allowed`. The UI keeps the message in its "sending" state meanwhile, and never shows a failure for that wait. A send blocks the core for that long, so the UI sends one message at a time, never a burst |
+| The mock's `sendMessage` resolves at once | The Rust core: a plain member who just joined has no channel key until a moderator's re-key reaches them. `sendMessage` then waits for it, up to 2 s (only re-trying the seal; the background sync brings the key), before `not-allowed`. The UI keeps the message in its "sending" state meanwhile. A send blocks the core for that long, so the UI sends one message at a time, never a burst |
 
 ## Proposed contract additions (Rust has them; `api.ts` doesn't yet)
 

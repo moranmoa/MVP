@@ -1610,8 +1610,8 @@ fn send_states_survive_a_restart() {
 
 /// v0.3.0 smoke (QA): a joiner sends the moment the join resolves, before
 /// the owner's re-key has reached it. The send waits for the key (the
-/// owner's background sync makes it), and never surfaces `not-allowed` to
-/// a legit member.
+/// owner's background sync makes it, the joiner's brings it in), and never
+/// surfaces `not-allowed` to a legit member.
 #[test]
 fn a_joiners_first_send_right_after_the_join_succeeds() {
     use api::crypto::GroupKeysCipher;
@@ -1631,13 +1631,16 @@ fn a_joiners_first_send_right_after_the_join_succeeds() {
     let server = owner.core.create_server("Instant", AgeRestriction::None).unwrap();
     let stop = AtomicBool::new(false);
     std::thread::scope(|scope| {
-        // The owner's app: its background sync loop.
-        scope.spawn(|| {
-            while !stop.load(Ordering::SeqCst) {
-                let _ = owner.core.sync_now();
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        });
+        // Both apps' background sync loops.
+        for peer in [&owner, &guest] {
+            let stop = &stop;
+            scope.spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let _ = peer.core.sync_now();
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            });
+        }
         guest.core.join_server(&server.invite_link).unwrap();
         assert!(guest.core.list_servers().unwrap().iter().any(|s| s.id == server.id));
         let channel = guest.core.list_channels(&server.id).unwrap().remove(0).id;

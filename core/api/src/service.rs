@@ -92,10 +92,8 @@ pub const MAX_CHECK_FAILURES: u8 = 5;
 pub const SYNC_EVERY: Duration = Duration::from_secs(2);
 /// How long a new member's send waits for the channel key (the re-key a
 /// moderator makes when they read the join), and how often it looks.
-pub const KEY_WAIT: Duration = Duration::from_secs(5);
-const KEY_WAIT_POLL: Duration = Duration::from_millis(200);
-/// At most one network pull per this, while a send waits for its key.
-const KEY_WAIT_PULL: Duration = Duration::from_secs(1);
+pub const KEY_WAIT: Duration = Duration::from_secs(2);
+const KEY_WAIT_POLL: Duration = Duration::from_millis(100);
 /// A join that found nobody online is retried in the background: first
 /// after `JOIN_RETRY_FIRST`, doubling up to `JOIN_RETRY_MAX`, for at most
 /// `JOIN_RETRY_FOR` (until then the inviter may still come online).
@@ -1224,8 +1222,12 @@ impl Core {
     /// message of a channel, or the first after a removal, needs a key
     /// rotation: a moderator or above makes one on the way. A plain member
     /// without the key yet (just joined: the moderator's re-key is on its
-    /// way) waits for it up to [`KEY_WAIT`], syncing meanwhile, and only
-    /// then gets `not-allowed`.
+    /// way) waits for it up to [`KEY_WAIT`], and only then gets
+    /// `not-allowed`. The wait only re-tries the seal: the background sync
+    /// loop (woken now) brings the key, never this request.
+    /// TODO(#285, tech lead): hold the message as pending in the core and
+    /// let the sync loop send it when the key comes, instead of blocking
+    /// the request thread at all.
     pub fn send_message(
         &self,
         channel_id: &str,
@@ -1239,7 +1241,6 @@ impl Core {
             return Err(ErrorCode::BadRequest.into());
         }
         let deadline = Instant::now() + KEY_WAIT;
-        let mut pulled = Instant::now();
         loop {
             let sent = self.run(|inner, ports, events| {
                 let (server, channel) = inner.find_channel(channel_id)?;
@@ -1264,13 +1265,10 @@ impl Core {
             if Instant::now() >= deadline {
                 return Err(ErrorCode::NotAllowed.into());
             }
+            // A round of the background sync now, rather than at its next
+            // tick: it brings the re-key in. Nothing is fetched here.
+            self.ports.network.wake();
             std::thread::sleep(KEY_WAIT_POLL);
-            // The background sync usually brings the re-key; pull it in
-            // ourselves too, but at most once a second (sec-lead).
-            if pulled.elapsed() >= KEY_WAIT_PULL {
-                pulled = Instant::now();
-                let _ = self.sync_now();
-            }
         }
     }
 
