@@ -37,24 +37,39 @@ mkdir -p "$rv/core" "$rv/cfg"
 cp "$dl/mvs-core" "$rv/core/mvs-core"
 cp "$(find "$dl" -name mvs-config.json -path '*resources*' | head -1)" "$rv/cfg/mvs-config.json"
 
-# Hides the relay's host, peer IDs, multiaddr hosts and any IP address.
+# Hides the relay's host, invite links, peer IDs, server IDs (64 hex),
+# multiaddr hosts, and IPv4/IPv6 addresses, also as a bare IP:port or
+# [IPv6]:port (sync=debug prints SocketAddrs). Module paths such as
+# mvs::join and clock times stay readable: an IPv6 must start after a
+# non-word character.
 relay_host=$(grep -o '"relay" *: *"/[a-z0-9]*/[^/"]*' "$rv/cfg/mvs-config.json" | sed 's#.*/##' | head -1)
 mask() {
   sed -E \
     -e "s#${relay_host:-<no-relay-host>}#<relay-host>#g" \
+    -e 's#mv[sp]://join/[^ "<>)]*#mvs://join/<link>#g' \
     -e 's#/(dns4|dns6|dnsaddr|ip4|ip6)/[^/ "]+#/\1/<masked>#g' \
     -e 's#/p2p/[1-9A-HJ-NP-Za-km-z]{40,}#/p2p/<peer>#g' \
-    -e 's#([0-9]{1,3}\.){3}[0-9]{1,3}#<ip>#g' \
-    -e 's#([0-9a-fA-F]{0,4}:){3,7}[0-9a-fA-F]{1,4}#<ip6>#g'
+    -e 's#(12D3KooW|Qm)[1-9A-HJ-NP-Za-km-z]{40,}#<peer>#g' \
+    -e 's#[0-9a-fA-F]{64}#<id>#g' \
+    -e 's#\[[0-9a-fA-F:.%]*:[0-9a-fA-F:.%]*\](:[0-9]+)?#<ip6>#g' \
+    -e 's#([0-9]{1,3}\.){3}[0-9]{1,3}(:[0-9]+)?#<ip>#g' \
+    -e 's#(^|[^0-9A-Za-z_:])[0-9a-fA-F]{0,4}(:[0-9a-fA-F]{0,4}){2,7}#\1<ip6>#g'
 }
 echo "live smoke $TAG, OK: $MVS_LIVE_SMOKE_OK" | mask
 
-cleanup() { docker rm -f "$P-a" "$P-b" >/dev/null 2>&1 || true; docker network rm "$P-a" "$P-b" >/dev/null 2>&1 || true; }
+# The run's raw files go at the end: the release config (the relay's
+# address), the binary and the rendezvous files (invite links).
+cleanup() {
+  docker rm -f "$P-a" "$P-b" >/dev/null 2>&1 || true
+  docker network rm "$P-a" "$P-b" >/dev/null 2>&1 || true
+  rm -rf "$rv/cfg" "$rv/core"
+  rm -f "$rv"/*.invite-*.json "$rv"/*.sent-*.json "$rv"/*.reply-*.json "$rv"/*.got-*.json
+}
 trap cleanup EXIT INT TERM
 docker network create "$P-a" >/dev/null
 docker network create "$P-b" >/dev/null
 side() { # role
-  docker run -d --name "$P-$1" --network "$P-$1" -e ROLE="$1" -e ROUNDS="${ROUNDS:-10}" \
+  docker run -d --name "$P-$1" --network "$P-$1" -e ROLE="$1" -e ROUNDS="${ROUNDS:-10}" -e JOIN_LOG="${JOIN_LOG:-}" \
     -v "$(mount "$rv/core"):/core:ro" -v "$(mount "$rv/cfg"):/cfg:ro" -v "$(mount "$here"):/qa:ro" -v "$(mount "$rv"):/rendezvous" \
     mvs-voice-e2e-app sh -c "chmod 777 /rendezvous 2>/dev/null; runuser -u pwuser -- dbus-run-session -- sh -c 'echo -n test | gnome-keyring-daemon --unlock --components=secrets >/dev/null && node /qa/live.mjs'" >/dev/null
 }

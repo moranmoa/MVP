@@ -82,6 +82,8 @@ dc logs --no-color --no-log-prefix a > "$out/a.log" 2>&1 || true
 dc logs --no-color --no-log-prefix b > "$out/b.log" 2>&1 || true
 dc logs --no-color --no-log-prefix relay > "$out/relay.log" 2>&1 || true
 docker cp "$(dc ps -aq a)":/rendezvous/. "$(mount "$out")" >/dev/null 2>&1 || true
+# Invite links (and, with MODE=restore, the throwaway owner's words) stay out of the results.
+rm -f "$out"/*.invite.json
 
 echo
 echo "== results ($out)"

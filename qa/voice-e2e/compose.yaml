@@ -61,6 +61,8 @@ services:
       MODE: ${MODE:-new}
       JOIN_VIA: ${JOIN_VIA:-bridge}
       JOIN_ONLY: ${JOIN_ONLY:-}
+      CHECK_LOG: ${CHECK_LOG:-}
+      MVS_DEBUG_LOG: ${MVS_DEBUG_LOG:-}
       MVS_RELAY: ${MVS_RELAY:-}
       MVS_CORE_PATH: /build/mvs-core
       MVS_UI_DIR: /build/ui
