@@ -2828,3 +2828,68 @@ input.switch:disabled {
   padding-block-start: 1rem;
   border-block-start: 1px solid var(--border);
 }
+
+/* G-11: the owner reorders the channels. The handle sits at the start side. */
+.channel-row {
+  position: relative;
+}
+
+.channel-handle {
+  position: absolute;
+  inset-inline-start: -0.875rem;
+  inset-block-start: 50%;
+  translate: 0 -50%;
+  width: 1rem;
+  text-align: center;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  cursor: grab;
+  opacity: 0;
+  user-select: none;
+}
+
+.channel-row:hover .channel-handle,
+.channel-row:focus-within .channel-handle,
+.channel-list ul.dragging .channel-handle {
+  opacity: 1;
+}
+
+.channel-list ul.dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.channel-row.drag-source {
+  opacity: 0.4;
+}
+
+.channel-row.drop-before::before,
+.channel-row.drop-after::after {
+  content: '';
+  position: absolute;
+  inset-inline: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+}
+
+.channel-row.drop-before::before {
+  inset-block-start: -1px;
+}
+
+.channel-row.drop-after::after {
+  inset-block-end: -1px;
+}
+
+.channel-arrange {
+  display: flex;
+}
+
+.channel-arrange .icon-button {
+  width: 2.75rem;
+  height: 2.75rem;
+}
+
+.channel-arrange-done {
+  margin: 0 0.5rem 0.5rem;
+}

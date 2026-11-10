@@ -81,6 +81,12 @@ export interface CoreCommands {
   createChannel(serverId: Id, input: { name: string; adult: boolean }): Promise<Channel>;
   /** Owner only. Same name rules as createChannel. */
   updateChannel(channelId: Id, input: { name?: string; adult?: boolean }): Promise<Channel>;
+  /**
+   * G-11 (#323), owner or admin: puts the channel right before `before`, right
+   * after `after`, or last. Returns the server's channels in the new order.
+   * Rejects not-allowed, not-found, bad-request.
+   */
+  moveChannel(serverId: Id, channelId: Id, before?: Id, after?: Id): Promise<Channel[]>;
   /** Owner only; `not-allowed` for the default channel. */
   deleteChannel(channelId: Id): Promise<void>;
   listMembers(serverId: Id): Promise<Member[]>;

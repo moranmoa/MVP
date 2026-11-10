@@ -42,6 +42,7 @@ const COMMANDS = Object.freeze({
   editMessage: ['messageId', 'body'],
   deleteMessage: ['messageId'],
   retryMessage: ['messageId'],
+  moveChannel: ['serverId', 'channelId', 'before', 'after'],
   discardMessage: ['messageId'],
   markRead: ['channelId'],
   // Safety
