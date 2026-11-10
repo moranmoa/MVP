@@ -21,7 +21,21 @@ pub struct Identity {
     pub bio: Option<String>,
     pub country: String,
     pub birth_date: String,
+    /// B7 §9: a correction that raises my age, waiting its 30 days
+    /// (decision 18). Until `effectiveAt` I count as under 18.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_birth_date: Option<PendingBirthDate>,
     pub recovery_checked: bool,
+}
+
+/// `Identity.pendingBirthDate`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingBirthDate {
+    /// `YYYY-MM-DD`, as `Identity.birthDate`.
+    pub date: String,
+    /// Milliseconds since the epoch.
+    pub effective_at: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

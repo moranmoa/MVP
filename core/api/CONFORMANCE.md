@@ -87,6 +87,12 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 
 - `updateProfile` with a new display name (trimmed) posts a new profile post to every server I'm still a member of (not kicked, not left, not closed); the latest one wins for everyone. The same name, or a new bio or avatar only, posts nothing: bio and avatar stay on this device, since the profile post carries the name (and caps) only. A server that refuses the post is skipped; the call still succeeds. Errors as before: `bad-request` for a bad name, bio or avatar, `not-found` with no identity.
 
+- Age claims and the 30-day rule (decision 18, B13 §3, B7 §9). Each claim is decided from my latest accepted claim in that server:
+  - A birth date that raises me from "not adult" to adult posts nothing. It sets `Identity.pendingBirthDate: { date, effectiveAt }` (`effectiveAt` = when found + 30 days). Until then I count as under 18: the core refuses 18+ joins (`age-blocked`), and servers keep my earlier claim.
+  - When `effectiveAt` passes, the next sync round posts "adult" to every server I'm still in, clears `pendingBirthDate`, and emits `identity.changed`.
+  - A lowering is posted at once. A claim equal to the one the server holds isn't posted again.
+  - So a restore (`restoreIdentity(words, input)`) can't skip the 30 days: the rejoin compares against the claim the server already holds.
+
 - Restore on a new computer:
   - `restoreIdentity(words, input?: { locale, country, birthDate })`. The words don't carry the country or birth date, so the UI asks them again (with the agreement) before the words and passes them here, as `createIdentity` takes them. The name follows with `updateProfile`.
   - Rejoining a server I'm still a member of (its invite link, after a restore) signs no new join. It never posts an empty display name or an age claim without a birth date: the server keeps the profile and claim it holds. With no birth date it isn't age-blocked either: my earlier claim stands. A known age below the server's minimum still blocks.

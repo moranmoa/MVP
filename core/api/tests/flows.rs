@@ -3337,7 +3337,7 @@ fn stranger_words() -> Vec<String> {
 }
 
 /// Fix 1's api: `restoreIdentity(words, input)` takes the country and birth
-/// date asked again; a rejoin then posts a claim from that date.
+/// date asked again; a rejoin then posts only a claim that differs from the one the server holds.
 #[test]
 fn a_restore_takes_the_birth_date_asked_again() {
     let world = World::new();
@@ -3374,7 +3374,8 @@ fn a_restore_takes_the_birth_date_asked_again() {
 
     laptop.core.join_server(&server.invite_link).unwrap();
     assert_eq!(laptop.core.list_servers().unwrap().len(), 1);
-    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::AgeClaim), claims + 1);
+    // The same "adult" claim the server already holds: nothing new posted.
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::AgeClaim), claims);
 }
 
 /// One side of a network partition: while cut, it sees only what the world
@@ -3591,4 +3592,95 @@ fn a_new_name_reaches_every_server_i_am_in() {
         .unwrap();
     bob.core.sync_now().unwrap();
     assert_eq!(name_seen_by(&bob, &one.id, &owner_id), "MoA");
+}
+
+/// The AgeClaim records `who` (a user ID) wrote in `server`, as their
+/// `adult` values.
+fn claims_by(world: &World, server: &str, who: &str) -> Vec<bool> {
+    let server = ServerId::from_bytes(hex::decode(server).unwrap().try_into().unwrap());
+    let who = PublicKey::from_bytes(hex::decode(who).unwrap().try_into().unwrap());
+    let mut claims: Vec<&records::Record> = Vec::new();
+    let fetched = world.network.fetch(server);
+    claims.extend(fetched.iter().filter(|r| r.kind() == Kind::AgeClaim && r.author() == who));
+    claims.into_iter().map(|r| r.body() == [1]).collect()
+}
+
+fn born(birth_date: &str) -> NewIdentityInput {
+    NewIdentityInput { locale: Locale::He, country: "IL".into(), birth_date: birth_date.into() }
+}
+
+/// Decision 18 (B13 §3, B7 §9, PO acceptance test 4a): someone whose claim
+/// says "not adult" restores with a birth date that makes them 18. The raise
+/// waits 30 days (`pendingBirthDate`), nothing is posted, and an 18+ server
+/// stays shut; after the 30 days the sync round posts "adult" and the 18+
+/// server opens. A restore can't skip it.
+#[test]
+fn a_restore_that_raises_the_age_waits_thirty_days() {
+    let world = World::new();
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let open = owner.core.create_server("Open", AgeRestriction::None).unwrap();
+    let night = owner.core.create_server("Night", AgeRestriction::Eighteen).unwrap();
+    // Kim is 17 (NOW is 2026-11-03), joins Open: "not adult".
+    let kim = world.peer();
+    let created = kim.core.create_identity(born("2009-06-01")).unwrap();
+    let kim_id = created.identity.id.clone();
+    kim.core.join_server(&open.invite_link).unwrap();
+    assert_eq!(claims_by(&world, &open.id, &kim_id), [false]);
+
+    // A new computer, a birth date that gives 18: the raise waits.
+    let laptop = world.peer();
+    let restored = laptop.core.restore_identity_with(created.words.clone(), Some(born("2008-06-01"))).unwrap();
+    assert_eq!(restored.pending_birth_date, None, "nothing known before a server says so");
+    laptop.core.join_server(&open.invite_link).unwrap();
+    assert_eq!(laptop.core.list_servers().unwrap().len(), 1);
+    assert_eq!(claims_by(&world, &open.id, &kim_id), [false], "the raise went out at once");
+    let pending = laptop.core.get_identity().unwrap().unwrap().pending_birth_date.expect("pending");
+    assert_eq!(pending.date, "2008-06-01");
+    // 30 days from when the raise was found (the test clock ticks per read).
+    let due = common::NOW_MS + api::AGE_RAISE_DELAY_MS;
+    assert!((due..due + 1_000).contains(&pending.effective_at), "{}", pending.effective_at);
+    // Still under 18 for the core: the 18+ server stays shut.
+    laptop.core.join_server(&night.invite_link).unwrap();
+    assert_eq!(laptop.core.list_servers().unwrap().len(), 1, "joined 18+ during the wait");
+    // A sync round before the 30 days: nothing.
+    advance(&world, api::AGE_RAISE_DELAY_MS - 60_000);
+    laptop.core.sync_now().unwrap();
+    assert_eq!(claims_by(&world, &open.id, &kim_id), [false]);
+
+    // After the 30 days: "adult" goes out, the wait is cleared, 18+ opens.
+    advance(&world, 120_000);
+    laptop.events.take();
+    laptop.core.sync_now().unwrap();
+    assert_eq!(claims_by(&world, &open.id, &kim_id), [false, true]);
+    assert_eq!(laptop.core.get_identity().unwrap().unwrap().pending_birth_date, None);
+    assert!(laptop.events.take().iter().any(|e| matches!(e, Event::IdentityChanged(_))));
+    laptop.core.join_server(&night.invite_link).unwrap();
+    assert_eq!(laptop.core.list_servers().unwrap().len(), 2);
+    assert_eq!(claims_by(&world, &night.id, &kim_id), [true]);
+    // No second wait, and no duplicate claim, on the next rounds.
+    laptop.core.sync_now().unwrap();
+    assert_eq!(claims_by(&world, &open.id, &kim_id), [false, true]);
+}
+
+/// Decision 18: a lower age counts at once. An adult restores with a birth
+/// date that makes them 17: "not adult" is posted on the rejoin, with no
+/// wait and no `pendingBirthDate`.
+#[test]
+fn a_restore_that_lowers_the_age_counts_at_once() {
+    let world = World::new();
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let open = owner.core.create_server("Open", AgeRestriction::None).unwrap();
+    let ana = world.peer();
+    let created = ana.core.create_identity(born("1990-05-01")).unwrap();
+    let ana_id = created.identity.id.clone();
+    ana.core.join_server(&open.invite_link).unwrap();
+    assert_eq!(claims_by(&world, &open.id, &ana_id), [true]);
+
+    let laptop = world.peer();
+    laptop.core.restore_identity_with(created.words.clone(), Some(born("2009-06-01"))).unwrap();
+    laptop.core.join_server(&open.invite_link).unwrap();
+    assert_eq!(claims_by(&world, &open.id, &ana_id), [true, false], "a lowering waits for nothing");
+    assert_eq!(laptop.core.get_identity().unwrap().unwrap().pending_birth_date, None);
 }
