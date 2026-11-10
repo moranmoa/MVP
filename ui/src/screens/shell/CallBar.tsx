@@ -72,6 +72,7 @@ function codeOf(id: Id): string {
 const ERROR_TEXT: Record<string, string> = {
   'call-full': 'call.error.full',
   'relay-only': 'call.error.relayOnly',
+  'in-call-elsewhere': 'call.error.inCallElsewhere',
   'not-implemented': 'call.error.notImplemented',
   'not-allowed': 'call.error.notAllowed',
 };

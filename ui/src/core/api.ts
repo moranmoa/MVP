@@ -124,7 +124,7 @@ export interface CoreCommands {
   getVoiceRoom(serverId: Id): Promise<VoiceRoom>;
   /**
    * Joins a voice room (leaving any other call first); `channelId` is the room's
-   * id. Rejects not-found, not-allowed (a text channel), call-full, relay-only, not-implemented.
+   * id. Rejects not-found, not-allowed (a text channel), call-full, relay-only, in-call-elsewhere (#294: I'm already in it from another computer), not-implemented.
    */
   joinCall(channelId: Id): Promise<CallState>;
   /** Idempotent. */

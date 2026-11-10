@@ -251,6 +251,7 @@
   "call.peerRefusedHint": "The connection didn't pass a security check, so it was blocked. You can't hear each other.",
   "call.error.full": "The call is full: up to 5 people.",
   "call.error.relayOnly": "Calls are off in relay-only mode: in a call, computers connect directly and participants can see your IP address.",
+  "call.error.inCallElsewhere": "You're already in this call on another computer. Leave it there to join from here.",
   "call.error.notImplemented": "Calls aren't available in this version yet.",
   "call.error.notAllowed": "You can't join this voice chat.",
   "call.error.other": "Couldn't join the call. You can try again.",
