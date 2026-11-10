@@ -8,7 +8,8 @@
 // docs/qa/voice-v1-test-plan.md. Exit code 1 if any check failed.
 
 import { createRequire } from 'node:module';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { lookup } from 'node:dns/promises';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -169,6 +170,61 @@ function connectionReport() {
   });
 }
 const live = async () => (await connectionReport()).filter((c) => c.state !== 'failed');
+
+// ---- mvs-core's sockets (V3) -------------------------------------------------
+
+const relayIp = (await lookup('relay')).address;
+
+/** The socket inodes held by processes named mvs-core in this container. */
+function coreInodes() {
+  const out = new Set();
+  for (const pid of readdirSync('/proc').filter((p) => /^\d+$/.test(p))) {
+    try {
+      if (readFileSync(`/proc/${pid}/comm`, 'utf8').trim() !== 'mvs-core') continue;
+      for (const fd of readdirSync(`/proc/${pid}/fd`)) {
+        const m = /^socket:\[(\d+)\]$/.exec(readlinkSync(`/proc/${pid}/fd/${fd}`));
+        if (m) out.add(m[1]);
+      }
+    } catch {
+      // gone, or not ours
+    }
+  }
+  return out;
+}
+
+function addr(hex) {
+  if (hex.length === 8) return hex.match(/../g).reverse().map((b) => parseInt(b, 16)).join('.');
+  if (/^0{20}FFFF0{4}/i.test(hex) || /^0{16}0{4}FFFF/i.test(hex)) return addr(hex.slice(24));
+  if (/^0+$/.test(hex)) return '::';
+  if (/^0{24}01000000$/i.test(hex)) return '::1';
+  return `v6:${hex}`;
+}
+
+/** mvs-core's TCP links and its TCP/UDP listeners, from /proc/net. */
+function sockets() {
+  const mine = coreInodes();
+  const established = [];
+  const listening = [];
+  for (const proto of ['tcp', 'tcp6', 'udp', 'udp6']) {
+    let lines;
+    try {
+      lines = readFileSync(`/proc/net/${proto}`, 'utf8').trim().split('\n').slice(1);
+    } catch {
+      continue;
+    }
+    for (const line of lines) {
+      const f = line.trim().split(/\s+/);
+      if (!mine.has(f[9])) continue;
+      const [lh, lp] = f[1].split(':');
+      const [rh] = f[2].split(':');
+      const s = { proto, local: addr(lh), port: parseInt(lp, 16) };
+      if (proto.startsWith('tcp') && f[3] === '0A') listening.push(s);
+      else if (proto.startsWith('udp') && f[3] === '07' && /^0+$/.test(f[2].replace(':', ''))) listening.push(s);
+      else if (proto.startsWith('tcp') && f[3] === '01') established.push({ ...s, remote: addr(rh) });
+    }
+  }
+  return { established, listening };
+}
 
 // ---- UI --------------------------------------------------------------------
 
@@ -469,6 +525,50 @@ try {
     await page.locator('.call-bar .call-leave').click();
     await page.locator('.call-bar').waitFor({ state: 'detached', timeout: 10_000 });
   });
+
+  // V3: B turns relay-only on (A stays outside): the room entry is off up
+  // front, the core refuses the join, and B's core keeps no direct link.
+  if (ROLE === 'b') {
+    const before = sockets();
+    await invoke('setRelayOnly', true);
+    await check('V3.1', 'relay-only: "Join chat" is disabled up front, with the reason', async () => {
+      await until('entry disabled', async () => (await entry().getAttribute('aria-disabled')) === 'true', 10_000);
+      const reason = await page.locator('.voice-room-reason').innerText({ timeout: 5000 });
+      return reason;
+    });
+    await check('V3.2', 'relay-only: the core refuses joinCall', async () => {
+      const room = await invoke('getVoiceRoom', serverId);
+      const res = await invoke('joinCall', room.roomId).then(
+        () => 'joined',
+        (e) => e.message,
+      );
+      if (!/relay-only/.test(res)) throw new Error(res);
+      return res;
+    });
+    await check('V3.3', 'relay-only: no IP notice, and clicking the entry joins nothing', async () => {
+      await entry().click({ force: true });
+      await sleep(1500);
+      if (await page.locator('.ip-notice').isVisible()) throw new Error('the IP notice showed');
+      if (await page.locator('.call-bar').count()) throw new Error('a call started');
+    });
+    await check('V3.5', 'relay-only: no direct connection to A, and no direct listener', async () => {
+      await sleep(3000); // turning it on closes direct links (#274)
+      const now = sockets();
+      const direct = now.established.filter((s) => s.remote !== relayIp);
+      const listeners = now.listening.filter((s) => !s.local.startsWith('127.') && s.local !== '::1');
+      log('sockets before:', JSON.stringify(before), 'after:', JSON.stringify(now));
+      if (direct.length) throw new Error(`still connected to ${direct.map((s) => s.remote).join(', ')}`);
+      if (listeners.length) throw new Error(`still listening on ${listeners.map((s) => `${s.proto} ${s.local}:${s.port}`).join(', ')}`);
+      return `${before.established.length} -> ${now.established.length} TCP links (relay ${relayIp} only)`;
+    });
+    await invoke('setRelayOnly', false);
+    await check('V3.1', 'relay-only off: "Join chat" is available again', () =>
+      until('entry enabled', async () => (await entry().getAttribute('aria-disabled')) !== 'true', 10_000),
+    );
+    put('v3-done');
+  } else {
+    await take('v3-done');
+  }
 
   // V4: both back in the room, then the owner kicks B.
   await entry().click();
