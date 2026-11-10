@@ -85,7 +85,7 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 
 ## Proposed contract additions (Rust has them; `api.ts` doesn't yet)
 
-- `signOut(input: { words: string[] } | { withoutWords: true })` returns `null`. It removes this identity from this computer.
+- `signOut({ words: string[] } | { withoutWords: true })` returns `null` (both read at the top level of `args`). It removes this identity from this computer.
   - `words` must be this identity's 12 words: `invalid-words` (with `positions`) for unknown words, `not-allowed` for another identity's. `withoutWords: true` is the explicit "I accept losing this account" path. Neither: `bad-request`. No identity: `not-found`.
   - In order, fail safe:
     1. The keychain secret is deleted. If that fails: `keyring-unavailable`, and nothing changed.
