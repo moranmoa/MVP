@@ -493,17 +493,23 @@ impl Core {
     }
 
     pub fn update_profile(&self, input: ProfileInput) -> CoreResult<Identity> {
-        self.run(|inner, _, events| {
+        self.run(|inner, ports, events| {
             model::check_profile(&input)?;
             let me = inner.me.as_mut().ok_or(ErrorCode::NotFound)?;
-            me.profile.display_name = input.display_name.trim().to_owned();
+            let name = input.display_name.trim().to_owned();
+            let renamed = me.profile.display_name != name;
+            me.profile.display_name = name.clone();
             me.profile.bio = input.bio;
             me.profile.avatar_data_url = input.avatar_data_url;
-            // TODO(profiles): publish the new name to my servers; members
-            // see the name from my profile post until then.
             let profile = me.profile.clone();
             let key = *me.identity.storage_key().expose_secret();
             inner.db.save_profile(&key, &serde_json::to_vec(&profile).expect("plain struct"))?;
+            // A new name goes to every server I'm still in, as a new profile
+            // post (the latest wins). Bio and avatar stay on this device:
+            // the profile post carries the name (and caps) only.
+            if renamed {
+                inner.post_profile_everywhere(ports, &name);
+            }
             let identity = inner.identity_json(inner.me.as_ref().expect("checked above"))?;
             events.push(Event::IdentityChanged(identity.clone()));
             Ok(identity)
@@ -2521,6 +2527,32 @@ impl Inner {
     /// stored or sent (`not-allowed`), and the log is rebuilt from the store
     /// so it leaves no trace.
     // TODO(records B4): `Resolver::would_accept` instead.
+    /// `updateProfile` with a new name: one profile post per server I'm
+    /// still a member of (not closed, not kicked, not left). A server that
+    /// refuses it is skipped and logged; the local save already stands.
+    fn post_profile_everywhere(&mut self, ports: &Ports, name: &str) {
+        let Ok(servers) = self.db.servers() else { return };
+        let Some(key) = self.me.as_ref().map(Me::key) else { return };
+        let action = model::profile_action(name);
+        for server in servers {
+            let posted = (|| -> CoreResult<bool> {
+                if self.db.closed_at(server)?.is_some() {
+                    return Ok(false);
+                }
+                self.load(server)?;
+                let view = self.view(server)?;
+                if view.state.closed.is_some() || !view.state.is_member(key) {
+                    return Ok(false);
+                }
+                self.publish_control(ports, server, &action)?;
+                Ok(true)
+            })();
+            if let Err(e) = posted {
+                eprintln!("mvs-core: a profile post wasn't published: {:?}", e.code);
+            }
+        }
+    }
+
     fn publish_control(
         &mut self,
         ports: &Ports,

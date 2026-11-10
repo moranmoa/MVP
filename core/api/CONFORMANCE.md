@@ -85,6 +85,8 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 
 ## Proposed contract additions (Rust has them; `api.ts` doesn't yet)
 
+- `updateProfile` with a new display name (trimmed) posts a new profile post to every server I'm still a member of (not kicked, not left, not closed); the latest one wins for everyone. The same name, or a new bio or avatar only, posts nothing: bio and avatar stay on this device, since the profile post carries the name (and caps) only. A server that refuses the post is skipped; the call still succeeds. Errors as before: `bad-request` for a bad name, bio or avatar, `not-found` with no identity.
+
 - Restore on a new computer:
   - `restoreIdentity(words, input?: { locale, country, birthDate })`. The words don't carry the country or birth date, so the UI asks them again (with the agreement) before the words and passes them here, as `createIdentity` takes them. The name follows with `updateProfile`.
   - Rejoining a server I'm still a member of (its invite link, after a restore) signs no new join. It never posts an empty display name or an age claim without a birth date: the server keeps the profile and claim it holds. With no birth date it isn't age-blocked either: my earlier claim stands. A known age below the server's minimum still blocks.
