@@ -5,7 +5,7 @@
 // RUST_LOG on; stderr goes to /rendezvous/core-<role>.log (run.sh masks it).
 
 import { spawn } from 'node:child_process';
-import { createWriteStream, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -14,11 +14,19 @@ const ROLE = process.env.ROLE;
 const OTHER = ROLE === 'a' ? 'b' : 'a';
 const MODE = process.env.MODE ?? 'new';
 const JOIN_TIMEOUT = Number(process.env.JOIN_TIMEOUT ?? 120) * 1000;
+const PRESERVERS = Number(process.env.PRESERVERS ?? 0);
+const MSGS = Number(process.env.MSGS ?? 0);
+const ROUNDS = Number(process.env.ROUNDS ?? 1);
 const RV = '/rendezvous';
 const t0 = Date.now();
 const log = (...m) => console.log(`[${ROLE} +${((Date.now() - t0) / 1000).toFixed(1)}s]`, ...m);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const put = (name, data = {}) => writeFileSync(join(RV, `${ROLE}.${name}.json`), JSON.stringify(data));
+// Written then renamed, so the other side never reads a half-written file.
+const put = (name, data = {}) => {
+  const f = join(RV, `${ROLE}.${name}.json`);
+  writeFileSync(`${f}.tmp`, JSON.stringify(data));
+  renameSync(`${f}.tmp`, f);
+};
 async function take(name, timeout = 300_000) {
   const end = Date.now() + timeout;
   while (Date.now() < end) {
@@ -75,21 +83,31 @@ try {
       log('relay-only on');
     }
     if (ROLE === 'a') {
-      const s = await call('createServer', { input: { name: 'join matrix', ageRestriction: 'none' } });
-      const channel = (await call('listChannels', { serverId: s.id }))[0].id;
-      await call('sendMessage', { channelId: channel, body: 'hello from the owner' });
-      // The words cross only through the run's private rendezvous folder.
-      put('ready', { link: s.inviteLink, words, ownerId: (await call('getIdentity')).id });
-      log('server created, invite handed over');
-      const done = await take('done', JOIN_TIMEOUT + 60_000).catch((e) => ({ error: e.message }));
-      log('members now:', JSON.stringify((await call('listMembers', { serverId: s.id })).map((m) => m.displayName || m.id.slice(0, 8))));
-      log('joiner reports:', JSON.stringify(done));
+      // A long-used identity: PRESERVERS servers, MSGS messages each, before the joins.
+      const t1 = Date.now();
+      for (let i = 1; i <= PRESERVERS; i++) {
+        const p = await call('createServer', { input: { name: `owner server ${i}`, ageRestriction: 'none' } });
+        const ch = (await call('listChannels', { serverId: p.id }))[0].id;
+        for (let m = 1; m <= MSGS; m++) await call('sendMessage', { channelId: ch, body: `message ${m} in server ${i}` });
+      }
+      if (PRESERVERS) log(`pre-created ${PRESERVERS} servers x ${MSGS} messages in ${((Date.now() - t1) / 1000).toFixed(1)} s`);
+      put('prepared');
+      for (let r = 1; r <= ROUNDS; r++) {
+        const s = await call('createServer', { input: { name: `join matrix ${r}`, ageRestriction: 'none' } });
+        const channel = (await call('listChannels', { serverId: s.id }))[0].id;
+        await call('sendMessage', { channelId: channel, body: 'hello from the owner' });
+        // The words cross only through the run's private rendezvous folder.
+        put(`ready-${r}`, { link: s.inviteLink, words, ownerId: (await call('getIdentity')).id });
+        const done = await take(`done-${r}`, JOIN_TIMEOUT + 60_000).catch((e) => ({ error: e.message }));
+        log(`round ${r}: joiner reports:`, JSON.stringify(done));
+        if (r === ROUNDS) log('members now:', JSON.stringify((await call('listMembers', { serverId: s.id })).map((m) => m.displayName || m.id.slice(0, 8))));
+      }
       result = 'owner-done';
     }
   }
-  if (ROLE === 'b') {
-    const { link, words, ownerId } = await take('ready');
-    if (MODE === 'restore') {
+  for (let r = 1; ROLE === 'b' && r <= ROUNDS; r++) {
+    const { link, words, ownerId } = await take(`ready-${r}`, PRESERVERS ? 900_000 : 300_000);
+    if (MODE === 'restore' && r === 1) {
       const id = await call('restoreIdentity', { words });
       log(`restored: same identity as the owner = ${id.id === ownerId}`);
       if (process.env.RELAY_ONLY === 'b' || process.env.RELAY_ONLY === 'both') {
@@ -103,7 +121,7 @@ try {
     const end = started + JOIN_TIMEOUT;
     let server = null;
     while (Date.now() < end) {
-      server = (await call('listServers')).find((s) => s.name === 'join matrix');
+      server = (await call('listServers')).find((s) => s.name === `join matrix ${r}`);
       if (server) break;
       await sleep(500);
     }
@@ -120,18 +138,18 @@ try {
         () => 'ok',
         (e) => e.message,
       );
-      result = `JOINED in ${s} s; owner's message ${history.includes('hello from the owner') ? 'received' : 'NOT received'}; send ${sent}`;
+      result = `round ${r}: JOINED in ${s} s; owner's message ${history.includes('hello from the owner') ? 'received' : 'NOT received'}; send ${sent}`;
     } else {
       await call('cancelJoin', { link }).catch(() => {});
-      result = `HANG: not joined after ${JOIN_TIMEOUT / 1000} s`;
+      result = `round ${r}: HANG: not joined after ${JOIN_TIMEOUT / 1000} s`;
     }
     log(result);
-    put('done', { result });
+    put(`done-${r}`, { result });
   }
 } catch (e) {
   result = `FAIL ${e.message}`;
   log(result);
-  if (ROLE === 'b') put('done', { result });
+  if (ROLE === 'b') for (let r = 1; r <= ROUNDS; r++) put(`done-${r}`, { result });
 }
 await sleep(1000);
 child.stdin.end();
