@@ -338,7 +338,10 @@ impl Network for SyncNetwork {
     /// Forgets that `server` is open here. TODO(server lifecycle, piece 3,
     /// dev-sync): `Node::close_server` unsubscribes its topics and drops its
     /// pending records; until then the node keeps its logs open (the core
-    /// no longer reads them).
+    /// no longer reads them). It MUST flush our own unsent records first
+    /// (the Tech Lead, #261): a dropped `Leave` keeps us in everyone's
+    /// member list and nobody re-keys. The core only closes a left server
+    /// after its `Leave` was delivered (the leave outbox).
     fn close_server(&self, server: ServerId) {
         self.opened.lock().expect("not poisoned").remove(&server);
     }

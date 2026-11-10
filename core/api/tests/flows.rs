@@ -2468,17 +2468,20 @@ fn servers_are_renamed_left_and_deleted_behind_the_rollout_gate() {
     owner.core.sync_now().unwrap();
     for code in [
         owner.core.rename_server(&server.id, "Blocked").unwrap_err().code,
-        guest.core.leave_server(&server.id).unwrap_err().code,
         owner.core.close_server(&server.id).unwrap_err().code,
     ] {
         assert_eq!(code, ErrorCode::UpdateNeeded, "an older member's profile");
     }
+    // The UI can say who blocks it.
+    let old_id = hex::encode(old.verifying_key().to_bytes());
+    assert_eq!(owner.core.get_update_needed(&server.id).unwrap(), [old_id]);
     assert_eq!(world.network.fetch(server_key).len(), signed + 1, "signed past the gate");
     // It updates: the cap in its latest profile post opens the gate.
     world.network.publish(&profile(r#","caps":["server-lifecycle-v1"]"#, 3));
     for peer in [&owner, &guest, &third] {
         peer.core.sync_now().unwrap();
     }
+    assert!(owner.core.get_update_needed(&server.id).unwrap().is_empty());
 
     // Leave: not the owner; a member leaves and the server leaves their
     // device; the others see them gone.
@@ -2560,4 +2563,160 @@ fn servers_are_renamed_left_and_deleted_behind_the_rollout_gate() {
 fn model_invite(link: &str) -> records::RecordId {
     let invite = link.strip_prefix("mvs://join/").unwrap().split('/').nth(1).unwrap();
     records::RecordId::from_bytes(hex::decode(invite).unwrap().try_into().unwrap())
+}
+
+/// A peer with the real group cipher (so re-keys happen), optionally on a
+/// database file (so it can restart).
+fn keyed_peer(world: &World, secrets: Arc<MemoryStore>, db: Option<std::path::PathBuf>) -> Peer {
+    world.peer_with(secrets, db, Arc::new(api::crypto::GroupKeysCipher::locked()))
+}
+
+fn key_rotations(world: &World, server: ServerId) -> usize {
+    let mut seen = BTreeSet::new();
+    for r in world.network.fetch(server).iter().filter(|r| r.kind() == Kind::KeyRotation) {
+        seen.insert(r.deps().to_vec());
+    }
+    seen.len()
+}
+
+fn leaves_by(world: &World, server: ServerId, who: &str) -> usize {
+    let who = PublicKey::from_bytes(hex::decode(who).unwrap().try_into().unwrap());
+    world
+        .network
+        .fetch(server)
+        .iter()
+        .filter(|r| r.kind() == Kind::Leave && r.author() == who)
+        .count()
+}
+
+/// An older member (a fixed key): joins, then posts a profile with or
+/// without the lifecycle cap.
+fn older_member(world: &World, server: &ServerSummary, key: &SigningKey) {
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let invite = model_invite(&server.invite_link);
+    let mut deps: BTreeSet<_> = world.network.fetch(server_key).iter().map(|r| r.id()).collect();
+    deps.insert(invite);
+    let join = authority::sign_control(
+        key,
+        server_key,
+        1,
+        deps.into_iter().collect(),
+        1,
+        &authority::Action::Join { invite },
+    )
+    .unwrap();
+    world.network.publish(&join);
+}
+
+fn older_profile(world: &World, server: &ServerSummary, key: &SigningKey, seq: u64, cap: bool) {
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let caps = if cap { r#","caps":["server-lifecycle-v1"]"# } else { "" };
+    let text = format!(r#"{{"mvs":"mvs/profile/v1","displayName":"Old"{caps}}}"#);
+    let heads = world
+        .network
+        .fetch(server_key)
+        .iter()
+        .filter(|r| r.scope() == Scope::Control)
+        .map(|r| r.id())
+        .collect();
+    let post =
+        authority::sign_control(key, server_key, seq, heads, 2, &authority::Action::Post { text })
+            .unwrap();
+    world.network.publish(&post);
+}
+
+/// The Tech Lead's #261 condition: the `Leave` reaches the others, who see
+/// the member gone and re-key.
+#[test]
+fn a_leave_reaches_the_others_and_they_re_key() {
+    let world = World::new();
+    let owner = keyed_peer(&world, Arc::new(MemoryStore::new()), None);
+    sign_up(&owner, "Owner");
+    let guest = keyed_peer(&world, Arc::new(MemoryStore::new()), None);
+    let guest_id = sign_up(&guest, "Guest").id;
+    let server = owner.core.create_server("Keys", AgeRestriction::None).unwrap();
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    guest.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    guest.core.sync_now().unwrap();
+    let before = key_rotations(&world, server_key);
+
+    guest.core.leave_server(&server.id).unwrap();
+    assert_eq!(leaves_by(&world, server_key, &guest_id), 1, "the Leave never went out");
+    owner.core.sync_now().unwrap();
+    assert!(!owner.core.list_members(&server.id).unwrap().iter().any(|m| m.id == guest_id));
+    assert!(key_rotations(&world, server_key) > before, "nobody re-keyed after the leave");
+    // Delivered: nothing is retried.
+    guest.core.sync_now().unwrap();
+    assert_eq!(leaves_by(&world, server_key, &guest_id), 1);
+}
+
+/// Both leads (#261): a leave is never blocked by the rollout gate. With
+/// an older member in, it's gone from the UI at once and its `Leave` waits
+/// in the outbox, across a restart, until the gate opens; a kick first
+/// drops it.
+#[test]
+fn a_leave_waits_in_the_outbox_until_the_gate_opens() {
+    let world = World::new();
+    let owner = keyed_peer(&world, Arc::new(MemoryStore::new()), None);
+    sign_up(&owner, "Owner");
+    let dir = std::env::temp_dir().join(format!("mvs-leave-outbox-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let secrets = Arc::new(MemoryStore::new());
+    let guest = keyed_peer(&world, secrets.clone(), Some(dir.join("core.db")));
+    let guest_id = sign_up(&guest, "Guest").id;
+    let kicked = keyed_peer(&world, Arc::new(MemoryStore::new()), None);
+    let kicked_id = sign_up(&kicked, "Kicked").id;
+    let server = owner.core.create_server("Outbox", AgeRestriction::None).unwrap();
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    for peer in [&guest, &kicked] {
+        peer.core.join_server(&server.invite_link).unwrap();
+    }
+    let old = SigningKey::from_bytes(&[43; 32]);
+    older_member(&world, &server, &old);
+    older_profile(&world, &server, &old, 2, false);
+    for peer in [&owner, &guest, &kicked] {
+        peer.core.sync_now().unwrap();
+    }
+
+    // The gate is shut: both leave anyway, and the server is gone at once.
+    for (peer, id) in [(&guest, &guest_id), (&kicked, &kicked_id)] {
+        peer.events.take();
+        peer.core.leave_server(&server.id).unwrap();
+        assert!(peer.events.take().contains(&Event::ServerRemoved {
+            server_id: server.id.clone(),
+            reason: Some(RemovedReason::Left),
+        }));
+        assert!(peer.core.list_servers().unwrap().is_empty());
+        assert_eq!(leaves_by(&world, server_key, id), 0, "a Leave went out past the gate");
+    }
+
+    // A kick while the Leave waits: it's dropped, never sent.
+    owner.core.kick_member(&server.id, &kicked_id).unwrap();
+    kicked.core.sync_now().unwrap();
+
+    // The guest restarts with the Leave still waiting.
+    drop(guest);
+    let guest = keyed_peer(&world, secrets, Some(dir.join("core.db")));
+    guest.core.sync_now().unwrap();
+    assert_eq!(leaves_by(&world, server_key, &guest_id), 0);
+    assert!(guest.core.list_servers().unwrap().is_empty());
+
+    // The older member updates: the gate opens, the waiting Leave goes out
+    // once, and the owner sees it and re-keys. The kicked one's never does.
+    owner.core.sync_now().unwrap();
+    let before = key_rotations(&world, server_key);
+    older_profile(&world, &server, &old, 3, true);
+    guest.core.sync_now().unwrap();
+    kicked.core.sync_now().unwrap();
+    assert_eq!(leaves_by(&world, server_key, &guest_id), 1);
+    assert_eq!(leaves_by(&world, server_key, &kicked_id), 0, "a kicked member's Leave went out");
+    owner.core.sync_now().unwrap();
+    assert!(!owner.core.list_members(&server.id).unwrap().iter().any(|m| m.id == guest_id));
+    assert!(key_rotations(&world, server_key) > before, "nobody re-keyed after the leave");
+    guest.core.sync_now().unwrap();
+    assert_eq!(leaves_by(&world, server_key, &guest_id), 1, "resent after delivery");
+    drop(guest);
+    let _ = std::fs::remove_dir_all(&dir);
 }

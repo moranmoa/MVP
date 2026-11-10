@@ -277,6 +277,7 @@ impl Core {
             }
             "leaveServer" => ok(self.leave_server(&args::<ServerArg>(raw)?.server_id)),
             "closeServer" => ok(self.close_server(&args::<ServerArg>(raw)?.server_id)),
+            "getUpdateNeeded" => ok(self.get_update_needed(&args::<ServerArg>(raw)?.server_id)),
             "kickMember" => {
                 let a: ServerUserArgs = args(raw)?;
                 ok(self.kick_member(&a.server_id, &a.user_id))

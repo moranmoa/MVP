@@ -7,7 +7,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use authority::Action;
+use authority::{Action, Cut};
 use groupkeys::MemberSecret;
 use identity::{PhraseError, RecoveryPhrase, Vault, VaultError, VaultState};
 use rand_core::{OsRng, RngCore};
@@ -160,6 +160,18 @@ fn parse_user(id: &str) -> CoreResult<PublicKey> {
 
 fn parse_server(id: &str) -> CoreResult<ServerId> {
     model::parse_hex32(id).map(ServerId::from_bytes).ok_or_else(|| ErrorCode::NotFound.into())
+}
+
+/// Server lifecycle's rollout gate (#229): every current, non-kicked member
+/// but `me` has `server-lifecycle-v1` in their latest profile post (none
+/// counts as needing an update).
+fn gate_open(view: &ServerView, me: PublicKey) -> bool {
+    let caps = view.lifecycle_caps();
+    view.state
+        .members
+        .iter()
+        .filter(|m| **m != me && !view.state.kicked.contains(m))
+        .all(|m| caps.get(m) == Some(&true))
 }
 
 impl Core {
@@ -637,9 +649,70 @@ impl Core {
             if inner.view(server)?.state.role(me) == authority::Role::Owner {
                 return Err(ErrorCode::NotAllowed.into());
             }
-            inner.lifecycle_gate(server)?;
-            inner.publish_control(ports, server, &Action::Leave { cut: Default::default() })?;
-            inner.purge_server(ports, server, RemovedReason::Left, &[], events)
+            // Never blocked by the rollout gate (both leads, #261): the
+            // signed `Leave` waits in a durable outbox and goes out once the
+            // gate opens (`flush_leaves`), retried until a member has it.
+            let leave =
+                inner.publish_control(ports, server, &Action::Leave { cut: Cut::default() })?;
+            inner.db.set_leave(server, &leave)?;
+            if inner.lifecycle_gate(server).is_ok() {
+                ports.network.publish(&leave);
+            }
+            // Gone from the UI at once; only the sync secret and the control
+            // subscription stay, to deliver the `Leave`.
+            inner.purge_server(ports, server, RemovedReason::Left, &[], true, events)
+        })?;
+        self.flush_leaves();
+        Ok(())
+    }
+
+    /// The leave outbox, once per sync round: each `Leave` not yet
+    /// delivered is checked against what reachable peers hold (without the
+    /// lock), then dropped, kept, or (re)published (`Inner::flush_leave`).
+    fn flush_leaves(&self) {
+        let pending = {
+            let inner = self.lock();
+            let Ok(leaves) = inner.db.leaves() else { return };
+            leaves
+                .into_iter()
+                .filter_map(|(server, leave)| {
+                    let secret = inner.secret(server).ok()??;
+                    Some((server, leave, secret))
+                })
+                .collect::<Vec<_>>()
+        };
+        for (server, leave, secret) in pending {
+            self.ports.network.open_server(server, &secret, &BTreeSet::new());
+            let fetched: Vec<Record> = self
+                .ports
+                .network
+                .fetch(server)
+                .into_iter()
+                .filter(|r| r.server() == server && r.scope() == Scope::Control)
+                .collect();
+            let _ = self.run(|inner, ports, _| inner.flush_leave(ports, server, &leave, fetched));
+        }
+    }
+
+    /// `getUpdateNeeded`: the members whose latest profile post lacks
+    /// `server-lifecycle-v1` (or who have none), so the UI can say who
+    /// blocks a rename or a delete (`update-needed`). Empty: the gate is
+    /// open.
+    pub fn get_update_needed(&self, server_id: &str) -> CoreResult<Vec<Id>> {
+        let server = parse_server(server_id)?;
+        self.run(|inner, _, _| {
+            inner.load_mine(server)?;
+            let me = inner.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+            let view = inner.view(server)?;
+            let caps = view.lifecycle_caps();
+            Ok(view
+                .state
+                .members
+                .iter()
+                .filter(|m| **m != me && !view.state.kicked.contains(m))
+                .filter(|m| caps.get(m) != Some(&true))
+                .map(|m| model::hex_id(m.as_bytes()))
+                .collect())
         })
     }
 
@@ -1155,6 +1228,7 @@ impl Core {
     /// crate's push and pull instead of a command.
     pub fn sync_now(&self) -> CoreResult<()> {
         self.retry_joins();
+        self.flush_leaves();
         let servers = {
             let mut inner = self.lock();
             if inner.me.is_none() {
@@ -2010,11 +2084,56 @@ impl Inner {
             self.logs.remove(&server);
             return Err(ErrorCode::NotAllowed.into());
         }
+        if matches!(action, Action::Leave { .. }) {
+            // Never stored: it goes to the leave outbox (`leave_server`).
+            return Ok(record);
+        }
         for record in &joined {
             self.db.put_record(record)?;
         }
         ports.network.publish(&record);
         Ok(record)
+    }
+
+    /// One round of the leave outbox for `server` (#261, both leads), on
+    /// what reachable peers hold (`fetched`; nothing of it is stored):
+    /// - kicked first, or the server closed: the `Leave` is dropped;
+    /// - a member has it (B6 `sent` or `received`; on a transport that
+    ///   doesn't track that, it took it): done, the entry and the sync
+    ///   secret go, and the subscription closes;
+    /// - otherwise, once the gate is open, it is (re)published.
+    fn flush_leave(
+        &mut self,
+        ports: &Ports,
+        server: ServerId,
+        leave: &Record,
+        fetched: Vec<Record>,
+    ) -> CoreResult<()> {
+        let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+        let finish = |db: &Db| -> CoreResult<()> {
+            db.drop_leave(server)?;
+            ports.network.close_server(server);
+            Ok(())
+        };
+        let log = Log::new(server, fetched);
+        let Some(view) = ServerView::build(server, &log) else { return Ok(()) };
+        if view.is_kicked(&me) || view.state.closed.is_some() {
+            return finish(&self.db);
+        }
+        let state = ports.network.send_state(leave.id());
+        if matches!(state, Some(SendState::Sent | SendState::Received)) {
+            return finish(&self.db);
+        }
+        if !gate_open(&view, me) || state == Some(SendState::Pending) {
+            return Ok(());
+        }
+        ports.network.publish(leave);
+        let took = ports.network.send_state(leave.id()).is_none()
+            && ports.network.fetch(server).iter().any(|r| r.id() == leave.id());
+        if took {
+            return finish(&self.db);
+        }
+        Ok(())
     }
 
     /// `not-allowed` below `role` in loaded `server` (before the gate, so a
@@ -2033,15 +2152,7 @@ impl Inner {
     /// This version reads them itself. Checked before anything is signed.
     fn lifecycle_gate(&self, server: ServerId) -> CoreResult<()> {
         let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
-        let view = self.view(server)?;
-        let caps = view.lifecycle_caps();
-        let behind = view
-            .state
-            .members
-            .iter()
-            .filter(|m| **m != me && !view.state.kicked.contains(m))
-            .any(|m| caps.get(m) != Some(&true));
-        if behind {
+        if !gate_open(&self.view(server)?, me) {
             return Err(ErrorCode::UpdateNeeded.into());
         }
         Ok(())
@@ -2068,16 +2179,20 @@ impl Inner {
     /// `server.removed` follows. Not erasure: other members keep copies.
     ///
     /// `keep`: for a closed server's last purge, its genesis and close.
+    /// `leaving`: my `Leave` is in the outbox, so the sync secret and
+    /// subscription stay until it is delivered (`flush_leave`).
+    #[allow(clippy::too_many_arguments)]
     fn purge_server(
         &mut self,
         ports: &Ports,
         server: ServerId,
         reason: RemovedReason,
         keep: &[RecordId],
+        leaving: bool,
         events: &mut Events,
     ) -> CoreResult<()> {
-        self.stop_using(ports, server, events);
-        self.db.purge_server(server, keep)?;
+        self.stop_using(ports, server, !leaving, events);
+        self.db.purge_server(server, keep, leaving)?;
         self.logs.remove(&server);
         self.announced.remove(&server);
         events.push(Event::ServerRemoved {
@@ -2099,7 +2214,7 @@ impl Inner {
         server: ServerId,
         events: &mut Events,
     ) -> CoreResult<()> {
-        self.stop_using(ports, server, events);
+        self.stop_using(ports, server, true, events);
         self.db.mark_closed(server, ports.clock.now_ms())?;
         events.push(Event::ServerClosed { server_id: model::hex_id(server.as_bytes()) });
         Ok(())
@@ -2118,14 +2233,22 @@ impl Inner {
             let genesis = log.records.iter().find(|r| r.kind() == Kind::Genesis).map(Record::id);
             let close = log.resolver.state().closed;
             let keep: Vec<RecordId> = genesis.into_iter().chain(close).collect();
-            self.purge_server(ports, server, RemovedReason::Closed, &keep, events)?;
+            self.purge_server(ports, server, RemovedReason::Closed, &keep, false, events)?;
         }
         Ok(())
     }
 
     /// What every way out of a server shares: my call there ends (with a
-    /// bye), and its keys, sync subscription and per-server state go.
-    fn stop_using(&mut self, ports: &Ports, server: ServerId, events: &mut Events) {
+    /// bye), and its keys, sync subscription (unless `close_sync` is false:
+    /// a `Leave` still to deliver) and per-server state go.
+    // TODO(#255): drop_server_invites here once invite publications land.
+    fn stop_using(
+        &mut self,
+        ports: &Ports,
+        server: ServerId,
+        close_sync: bool,
+        events: &mut Events,
+    ) {
         if self.calls.in_server(server) {
             if let Some(key) = self.me.as_ref().map(|me| me.identity.signing_key().clone()) {
                 let mut calls = std::mem::take(&mut self.calls);
@@ -2136,7 +2259,9 @@ impl Inner {
         }
         self.calls.forget_server(server);
         ports.cipher.forget(server);
-        ports.network.close_server(server);
+        if close_sync {
+            ports.network.close_server(server);
+        }
         self.presence_seen.remove(&server);
         self.keyed_for.retain(|(s, _), _| *s != server);
         self.rekey_after.retain(|(s, _), _| *s != server);

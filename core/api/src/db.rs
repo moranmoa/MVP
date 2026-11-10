@@ -43,6 +43,10 @@ fn secret_key(server: ServerId) -> String {
 fn closed_key(server: ServerId) -> String {
     format!("closed-at/{}", hex::encode(server.as_bytes()))
 }
+
+fn leave_key(server: ServerId) -> String {
+    format!("leave-outbox/{}", hex::encode(server.as_bytes()))
+}
 const NONCE_LEN: usize = 24;
 
 pub(crate) struct Db {
@@ -260,7 +264,15 @@ impl Db {
     ///
     /// `keep`: records that stay (a closed server's genesis and close, kept
     /// forever so the server reads as closed, not unknown).
-    pub fn purge_server(&mut self, server: ServerId, keep: &[RecordId]) -> Result<(), CoreError> {
+    ///
+    /// `keep_secret`: a leave whose `Leave` is still in the outbox keeps the
+    /// sync secret until it is delivered.
+    pub fn purge_server(
+        &mut self,
+        server: ServerId,
+        keep: &[RecordId],
+        keep_secret: bool,
+    ) -> Result<(), CoreError> {
         let id = server.as_bytes().as_slice();
         let kept: Vec<Vec<u8>> = {
             let mut stmt = self
@@ -294,7 +306,9 @@ impl Db {
             )
             .map_err(internal)?;
         }
-        tx.execute("DELETE FROM kv WHERE key = ?1", [secret_key(server)]).map_err(internal)?;
+        if !keep_secret {
+            tx.execute("DELETE FROM kv WHERE key = ?1", [secret_key(server)]).map_err(internal)?;
+        }
         tx.commit().map_err(internal)
     }
 
@@ -311,6 +325,43 @@ impl Db {
         Ok(self
             .get(&closed_key(server))?
             .and_then(|v| Some(u64::from_le_bytes(v.try_into().ok()?))))
+    }
+
+    /// The leave outbox (#261, both leads): my signed `Leave` for `server`,
+    /// kept across the purge and restarts until a member has it.
+    pub fn set_leave(&self, server: ServerId, leave: &Record) -> Result<(), CoreError> {
+        self.set(&leave_key(server), &leave.encode())
+    }
+
+    /// Every `Leave` in the outbox.
+    pub fn leaves(&self) -> Result<Vec<(ServerId, Record)>, CoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, value FROM kv WHERE key LIKE 'leave-outbox/%'")
+            .map_err(internal)?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))
+            .map_err(internal)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (key, bytes) = row.map_err(internal)?;
+            let hex = key.trim_start_matches("leave-outbox/");
+            let Some(server) = hex::decode(hex).ok().and_then(|b| <[u8; 32]>::try_from(b).ok())
+            else {
+                continue;
+            };
+            if let Ok(record) = Record::decode(&bytes) {
+                out.push((ServerId::from_bytes(server), record));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The `Leave` is delivered (or a kick won): it and the server's sync
+    /// secret go.
+    pub fn drop_leave(&self, server: ServerId) -> Result<(), CoreError> {
+        self.delete(&leave_key(server))?;
+        self.delete(&secret_key(server))
     }
 
     /// Closed servers still listed (within their 30 days), with when their
@@ -413,7 +464,7 @@ mod tests {
         db.mark_closed(server, 5).unwrap();
         assert_eq!(db.closed_servers().unwrap(), [(server, 5)]);
 
-        db.purge_server(server, &[genesis.id(), b.id()]).unwrap();
+        db.purge_server(server, &[genesis.id(), b.id()], false).unwrap();
         let left: Vec<RecordId> = db.records(server).unwrap().iter().map(Record::id).collect();
         assert_eq!(left.len(), 2);
         assert!(left.contains(&genesis.id()) && left.contains(&b.id()) && !left.contains(&a.id()));
@@ -421,7 +472,7 @@ mod tests {
         assert_eq!(db.closed_at(server).unwrap(), Some(5), "the tombstone went");
         assert!(db.closed_servers().unwrap().is_empty());
 
-        db.purge_server(server, &[]).unwrap();
+        db.purge_server(server, &[], false).unwrap();
         assert!(db.records(server).unwrap().is_empty());
     }
 }
