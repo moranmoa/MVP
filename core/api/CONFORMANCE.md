@@ -165,6 +165,7 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
   - `sendMessage` then resolves at once with `{ ..., id: 'pending-<16 hex>', sendState: 'pending' }`, and fires `message.added` with it. Nothing is sealed or sent yet.
     - The message is listed after the channel's stored messages (`getMessages`, `getMessageCount`).
     - It lives in memory only: a restart drops it.
+    - At most 50 are held per channel at once; past that, `not-allowed`.
   - When the key comes, the core's background sync seals and sends it, and fires `message.updated` with the real message: its record `id`, `sendState: 'sent'`, and **`replaces: 'pending-…'`**. From then on it is an ordinary message (`sent`, then `received`).
     - **Its `index` may differ from the pending entry's.** The same round can bring in other messages first: the key can make earlier messages readable, and others may have written meanwhile. These come as their own `message.added` events, before the replacement. The real message is placed after them, and any other held messages after it.
     - So on `replaces`, the UI drops the entry with that `pending-…` ID (wherever it sits) before applying the message at its `index`. It should also re-read `getMessageCount` (or the visible window) rather than keep its own count.

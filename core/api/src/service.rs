@@ -95,6 +95,8 @@ pub const SYNC_EVERY: Duration = Duration::from_secs(2);
 pub const KEY_PENDING_FOR: Duration = Duration::from_secs(120);
 /// Provisional IDs of messages held for their key.
 pub const KEY_PENDING_PREFIX: &str = "pending-";
+/// Messages held for their key per channel at once; more get `not-allowed`.
+pub const MAX_KEY_PENDING: usize = 50;
 /// A join that found nobody online is retried in the background: first
 /// after `JOIN_RETRY_FIRST`, doubling up to `JOIN_RETRY_MAX`, for at most
 /// `JOIN_RETRY_FOR` (until then the inviter may still come online).
@@ -2010,6 +2012,10 @@ impl Inner {
         body: &str,
     ) -> CoreResult<Message> {
         let author = self.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+        // Bounded (tech lead): past the cap, the plain refusal.
+        if self.key_pending.iter().filter(|p| p.channel == channel && !p.failed).count() >= MAX_KEY_PENDING {
+            return Err(ErrorCode::NotAllowed.into());
+        }
         let mut tag = [0u8; 8];
         OsRng.fill_bytes(&mut tag);
         let held = KeyPending {

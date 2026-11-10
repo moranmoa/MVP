@@ -1727,6 +1727,17 @@ fn a_message_held_without_a_key_fails_after_two_minutes() {
     // Said once, not every round.
     guest.core.sync_now().unwrap();
     assert!(!guest.events.take().iter().any(|e| matches!(e, Event::MessageUpdated(_))));
+
+    // Bounded: at most MAX_KEY_PENDING held at once per channel (the failed
+    // one doesn't count); then the plain refusal.
+    for i in 0..api::MAX_KEY_PENDING {
+        let held = guest.core.send_message(&channel, &format!("held {i}"), None).unwrap();
+        assert_eq!(held.send_state, Some(SendState::Pending));
+    }
+    assert_eq!(
+        guest.core.send_message(&channel, "one too many", None).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
 }
 
 /// v0.2.0 smoke: a member who joins writes first, and the owner never
