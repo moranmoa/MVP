@@ -12,4 +12,4 @@ export {
   type VoiceEvents,
   type VoiceParticipant,
 } from './engine';
-export { nextPeerFailed, useVoiceEngine, type VoiceEngineView } from './useVoiceEngine';
+export { nextPeerFailed, useVoiceEngine, type PeerFailure, type VoiceEngineView } from './useVoiceEngine';

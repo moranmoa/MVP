@@ -21,11 +21,13 @@ export interface VoiceEngineView {
   error?: 'mic-denied' | 'no-device' | 'failed' | 'rejoin-to-talk';
   speaking: Record<Id, boolean>;
   /**
-   * People in the call I have no voice connection with: the engine gave up
-   * (peer-failed) or refused them (a security check). Cleared when that
-   * person connects again, and when the call ends.
+   * People in the call I have no voice connection with, and why:
+   * - `failed`: the engine gave up connecting (peer-failed);
+   * - `refused`: a security check failed (fingerprint-mismatch,
+   *   unverified-signal); not retried during this call.
+   * Cleared when that person connects again, and when the call ends.
    */
-  peerFailed: Id[];
+  peerFailed: Record<Id, PeerFailure>;
   setMicMuted: (muted: boolean) => void;
   inputs: AudioDevice[];
   outputs: AudioDevice[];
@@ -35,33 +37,40 @@ export interface VoiceEngineView {
   setOutput: (id: string) => void;
 }
 
+export type PeerFailure = 'failed' | 'refused';
+
+/** The next peerFailed map after an engine event. Pure, for tests. */
+export function nextPeerFailed(
+  prev: Record<Id, PeerFailure>,
+  event: { error: VoiceError } | { participants: VoiceParticipant[] },
+): Record<Id, PeerFailure> {
+  if ('error' in event) {
+    const { peer, code } = event.error;
+    const reason: PeerFailure | null =
+      code === 'peer-failed' ? 'failed' : code === 'fingerprint-mismatch' || code === 'unverified-signal' ? 'refused' : null;
+    // A refusal is never downgraded to a plain failure.
+    if (!peer || !reason || prev[peer] === reason || prev[peer] === 'refused') return prev;
+    return { ...prev, [peer]: reason };
+  }
+  const ids = Object.keys(prev);
+  if (!event.participants.length) return ids.length ? {} : prev;
+  const connected = new Set(event.participants.filter((p) => p.state === 'connected').map((p) => p.identity));
+  if (!ids.some((id) => connected.has(id))) return prev;
+  return Object.fromEntries(Object.entries(prev).filter(([id]) => !connected.has(id)));
+}
+
 /**
  * `call` is the store's current call (null outside one), `myId` my identity.
  * `options.stunUrl` is the config's STUN URL from the desktop shell (piece C);
  * without it, only host candidates are used.
  */
-/** The next peerFailed list after an engine event. Pure, for tests. */
-export function nextPeerFailed(
-  prev: Id[],
-  event: { error: VoiceError } | { participants: VoiceParticipant[] },
-): Id[] {
-  if ('error' in event) {
-    const id = event.error.peer;
-    return id && !prev.includes(id) ? [...prev, id] : prev;
-  }
-  if (!event.participants.length) return prev.length ? [] : prev;
-  const connected = new Set(event.participants.filter((p) => p.state === 'connected').map((p) => p.identity));
-  const next = prev.filter((id) => !connected.has(id));
-  return next.length === prev.length ? prev : next;
-}
-
 export function useVoiceEngine(call: CallState | null, myId: Id, options: Pick<VoiceEngineOptions, 'stunUrl'> = {}): VoiceEngineView {
   const core = useCore();
   const engineRef = useRef<VoiceEngine | null>(null);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<VoiceEngineView['error']>();
   const [speaking, setSpeaking] = useState<Record<Id, boolean>>({});
-  const [peerFailed, setPeerFailed] = useState<Id[]>([]);
+  const [peerFailed, setPeerFailed] = useState<Record<Id, PeerFailure>>({});
   const [inputs, setInputs] = useState<AudioDevice[]>([]);
   const [outputs, setOutputs] = useState<AudioDevice[]>([]);
   const [inputId, setInputId] = useState<string>();
@@ -107,7 +116,7 @@ export function useVoiceEngine(call: CallState | null, myId: Id, options: Pick<V
       engine.detach();
       setReady(false);
       setSpeaking({});
-      setPeerFailed([]);
+      setPeerFailed({});
     };
     // Re-attach only when the call itself changes, not on every participant update:
     // the engine follows call.state on its own.
