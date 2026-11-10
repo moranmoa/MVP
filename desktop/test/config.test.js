@@ -198,3 +198,18 @@ test('relay and bootstrap hosts, DNS or IP, never reach the file log', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('bootstrap takes the relay\'s QUIC address beside its TCP one (#243)', () => {
+  const quic = `/dns4/relay-direct.example.org/udp/4001/quic-v1/p2p/${ID}`;
+  const quic4 = `/ip4/198.51.100.7/udp/4001/quic-v1/p2p/${ID}`;
+  const warnings = [];
+  const config = JSON.stringify({ relay: RELAY, bootstrap: [TCP, quic, quic4] });
+  assert.deepEqual(bootstrapFor({ packaged: true, resourcesPath: resources(config), warn: (m) => warnings.push(m) }), [TCP, quic, quic4]);
+  assert.deepEqual(warnings, []);
+  assert.deepEqual(bootstrapFor({ packaged: false, env: { MVS_BOOTSTRAP: `${TCP},${quic}` } }), [TCP, quic]);
+  // Still pinned: a QUIC address without the relay's /p2p ID is dropped.
+  assert.deepEqual(bootstrapFor({ packaged: true, resourcesPath: resources(JSON.stringify({ bootstrap: ['/dns4/x/udp/4001/quic-v1'] })), warn() {} }), []);
+  // Its host stays out of the file log like the TCP one's.
+  assert.equal(logHost(quic), 'relay-direct.example.org');
+  assert.equal(logHost(quic4), '198.51.100.7');
+});
