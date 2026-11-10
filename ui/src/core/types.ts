@@ -198,6 +198,8 @@ export type UpdateChannel = 'stable' | 'beta';
 export interface AppInfo {
   version: string;
   updateChannel: UpdateChannel;
+  /** Relay-only (GAP-6r, #272): this device is reached only through the relay; calls are off. */
+  relayOnly?: boolean;
 }
 
 /** An invite to a server (#214). `maxUses` 0 is unlimited; no `expiresAt` is never. */

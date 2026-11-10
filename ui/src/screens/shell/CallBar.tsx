@@ -169,6 +169,14 @@ export function VoiceRoomEntry({ serverId, myId, engine }: { serverId: Id; myId:
       {blocked && (
         <p id={reasonId} className="voice-room-reason">
           <FormattedMessage id={blocked} />
+          {relayOnly && (
+            <>
+              {' '}
+              <button type="button" className="link small" onClick={() => store.openSettings('privacy')}>
+                <FormattedMessage id="privacy.relayOnly.open" />
+              </button>
+            </>
+          )}
         </p>
       )}
       {!blocked && callError && <CallError />}

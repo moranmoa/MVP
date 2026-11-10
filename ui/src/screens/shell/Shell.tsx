@@ -31,6 +31,7 @@ export function Shell() {
   const notice = useStore(store, (s) => s.notice);
   const updateNote = useStore(store, (s) => s.updateNote);
   const flash = useStore(store, (s) => s.flash);
+  const settingsRequest = useStore(store, (s) => s.settingsRequest);
   const serverGone = useStore(store, (s) => s.serverGone);
   const uiDir = useUiDir();
   const intl = useIntl();
@@ -114,6 +115,10 @@ export function Shell() {
     const t = setTimeout(() => store.clearServerGone(), 6000);
     return () => clearTimeout(t);
   }, [serverGone, store]);
+
+  useEffect(() => {
+    if (settingsRequest) setSettingsOpen(true);
+  }, [settingsRequest]);
 
   useEffect(() => {
     if (!flash) return;
@@ -325,7 +330,12 @@ export function Shell() {
           <RecoveryCheck onChecked={closeCheck} onShowAgain={() => setShowWords(true)} />
         )}
       </Dialog>
-      <SettingsScreen open={settingsOpen} onClose={() => setSettingsOpen(false)} onCheckWords={() => setDialog('check')} />
+      <SettingsScreen
+        open={settingsOpen}
+        request={settingsRequest}
+        onClose={() => setSettingsOpen(false)}
+        onCheckWords={() => setDialog('check')}
+      />
 
       {/* Toasts stack in one column, so two at once never overlap. */}
       <div className="toasts">

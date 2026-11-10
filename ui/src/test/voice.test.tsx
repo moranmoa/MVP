@@ -282,8 +282,8 @@ describe('voice room', () => {
     await store.leaveCall();
     expect(store.getState().callError).toBeNull();
     await store.joinCall(room.roomId);
-    store.setRelayOnly(true);
-    await core.leaveCall(); // as the core does when relay-only goes on
+    // The core ends my call when relay-only goes on, and says why (#272).
+    await store.setRelayOnly(true);
     expect(store.getState().call).toBeNull();
     expect(store.getState().callError).toBe('relay-only');
   });
