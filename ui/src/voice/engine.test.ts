@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CallSignal, CallState, Id } from '../core/types';
 import type { SignalKind, VoiceCore } from './adapter';
-import { createVoiceEngine, type VoiceEnv, type VoiceError, type VoiceParticipant } from './engine';
+import { createVoiceEngine, type VoiceEngineOptions, type VoiceEnv, type VoiceError, type VoiceParticipant } from './engine';
 import { fingerprints, iceServersFor, soleFingerprint } from './sdp';
 
 const A: Id = 'a'.repeat(64);
@@ -237,7 +237,7 @@ const flush = async (n = 10) => {
 };
 
 /** Two engines whose cores pass signals to each other, as two verifying cores would. */
-function pair(ids: [Id, Id] = [A, B]) {
+function pair(ids: [Id, Id] = [A, B], opts: Omit<VoiceEngineOptions, 'env'> = {}) {
   const [x, y] = ids;
   const hx = fakeEnv();
   const hy = fakeEnv();
@@ -245,8 +245,8 @@ function pair(ids: [Id, Id] = [A, B]) {
   const cy = new FakeCore(y, [y, x]);
   cx.wire = (to, kind, payload) => to === y && setTimeout(() => cy.emitSignal({ from: x, kind, payload, fingerprintVerified: true }), 0);
   cy.wire = (to, kind, payload) => to === x && setTimeout(() => cx.emitSignal({ from: y, kind, payload, fingerprintVerified: true }), 0);
-  const ex = createVoiceEngine(cx, { env: hx.env, stunUrl: 'stun:stun.example.test:3478' });
-  const ey = createVoiceEngine(cy, { env: hy.env, stunUrl: 'stun:stun.example.test:3478' });
+  const ex = createVoiceEngine(cx, { env: hx.env, stunUrl: 'stun:stun.example.test:3478', ...opts });
+  const ey = createVoiceEngine(cy, { env: hy.env, stunUrl: 'stun:stun.example.test:3478', ...opts });
   return { hx, hy, cx, cy, ex, ey };
 }
 
@@ -529,6 +529,88 @@ describe('voice engine', () => {
     engine.setMicMuted(true);
     await vi.advanceTimersByTimeAsync(300);
     expect(events.at(-1)).toEqual({ [A]: false });
+  });
+
+  it('a lost first offer: the answerer attaches 1 s late and the pair still connects', async () => {
+    vi.useFakeTimers();
+    const { hx, hy, cx, cy, ex, ey } = pair();
+    const errors = record<VoiceError>((cb) => ex.on('error', cb));
+    await ex.attach(cx.state(), A);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(cx.sent.map((s) => s.kind)).toEqual(['offer']); // lost: B isn't attached yet
+    expect(cy.sent).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await ey.attach(cy.state(), B);
+    await vi.advanceTimersByTimeAsync(4_500); // past the 5 s answer timeout
+    expect(cx.sent.map((s) => s.kind)).toEqual(['offer', 'offer']);
+    expect(cy.sent.map((s) => s.kind)).toEqual(['answer']);
+    expect(hx.pcs).toHaveLength(2);
+    expect(hx.pcs[0]!.closed).toBe(true);
+    expect(hx.pcs[1]!.connectionState).toBe('connected');
+    expect(hx.audios).toHaveLength(1);
+    expect(hy.audios).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(60_000); // connected: no more offers, no failure
+    expect(cx.sent).toHaveLength(2);
+    expect(errors).toEqual([]);
+    ex.dispose();
+    ey.dispose();
+  });
+
+  it('gives up after 3 offers with backoff, as peer-failed', async () => {
+    vi.useFakeTimers();
+    const h = fakeEnv();
+    const core = new FakeCore(A, [A, B]);
+    const engine = createVoiceEngine(core, { env: h.env });
+    const errors = record<VoiceError>((cb) => engine.on('error', cb));
+    await engine.attach(core.state(), A);
+    await vi.advanceTimersByTimeAsync(4_900);
+    expect(core.sent).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(200); // 5 s: second offer
+    expect(core.sent).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(9_800);
+    expect(core.sent).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(300); // +10 s: third offer
+    expect(core.sent).toHaveLength(3);
+    expect(errors).toEqual([]);
+    await vi.advanceTimersByTimeAsync(20_000); // +20 s: give up
+    expect(core.sent).toHaveLength(3);
+    expect(errors).toEqual([{ code: 'peer-failed', peer: B }]);
+    expect(h.pcs.every((pc) => pc.closed)).toBe(true);
+    engine.dispose();
+  });
+
+  it('the answerer drops a connection that stays connecting, as peer-failed', async () => {
+    const h = fakeEnv();
+    const core = new FakeCore(B, [B, A]);
+    const engine = createVoiceEngine(core, { env: h.env, connectTimeoutMs: 300 });
+    const errors = record<VoiceError>((cb) => engine.on('error', cb));
+    await engine.attach(core.state(), B);
+    const realCreate = h.env.createPeerConnection;
+    h.env.createPeerConnection = (c) => {
+      const pc = realCreate(c) as unknown as FakePC;
+      pc.setLocalDescription = async (d) => void (pc.localDescription = d); // never connects
+      return pc as unknown as RTCPeerConnection;
+    };
+    core.emitSignal({ from: A, kind: 'offer', payload: `v=0
+a=fingerprint:sha-256 ${newFingerprint()}
+`, fingerprintVerified: true });
+    await flush();
+    expect(h.pcs[0]!.closed).toBe(false);
+    await new Promise((r) => setTimeout(r, 400));
+    expect(h.pcs[0]!.closed).toBe(true);
+    expect(errors).toEqual([{ code: 'peer-failed', peer: A }]);
+    engine.dispose();
+  });
+
+  it('a mic chosen after starting without one asks for a rejoin', async () => {
+    const h = fakeEnv({ micError: 'NotFoundError' });
+    const core = new FakeCore(A, [A, B]);
+    const engine = createVoiceEngine(core, { env: h.env });
+    const errors = record<VoiceError>((cb) => engine.on('error', cb));
+    await engine.attach(core.state(), A);
+    await engine.setInputDevice('mic1');
+    expect(errors).toEqual([{ code: 'no-device' }, { code: 'rejoin-to-talk' }]);
+    engine.dispose();
   });
 
   it('dispose unsubscribes from the core', async () => {

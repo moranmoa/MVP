@@ -17,6 +17,12 @@
 //     must match it too;
 //   - only then is the peer's audio played.
 //   A peer dropped for any of these is not retried until the call ends.
+// - Lost offers: the offerer re-offers (a fresh connection) when the peer is
+//   not connected within `answerTimeoutMs`, doubling it each time, up to
+//   OFFER_ATTEMPTS offers; then the peer is dropped as `peer-failed`. This
+//   covers a newcomer whose engine wasn't attached yet when the first offer
+//   came. The answerer drops a connection still not up after
+//   `connectTimeoutMs` (`peer-failed`); the offerer's next offer starts over.
 // - ICE servers come from the config's optional STUN URL only (`stunUrl`),
 //   never a public default.
 // - Speaking: an AnalyserNode per stream, level over a threshold.
@@ -39,7 +45,9 @@ export type VoiceErrorCode =
   | 'failed'
   | 'unverified-signal'
   | 'fingerprint-mismatch'
-  | 'peer-failed';
+  | 'peer-failed'
+  /** The call started without a microphone; sending needs a rejoin. */
+  | 'rejoin-to-talk';
 
 export interface VoiceError {
   code: VoiceErrorCode;
@@ -77,6 +85,10 @@ export interface VoiceEngineOptions {
   env?: VoiceEnv;
   /** How long to wait for ICE gathering before sending the SDP anyway. */
   gatherTimeoutMs?: number;
+  /** The offerer's first wait for a connection; doubles per retry. Default 5 s. */
+  answerTimeoutMs?: number;
+  /** The answerer's wait for a connection. Default 30 s. */
+  connectTimeoutMs?: number;
   /** RMS level above which someone counts as speaking (0..1). */
   speakingThreshold?: number;
 }
@@ -108,6 +120,7 @@ export interface VoiceEngine {
 
 const MAX_PEERS = 4; // 5 in a call, me included
 const MAX_PENDING_ICE = 32;
+const OFFER_ATTEMPTS = 3;
 const SPEAKING_POLL_MS = 100;
 const SPEAKING_HOLD_MS = 300;
 
@@ -125,6 +138,9 @@ interface Peer {
   /** Media plays only after the certificate check. */
   verified: boolean;
   closed: boolean;
+  /** Offerer: which offer this is (1-based). */
+  attempt: number;
+  watchdog: ReturnType<typeof setTimeout> | null;
 }
 
 interface Meter {
@@ -163,6 +179,8 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
   const env = options.env ?? browserEnv();
   const gatherTimeoutMs = options.gatherTimeoutMs ?? 3000;
   const threshold = options.speakingThreshold ?? 0.02;
+  const answerTimeoutMs = options.answerTimeoutMs ?? 5000;
+  const connectTimeoutMs = options.connectTimeoutMs ?? 30_000;
   const iceServers = iceServersFor(options.stunUrl);
 
   const listeners: { [E in keyof VoiceEvents]: Set<(p: VoiceEvents[E]) => void> } = {
@@ -288,7 +306,7 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
   }
 
   // ---- peers -----------------------------------------------------------------
-  function createPeer(id: Id, offerer: boolean): Peer {
+  function createPeer(id: Id, offerer: boolean, attempt = 1): Peer {
     const pc = env.createPeerConnection({
       iceServers,
       bundlePolicy: 'max-bundle',
@@ -306,8 +324,17 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
       state: 'connecting',
       verified: false,
       closed: false,
+      attempt,
+      watchdog: null,
     };
     peers.set(id, peer);
+    peer.watchdog = setTimeout(
+      () => {
+        peer.watchdog = null;
+        if (!peer.closed && !peer.verified) retryOrFail(peer);
+      },
+      offerer ? answerTimeoutMs * 2 ** (attempt - 1) : connectTimeoutMs,
+    );
 
     const track = micTrack();
     const transceiver = track
@@ -331,17 +358,28 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
       if (peer.closed) return;
       const s = pc.connectionState;
       if (s === 'connected') void checkCertificate(peer);
-      else if (s === 'failed') {
-        dropPeer(peer, 'peer-failed');
-      }
+      else if (s === 'failed') retryOrFail(peer);
     };
     emitParticipants();
     return peer;
   }
 
+  /** The offerer offers again on a fresh connection while it has tries left. */
+  function retryOrFail(peer: Peer) {
+    const next = peer.attempt + 1;
+    if (peer.offerer && next <= OFFER_ATTEMPTS && active && members.has(peer.id) && !refused.has(peer.id)) {
+      dropPeer(peer);
+      void offerTo(peer.id, next);
+    } else {
+      dropPeer(peer, 'peer-failed');
+    }
+  }
+
   function dropPeer(peer: Peer, reason?: VoiceErrorCode) {
     if (peer.closed) return;
     peer.closed = true;
+    if (peer.watchdog) clearTimeout(peer.watchdog);
+    peer.watchdog = null;
     peer.state = 'failed';
     try {
       peer.pc.close();
@@ -388,6 +426,8 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
     if (!peer.fingerprint) return dropPeer(peer, 'fingerprint-mismatch');
     peer.verified = true;
     peer.state = 'connected';
+    if (peer.watchdog) clearTimeout(peer.watchdog);
+    peer.watchdog = null;
     if (peer.stream) playPeer(peer);
     emitParticipants();
   }
@@ -437,8 +477,8 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
     await core.sendSignal(peer.id, kind, sdp);
   }
 
-  async function offerTo(id: Id) {
-    const peer = createPeer(id, true);
+  async function offerTo(id: Id, attempt = 1) {
+    const peer = createPeer(id, true, attempt);
     try {
       await sendDescription(peer, 'offer');
     } catch {
@@ -619,6 +659,12 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
     async setInputDevice(deviceId) {
       inputId = deviceId || undefined;
       if (!active) return;
+      // Connections made without a microphone are receive-only; sending would
+      // need a renegotiation the answerer can't start (glare rule). v1: rejoin.
+      if (!local) {
+        emit('error', { code: 'rejoin-to-talk' });
+        return;
+      }
       const gen = generation;
       const next = await openMic(inputId);
       if (gen !== generation) {

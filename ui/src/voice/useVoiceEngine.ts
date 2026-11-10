@@ -10,7 +10,8 @@ import { createVoiceEngine, type AudioDevice, type VoiceEngine, type VoiceEngine
 
 export interface VoiceEngineView {
   ready: boolean;
-  error?: 'mic-denied' | 'no-device' | 'failed';
+  /** `rejoin-to-talk`: the call started without a mic; a new device needs a rejoin. */
+  error?: 'mic-denied' | 'no-device' | 'failed' | 'rejoin-to-talk';
   speaking: Record<Id, boolean>;
   setMicMuted: (muted: boolean) => void;
   inputs: AudioDevice[];
@@ -44,7 +45,7 @@ export function useVoiceEngine(call: CallState | null, myId: Id, options: Pick<V
     const offs = [
       engine.on('speaking', setSpeaking),
       engine.on('error', (e) => {
-        if (e.code === 'mic-denied' || e.code === 'no-device' || e.code === 'failed') setError(e.code);
+        if (e.code === 'mic-denied' || e.code === 'no-device' || e.code === 'failed' || e.code === 'rejoin-to-talk') setError(e.code);
       }),
     ];
     return () => {
