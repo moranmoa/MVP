@@ -3711,9 +3711,15 @@ fn sign_out_leaves_a_fresh_start() {
     // intent stays (and `mvs-core` starts offline).
     assert!(!api::finish_sign_out(&db, &sync, None).unwrap());
     assert!(api::sign_out_pending(&db) && sync.join("node.key").exists());
-    // Readable, secret gone: the files go, node key included, then the marker.
+    // Readable, secret gone: the files go (SQLite's -wal and -shm too, node
+    // key included), then the marker.
+    let wal = dir.join("core.db-wal");
+    let shm = dir.join("core.db-shm");
+    std::fs::write(&wal, b"wal").unwrap();
+    std::fs::write(&shm, b"shm").unwrap();
     assert!(api::finish_sign_out(&db, &sync, Some(false)).unwrap());
     assert!(!db.exists() && !sync.exists() && !marker.exists());
+    assert!(!wal.exists() && !shm.exists(), "SQLite's side files stayed");
     assert!(!api::sign_out_pending(&db));
     assert!(!api::finish_sign_out(&db, &sync, Some(false)).unwrap(), "nothing left to do");
     // A marker whose secret is still there (a sign-out that never deleted
