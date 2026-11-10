@@ -372,6 +372,7 @@ jobs:
 
           - **Alpha:** the data format may still change. Servers and messages made with this build may be reset by a later one. Your identity is safe as long as you keep your 12 recovery words.
           - The installers are **not code-signed**. Windows SmartScreen will warn: choose "More info" and then "Run anyway".
+          - **Windows firewall:** the first time MVS starts, Windows asks whether to allow it on your networks. Choose **Allow** (private networks are enough). MVS works either way: if it is blocked, messages go through the MVS relay, but direct connections to members are lost and voice calls may not connect. To allow it later: Windows Security, Firewall & network protection, "Allow an app through firewall", "Change settings", then tick MVS (this step needs an administrator account). MVS never changes firewall settings itself.
           - The \`.zip\`/\`.tar.gz\` files are the in-app updater payloads; you don't need them.
           - \`manifest-body-beta.json\` / \`manifest-body-alpha.json\` are the **unsigned** update manifests per channel. The owner signs them offline and publishes them to the \`update-beta\` / \`update-alpha\` releases; until then, in-app updates are not offered.
           - Built by GitHub Actions from \`${GITHUB_SHA}\`. Check downloads against \`SHA256SUMS\`.
