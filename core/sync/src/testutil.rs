@@ -49,6 +49,11 @@ pub fn message_with_auth(seq: u64, deps: &[RecordId], auth_deps: &[RecordId], si
     sign(Scope::Channel(channel()), seq, deps, auth_deps, Kind::Message, body, 1)
 }
 
+/// A first message by test key 1 in `channel` of the test server.
+pub fn message_in(channel: ChannelId) -> Record {
+    sign(Scope::Channel(channel), 0, &[], &[], Kind::Message, vec![0], 1)
+}
+
 /// `n` messages, each on top of the previous one.
 pub fn message_chain(n: usize, size: usize) -> Vec<Record> {
     let mut out: Vec<Record> = Vec::new();
