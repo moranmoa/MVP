@@ -259,7 +259,10 @@ function checkFileLog() {
     const hits = lines.filter((l) => re.test(l.slice(24))); // skip the timestamp
     if (hits.length) leaks.push(`${name}: ${hits.length} (e.g. ${hits[0].slice(24, 120).replace(re, '«…»')})`);
   };
-  scan('IPv4', /\b(?:\d{1,3}\.){3}\d{1,3}\b/);
+  scan('IPv4 (or IP:port)', /\b(?:\d{1,3}\.){3}\d{1,3}\b/);
+  // sync=debug prints SocketAddrs: [v6]:port, and bare v6 outside a multiaddr.
+  scan('IPv6 (or [IPv6]:port)', /\[[0-9a-f:.%]*:[0-9a-f:.%]*\]|(?<![0-9A-Za-z_:])(?=[0-9a-f:]*::|(?:[0-9a-f]{1,4}:){7})[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}(?![0-9A-Za-z_])(?<=[0-9a-f])/i);
+  scan('invite link', /mv[sp]:\/\/join\/(?!<)/i);
   scan('peer ID', /\b(?:12D3KooW|Qm)[1-9A-HJ-NP-Za-km-z]{40,}/);
   scan('64-hex ID', /\b[0-9a-f]{64}\b/i);
   if (serverId) scan('server ID', new RegExp(serverId.slice(0, 16), 'i'));
