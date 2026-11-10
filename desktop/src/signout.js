@@ -1,7 +1,8 @@
 'use strict';
 
 // Sign out on this computer (#304), the desktop's part.
-// - Without the recovery words, the account is lost for good. The page's own
+// - Without the recovery words, the account can't be restored here or on a new
+//   computer (others still signed in keep it). The page's own
 //   confirmation could be clicked by a script injected into it, so main asks
 //   again in a native dialog the page can't reach. Declining answers
 //   `cancelled`, and the core is never asked.
@@ -54,8 +55,8 @@ const WITHOUT_WORDS_DIALOG = {
   noLink: true,
   message: 'לצאת בלי מילות השחזור? / Sign out without the recovery words?',
   detail:
-    'החשבון יאבד לתמיד: לא יהיה אפשר להיכנס אליו שוב בשום מחשב.\n' +
-    "The account will be lost for good: you can't sign in to it again on any computer.",
+    'בלי מילות השחזור, אי אפשר יהיה לשחזר את החשבון, לא במחשב הזה ולא במחשב חדש. מחשבים אחרים שעדיין מחוברים לחשבון ממשיכים להשתמש בו.\n' +
+    "Without the recovery words, the account can't be restored, on this computer or a new one. Other computers still signed in to it keep it.",
 };
 
 module.exports = { signOut, clearLogFiles, WITHOUT_WORDS_DIALOG };
