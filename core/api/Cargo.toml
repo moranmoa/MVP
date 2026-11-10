@@ -45,5 +45,18 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+# MIT. Same version as `sync`, with the features its own relay test uses: an
+# in-process relay for the voice test in `two_peers.rs` (no new crates).
+libp2p = { version = "0.54", default-features = false, features = [
+    "tokio",
+    "tcp",
+    "noise",
+    "yamux",
+    "relay",
+    "identify",
+    "ping",
+    "kad",
+    "macros",
+] }
 # MIT. Same version and features as `updater`: builds test update payloads.
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }

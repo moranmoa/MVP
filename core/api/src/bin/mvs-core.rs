@@ -156,6 +156,14 @@ fn main() -> ExitCode {
     // joined, so a download in progress can't hold up the exit.
     let core: &'static Core = Box::leak(Box::new(core));
     std::thread::spawn(|| core.run_update_loop());
+    // Voice (piece A): calls go over sync's member-only signalling. The
+    // delivery thread ends with the node.
+    if let Some(net) = &sync {
+        core.set_voice(net.clone());
+        if let Some(signals) = net.take_voice() {
+            std::thread::spawn(move || api::syncnet::deliver_voice(signals, core));
+        }
+    }
     eprintln!("mvs-core: ready");
     // With a network, a background sync beside the request loop; it stops
     // and is joined when stdin closes.
