@@ -134,9 +134,11 @@ pub fn open(
 /// An envelope as the inviter publishes it to members (design §4).
 #[derive(Clone, PartialEq, Eq)]
 pub struct InvitePublication {
-    pub invite: RecordId,
-    pub handle: [u8; 32],
-    pub envelope: Vec<u8>,
+    // Private: built only by `sign`/`decode`, so `encode` never sees an
+    // envelope over the cap (its u16 length would truncate).
+    invite: RecordId,
+    handle: [u8; 32],
+    envelope: Vec<u8>,
     sig: [u8; SIG_LEN],
 }
 
@@ -169,6 +171,32 @@ impl InvitePublication {
         }
         let sig = author.sign(&signed_message(&invite, &handle, &envelope)).to_bytes();
         Some(InvitePublication { invite, handle, envelope, sig })
+    }
+
+    /// The invite record this publication is for. A joiner must also check
+    /// that the opened envelope names this same invite: the signature
+    /// covers the envelope's bytes, not what is sealed inside.
+    pub fn invite(&self) -> RecordId {
+        self.invite
+    }
+
+    /// The envelope's name on the wire (`h`).
+    pub fn handle(&self) -> &[u8; 32] {
+        &self.handle
+    }
+
+    /// The sealed envelope (open it with [`open`]).
+    pub fn envelope(&self) -> &[u8] {
+        &self.envelope
+    }
+
+    /// Whether this publication is for what its envelope holds: the opened
+    /// envelope names this publication's invite, and the handle is k's.
+    /// A joiner requires this, then [`verify`](Self::verify) against the
+    /// author of that invite in the control log it pulled; any failure
+    /// moves on to the next answer.
+    pub fn names(&self, key: &[u8; KEY_LEN], opened: &Opened) -> bool {
+        opened.invite == self.invite && self.handle == handle(key)
     }
 
     /// Whether `author` (the named invite's author in the control log)
@@ -301,6 +329,26 @@ mod tests {
             PublicKey::from_bytes(SigningKey::from_bytes(&[0x56; 32]).verifying_key().to_bytes());
         assert!(!decoded.verify(&someone));
         assert_eq!(format!("{decoded:?}"), "InvitePublication(..)");
+    }
+
+    #[test]
+    fn a_publication_for_one_invite_carrying_another_is_caught() {
+        // Signed for invite X, but the envelope inside names invite Y: the
+        // signature holds (it covers the bytes) and the envelope opens, yet
+        // `names` refuses it. So does a handle that isn't k's.
+        let (x, y) = (RecordId::from_bytes([0x33; 32]), RecordId::from_bytes([0x34; 32]));
+        let author_key = PublicKey::from_bytes(author().verifying_key().to_bytes());
+        let for_y = seal(&KEY, &server(), &y, &SECRET);
+        let mismatched = InvitePublication::sign(&author(), x, handle(&KEY), for_y).unwrap();
+        assert!(mismatched.verify(&author_key));
+        let opened = open(&KEY, &prefix_of(&server()), mismatched.envelope()).unwrap();
+        assert!(!mismatched.names(&KEY, &opened));
+        let other_handle =
+            InvitePublication::sign(&author(), y, [0; 32], mismatched.envelope().to_vec()).unwrap();
+        assert!(!other_handle.names(&KEY, &opened));
+        let good = publication();
+        let opened = open(&KEY, &prefix_of(&server()), good.envelope()).unwrap();
+        assert!(good.names(&KEY, &opened));
     }
 
     #[test]
