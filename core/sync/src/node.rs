@@ -105,6 +105,10 @@ const MAX_PULLS_IN_FLIGHT: usize = 3;
 /// refills between rounds, so a peer that holds none of our servers' logs
 /// (and answers each at once, empty) is never pushed over its limit.
 const PULLS_PER_PEER_ROUND: usize = 20;
+/// The first round to a peer that just connected: small, since the round
+/// timer, a relay reservation and the other side's own first round can all
+/// land within the same few seconds.
+const FIRST_CONTACT_PULLS: usize = 5;
 /// How a control log's name ends (`log_name`): queued first.
 const CONTROL_SUFFIX: &str = "/control";
 /// Per-peer pull buckets remembered (also after disconnecting).
@@ -1215,7 +1219,7 @@ impl Task {
                 }
                 _ = anti_entropy.tick() => {
                     self.pending.expire(Instant::now(), PENDING_TTL);
-                    self.pull_all();
+                    self.pull_all("round");
                 }
                 _ = discovery.tick() => self.discover(),
             }
@@ -1333,8 +1337,12 @@ impl Task {
         if let Err(err) = self.swarm.behaviour_mut().gossipsub.subscribe(&topic(&self.sealing.wire(&log))) {
             warn!(%err, "subscribe failed");
         }
+        // A new log: its control log from anyone (a joiner needs it before
+        // anyone is bound), a channel only from peers that share it.
         for peer in self.connected.clone() {
-            self.pull(peer, &log);
+            if self.shares(peer, &log) {
+                self.pull(peer, &log, "open");
+            }
         }
     }
 
@@ -1751,17 +1759,23 @@ impl Task {
 
     /// Pulls the logs we just wrote to, so receipt acks come back quickly.
     fn pull_soon(&mut self) {
+        // Receipt acks come only from members bound to the log's server, so
+        // only they are asked: a write burst while unrelated peers are
+        // connected no longer floods them with pulls.
         for log in std::mem::take(&mut self.soon) {
+            let server = self.sealing.get(&log).map(|s| s.server);
             for peer in self.connected.clone() {
-                self.pull(peer, &log);
+                if server.is_none_or(|server| self.bound.contains_key(&(peer, server))) {
+                    self.pull(peer, &log, "soon");
+                }
             }
         }
     }
 
-    fn pull_all(&mut self) {
+    fn pull_all(&mut self, cause: &'static str) {
         self.pull_round = self.pull_round.wrapping_add(1);
         for peer in self.connected.clone() {
-            self.pull_shared(peer);
+            self.pull_shared(peer, cause, PULLS_PER_PEER_ROUND);
         }
     }
 
@@ -1775,7 +1789,7 @@ impl Task {
             return;
         };
         queue.remove(&log);
-        self.pull(peer, &log);
+        self.pull(peer, &log, "queue");
     }
 
     /// Whether `log` is worth pulling from `peer`. A plain-named log, and a
@@ -1792,12 +1806,13 @@ impl Task {
         }
     }
 
-    /// Pulls `peer`'s share of our logs, at most [`PULLS_PER_PEER_ROUND`] a
-    /// round: those of servers it is bound to first, then the other control
+    /// Pulls `peer`'s share of our logs, at most `limit` (a round:
+    /// [`PULLS_PER_PEER_ROUND`]; a first contact: [`FIRST_CONTACT_PULLS`]):
+    /// those of servers it is bound to first, then the other control
     /// logs in turn (a different slice each round), so a node with many
     /// servers never sends a peer more pulls than its limits take. `pull`
     /// also keeps at most [`MAX_PULLS_IN_FLIGHT`] out at once.
-    fn pull_shared(&mut self, peer: PeerId) {
+    fn pull_shared(&mut self, peer: PeerId, cause: &'static str, limit: usize) {
         let (mut bound, mut rest): (Vec<String>, Vec<String>) = self
             .logs
             .iter()
@@ -1806,18 +1821,18 @@ impl Task {
             .partition(|log| self.sealing.get(log).is_none_or(|s| self.bound.contains_key(&(peer, s.server))));
         bound.sort();
         rest.sort();
-        bound.truncate(PULLS_PER_PEER_ROUND);
-        let room = PULLS_PER_PEER_ROUND - bound.len();
+        bound.truncate(limit);
+        let room = limit - bound.len();
         if !rest.is_empty() && room > 0 {
             let start = self.pull_round.wrapping_mul(room) % rest.len();
             bound.extend((0..room.min(rest.len())).map(|i| rest[(start + i) % rest.len()].clone()));
         }
         for log in bound {
-            self.pull(peer, &log);
+            self.pull(peer, &log, cause);
         }
     }
 
-    fn pull(&mut self, peer: PeerId, log: &str) {
+    fn pull(&mut self, peer: PeerId, log: &str, cause: &'static str) {
         let key = (peer, log.to_string());
         if self.decoding.contains(&key) || self.inflight.values().any(|k| *k == key) {
             self.again.insert(key);
@@ -1838,6 +1853,9 @@ impl Task {
         let have = have.into_iter().map(|id| ByteBuf::from(id.as_bytes().to_vec())).collect();
         let binding = self.sealing.get(log).map(|s| s.server).and_then(|server| self.own_binding(server));
         let request = SyncRequest { log: self.sealing.wire(log), have, binding };
+        // Why this pull went out, for sync debug logs (mvs.log through
+        // MVS_DEBUG_LOG): the trigger only, never the peer or the log name.
+        debug!(cause, in_flight = self.inflight.values().filter(|(p, _)| *p == peer).count(), "pull sent");
         let request = self.swarm.behaviour_mut().sync.send_request(&peer, request);
         self.inflight.insert(request, key);
     }
@@ -1895,7 +1913,7 @@ impl Task {
                 .cloned()
                 .collect();
             for log in channels {
-                self.pull(peer, &log);
+                self.pull(peer, &log, "bound");
             }
         }
         Some(identity)
@@ -1957,7 +1975,7 @@ impl Task {
                     info!(%peer_id, "peer connected");
                     self.reached = true;
                     self.emit(NodeEvent::PeerConnected(peer_id));
-                    self.pull_shared(peer_id);
+                    self.pull_shared(peer_id, "connect", FIRST_CONTACT_PULLS);
                 }
             }
             SwarmEvent::ConnectionClosed { peer_id, connection_id, num_established, .. } => {
@@ -2038,7 +2056,7 @@ impl Task {
                     self.emit(NodeEvent::RelayReserved);
                     let me = *self.swarm.local_peer_id();
                     self.swarm.behaviour_mut().kad.get_closest_peers(me);
-                    self.pull_all();
+                    self.pull_all("reservation");
                 }
             }
             SwarmEvent::NewListenAddr { listener_id, address } if Some(listener_id) == self.listener => {
@@ -2358,9 +2376,9 @@ impl Task {
                 let control = log_name(record.server(), Scope::Control);
                 let needs_control = record.auth_deps().iter().any(|d| missing.contains(d));
                 self.pending.insert(missing[0], record, Instant::now());
-                self.pull(from, &log);
+                self.pull(from, &log, "deps");
                 if needs_control && self.logs.contains(&control) {
-                    self.pull(from, &control);
+                    self.pull(from, &control, "deps");
                 }
                 Ingest::Waiting
             }
@@ -2468,7 +2486,7 @@ impl Task {
             self.release_pending(id);
         }
         if follow_up(more, added_any) || self.again.remove(&key) {
-            self.pull(peer, &log);
+            self.pull(peer, &log, "more");
         }
     }
 
@@ -3569,6 +3587,41 @@ mod tests {
         tokio::time::sleep(ANTI_ENTROPY * 2 + Duration::from_secs(1)).await;
         assert_eq!((many.rate_limited().await, fresh.rate_limited().await), (0, 0), "pulls refused (many, fresh)");
         for node in [many, fresh] {
+            node.shutdown().await.unwrap();
+        }
+    }
+
+    /// A burst of local writes while a peer that shares none of our servers
+    /// is connected (QA's owner posting with a second device online): the
+    /// receipt pulls after each write go only to members, so that peer never
+    /// has to refuse a pull.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_write_burst_pulls_only_from_members() {
+        use crate::testutil::{message_in, test_key};
+        let key = |n: u8| -> Option<Arc<dyn Binder>> { Some(Arc::new(test_key(n))) };
+        let access = |n: u8| Access { binder: key(n), read_gate: Some(Arc::new(AcceptAll)), stub_gate: None };
+        let (writer, _events) = test_node_events("writer", None, None, access(1)).await;
+        let port = port_of(&writer).await;
+        writer.open_server(server(), ServerSecret::from_bytes([11; 32])).unwrap();
+        // 60 channels: each write lands in a log of its own, as QA's owner
+        // writing across many servers did (one log's writes coalesce).
+        let channels: Vec<ChannelId> = (0..60u8).map(|i| ChannelId::from_bytes([100 + i; 32])).collect();
+        for c in &channels {
+            writer.open_channel(server(), *c).await.unwrap();
+        }
+        let other = test_node("other", None, Some(port), access(0)).await;
+        other.open_server(ServerId::from_bytes([77; 32]), ServerSecret::from_bytes([78; 32])).unwrap();
+        let start = Instant::now();
+        while writer.peers().await.unwrap().is_empty() {
+            assert!(start.elapsed() < Duration::from_secs(10), "never connected");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        for c in &channels {
+            writer.append(message_in(*c)).await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(other.rate_limited().await, 0, "the non-member refused pulls after a write burst");
+        for node in [writer, other] {
             node.shutdown().await.unwrap();
         }
     }
