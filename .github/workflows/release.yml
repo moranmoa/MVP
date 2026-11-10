@@ -223,12 +223,20 @@ jobs:
           want='{"relay":"/dns4/relay.example.invalid/tcp/443/wss/p2p/12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc","bootstrap":["/dns4/tcp.relay.example.invalid/tcp/4001/p2p/12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc"]}'
           got=$(cat "$RUNNER_TEMP/relay-selftest.json")
           [ "$got" = "$want" ] || { echo "::error::bootstrap config was altered on the way: $got"; exit 1; }
-          echo "ok: relay and bootstrap addresses reach the config unchanged"
+          # Relay plus STUN (the cases above have no stun key).
+          STUN=stun:stun.relay.example.invalid:3478 \
+            node .github/scripts/write-relay-config.mjs "$RUNNER_TEMP/relay-selftest.json"
+          want='{"relay":"/dns4/relay.example.invalid/tcp/443/wss/p2p/12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc","stun":"stun:stun.relay.example.invalid:3478"}'
+          got=$(cat "$RUNNER_TEMP/relay-selftest.json")
+          [ "$got" = "$want" ] || { echo "::error::stun config was altered on the way: $got"; exit 1; }
+          echo "ok: relay, bootstrap and stun reach the config unchanged"
       - name: Build-time config (relay)
         env:
           RELAY: ${{ github.event_name == 'push' && vars.MVS_RELAY_ADDR || '' }}
           # Plain-TCP route to the relay (DCUtR, #219); optional.
           RELAY_TCP: ${{ github.event_name == 'push' && vars.MVS_RELAY_TCP_ADDR || '' }}
+          # Our own STUN server for voice (stun:<host>:3478); optional.
+          STUN: ${{ github.event_name == 'push' && vars.MVS_STUN_URL || '' }}
           MSYS2_ENV_CONV_EXCL: RELAY
           MSYS_NO_PATHCONV: "1"
         run: |
