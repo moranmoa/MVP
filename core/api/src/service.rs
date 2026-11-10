@@ -1274,6 +1274,93 @@ impl Core {
         Ok(json)
     }
 
+    /// G-11 `moveChannel(serverId, channelId, before?, after?)`: owner and
+    /// admin only (`not-allowed`). Puts the channel right before `before`,
+    /// or right after `after`, or last with neither; both must agree (the
+    /// two neighbours of one gap), else `bad-request`, as for a neighbour
+    /// that isn't a live channel of the server. One signed channel-order
+    /// post: a key between the new neighbours', or, when a neighbour has no
+    /// key yet or the key would pass 32 characters, keys for every channel
+    /// in the new order (a rebalance). Returns the channels in order, and
+    /// emits `channel.updated` for each one whose position changed.
+    pub fn move_channel(
+        &self,
+        server_id: &str,
+        channel_id: &str,
+        before: Option<&str>,
+        after: Option<&str>,
+    ) -> CoreResult<Vec<Channel>> {
+        let server = parse_server(server_id)?;
+        let parse = |id: &str| model::parse_hex32(id).map(ChannelId::from_bytes);
+        let channel = parse(channel_id).ok_or(ErrorCode::NotFound)?;
+        let (moved, positions) = {
+            let mut inner = self.lock();
+            inner.load_mine(server)?;
+            let me = inner.me.as_ref().map(Me::key).ok_or(ErrorCode::NotFound)?;
+            let view = inner.view(server)?;
+            if view.state.role(me) < authority::Role::Admin {
+                return Err(ErrorCode::NotAllowed.into());
+            }
+            if !view.state.channels.contains_key(&channel) {
+                return Err(ErrorCode::NotFound.into());
+            }
+            let positions = view.channel_positions();
+            let mut order: Vec<ChannelId> = view.ordered_channels();
+            order.retain(|c| *c != channel);
+            let neighbour = |id: Option<&str>| -> CoreResult<Option<ChannelId>> {
+                id.map(|id| {
+                    parse(id)
+                        .filter(|c| order.contains(c))
+                        .ok_or_else(|| CoreError::from(ErrorCode::BadRequest))
+                })
+                .transpose()
+            };
+            let (before, after) = (neighbour(before)?, neighbour(after)?);
+            let at = match (before, after) {
+                (Some(b), Some(a)) => {
+                    let b_at = order.iter().position(|c| *c == b).expect("checked");
+                    if b_at == 0 || order[b_at - 1] != a {
+                        return Err(ErrorCode::BadRequest.into());
+                    }
+                    b_at
+                }
+                (Some(b), None) => order.iter().position(|c| *c == b).expect("checked"),
+                (None, Some(a)) => order.iter().position(|c| *c == a).expect("checked") + 1,
+                (None, None) => order.len(),
+            };
+            order.insert(at, channel);
+            let prev = at.checked_sub(1).map(|i| order[i]);
+            let next = order.get(at + 1).copied();
+            let key_of = |c: Option<ChannelId>| -> Option<Option<&String>> {
+                match c {
+                    None => Some(None),
+                    Some(c) => positions.get(&c).map(Some),
+                }
+            };
+            let single = match (key_of(prev), key_of(next)) {
+                (Some(lo), Some(hi)) if lo.is_none_or(|lo| hi.is_none_or(|hi| lo < hi)) => {
+                    let key = model::key_between(lo.map(String::as_str), hi.map(String::as_str));
+                    (key.len() <= model::POSITION_MAX).then_some(key)
+                }
+                _ => None,
+            };
+            let moved: BTreeMap<ChannelId, String> = match single {
+                Some(key) => BTreeMap::from([(channel, key)]),
+                None => order.iter().copied().zip(model::spread_keys(order.len())).collect(),
+            };
+            (moved, positions)
+        };
+        self.control_action(server_id, model::channel_order_action(&moved))?;
+        let list = self.list_channels(server_id)?;
+        for json in &list {
+            let id = parse(&json.id).expect("own hex");
+            if moved.get(&id).is_some_and(|key| positions.get(&id) != Some(key)) {
+                self.ports.events.emit(&Event::ChannelUpdated(json.clone()));
+            }
+        }
+        Ok(list)
+    }
+
     /// B11: the owner deletes a channel; never #general (`not-allowed`).
     /// TODO(sync): close its log in sync; until then it is only no longer
     /// opened (the next `open_server` leaves it out).
@@ -3511,6 +3598,7 @@ impl ServerView<'_> {
     /// TODO(#116): hide 18+ channels from members without an 18+ claim.
     fn channels(&self, me: Option<PublicKey>) -> Vec<Channel> {
         let server_id = model::hex_id(self.id.as_bytes());
+        let positions = self.channel_positions();
         let channel = |id: ChannelId, name: &str, adult: bool, general: bool| Channel {
             id: model::hex_id(id.as_bytes()),
             server_id: server_id.clone(),
@@ -3519,18 +3607,34 @@ impl ServerView<'_> {
             unread: false,
             mentions: 0,
             is_default: general,
+            position: positions.get(&id).cloned(),
         };
         if self.state.channels.is_empty() && self.state.deleted_channels.is_empty() {
             return vec![channel(model::default_channel(self.id), model::GENERAL, false, true)];
         }
         // B7: 18+ channels only for members with an accepted 18+ claim.
         let adult = me.is_some_and(|me| self.state.adults.contains(&me));
-        self.state
-            .channels
-            .iter()
+        self.ordered_channels()
+            .into_iter()
+            .filter_map(|id| self.state.channels.get(&id).map(|c| (id, c)))
             .filter(|(_, c)| adult || !c.adult)
-            .map(|(id, c)| channel(*id, &c.name, c.adult, c.general))
+            .map(|(id, c)| channel(id, &c.name, c.adult, c.general))
             .collect()
+    }
+
+    /// G-11: every live channel in order. Placed ones first, by key (then
+    /// ID, for keys two admins happened to pick alike); the rest after, in
+    /// today's order.
+    fn ordered_channels(&self) -> Vec<ChannelId> {
+        let positions = self.channel_positions();
+        let mut ids: Vec<ChannelId> = self.state.channels.keys().copied().collect();
+        ids.sort_by(|a, b| match (positions.get(a), positions.get(b)) {
+            (Some(x), Some(y)) => x.cmp(y).then(a.cmp(b)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+        ids
     }
 }
 
