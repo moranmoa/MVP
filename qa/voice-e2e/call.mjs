@@ -8,7 +8,8 @@
 // docs/qa/voice-v1-test-plan.md. Exit code 1 if any check failed.
 
 import { createRequire } from 'node:module';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { lookup } from 'node:dns/promises';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -16,6 +17,12 @@ const require = createRequire('/repo/desktop/package.json');
 const { _electron: electron } = require('playwright-core');
 
 const ROLE = process.env.ROLE;
+// Join variants (#join hang repro): MODE=restore makes B the owner's identity
+// restored on a second computer; JOIN_VIA=ui joins from the app's own dialog;
+// JOIN_ONLY=1 stops after the join (no call).
+const MODE = process.env.MODE || 'new';
+const JOIN_VIA = process.env.JOIN_VIA || 'bridge';
+const JOIN_ONLY = !!process.env.JOIN_ONLY;
 const OTHER = ROLE === 'a' ? 'b' : 'a';
 const NAME = { a: 'QA-A owner', b: 'QA-B member' };
 const SERVER = 'voice e2e';
@@ -170,6 +177,61 @@ function connectionReport() {
 }
 const live = async () => (await connectionReport()).filter((c) => c.state !== 'failed');
 
+// ---- mvs-core's sockets (V3) -------------------------------------------------
+
+const relayIp = (await lookup('relay')).address;
+
+/** The socket inodes held by processes named mvs-core in this container. */
+function coreInodes() {
+  const out = new Set();
+  for (const pid of readdirSync('/proc').filter((p) => /^\d+$/.test(p))) {
+    try {
+      if (readFileSync(`/proc/${pid}/comm`, 'utf8').trim() !== 'mvs-core') continue;
+      for (const fd of readdirSync(`/proc/${pid}/fd`)) {
+        const m = /^socket:\[(\d+)\]$/.exec(readlinkSync(`/proc/${pid}/fd/${fd}`));
+        if (m) out.add(m[1]);
+      }
+    } catch {
+      // gone, or not ours
+    }
+  }
+  return out;
+}
+
+function addr(hex) {
+  if (hex.length === 8) return hex.match(/../g).reverse().map((b) => parseInt(b, 16)).join('.');
+  if (/^0{20}FFFF0{4}/i.test(hex) || /^0{16}0{4}FFFF/i.test(hex)) return addr(hex.slice(24));
+  if (/^0+$/.test(hex)) return '::';
+  if (/^0{24}01000000$/i.test(hex)) return '::1';
+  return `v6:${hex}`;
+}
+
+/** mvs-core's TCP links and its TCP/UDP listeners, from /proc/net. */
+function sockets() {
+  const mine = coreInodes();
+  const established = [];
+  const listening = [];
+  for (const proto of ['tcp', 'tcp6', 'udp', 'udp6']) {
+    let lines;
+    try {
+      lines = readFileSync(`/proc/net/${proto}`, 'utf8').trim().split('\n').slice(1);
+    } catch {
+      continue;
+    }
+    for (const line of lines) {
+      const f = line.trim().split(/\s+/);
+      if (!mine.has(f[9])) continue;
+      const [lh, lp] = f[1].split(':');
+      const [rh] = f[2].split(':');
+      const s = { proto, local: addr(lh), port: parseInt(lp, 16) };
+      if (proto.startsWith('tcp') && f[3] === '0A') listening.push(s);
+      else if (proto.startsWith('udp') && f[3] === '07' && /^0+$/.test(f[2].replace(':', ''))) listening.push(s);
+      else if (proto.startsWith('tcp') && f[3] === '01') established.push({ ...s, remote: addr(rh) });
+    }
+  }
+  return { established, listening };
+}
+
 // ---- UI --------------------------------------------------------------------
 
 const entry = () => page.locator('.voice-room-entry');
@@ -178,6 +240,30 @@ const rosterNames = () => roster().locator('.call-person').allInnerTexts();
 async function rosterHas(names) {
   const got = (await rosterNames()).map((t) => t.trim());
   return names.every((n) => got.some((g) => g.startsWith(n))) && got.length === names.length ? got : null;
+}
+
+/** Joins as a user does: Home → "Join with a link" → paste → Join. Logs what the dialog shows. */
+async function joinFromDialog(link) {
+  await page.reload();
+  await page.waitForFunction(() => typeof window.mvs?.invoke === 'function');
+  await page.getByRole('button', { name: /^(Join with a link|הצטרפות בלינק)/ }).first().click({ timeout: 30_000 });
+  await page.getByLabel(/^(Invite link|לינק הזמנה)$/).fill(link);
+  await page.getByRole('button', { name: /^(Join|הצטרפות)$/ }).click();
+  // Record each new text the dialog shows until the server is in the rail.
+  const seen = [];
+  const end = Date.now() + 120_000;
+  const railButton = page.getByRole('button', { name: new RegExp(`^${SERVER}`) });
+  while (Date.now() < end) {
+    const text = (await page.getByRole('dialog').allInnerTexts().catch(() => [])).join(' | ').replace(/\s+/g, ' ').slice(0, 160);
+    if (text && text !== seen[seen.length - 1]) {
+      seen.push(text);
+      log(`join dialog: ${text}`);
+    }
+    if (await railButton.count()) break;
+    await sleep(250);
+  }
+  log(`join dialog states: ${seen.length}; server in the rail: ${(await railButton.count()) > 0}`);
+  if (!(await railButton.count())) await page.screenshot({ path: join(RV, `${ROLE}-join-stuck.png`) }).catch(() => {});
 }
 
 async function openServer() {
@@ -246,24 +332,34 @@ async function mediaProbe(names = Object.keys(PROBES)) {
 let ok = true;
 let serverId;
 try {
+  scenario: {
   log('setting up the account');
-  await invoke('createIdentity', { locale: 'he', country: 'IL', birthDate: '1995-03-03' });
-  const words = await invoke('getRecoveryWords');
-  const challenge = await invoke('getRecoveryChallenge').catch(() => null);
-  const positions = challenge?.positions ?? [1, 5, 9];
-  await invoke('checkRecoveryWords', Object.fromEntries(positions.map((p) => [p, words[p - 1]])));
-  await invoke('updateProfile', { displayName: NAME[ROLE] });
+  // MODE=restore: B restores A's words (the same identity on a second computer).
+  let words = null;
+  if (!(ROLE === 'b' && MODE === 'restore')) {
+    await invoke('createIdentity', { locale: 'he', country: 'IL', birthDate: '1995-03-03' });
+    words = await invoke('getRecoveryWords');
+    const challenge = await invoke('getRecoveryChallenge').catch(() => null);
+    const positions = challenge?.positions ?? [1, 5, 9];
+    await invoke('checkRecoveryWords', Object.fromEntries(positions.map((p) => [p, words[p - 1]])));
+    await invoke('updateProfile', { displayName: NAME[ROLE] });
+  }
 
   if (ROLE === 'a') {
     const server = await invoke('createServer', { name: SERVER, ageRestriction: 'none' });
     serverId = server.id;
-    put('invite', { link: server.inviteLink });
+    put('invite', { link: server.inviteLink, ...(MODE === 'restore' ? { words } : {}) });
     log('server created, invite handed over');
     await take('joined');
   } else {
-    const { link } = await take('invite');
+    const { link, words: ownerWords } = await take('invite');
+    if (MODE === 'restore') {
+      const me = await invoke('restoreIdentity', ownerWords);
+      log(`restored the owner's identity (${me.id.slice(0, 8)})`);
+    }
     const started = Date.now();
-    await invoke('joinServer', link);
+    if (JOIN_VIA === 'ui') await joinFromDialog(link);
+    else await invoke('joinServer', link);
     const ok1 = await check('S1.1', 'B joins A\'s server by invite over the relay', async () => {
       await until('server in the list', async () => (await invoke('listServers')).some((s) => s.name === SERVER), 120_000, 1000);
       return `${((Date.now() - started) / 1000).toFixed(1)} s`;
@@ -272,6 +368,7 @@ try {
     serverId = (await invoke('listServers')).find((s) => s.name === SERVER).id;
     put('joined');
   }
+  if (JOIN_ONLY) break scenario;
 
   await openServer();
   log('server open in the UI');
@@ -470,6 +567,51 @@ try {
     await page.locator('.call-bar').waitFor({ state: 'detached', timeout: 10_000 });
   });
 
+  // V3: B turns relay-only on (A stays outside): the room entry is off up
+  // front, the core refuses the join, and B's core keeps no direct link.
+  if (ROLE === 'b') {
+    const before = sockets();
+    await invoke('setRelayOnly', true);
+    await check('V3.1', 'relay-only: "Join chat" is disabled up front, with the reason', async () => {
+      await until('entry disabled', async () => (await entry().getAttribute('aria-disabled')) === 'true', 10_000);
+      const reason = await page.locator('.voice-room-reason').innerText({ timeout: 5000 });
+      return reason;
+    });
+    await check('V3.2', 'relay-only: the core refuses joinCall', async () => {
+      const room = await invoke('getVoiceRoom', serverId);
+      const res = await invoke('joinCall', room.roomId).then(
+        () => 'joined',
+        (e) => e.message,
+      );
+      if (!/relay-only/.test(res)) throw new Error(res);
+      return res;
+    });
+    await check('V3.3', 'relay-only: no IP notice, and clicking the entry joins nothing', async () => {
+      await entry().click({ force: true });
+      await sleep(1500);
+      if (await page.locator('.ip-notice').isVisible()) throw new Error('the IP notice showed');
+      if (await page.locator('.call-bar').count()) throw new Error('a call started');
+    });
+    await check('V3.5', 'relay-only: no direct connection to A, and no direct listener', async () => {
+      await sleep(3000); // turning it on closes direct links (#274)
+      const now = sockets();
+      const loopback = (a) => a.startsWith('127.') || a === '::1';
+      const direct = now.established.filter((s) => s.remote !== relayIp && !loopback(s.remote));
+      const listeners = now.listening.filter((s) => !loopback(s.local));
+      log('sockets before:', JSON.stringify(before), 'after:', JSON.stringify(now));
+      if (direct.length) throw new Error(`still connected to ${direct.map((s) => s.remote).join(', ')}`);
+      if (listeners.length) throw new Error(`still listening on ${listeners.map((s) => `${s.proto} ${s.local}:${s.port}`).join(', ')}`);
+      return `${before.established.length} -> ${now.established.length} TCP links (relay ${relayIp} only)`;
+    });
+    await invoke('setRelayOnly', false);
+    await check('V3.1', 'relay-only off: "Join chat" is available again', () =>
+      until('entry enabled', async () => (await entry().getAttribute('aria-disabled')) !== 'true', 10_000),
+    );
+    put('v3-done');
+  } else {
+    await take('v3-done');
+  }
+
   // V4: both back in the room, then the owner kicks B.
   await entry().click();
   await page.locator('.call-bar').waitFor({ timeout: 15_000 });
@@ -543,6 +685,7 @@ try {
     const crashed = await page.evaluate(() => 1).then(() => false, () => true);
     return crashed ? `${res}; the renderer was killed` : res;
   });
+  }
 } catch (e) {
   ok = false;
   record('FAIL', 'run', 'the scenario stopped', e?.message ?? String(e));
