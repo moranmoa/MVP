@@ -3,12 +3,26 @@
 // it, can join, mute and leave; text channels don't carry calls.
 
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { App } from '../app/App';
 import { Store } from '../app/store';
 import type { Settings } from '../app/settings';
 import { MockCore, type MockOptions } from '../core/mock';
 import { cleanCall, cleanVoiceRoom, guardCore } from '../core/sanitize';
+
+// jsdom has no WebRTC: the engine (piece D) has its own tests in src/voice. Here it
+// is an idle engine with a working mic; ?voiceSim drives the failure states.
+vi.mock('../voice', () => ({
+  useVoiceEngine: () => ({
+    ready: true,
+    speaking: {},
+    setMicMuted: () => {},
+    inputs: [],
+    outputs: [],
+    setInput: () => {},
+    setOutput: () => {},
+  }),
+}));
 
 const settings: Settings = { locale: 'en', theme: 'light', uiScale: 1, fontSize: 15 };
 
