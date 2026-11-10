@@ -20,39 +20,47 @@
   - The laptop returns as the owner: same member, history readable, name and age claim untouched.
   - Calls from one machine at a time.
 
-## 1. The personal backup ("roster")
+## 1. The personal backup
 
-**Keys** come from the identity seed, which the 12 words give, with BLAKE3 `derive_key`, in `core/identity`:
+**Keys** come from the BIP-39 seed, which the 12 words give. The seed carries 128 bits of entropy, so no slow KDF is needed. Each value uses BLAKE3 `derive_key` under its own frozen `mvs/` context, in `core/identity` (Security Lead):
 
 | Value | Derivation | Use |
 |---|---|---|
-| `k` | `derive_key("mvs/roster-key/v1", seed)` | XChaCha20-Poly1305 key for the roster |
-| `w` | Ed25519 from `derive_key("mvs/roster-sign/v1", seed)` | signs every roster version |
-| `tag` | `blake3("mvs/roster-tag/v1" ‖ w.public)` | where the roster lives |
+| `k_enc` | `derive_key("mvs/backup-key/v1", seed)` | XChaCha20-Poly1305, random 24-byte nonce, AAD = `"mvs/backup/v1" ‖ tag ‖ version` |
+| `w` | Ed25519 from `derive_key("mvs/backup-write/v1", seed)` | a **separate write key**: it authorises every write |
+| `tag` | `BLAKE3(derive_key("mvs/backup-tag/v1", w_pub))` | where the backup lives |
 
-- **Unlinkable:** the tag can't be computed from my public identity key. Nobody can look up a named person's roster, or link a tag to an identity, from the tag alone.
-- **Can't be overwritten by others:** a holder accepts a blob for `tag` only if it's signed by the key whose hash is `tag`.
+- **Unlinkable:** the tag isn't the identity key and isn't derived from it. Nobody can look up a named person's backup, or link a tag to an identity, from the tag alone.
+- **No identity signature outside:** holders never see one. Writes are authorised by `w` only: a holder accepts a blob for `tag` only if it's signed by the `w` whose hash gives `tag`.
+  - An identity signature visible to holders would link the tag to the identity key, and through it to every membership.
+  - If devices want an identity signature for integrity between them, it goes *inside* the ciphertext. The AEAD already authenticates the content.
+- **Writes don't use a bearer token** (Tech Lead's alternative). A buddy that learned a token could overwrite the backup at every other holder. A signature by `w` reveals nothing it could reuse.
 
-**The blob:** `{v: 1, tag, w.public, version: u64, ts}`, then the ciphertext, then a signature by `w`.
+**The blob:** `{v: 1, tag, w_pub, version: u64}`, then the ciphertext, then a signature by `w`.
 - **Plaintext:**
-  - `servers: [{ server_id, sync_secret, state: member | left | closed, changed_at }]`;
-  - `profile: { name, country, birth_date, locale }`.
+  - `servers: [{ server_id, sync_secret, role_hint, joined_at, gone?: { left | kicked | closed, at } }]`;
+  - `profile: { name, country, birth_date, locale }`;
+  - `version`, repeated inside.
+- **Kept out:** channel and group keys (re-fetched through rotations), messages, invite keys, the relay-only setting and the leave outbox.
 - **Padding:** to 4 KiB steps, at most 64 KiB, so the size doesn't reveal the number of servers.
+- **Rollback:** each device keeps the highest `version` it has seen and refuses older ones.
+  - A *fresh* device can't detect a rolled-back blob. The harm is limited to missing recently joined servers, and §5 never re-enters a server I left.
+  - This is accepted and documented (Security Lead).
 
-**GAP-4:** the sync secrets sit only inside the ciphertext, and only the seed opens it.
+**Sync secrets in the blob:** accepted by the Security Lead. Whoever holds the words can already sign as me, unwrap every channel key wrapped to me, and rejoin through any invite. The secrets only add finding my servers without an invite. They raise the impact of lost words from "identity taken" to "identity taken and every server immediately readable", and that's accepted because the words are the whole account.
 
 ## 2. Where it lives: k = 5 copies, not everywhere
 
 | # | Holder | Count | Kept for | Notes |
 |---|---|---|---|---|
 | 1 | each of my own devices | 1 per device | while installed | it is the writer |
-| 2 | relay / bootstrap mailbox | 1 per bootstrap (1 today) | 365 days since the last refresh | opaque store keyed by `tag`, ≤ 64 KiB, rate-limited |
+| 2 | relay / bootstrap mailbox | 1 per bootstrap (1 today) | 13 months since the last write | one opaque blob per `tag`, ≤ 64 KiB; writes rate-limited per tag; a constant "not found"; no tag-to-IP logs beyond counts (R11). The relay is the only rendezvous a clean machine has (Tech Lead). devops, `infra/**`; the live relay only from main, with the manager's OK |
 | 3 | DHT record under `tag` | the K closest DHT servers | republished every 24 h | today the DHT servers are the bootstraps (clients are in client mode, GAP-6), so this grows with GAP-9 |
-| 4 | "roster buddies": online co-members, picked at random across all my servers | 3 | 180 days since the last refresh | each node holds at most 8 others' blobs (64 KiB each), dropping the least recently refreshed; it announces itself as a DHT *provider* of `tag` (no blob in the DHT) |
+| 4 | "backup buddies": online co-members, picked at random across all my servers | 3 | 180 days since the last refresh | each node holds at most 8 others' blobs (64 KiB each), dropping the least recently refreshed; it announces itself as a DHT *provider* of `tag` (no blob in the DHT) |
 
 **Target:** at least 3 reachable holders besides my own devices.
 
-**The GAP-4 objection, answered.** I said earlier that members can't hold the backup, because a clean device can't reach a server's members without that server's secret. That's true for *server* traffic. The roster uses a separate protocol, `/mvs/roster/1`, keyed only by `tag`, outside any server.
+**The GAP-4 objection, answered.** I said earlier that members can't hold the backup, because a clean device can't reach a server's members without that server's secret. That's true for *server* traffic. The backup uses a separate protocol, `/mvs/backup/1`, keyed only by `tag`, outside any server.
 - **Finding holders:** a restoring device finds them through the relay mailbox, the DHT record, and DHT provider records for `tag`. It dials them over relay circuits like any peer.
 - **No secret needed:** a restore needs no server secret; the secrets come out of the blob.
 - **Who may ask a node to hold a blob:** only a bound member of a server we share. That stops spam.
@@ -64,6 +72,7 @@
 - **A buddy:** that a co-member it already knows (it shares a server with me) keeps a blob with it. It can link `tag` to my identity, but it can't read the server list or its size beyond the padding step.
 - **Timing:** a write follows a join or leave. Writes are delayed by a random 30 s to 10 min, and every login republishes anyway, which blurs the timing.
 - **The server list:** readable only with the seed.
+- **Accepted risk (Security Lead):** the relay, and Cloudflare in front of it, see the tag, the size bucket, the update times and, at restore time, the fetching IP.
 
 ## 4. Writes, refresh and offline holders
 
@@ -85,22 +94,31 @@
    - It runs in the background, retrying for up to 24 h.
    - It emits a new `restore.progress { found, servers }` event.
 3. It verifies, decrypts, and merges with anything already local.
-4. For each entry in `member` state, it opens the server with its secret and fetches.
+4. For each entry with no tombstone, it opens the server with its secret and fetches.
    - It adds the server locally **without posting** (the fix 2 path) if the log lists me as a member who isn't kicked and the server isn't closed.
-   - Otherwise it marks the entry `left` or `closed`.
+   - Otherwise it adds a tombstone: left, kicked or closed.
+   - Tombstoned servers are never opened.
 5. The profile and birth date fill the empty profile. If no blob was found, the UI's answers stand.
 6. This device becomes a writer and republishes.
 
 ## 6. Two devices with one identity
 
-- **Roster:** merged, not replaced.
-  - Entries are keyed by `server_id`, last-writer-wins on `changed_at`; the profile is last-writer-wins too.
-  - A device that sees a version with entries it lacks merges and republishes it as `version + 1`. Concurrent writes converge after one round.
+- **Backup:** merged, not replaced, and **not last-writer-wins** (Security Lead). It's a set of servers with tombstones:
+  - The union of both devices' entries, keyed by `server_id`, so neither device erases the other's joins.
+  - A tombstone (left, kicked or closed) beats a membership with an equal or earlier `joined_at`.
+  - A deliberate rejoin after a leave makes a new entry with a later `joined_at`. Closed and kicked tombstones are final.
+  - On a kick, the next write drops the secret and keeps only the tombstone.
+  - The profile is last-writer-wins.
+  - A device that sees a version with entries it lacks merges and republishes it as `max(version) + 1`. Concurrent writes converge after one round.
 - **Records:** both devices sign with the same key. That's valid: `seq` decides neither validity nor order (a min-ID topological sort).
 - **Leave or close on one device:** the other sees it in the server log, drops the server, and marks the entry.
 - **Calls: one device per call.** Sync routes voice to one peer per identity.
-  - Follow-up: `joinCall` refuses while another device of mine is in the room.
-- **Re-keys:** both devices may rotate on the same join. Both rotations are valid. Open question: check that groupkeys converges.
+  - The core refuses `joinCall` while a hello from my own identity, from another peer, is in the room (Security Lead).
+  - The 0.3.x release notes say "call from one machine only" until phase 3 (Tech Lead).
+- **Re-keys:** both devices may rotate on the same join, and a restored device adds one extra re-key per channel because its `keyed_for` is empty. That's noise, not harm.
+  - Both rotations are valid authority records wrapped to every current member. Messages sealed under either key stay readable, provided the cipher keeps every accepted rotation.
+  - A test (in #290) checks it: one owner on two cores rotates concurrently, a third member reads messages sealed under both, and a later kick excludes the kicked member from both.
+  - If they diverge, a restored device must not re-key before it has synced the control log, and it becomes a GAP-5 item.
 - **Per-device state, not synced:** relay-only, send states, unread, mute.
 - **Real linked devices** (device keys signed by the identity, revocation) stay in phase 3 (spec).
 
@@ -112,15 +130,15 @@
   - Buddies protect against the relay *losing its store*, not against the relay being down.
 - **After GAP-9, two or more bootstraps:** the DHT record and provider records live on each, and buddies are reachable through either.
   - With 2 bootstraps at 99% and 3 buddies, a restore succeeds unless every bootstrap is down, or every holder has dropped or lost the blob. Target: ≥ 99.9%.
-- **Retention:** 365 days on bootstraps and 180 days on buddies. A user can be away for 6 months with no device and still restore from a buddy, or for a year from a bootstrap.
+- **Retention:** 13 months on bootstraps and 180 days on buddies. A user can be away for 6 months with no device and still restore from a buddy, or for a year from a bootstrap.
 
 ## 8. Pieces and files
 
 | Piece | Owner | Files |
 |---|---|---|
-| Roster keys from the seed | dev-identity | `core/identity/src/lib.rs` (+ tests) |
-| Roster format, padding, merge, encrypt and sign; write hooks; republish; restore flow and "re-add without posting"; `restore.progress` | dev-identity | new `core/api/src/roster.rs`, `service.rs`, `types.rs`, `ports.rs` (`Network::put_roster`, `fetch_roster`), `CONFORMANCE.md` |
-| `/mvs/roster/1` store and fetch, holder store with quotas and expiry, DHT record and provider records, store only from bound co-members, fetch rate limit | dev-sync | `core/sync/src/node.rs`, new `core/sync/src/roster.rs`, `store.rs` |
+| Backup keys from the seed | dev-identity | `core/identity/src/lib.rs` (+ tests) |
+| Backup format, padding, merge, encrypt and sign; write hooks; republish; restore flow and "re-add without posting"; `restore.progress` | dev-identity | new `core/api/src/backup.rs`, `service.rs`, `types.rs`, `ports.rs` (`Network::put_backup`, `fetch_backup`), `CONFORMANCE.md` |
+| `/mvs/backup/1` store and fetch, holder store with quotas and expiry, DHT record and provider records, store only from bound co-members, fetch rate limit | dev-sync | `core/sync/src/node.rs`, new `core/sync/src/backup.rs`, `store.rs` |
 | Bootstrap mailbox and DHT server role, retention, rate limits | devops | `infra/relay/**` |
 | Restore steps, progress and copy | dev-ui | `ui/src/screens/onboarding/*`, `i18n` |
 | Tests | each owner, then QA | api `flows.rs`: restore with every device gone, rollback, a left server not re-entered, two-device merge. Sync `tests/relay.rs`: fetch via DHT providers through a relay |
@@ -130,4 +148,27 @@
 1. The tag, key and signing-key derivations, and whether the tag should rotate (e.g. per year) to limit how long a buddy can link it.
 2. k, the retention periods, and the buddies' per-node quota.
 3. Whether a bootstrap should also be a DHT *server* (today it is the only one).
-4. Whether to include the profile and birth date in the roster: the spec's "encrypted identity backup".
+4. Whether to include the profile and birth date in the backup: the spec's "encrypted identity backup".
+5. Answered by the Tech Lead and the Security Lead: the relay mailbox is a fine home; derivations as in §1; sync secrets may go in the blob; tombstone merge; joinCall refusal; the concurrent re-key test.
+
+## 10. Future: email + password (owner roadmap, not now)
+
+The owner wants users to be able to link an email and sign in with an email and password later. The design above stays compatible: the password opens the **seed**, and the seed opens the backup as before. Nothing in §1–§8 changes.
+
+- **Lookup handle:** the email is never stored in clear.
+  - `handle = derive_key("mvs/email-handle/v1", normalise(email))`, and the holders store under `H(handle)`.
+  - A plain hash can be enumerated: anyone can test "does x@example.com have a backup" against a holder. Better: an **OPRF** (blinded hash) evaluated by the bootstraps, ideally split across them by threshold, so neither a holder nor an outsider can test emails offline. Holders also rate-limit lookups.
+- **Password key:** `k_pw = Argon2id(password, salt = handle)` with a high cost (for example 256 MiB, t = 3).
+  - The "password envelope" `AEAD(k_pw, seed)` is stored under the handle like a backup.
+  - Writes are authorised by `w` (§1), so only the account can set or replace it.
+  - Sign-in: email → handle → envelope → password → seed → the normal restore (§5).
+- **Trade-offs:**
+  - **Offline guessing:** anyone who can fetch the envelope (anyone who knows the email) can guess passwords offline. Argon2id only slows that down, and a weak password falls. The envelope opens the whole account.
+  - **Mitigation:** make the password itself OPRF-hardened (OPAQUE-style), with the bootstraps as rate-limited online oracles. Guessing then needs the network, and it's throttled. That needs a running service (the bootstraps) but no account database.
+  - The password stays optional, with a strength check. The 12 words remain the root.
+  - **Email enumeration:** prevented by the OPRF plus rate limits, with a constant "not found".
+- **Email verification:** sending mail needs a mail-sending service, which is the one central piece. Without verification, the email is just a lookup name the user picks:
+  - Restoring still needs the password, so that's safe.
+  - But someone could claim a handle for another person's email first, and the first `w` per handle wins.
+  - A verification service run by the bootstraps (a signed one-time code by email) prevents that, at the cost of a service that learns emails.
+  - **Password reset** without a custodian is impossible by design: the words are the only reset.
