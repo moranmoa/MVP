@@ -43,10 +43,10 @@ pub const MAX_BLOB: usize = 16 * 1024;
 pub const CLOCK_WINDOW_MS: u64 = 120_000;
 pub const HELLO_EVERY_MS: u64 = 10_000;
 pub const HELLO_TIMEOUT_MS: u64 = 30_000;
-/// Nonces remembered for replay checks, within the clock window; past this
-/// the oldest go. Dropping by count is safe only because piece A caps the
-/// blob rate per peer: no sender can push a live nonce out of the cache
-/// within the window. Keep the two in step.
+/// Nonces remembered for replay checks, within the clock window. When full,
+/// new envelopes are dropped (fail closed) rather than evicting a live
+/// nonce, which would let a replay through. Piece A's per-peer rate cap
+/// keeps a flood from filling it for long; keep the two in step.
 const MAX_NONCES: usize = 4096;
 /// How long after joining a `full` may still turn us away.
 const JOINING_MS: u64 = HELLO_EVERY_MS;
@@ -534,15 +534,16 @@ impl Calls {
     }
 
     /// Not seen within the clock window: remembers it.
+    /// Full of live nonces: false (fail closed).
     fn fresh(&mut self, nonce: [u8; 16], now: u64) -> bool {
         while let Some((at, old)) = self.nonces.front().copied() {
-            if now.saturating_sub(at) <= 2 * CLOCK_WINDOW_MS && self.nonces.len() < MAX_NONCES {
+            if now.saturating_sub(at) <= 2 * CLOCK_WINDOW_MS {
                 break;
             }
             self.nonces.pop_front();
             self.seen.remove(&old);
         }
-        if !self.seen.insert(nonce) {
+        if self.nonces.len() >= MAX_NONCES || !self.seen.insert(nonce) {
             return false;
         }
         self.nonces.push_back((now, nonce));
@@ -644,17 +645,24 @@ mod tests {
     }
 
     #[test]
-    fn a_nonce_counts_once_and_the_cache_stays_bounded() {
+    fn a_nonce_counts_once_and_a_full_cache_fails_closed() {
+        let nonce = |n: u32| {
+            let mut nonce = [7; 16];
+            nonce[..4].copy_from_slice(&n.to_le_bytes());
+            nonce
+        };
         let mut calls = Calls::default();
         assert!(calls.fresh([1; 16], NOW));
         assert!(!calls.fresh([1; 16], NOW + 1000));
-        for n in 0..(MAX_NONCES as u32 + 10) {
-            let mut nonce = [0; 16];
-            nonce[..4].copy_from_slice(&n.to_le_bytes());
-            nonce[15] = 7;
-            calls.fresh(nonce, NOW);
+        for n in 1..MAX_NONCES as u32 {
+            assert!(calls.fresh(nonce(n), NOW));
         }
-        assert!(calls.nonces.len() <= MAX_NONCES && calls.seen.len() == calls.nonces.len());
+        // Full: the first nonce is still remembered, and new ones are dropped.
+        assert!(!calls.fresh(nonce(0), NOW + 1));
+        assert!(!calls.fresh([1; 16], NOW + 1));
+        assert_eq!((calls.nonces.len(), calls.seen.len()), (MAX_NONCES, MAX_NONCES));
+        // Once the window passes, room again.
+        assert!(calls.fresh(nonce(0), NOW + 2 * CLOCK_WINDOW_MS + 1));
     }
 
     #[derive(Default)]

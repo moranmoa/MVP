@@ -108,7 +108,7 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
   - It fails closed. A core-to-core envelope is signed by the sender's identity key under `mvs/voice-signal/v1`, and the signature covers the SDP and its fingerprint. The core drops, without an event:
     - an envelope that doesn't verify or isn't `v: 1`;
     - one outside ±120 s of our clock;
-    - a replayed nonce (up to 4096 remembered);
+    - a replayed nonce (up to 4096 remembered; when the cache is full, new envelopes are dropped);
     - one from someone who couldn't join that call themselves;
     - an offer or answer without a fingerprint.
   - Presence: a hello every 10 s, a bye on leaving, and a participant dropped after 30 s of silence.
