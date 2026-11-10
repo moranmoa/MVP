@@ -7,6 +7,7 @@
 // prints "PASS|FAIL|SKIP <case> <text>"; the case IDs are the ones in
 // docs/qa/voice-v1-test-plan.md. Exit code 1 if any check failed.
 
+import { execSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { lookup } from 'node:dns/promises';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, writeFileSync } from 'node:fs';
@@ -230,6 +231,40 @@ function sockets() {
     }
   }
   return { established, listening };
+}
+
+// ---- the shell's file log (CHECK_LOG=1) ----------------------------------------
+
+/**
+ * mvs.log (desktop/src/logfile.js): the join steps at info, sync's debug lines
+ * with MVS_DEBUG_LOG=1, and nothing that says where or who someone is.
+ */
+function checkFileLog() {
+  const files = execSync(`find ${PROFILE} ${process.env.HOME} -name 'mvs.log*' -type f 2>/dev/null || true`, { encoding: 'utf8' })
+    .split('\n')
+    .filter(Boolean);
+  const text = files.map((f) => readFileSync(f, 'utf8')).join('\n');
+  writeFileSync(join(RV, `mvslog-${ROLE}.txt`), text);
+  const lines = text.split('\n').filter(Boolean);
+  record(files.length ? 'PASS' : 'FAIL', 'LOG.0', 'mvs.log exists', `${files.length} file(s), ${lines.length} lines`);
+  const joinLines = lines.filter((l) => /join/i.test(l) && !/joinCall|call/i.test(l));
+  if (ROLE === 'b') {
+    record(joinLines.length ? 'PASS' : 'FAIL', 'LOG.1', 'the join steps are in mvs.log at info', joinLines.slice(0, 4).map((l) => l.slice(25, 140)).join(' / ') || 'none');
+  }
+  const debug = lines.filter((l) => /\bDEBUG\b/.test(l) && /sync/.test(l));
+  if (process.env.MVS_DEBUG_LOG === '1') record(debug.length ? 'PASS' : 'FAIL', 'LOG.2', 'MVS_DEBUG_LOG=1: sync debug lines in mvs.log', `${debug.length} lines`);
+  else record(debug.length ? 'FAIL' : 'PASS', 'LOG.2', 'without MVS_DEBUG_LOG: no sync debug lines', `${debug.length} lines`);
+  const leaks = [];
+  const scan = (name, re) => {
+    const hits = lines.filter((l) => re.test(l.slice(24))); // skip the timestamp
+    if (hits.length) leaks.push(`${name}: ${hits.length} (e.g. ${hits[0].slice(24, 120).replace(re, '«…»')})`);
+  };
+  scan('IPv4', /\b(?:\d{1,3}\.){3}\d{1,3}\b/);
+  scan('peer ID', /\b(?:12D3KooW|Qm)[1-9A-HJ-NP-Za-km-z]{40,}/);
+  scan('64-hex ID', /\b[0-9a-f]{64}\b/i);
+  if (serverId) scan('server ID', new RegExp(serverId.slice(0, 16), 'i'));
+  scan('relay multiaddr host', /\/dns4?\/(?!<host>)[^/\s]+/);
+  record(leaks.length ? 'FAIL' : 'PASS', 'LOG.3', 'mvs.log is redacted (no IPs, peer IDs, server IDs, hosts)', leaks.join('; ') || `${lines.length} lines checked`);
 }
 
 // ---- UI --------------------------------------------------------------------
@@ -694,6 +729,7 @@ try {
   await page.screenshot({ path: join(RV, `${ROLE}-final.png`) }).catch(() => {});
   await sleep(2000);
   await app.close().catch(() => {});
+  if (process.env.CHECK_LOG) checkFileLog();
   writeFileSync(join(RV, `results-${ROLE}.json`), JSON.stringify(results, null, 2));
   writeFileSync(join(RV, `main-${ROLE}.log`), mainOut);
 }
