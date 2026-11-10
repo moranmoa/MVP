@@ -141,7 +141,15 @@ class FakePC {
     this.signalingState = d.type === 'offer' ? 'have-remote-offer' : 'stable';
     // Like Chromium: a transceiver added with addTransceiver before the offer
     // is NOT bound to the offer's m-line; a new receive-only one is (QA-21).
-    if (d.type === 'offer' && !this.bound() && /\r\nm=audio /.test(d.sdp ?? '')) this.transceiver('recvonly', null, '0');
+    // One per audio/video m-line, in order, mid = its index (m=application
+    // is SCTP: no transceiver).
+    if (d.type === 'offer' && !this.bound()) {
+      const kinds = [...(d.sdp ?? '').matchAll(/\r\nm=(\w+) /g)].map((m) => m[1]!);
+      kinds.forEach((kind, i) => {
+        if (kind !== 'audio' && kind !== 'video') return;
+        this.transceiver('recvonly', null, String(i)).receiver.track.kind = kind;
+      });
+    }
     this.maybeConnect();
   }
   /** Whether the remote side sends audio, from its m-line direction. */
@@ -415,6 +423,35 @@ describe('voice engine', () => {
     await flush();
     await ey.setInputDevice('mic1');
     expect(hy.pcs[0]!.transceivers[0]!.sender.track).toBe(hy.mics[1]!.tracks[0]);
+  });
+
+  it('the answerer sets any extra offered m-lines (video, a 2nd audio) inactive and closes data channels', async () => {
+    const h = fakeEnv();
+    const core = new FakeCore(B, [B, A]);
+    const engine = createVoiceEngine(core, { env: h.env });
+    await engine.attach(core.state(), B);
+    const extra =
+      `v=0\r\na=fingerprint:sha-256 ${newFingerprint()}\r\na=setup:actpass\r\n` +
+      'm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:0\r\na=sendrecv\r\n' +
+      'm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:1\r\na=sendrecv\r\n' +
+      'm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:2\r\na=sendrecv\r\n' +
+      'm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=mid:3\r\n';
+    core.emitSignal({ from: A, kind: 'offer', payload: extra, fingerprintVerified: true });
+    await flush();
+    const pc = h.pcs[0]!;
+    expect(core.sent.map((s) => s.kind)).toEqual(['answer']);
+    expect(pc.transceivers.map((t) => [t.mid, t.receiver.track.kind, t.direction])).toEqual([
+      ['0', 'video', 'inactive'],
+      ['1', 'audio', 'sendrecv'],
+      ['2', 'audio', 'inactive'],
+    ]);
+    expect(pc.transceivers[1]!.sender.track).toBe(h.mics[0]!.tracks[0]);
+    expect(pc.transceivers.filter((t) => t.sender.track).length).toBe(1); // the mic goes out once
+    // A data channel the peer opens is closed at once.
+    const channel = { closed: false, close() { this.closed = true; } };
+    (pc as unknown as { ondatachannel: (e: { channel: typeof channel }) => void }).ondatachannel({ channel });
+    expect(channel.closed).toBe(true);
+    engine.dispose();
   });
 
   it('the answerer drops an offer without an audio m-line', async () => {

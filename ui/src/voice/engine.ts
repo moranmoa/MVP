@@ -352,8 +352,9 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
       preferOpus(transceiver);
     }
 
+    pc.ondatachannel = (e) => e.channel.close(); // voice uses no data channels
     pc.ontrack = (e) => {
-      if (peer.closed) return;
+      if (peer.closed || e.track.kind !== 'audio') return;
       peer.stream = e.streams[0] ?? new MediaStream([e.track]);
       if (peer.verified) playPeer(peer);
     };
@@ -508,10 +509,14 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
    * the offer has no audio m-line.
    */
   async function bindAnswerTransceiver(peer: Peer): Promise<boolean> {
-    const transceiver = peer.pc
-      .getTransceivers()
-      .find((t) => t.mid !== null && t.currentDirection !== 'stopped' && t.receiver.track?.kind === 'audio');
+    const offered = peer.pc.getTransceivers().filter((t) => t.mid !== null && t.currentDirection !== 'stopped');
+    const transceiver = offered.find((t) => t.receiver.track?.kind === 'audio');
     if (!transceiver) return false;
+    // Voice is one audio m-line. Anything else the offer carries (video, a
+    // second audio line) is answered inactive: nothing sent, nothing taken.
+    // A data channel (m=application) has no transceiver; ondatachannel
+    // closes any that opens.
+    for (const t of offered) if (t !== transceiver) t.direction = 'inactive';
     const track = micTrack();
     if (track) {
       await transceiver.sender.replaceTrack(track);
