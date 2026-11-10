@@ -988,7 +988,23 @@ async fn relay_only_from_start_never_goes_direct_and_turning_it_on_closes_direct
     let (a, _) = bound_node_on_events("ro-start-a", &relay, 30, true, Arc::new(AcceptAll), tcp(), vec![bootstrap], true).await;
     let listening = a.listen_addrs().await.unwrap();
     assert!(only_circuits(&listening), "relay only from the start, yet listening directly: {listening:?}");
-    let b = bound_node("ro-start-b", &relay, 31, true, Arc::new(AcceptAll)).await;
+    // B is a member with LAN allowed, so it reports its direct (loopback)
+    // address to A. A relay-only A must never dial it: closing such a
+    // connection on arrival would be too late to hide A's IP from B. B's
+    // events show any direct connection from A, outbound or inbound.
+    let (b, mut b_events) = bound_node_events("ro-start-b", &relay, 31, true, Arc::new(AcceptAll)).await;
+    let a_peer = a.peer_id();
+    let saw_direct = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watch = {
+        let saw_direct = saw_direct.clone();
+        tokio::spawn(async move {
+            while let Some(event) = b_events.recv().await {
+                if matches!(event, NodeEvent::Link { peer, direct: true } if peer == a_peer) {
+                    saw_direct.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        })
+    };
     let ids = [a.peer_id(), b.peer_id()];
     let start = Instant::now();
     while !circuits.lock().unwrap().iter().any(|(p, ok)| *ok && ids.contains(p)) {
@@ -1007,8 +1023,10 @@ async fn relay_only_from_start_never_goes_direct_and_turning_it_on_closes_direct
         dialled += 1;
     }
     assert_eq!(dialled, 0, "a relay-only node dialled its bootstrap address");
+    assert!(!saw_direct.load(std::sync::atomic::Ordering::SeqCst), "B saw a direct connection from the relay-only A");
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
+    watch.abort();
 
     // Turned on later: two members on one LAN go direct, then relay-only on
     // one side closes that link and both stay connected through the relay.
