@@ -32,6 +32,8 @@ test('window preferences as configured', async () => {
   assert.equal(prefs.nodeIntegration, false);
   assert.equal(prefs.webSecurity, true);
   assert.equal(prefs.webviewTag, false);
+  const policy = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.getWebRTCIPHandlingPolicy());
+  assert.equal(policy, 'default_public_and_private_interfaces');
 });
 
 test('no Node or Electron in the page', async () => {
@@ -94,6 +96,54 @@ test('permissions are refused, except the microphone', async () => {
   assert.notEqual(screen, 'granted');
   const notif = await page.evaluate(() => Notification.requestPermission());
   assert.notEqual(notif, 'granted');
+});
+
+// Legacy desktop capture through getUserMedia (chromeMediaSource 'desktop')
+// can ask for 'media' with audio only; on Windows that is all system sound.
+// None may give a stream. Each case runs in its own throwaway window of our
+// origin (same session, same handlers): on Windows, desktop audio alone
+// crashes that renderer before any permission request reaches main (seen
+// with Electron 44); a crash gives no stream, so it passes too.
+test('legacy desktop capture never gives a stream', async () => {
+  const desktop = (chromeMediaSourceId) => ({ mandatory: { chromeMediaSource: 'desktop', ...(chromeMediaSourceId ? { chromeMediaSourceId } : {}) } });
+  const cases = [
+    ['desktop audio', { audio: desktop() }],
+    ['desktop audio + video', { audio: desktop(), video: desktop() }],
+    ['desktop audio, screen:0:0', { audio: desktop('screen:0:0') }],
+    ['desktop audio + video, screen:0:0', { audio: desktop('screen:0:0'), video: desktop('screen:0:0') }],
+  ];
+  for (const [label, constraints] of cases) {
+    const opened = app.waitForEvent('window');
+    await app.evaluate(({ BrowserWindow }) => {
+      const w = new BrowserWindow({ show: false, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
+      w.loadURL('app://mvs/index.html');
+    });
+    const probe = await opened;
+    await probe.waitForLoadState('domcontentloaded');
+    const crashed = new Promise((resolve) => probe.once('crash', () => resolve('crashed')));
+    const got = await Promise.race([
+      probe
+        .evaluate(
+          (c) =>
+            navigator.mediaDevices.getUserMedia(c).then(
+              (s) => {
+                const live = s.getTracks().filter((t) => t.readyState === 'live').length;
+                for (const t of s.getTracks()) t.stop();
+                return `stream with ${live} live track(s)`;
+              },
+              (e) => `rejected: ${e.name}`,
+            ),
+          constraints,
+        )
+        .catch(() => 'crashed'),
+      crashed,
+      new Promise((resolve) => setTimeout(() => resolve('no answer in 15 s'), 15_000)),
+    ]);
+    await probe.close().catch(() => {});
+    assert.match(got, /^(rejected: |crashed$)/, `${label}: ${got}`);
+  }
+  // Our own page is untouched.
+  assert.equal(await page.evaluate(() => location.origin), 'app://mvs');
 });
 
 test('the page sees only copyText, invoke and onEvent', async () => {

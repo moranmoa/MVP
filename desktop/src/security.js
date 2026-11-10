@@ -127,6 +127,9 @@ function isExternalWebUrl(url) {
  */
 const ALLOWED_PERMISSIONS = Object.freeze(new Set());
 
+/** WebRTC IP handling for every webContents (main.js lockDown). */
+const WEBRTC_IP_POLICY = 'default_public_and_private_interfaces';
+
 /** True only for a non-empty list that holds 'audio' and nothing else. */
 function isAudioOnly(mediaTypes) {
   return Array.isArray(mediaTypes) && mediaTypes.length > 0 && mediaTypes.every((t) => t === 'audio');
@@ -170,6 +173,7 @@ module.exports = {
   ORIGIN,
   WEB_PREFERENCES,
   ALLOWED_PERMISSIONS,
+  WEBRTC_IP_POLICY,
   allowPermissionRequest,
   allowPermissionCheck,
   cspFromIndexHtml,

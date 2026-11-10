@@ -81,6 +81,10 @@ test('the camera is denied, also next to the microphone', () => {
   assert.equal(sec.allowPermissionCheck(PAGE, 'media', 'app://mvs', undefined), false);
 });
 
+test('WebRTC uses only the default route interface', () => {
+  assert.equal(sec.WEBRTC_IP_POLICY, 'default_public_and_private_interfaces');
+});
+
 test('screen capture is denied', () => {
   for (const perm of ['display-capture', 'screen', 'desktop', 'window-management', 'window-placement']) {
     assert.equal(sec.allowPermissionRequest(PAGE, perm, micReq()), false, perm);

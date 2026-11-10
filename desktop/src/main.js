@@ -181,6 +181,9 @@ async function openExternal(win, url) {
 
 /** Applied to every webContents, including any created later. */
 function lockDown(contents) {
+  // Voice: WebRTC gathers candidates only on the default route's interface
+  // (public and private address), never every local adapter (VPNs, VMs).
+  contents.setWebRTCIPHandlingPolicy(sec.WEBRTC_IP_POLICY);
   contents.setWindowOpenHandler(({ url }) => {
     const win = BrowserWindow.fromWebContents(contents);
     if (win) openExternal(win, url).catch(() => {});
