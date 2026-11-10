@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, VerifyingKey};
 use identity::BackupKeys;
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -144,7 +144,8 @@ pub fn check(blob: &[u8]) -> Result<([u8; 32], u64), BackupError> {
     let (signed, sig) = blob.split_at(blob.len() - SIG);
     let key = VerifyingKey::from_bytes(&w_pub).map_err(|_| BackupError::Malformed)?;
     let sig = Signature::from_bytes(sig.try_into().expect("64 bytes"));
-    key.verify(signed, &sig).map_err(|_| BackupError::Tampered)?;
+    // Strict: no weak keys or malleable signatures (Security Lead).
+    key.verify_strict(signed, &sig).map_err(|_| BackupError::Tampered)?;
     Ok((tag, version))
 }
 
