@@ -121,7 +121,12 @@ try {
           await sleep(500);
         }
       }
-      if (refusals) console.log(`round ${r}: B could write ${((Date.now() - t1) / 1000).toFixed(1)} s after joining (${refusals} not-allowed)`);
+      // #285: the first send right after the join must succeed (no not-allowed).
+      console.log(
+        refusals
+          ? `round ${r}: FAIL first send refused ${refusals}x (not-allowed); it worked ${((Date.now() - t1) / 1000).toFixed(1)} s after joining`
+          : `round ${r}: first send OK (${Date.now() - t1} ms)`,
+      );
       const at = Date.now();
       put(`sent-${r}`, { at, text });
       const reply = await take(`reply-${r}`);
