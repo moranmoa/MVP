@@ -31,8 +31,16 @@ async function take(name, timeout = 300_000) {
 
 const args = ['--data-dir', mkdtempSync(join(tmpdir(), `mvs-live-${ROLE}-`)), '--relay', cfg.relay];
 for (const b of (cfg.bootstrap ?? []).slice(0, 4)) args.push('--bootstrap', b);
-const child = spawn('/core/mvs-core', args, { stdio: ['pipe', 'pipe', 'pipe'] });
-child.stderr.on('data', () => {}); // the core logs addresses; keep them out of the report
+// JOIN_LOG=1: the core's join steps and sync's debug lines (the desktop's
+// MVS_DEBUG_LOG filter) go to stdout as "core: ...", and run.sh masks them.
+// Otherwise stderr is dropped: the core logs addresses.
+const JOIN_LOG = process.env.JOIN_LOG === '1';
+const child = spawn('/core/mvs-core', args, {
+  stdio: ['pipe', 'pipe', 'pipe'],
+  env: { ...process.env, ...(JOIN_LOG ? { RUST_LOG: 'off,mvs::join=info,sync=debug' } : {}) },
+});
+if (JOIN_LOG) createInterface({ input: child.stderr }).on('line', (l) => console.log(`core: ${l}`));
+else child.stderr.on('data', () => {});
 const waiting = new Map();
 let next = 1;
 createInterface({ input: child.stdout }).on('line', (line) => {
@@ -95,6 +103,7 @@ try {
       console.log(`round ${r}: B->A ${bToA ?? 'MISSING'} ms, A->B ${aToB ?? 'MISSING'} ms`);
     } else {
       const { link } = await take(`invite-${r}`);
+      console.log(`round ${r}: join start ${new Date().toISOString()}`);
       const t0 = Date.now();
       await call('joinServer', { link });
       const s = await until(async () => (await call('listServers')).find((x) => x.name === `live smoke ${r}`), 120_000);
