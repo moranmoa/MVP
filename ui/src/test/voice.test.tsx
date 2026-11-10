@@ -12,7 +12,9 @@ import { cleanCall, cleanVoiceRoom, guardCore } from '../core/sanitize';
 
 const settings: Settings = { locale: 'en', theme: 'light', uiScale: 1, fontSize: 15 };
 
-async function setup(options: MockOptions = {}) {
+/** `ipNoticeSeen: false` starts as on a computer that never joined a call. */
+async function setup(options: MockOptions = {}, { ipNoticeSeen = true } = {}) {
+  if (ipNoticeSeen) localStorage.setItem('mvs.notices.voiceIp.v1', '1');
   const core = new MockCore({ demo: true, speed: 0, simulateActivity: false, ...options });
   render(<App core={core} initialSettings={settings} />);
   await screen.findByRole('textbox', { name: /^Message / });
@@ -35,6 +37,55 @@ describe('voice room', () => {
     expect(within(roster).getAllByRole('img', { name: 'Microphone off' })).toHaveLength(1);
     expect(screen.queryByRole('button', { name: 'Join call' })).toBeNull();
     expect(screen.queryByRole('region', { name: 'Voice call' })).toBeNull();
+  });
+
+  describe('the one-time IP notice (docs/ux/specs/voice-ip-notice.md)', () => {
+    it('shows before the first join; joinCall waits for "Got it", which is remembered', async () => {
+      const { core, join } = await setup({}, { ipNoticeSeen: false });
+      const [server] = await core.listServers();
+      const inRoom = async () => (await core.getVoiceRoom(server.id)).participants.length;
+      await join();
+      const dialog = screen.getByRole('dialog', { name: 'Before your first call' });
+      expect(document.getElementById(dialog.getAttribute('aria-describedby')!)?.textContent).toContain('can see your IP address');
+      expect(document.activeElement?.textContent).toBe('Got it');
+      expect(await inRoom()).toBe(2); // joinCall not called yet
+      expect(screen.queryByRole('region', { name: 'Voice call' })).toBeNull();
+      await act(async () => {
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Got it' }));
+      });
+      expect(await inRoom()).toBe(3);
+      expect(localStorage.getItem('mvs.notices.voiceIp.v1')).toBe('1');
+      const bar = screen.getByRole('region', { name: 'Voice call' });
+      await waitFor(() => expect(document.activeElement).toBe(within(bar).getByRole('button', { name: 'Mute' })));
+      // Leave and join again: no notice the second time.
+      await act(async () => {
+        fireEvent.click(within(bar).getByRole('button', { name: 'Leave call' }));
+      });
+      await join();
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(await inRoom()).toBe(3);
+      expect(screen.getByRole('region', { name: 'Voice call' })).toBeTruthy();
+    });
+
+    it('Cancel: no join, nothing saved, and the notice comes back next time', async () => {
+      const { join, entry } = await setup({}, { ipNoticeSeen: false });
+      await join();
+      await act(async () => {
+        fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+      });
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(screen.queryByRole('region', { name: 'Voice call' })).toBeNull();
+      expect(localStorage.getItem('mvs.notices.voiceIp.v1')).toBeNull();
+      expect(document.activeElement).toBe(entry());
+      await join();
+      expect(screen.getByRole('dialog', { name: 'Before your first call' })).toBeTruthy();
+    });
+
+    it('a full room shows no notice: the entry is disabled', async () => {
+      const { join } = await setup({ roomFull: true }, { ipNoticeSeen: false });
+      await join();
+      expect(screen.queryByRole('dialog')).toBeNull();
+    });
   });
 
   it('joins from the sidebar entry: call bar, me in the roster', async () => {
@@ -139,7 +190,7 @@ describe('voice room', () => {
       const { join } = await setup();
       await join();
       const bar = screen.getByRole('region', { name: 'Voice call' });
-      expect(within(bar).getAllByText("couldn't connect directly")).toHaveLength(1);
+      expect(within(bar).getAllByText("can't be heard: no direct connection")).toHaveLength(1);
       expect(within(bar).getAllByRole('listitem')).toHaveLength(3);
     } finally {
       window.history.pushState({}, '', '/');

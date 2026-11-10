@@ -382,12 +382,19 @@ for (const [detail, name] of [
 }
 
 // ---- voice v1, pieces E and E2: the voice room and the call bar (240-249) -------
-// 243-244 are the first-call IP notice (docs/ux/specs/voice-ip-notice.md).
+// Joining: the room entry, then the one-time IP notice (243-244, docs/ux/specs/voice-ip-notice.md).
+async function joinRoom(p, ok = 'הבנתי') {
+  await p.locator('.voice-room-entry').click();
+  await p.getByRole('dialog').getByRole('button', { name: ok }).click();
+}
 {
   const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999', 'x');
   await p.locator('.voice-room-people li').first().waitFor();
   await shot(p, '245-voice-room-he');
   await p.locator('.voice-room-entry').click();
+  await p.getByRole('dialog').waitFor();
+  await shot(p, '243-call-ip-notice-he');
+  await p.getByRole('dialog').getByRole('button', { name: 'הבנתי' }).click();
   const bar = p.getByRole('region', { name: 'שיחה קולית' });
   await bar.waitFor();
   await bar.getByRole('button', { name: 'השתקה' }).click();
@@ -397,7 +404,7 @@ for (const [detail, name] of [
 }
 {
   const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999&callError=relay-only', 'x');
-  await p.locator('.voice-room-entry').click();
+  await joinRoom(p);
   await p.locator('.voice-room-reason').waitFor();
   await shot(p, '241-call-relay-only-he');
   await p.close();
@@ -414,12 +421,19 @@ for (const [detail, name] of [
   await shot(p, '246-voice-room-en-dark');
   await p.close();
 }
+{
+  const p = await chat('?demo=1&still=1&lang=en&theme=light&update=999999', 'x');
+  await p.locator('.voice-room-entry').click();
+  await p.getByRole('dialog').waitFor();
+  await shot(p, '244-call-ip-notice-en-light');
+  await p.close();
+}
 for (const [sim, name, wait] of [
   ['noMic', '247-call-no-mic-he', '.call-no-mic'],
   ['peerFailed', '248-call-peer-failed-he', '.call-peer-failed'],
 ]) {
   const p = await chat(`?demo=1&still=1&lang=he&theme=light&update=999999&voiceSim=${sim}`, 'x');
-  await p.locator('.voice-room-entry').click();
+  await joinRoom(p);
   await p.locator(wait).waitFor();
   await p.waitForTimeout(300);
   await shot(p, name);

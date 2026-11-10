@@ -3,11 +3,11 @@
 // mute, leave. The audio itself (microphone,
 // WebRTC, speaking levels) is the voice engine's, piece D in ui/src/voice.
 
-import { useEffect } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
-import { Avatar, Name } from '../../components/common';
+import { Avatar, Dialog, Name } from '../../components/common';
 import { AlertIcon, HangUpIcon, MicIcon, MicOffIcon, PhoneIcon, SpeakerIcon } from '../../components/icons';
 import { useCore, type CallState, type Id, type Member } from '../../core';
 
@@ -70,6 +70,23 @@ const ERROR_TEXT: Record<string, string> = {
 const NO_MEMBERS: Member[] = [];
 const ROOM_MAX = 5;
 
+/** docs/ux/specs/voice-ip-notice.md: shown once per computer, before the first join. */
+const IP_NOTICE_KEY = 'mvs.notices.voiceIp.v1';
+function ipNoticeSeen(): boolean {
+  try {
+    return localStorage.getItem(IP_NOTICE_KEY) === '1';
+  } catch {
+    return false; // no storage: explain every time rather than join unexplained
+  }
+}
+function rememberIpNotice(): void {
+  try {
+    localStorage.setItem(IP_NOTICE_KEY, '1');
+  } catch {
+    // Shown again next time.
+  }
+}
+
 /**
  * The server's voice room in the channel sidebar: "Join chat" with a speaker
  * icon, and who is inside under it, for every member. Disabled, with the reason
@@ -82,6 +99,14 @@ export function VoiceRoomEntry({ serverId, myId }: { serverId: Id; myId: Id }) {
   const members = useStore(store, (s) => s.members[serverId] ?? NO_MEMBERS);
   const relayOnly = useStore(store, (s) => s.relayOnly);
   const callError = useStore(store, (s) => s.callError);
+  const [notice, setNotice] = useState(false);
+  const entryRef = useRef<HTMLButtonElement>(null);
+  const okRef = useRef<HTMLButtonElement>(null);
+  // Spec §3: focus starts on "Got it" (the dialog opens in its own effect, which runs first).
+  useEffect(() => {
+    if (notice) okRef.current?.focus();
+  }, [notice]);
+  const bodyId = useId();
   // Events are hints: re-read the room whenever this server comes on screen.
   useEffect(() => {
     void store.loadVoiceRoom(serverId);
@@ -103,13 +128,17 @@ export function VoiceRoomEntry({ serverId, myId }: { serverId: Id; myId: Id }) {
     <div className="voice-room">
       <button
         type="button"
+        ref={entryRef}
         className={`channel voice-room-entry ${inRoom ? 'in-room' : ''}`}
         aria-label={label}
         aria-disabled={blocked || inRoom ? true : undefined}
         aria-describedby={blocked ? reasonId : undefined}
         disabled={!room}
         onClick={() => {
-          if (room && !blocked && !inRoom) void store.joinCall(room.roomId);
+          if (!room || blocked || inRoom) return;
+          // In a call, computers connect directly: say so before the first join.
+          if (!ipNoticeSeen()) setNotice(true);
+          else void store.joinCall(room.roomId);
         }}
       >
         <SpeakerIcon />
@@ -128,6 +157,44 @@ export function VoiceRoomEntry({ serverId, myId }: { serverId: Id; myId: Id }) {
         </p>
       )}
       {!blocked && callError && <CallError />}
+      <Dialog
+        open={notice}
+        onClose={() => {
+          setNotice(false);
+          entryRef.current?.focus();
+        }}
+        title={intl.formatMessage({ id: 'call.ipNotice.title' })}
+        describedBy={bodyId}
+        className="ip-notice"
+      >
+        <p id={bodyId}>
+          <FormattedMessage id="call.ipNotice.body" />
+        </p>
+        <div className="actions">
+          <button
+            type="button"
+            ref={okRef}
+            onClick={async () => {
+              rememberIpNotice();
+              setNotice(false);
+              if (room) await store.joinCall(room.roomId);
+              document.querySelector<HTMLButtonElement>('.call-bar .call-mute')?.focus();
+            }}
+          >
+            <FormattedMessage id="call.ipNotice.ok" />
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => {
+              setNotice(false);
+              entryRef.current?.focus();
+            }}
+          >
+            <FormattedMessage id="common.cancel" />
+          </button>
+        </div>
+      </Dialog>
       {people.length > 0 && (
         <ul className="voice-room-people" aria-label={intl.formatMessage({ id: 'call.roomPeople' })}>
           {people.map((p) => {
