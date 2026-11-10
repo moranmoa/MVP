@@ -119,6 +119,8 @@ export interface CoreError {
     // Voice v1 (#223)
     | 'call-full'
     | 'relay-only'
+    /** #294: my own identity is already in this room from another computer (clears ~30 s after it stops). */
+    | 'in-call-elsewhere'
     // In-app update (core/api CONFORMANCE "Updates")
     | 'offline'
     | 'invalid-update'

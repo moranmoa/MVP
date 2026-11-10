@@ -104,6 +104,25 @@ impl Db {
         self.conn.execute("DELETE FROM kv WHERE key = ?1", [key]).map(drop).map_err(internal)
     }
 
+    /// Sign-out: every row of every table, then `VACUUM` so the freed pages
+    /// (profile, secrets, records) don't linger in the file. The file
+    /// itself is deleted at the next start (`finish_sign_out`).
+    pub fn wipe(&self) -> Result<(), CoreError> {
+        let tables: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+                .map_err(internal)?;
+            let rows = stmt.query_map([], |row| row.get(0)).map_err(internal)?;
+            rows.collect::<Result<_, _>>().map_err(internal)?
+        };
+        for table in tables {
+            // Names from sqlite_master, quoted: never user input.
+            self.conn.execute(&format!("DELETE FROM \"{}\"", table.replace('"', "\"\"")), []).map_err(internal)?;
+        }
+        self.conn.execute_batch("VACUUM").map_err(internal)
+    }
+
     /// The profile JSON, sealed with XChaCha20-Poly1305 under the storage
     /// key: it holds the birth date, which never leaves the device.
     pub fn save_profile(&self, key: &[u8; 32], json: &[u8]) -> Result<(), CoreError> {

@@ -18,7 +18,7 @@ mod phrase;
 mod store;
 mod vault;
 
-pub use derive::{Identity, StorageKey, Subkey};
+pub use derive::{backup_tag, BackupKeys, Identity, StorageKey, Subkey, BACKUP_TAG_CONTEXT};
 pub use lock::LockParams;
 pub use phrase::{
     check_positions, is_word, suggest, word_list, PhraseError, RecoveryPhrase, UnknownWord,
