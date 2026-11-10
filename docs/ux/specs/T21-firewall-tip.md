@@ -10,7 +10,8 @@
 
 1. **Windows, אפליקציית הדסקטופ.** לא בגרסת ה-Web ולא ב-Linux (שם אין חלון כזה).
 2. **יש לפחות חבר אחד אונליין, וכל החיבורים הם `relay`** (`Connection`, `ui/src/core/types.ts`), ברציפות במשך **2 דקות**. אם נוצר חיבור `direct` אחד, הספירה מתאפסת.
-3. **הטיפ לא נסגר קודם** במחשב הזה: המפתח `mvs.tips.firewall.v1` לא קיים ב-`localStorage`. אם האחסון לא זמין: מציגים פעם אחת בכל הפעלה.
+3. **לא במצב "ממסר בלבד"** (כשיהיה): שם המעבר דרך הממסר מכוון, ואין מה לתקן.
+4. **הטיפ לא נסגר קודם** במחשב הזה: המפתח `mvs.tips.firewall.v1` לא קיים ב-`localStorage`. אם האחסון לא זמין: מציגים פעם אחת בכל הפעלה.
 
 זה **רמז, לא אבחנה**: גם NAT קשה בצד השני יוצר `relay` בלבד. לכן הניסוח הוא "ייתכן", ואף פעם לא "חסום".
 
@@ -19,6 +20,8 @@
 - **באנר דק ולא מודאלי** מעל רשימת החברים (לא toast שנעלם, ולא דיאלוג שחוסם).
 - אייקון מידע, טקסט `tips.firewall.body`, קישור `tips.firewall.how` שפותח הסבר מקופל (3 צעדים), ו-X לסגירה.
 - **X** או `tips.firewall.dismiss` שומרים `mvs.tips.firewall.v1` = `"1"`. הטיפ לא מוצג שוב.
+- **רשימת החברים מוסתרת** (בכפתור, או בטלפון מתחת ל-40rem): הבאנר מחכה עד שהרשימה נפתחת, ולא עובר למקום אחר.
+- **שמות המסכים של Windows** מסומנים ב-`<b>` כדי שיהיה ברור שאלה תוויות על המסך. לפני המיזוג: לבדוק שהם זהים מילה במילה ל-Windows 11 בעברית ובאנגלית.
 - **אין כפתור שמשנה הגדרות:** האפליקציה לא פותחת את חומת האש ולא מבקשת הרשאות. הצעדים הם טקסט בלבד.
 - כשנוצר חיבור `direct`, הבאנר נעלם מעצמו בלי לשמור כלום (אם החסימה תחזור, הוא יופיע שוב).
 
@@ -31,12 +34,12 @@
 
 | מפתח | עברית | English | שינוי |
 | --- | --- | --- | --- |
-| `tips.firewall.body` | `כל החיבורים עוברים דרך שרת העזר. ייתכן שחומת האש של Windows חוסמת חיבורים ישירים.` | `All connections go through the relay. Windows Firewall may be blocking direct connections.` | חדש |
+| `tips.firewall.body` | `כל החיבורים עוברים דרך הממסר של MVS. ייתכן שחומת האש של Windows חוסמת חיבורים ישירים.` | `All connections go through the relay. Windows Firewall may be blocking direct connections.` | חדש |
 | `tips.firewall.how` | `איך לאפשר` | `How to allow it` | חדש |
-| `tips.firewall.step1` | `פותחים את "אבטחת Windows" ← "חומת אש והגנה על הרשת".` | `Open Windows Security, then "Firewall & network protection".` | חדש |
-| `tips.firewall.step2` | `בוחרים "אפשר לאפליקציה לעבור דרך חומת האש" ← "שנה הגדרות".` | `Choose "Allow an app through firewall", then "Change settings".` | חדש |
+| `tips.firewall.step1` | `פותחים את <b>אבטחת Windows</b> ← <b>חומת אש והגנה על הרשת</b>.` | `Open <b>Windows Security</b>, then <b>Firewall & network protection</b>.` | חדש |
+| `tips.firewall.step2` | `בוחרים <b>אפשר לאפליקציה לעבור דרך חומת האש</b> ← <b>שנה הגדרות</b>.` | `Choose <b>Allow an app through firewall</b>, then <b>Change settings</b>.` | חדש |
 | `tips.firewall.step3` | `מסמנים את MVS ברשתות פרטיות. השלב הזה דורש חשבון מנהל.` | `Tick MVS for private networks. This step needs an administrator account.` | חדש |
-| `tips.firewall.note` | `MVS עובד גם בלי זה: ההודעות מגיעות דרך שרת העזר.` | `MVS works without this: messages arrive through the relay.` | חדש |
+| `tips.firewall.note` | `MVS עובד גם בלי זה: ההודעות מגיעות דרך הממסר. שיחות קוליות עלולות לא להתחבר.` | `MVS works without this: messages arrive through the relay. Voice calls may not connect.` | חדש |
 | `tips.firewall.dismiss` | `לא להציג שוב` | `Don't show again` | חדש |
 
 ## 5. מקלדת וקורא מסך
@@ -53,10 +56,10 @@
 4. Linux או Web ← הבאנר לא מופיע לעולם.
 5. אין חברים אונליין ← הבאנר לא מופיע.
 
-**צילומים (250–259):**
+**צילומים (260–269):**
 
 | # | קובץ | מה רואים |
 | --- | --- | --- |
-| 250 | `250-firewall-tip.png` | הבאנר מעל רשימת החברים, מקופל |
-| 251 | `251-firewall-tip-open.png` | ההסבר פתוח עם 3 הצעדים וההערה |
-| 252 | `252-firewall-tip-en.png` | אותו מסך באנגלית |
+| 260 | `260-firewall-tip.png` | הבאנר מעל רשימת החברים, מקופל |
+| 261 | `261-firewall-tip-open.png` | ההסבר פתוח עם 3 הצעדים וההערה |
+| 262 | `262-firewall-tip-en.png` | אותו מסך באנגלית |
