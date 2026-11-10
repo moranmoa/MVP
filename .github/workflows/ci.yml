@@ -189,12 +189,12 @@ jobs:
       - name: Install desktop dependencies
         working-directory: desktop
         run: npm ci --no-audit --no-fund
-      # Skips the three tests that spawn the core (their names say "the core"):
+      # Skips the three tests that spawn the core (names matching "the core|core events"):
       # test/fake-core.js is spawned directly, and Windows cannot execute a .js
       # file (EFTYPE). Linux runs them. The permission (mic) test still runs here.
       - name: Electron e2e (without the core-spawning tests)
         working-directory: desktop
-        run: node --test --test-concurrency=1 --test-skip-pattern="the core" test/e2e.test.mjs
+        run: node --test --test-concurrency=1 --test-skip-pattern="the core|core events" test/e2e.test.mjs
 
   # The same e2e on Linux under Xvfb. ubuntu-22.04 on purpose: 24.04 runners
   # restrict unprivileged user namespaces, which Electron's sandbox needs, and
