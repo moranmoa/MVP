@@ -65,6 +65,8 @@ fn names(events: &[Event]) -> Vec<&'static str> {
             Event::Notice { .. } => "notice",
             Event::MessageAdded(_) => "message.added",
             Event::MessageUpdated(_) => "message.updated",
+            Event::CallState(_) => "call.state",
+            Event::CallSignal { .. } => "call.signal",
         })
         .collect()
 }
@@ -2084,4 +2086,232 @@ fn invites_are_made_listed_and_revoked() {
     let mine = guest.core.create_invite(&server.id, None, None).unwrap();
     assert_eq!((mine.expires_at, mine.max_uses), (None, None));
     guest.core.revoke_invite(&server.id, &mine.id).unwrap();
+}
+
+/// Voice transport inside the process: blobs queue until `pump`.
+#[derive(Default)]
+struct VoiceHub {
+    queue: std::sync::Mutex<Vec<(PublicKey, PublicKey, Vec<u8>)>>,
+    relay_only: std::sync::atomic::AtomicBool,
+}
+
+struct HubPort {
+    hub: Arc<VoiceHub>,
+    me: PublicKey,
+}
+
+impl VoiceNet for HubPort {
+    fn relay_only(&self) -> bool {
+        self.hub.relay_only.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn send(&self, to: PublicKey, blob: Vec<u8>) {
+        assert!(blob.len() <= 16 * 1024);
+        self.hub.queue.lock().unwrap().push((self.me, to, blob));
+    }
+}
+
+fn user_key(id: &str) -> PublicKey {
+    PublicKey::from_bytes(hex::decode(id).unwrap().try_into().unwrap())
+}
+
+impl VoiceHub {
+    fn connect(self: &Arc<Self>, peer: &Peer, id: &str) {
+        peer.core.set_voice(Arc::new(HubPort { hub: self.clone(), me: user_key(id) }));
+    }
+
+    /// Delivers until nothing is queued; returns what was delivered.
+    fn pump(&self, peers: &[(&str, &Peer)]) -> Vec<(PublicKey, PublicKey, Vec<u8>)> {
+        let mut delivered = Vec::new();
+        loop {
+            let batch = std::mem::take(&mut *self.queue.lock().unwrap());
+            if batch.is_empty() {
+                return delivered;
+            }
+            for (from, to, blob) in batch {
+                if let Some((_, peer)) = peers.iter().find(|(id, _)| user_key(id) == to) {
+                    peer.core.voice_received(Some(from), &blob);
+                }
+                delivered.push((from, to, blob));
+            }
+        }
+    }
+}
+
+fn call_states(events: Vec<Event>) -> Vec<CallState> {
+    events
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::CallState(state) => Some(state),
+            _ => None,
+        })
+        .collect()
+}
+
+fn who(state: &CallState) -> Vec<&str> {
+    state.participants.iter().map(|p| p.identity.as_str()).collect()
+}
+
+const SDP: &str = "v=0\r\na=fingerprint:sha-256 AB:CD:EF\r\na=setup:actpass\r\n";
+
+/// Voice B: join, see each other, signal (verified only), mute, leave,
+/// time out; nothing forged or replayed gets through.
+#[test]
+fn a_call_between_members() {
+    let world = World::new();
+    let hub = Arc::new(VoiceHub::default());
+    let owner = world.peer();
+    let owner_id = sign_up(&owner, "Owner").id;
+    let alice = world.peer();
+    let alice_id = sign_up(&alice, "Alice").id;
+    let bob = world.peer();
+    let bob_id = sign_up(&bob, "Bob").id;
+    let server = owner.core.create_server("Talk", AgeRestriction::None).unwrap();
+    for peer in [&alice, &bob] {
+        peer.core.join_server(&server.invite_link).unwrap();
+    }
+    for peer in [&owner, &alice, &bob] {
+        peer.core.sync_now().unwrap();
+    }
+    let general = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    let peers = [(owner_id.as_str(), &owner), (alice_id.as_str(), &alice), (bob_id.as_str(), &bob)];
+
+    // No transport yet: not-implemented. Then relay-only: calls are off.
+    assert_eq!(owner.core.join_call(&general).unwrap_err().code, ErrorCode::NotImplemented);
+    for (id, peer) in peers {
+        hub.connect(peer, id);
+    }
+    hub.relay_only.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(owner.core.join_call(&general).unwrap_err().code, ErrorCode::RelayOnly);
+    hub.relay_only.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(owner.core.join_call(&"ab".repeat(32)).unwrap_err().code, ErrorCode::NotFound);
+
+    // The owner, then Alice, join; each sees both.
+    let state = owner.core.join_call(&general).unwrap();
+    assert_eq!((who(&state), state.full), (vec![owner_id.as_str()], false));
+    assert!(owner.core.in_call());
+    hub.pump(&peers);
+    let state = alice.core.join_call(&general).unwrap();
+    assert_eq!(who(&state), [alice_id.as_str(), owner_id.as_str()]);
+    owner.events.take();
+    hub.pump(&peers);
+    let seen = call_states(owner.events.take());
+    assert_eq!(who(seen.last().unwrap()), [owner_id.as_str(), alice_id.as_str()]);
+
+    // Signalling: only to a participant, offers and answers with a fingerprint.
+    assert_eq!(
+        alice.core.send_signal(&bob_id, SignalKind::Offer, SDP.into()).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+    assert_eq!(
+        alice.core.send_signal(&owner_id, SignalKind::Offer, "v=0\r\n".into()).unwrap_err().code,
+        ErrorCode::BadRequest
+    );
+    let big = "x".repeat(12 * 1024 + 1);
+    assert_eq!(
+        alice.core.send_signal(&owner_id, SignalKind::Ice, big).unwrap_err().code,
+        ErrorCode::BadRequest
+    );
+    assert_eq!(
+        bob.core.send_signal(&owner_id, SignalKind::Offer, SDP.into()).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+    alice.core.send_signal(&owner_id, SignalKind::Offer, SDP.into()).unwrap();
+    let delivered = hub.pump(&peers);
+    let signals: Vec<Event> =
+        owner.events.take().into_iter().filter(|e| matches!(e, Event::CallSignal { .. })).collect();
+    assert_eq!(
+        signals,
+        [Event::CallSignal {
+            from: alice_id.clone(),
+            kind: SignalKind::Offer,
+            payload: SDP.into(),
+            fingerprint_verified: true,
+        }]
+    );
+
+    // The same blob again (a replay), and one changed in transit: dropped.
+    let (from, _, blob) = delivered.last().unwrap().clone();
+    owner.core.voice_received(Some(from), &blob);
+    let changed = String::from_utf8(blob.clone()).unwrap().replace("AB:CD:EF", "AB:CD:EE");
+    owner.core.voice_received(Some(from), changed.as_bytes());
+    // Signed by Alice, but sync says Bob sent it.
+    owner.core.voice_received(Some(user_key(&bob_id)), &blob);
+    assert!(owner.events.take().is_empty());
+
+    // Mute shows; leave drops; a quiet participant times out.
+    alice.core.set_muted(true).unwrap();
+    hub.pump(&peers);
+    let seen = call_states(owner.events.take());
+    assert!(seen.last().unwrap().participants.iter().any(|p| p.identity == alice_id && p.muted));
+    alice.core.leave_call().unwrap();
+    alice.core.leave_call().unwrap();
+    assert!(!alice.core.in_call());
+    assert_eq!(alice.core.set_muted(false).unwrap_err().code, ErrorCode::NotAllowed);
+    hub.pump(&peers);
+    let seen = call_states(owner.events.take());
+    assert_eq!(who(seen.last().unwrap()), [owner_id.as_str()]);
+
+    bob.core.join_call(&general).unwrap();
+    hub.pump(&peers);
+    *world.clock.0.lock().unwrap() += 31_000;
+    owner.events.take();
+    owner.core.voice_tick();
+    let seen = call_states(owner.events.take());
+    assert_eq!(who(seen.last().unwrap()), [owner_id.as_str()], "Bob didn't time out");
+    owner.core.leave_call().unwrap();
+    assert!(!owner.core.in_call());
+}
+
+/// Voice B: 5 is the cap; a kicked member's hello doesn't count.
+#[test]
+fn a_call_holds_five_and_kicked_members_are_ignored() {
+    let world = World::new();
+    let hub = Arc::new(VoiceHub::default());
+    let owner = world.peer();
+    let owner_id = sign_up(&owner, "Owner").id;
+    let server = owner.core.create_server("Crowd", AgeRestriction::None).unwrap();
+    let mut others = Vec::new();
+    for n in 0..6 {
+        let peer = world.peer();
+        let id = sign_up(&peer, &format!("P{n}")).id;
+        peer.core.join_server(&server.invite_link).unwrap();
+        others.push((id, peer));
+    }
+    owner.core.sync_now().unwrap();
+    for (_, peer) in &others {
+        peer.core.sync_now().unwrap();
+    }
+    let general = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    hub.connect(&owner, &owner_id);
+    for (id, peer) in &others {
+        hub.connect(peer, id);
+    }
+    let mut peers: Vec<(&str, &Peer)> = vec![(owner_id.as_str(), &owner)];
+    peers.extend(others.iter().map(|(id, peer)| (id.as_str(), peer)));
+
+    owner.core.join_call(&general).unwrap();
+    hub.pump(&peers);
+    for (_, peer) in &others[..4] {
+        peer.core.join_call(&general).unwrap();
+        hub.pump(&peers);
+    }
+    let state = owner.core.join_call(&general).unwrap();
+    assert_eq!((state.participants.len(), state.full), (5, true));
+    let (_, sixth) = &others[4];
+    assert_eq!(sixth.core.join_call(&general).unwrap_err().code, ErrorCode::CallFull);
+    assert!(!sixth.core.in_call());
+
+    // P0 is kicked; before it learns, its hellos go out and are ignored.
+    let (kicked_id, kicked) = &others[0];
+    owner.core.kick_member(&server.id, kicked_id).unwrap();
+    owner.events.take();
+    owner.core.voice_tick();
+    let seen = call_states(owner.events.take());
+    assert_eq!(seen.last().unwrap().participants.len(), 4);
+    *world.clock.0.lock().unwrap() += 11_000;
+    kicked.core.voice_tick();
+    hub.pump(&peers);
+    let state = owner.core.join_call(&general).unwrap();
+    assert!(!who(&state).contains(&kicked_id.as_str()));
 }
