@@ -586,6 +586,7 @@ impl Node {
             listen: listen.clone(),
             port_file,
             listener: Some(listener),
+            quic_listener: None,
             relayed_preferred: HashSet::new(),
             dial_backoff: backoff,
             #[cfg(test)]
@@ -808,6 +809,10 @@ async fn build_swarm(
     Ok(SwarmBuilder::with_existing_identity(key)
         .with_tokio()
         .with_tcp(tcp::Config::default().nodelay(true), noise::Config::new, yamux::Config::default)?
+        // QUIC beside TCP (`/udp/<port>/quic-v1`): its dials leave from the
+        // listening socket, so hole punching works where TCP simultaneous
+        // open does not (Windows).
+        .with_quic()
         .with_dns()?
         // `/dns4/<relay>/tcp/443/wss`: the relay sits behind a TLS-terminating
         // proxy (Cloudflare). Ping (every 15 s) keeps such a connection under
@@ -1056,6 +1061,8 @@ struct Task {
     /// The direct listener (`NodeConfig::listen`), removed while relay-only.
     listen: Multiaddr,
     listener: Option<ListenerId>,
+    /// The QUIC listener beside it (same port when free), removed with it.
+    quic_listener: Option<ListenerId>,
     /// Where our TCP listen port is kept, so it stays the same across
     /// restarts (a firewall or router rule can then allow it once).
     port_file: PathBuf,
@@ -1581,7 +1588,7 @@ impl Task {
         // No hole punching either way while relay-only (GAP-6).
         self.swarm.behaviour_mut().punch.set_enabled(!on);
         if on {
-            if let Some(id) = self.listener.take() {
+            for id in [self.listener.take(), self.quic_listener.take()].into_iter().flatten() {
                 self.swarm.remove_listener(id);
             }
             self.direct_candidates.clear();
@@ -1887,6 +1894,12 @@ impl Task {
             }
             SwarmEvent::NewListenAddr { listener_id, address } if Some(listener_id) == self.listener => {
                 save_port(&self.port_file, &address);
+                // QUIC once the TCP port is known, on the same port, so one
+                // router or firewall rule (and NAT mapping) covers both.
+                // Removed with the TCP listener while relay-only.
+                if self.quic_listener.is_none() && !self.relay_only {
+                    self.quic_listener = listen_quic(&mut self.swarm, &self.listen, &address);
+                }
             }
             SwarmEvent::ListenerClosed { listener_id, .. } if self.circuit == Some(listener_id) => {
                 // Reservation refused or lost: the next discovery tick asks again.
@@ -2551,6 +2564,32 @@ fn with_saved_port(listen: &Multiaddr, file: &std::path::Path) -> Multiaddr {
     }
 }
 
+/// `listen` (`/ip4|ip6/<ip>/tcp/<port>`) as QUIC on the same UDP port:
+/// `/ip4|ip6/<ip>/udp/<port>/quic-v1`. None for anything else.
+fn quic_of(listen: &Multiaddr) -> Option<Multiaddr> {
+    let mut parts = listen.iter();
+    let ip = parts.next().filter(|p| matches!(p, Protocol::Ip4(_) | Protocol::Ip6(_)))?;
+    let Some(Protocol::Tcp(port)) = parts.next() else { return None };
+    parts.next().is_none().then(|| Multiaddr::empty().with(ip).with(Protocol::Udp(port)).with(Protocol::QuicV1))
+}
+
+/// Listens on QUIC beside the TCP listener `listen`, on `bound`'s TCP port
+/// (the port it got, saved for next time, #200) when that is free over UDP,
+/// else any. Not fatal: without it, TCP and the relay remain.
+fn listen_quic(swarm: &mut Swarm<Behaviour>, listen: &Multiaddr, bound: &Multiaddr) -> Option<ListenerId> {
+    let port = bound.iter().find_map(|p| if let Protocol::Tcp(port) = p { Some(port) } else { None })?;
+    let on = |port: u16| listen.iter().map(|p| if let Protocol::Tcp(_) = p { Protocol::Tcp(port) } else { p }).collect();
+    let addr = quic_of(&on(port))?;
+    let any = quic_of(&on(0))?;
+    match swarm.listen_on(addr).or_else(|_| swarm.listen_on(any)) {
+        Ok(id) => Some(id),
+        Err(err) => {
+            warn!(%err, "listening on QUIC failed; TCP and the relay only");
+            None
+        }
+    }
+}
+
 /// Saves the TCP port of our listen address the first time we get one.
 fn save_port(file: &std::path::Path, address: &Multiaddr) {
     if file.exists() {
@@ -3098,11 +3137,26 @@ mod tests {
     }
 
     #[test]
+    fn quic_listens_beside_tcp_on_the_same_port() {
+        let a = |s: &str| s.parse::<Multiaddr>().unwrap();
+        assert_eq!(quic_of(&a("/ip4/0.0.0.0/tcp/4001")), Some(a("/ip4/0.0.0.0/udp/4001/quic-v1")));
+        assert_eq!(quic_of(&a("/ip6/::/tcp/0")), Some(a("/ip6/::/udp/0/quic-v1")));
+        assert_eq!(quic_of(&a("/dns4/example.com/tcp/4001")), None);
+        assert_eq!(quic_of(&a("/ip4/0.0.0.0/tcp/443/wss")), None);
+        assert_eq!(quic_of(&a("/ip4/0.0.0.0/udp/4001/quic-v1")), None);
+    }
+
+    #[test]
     fn only_direct_incoming_connections_count_per_ip() {
         let a = |s: &str| s.parse::<Multiaddr>().unwrap();
         let incoming = |local: &str, remote: &str| ConnectedPoint::Listener { local_addr: a(local), send_back_addr: a(remote) };
         let direct = incoming("/ip4/0.0.0.0/tcp/4001", "/ip4/203.0.113.7/tcp/51000");
         assert_eq!(incoming_ip(&direct), Some("203.0.113.7".parse().unwrap()));
+        // QUIC counts against the same per-IP budget as TCP.
+        let quic = incoming("/ip4/0.0.0.0/udp/4001/quic-v1", "/ip4/203.0.113.7/udp/51000/quic-v1");
+        assert_eq!(incoming_ip(&quic), Some("203.0.113.7".parse().unwrap()));
+        let quic6 = incoming("/ip6/::/udp/4001/quic-v1", "/ip6/2001:db8::7/udp/51000/quic-v1");
+        assert_eq!(incoming_ip(&quic6), Some("2001:db8::7".parse().unwrap()));
         let relayed = incoming(
             "/ip4/198.51.100.1/tcp/4001/p2p/12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc/p2p-circuit",
             "/p2p/12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc",

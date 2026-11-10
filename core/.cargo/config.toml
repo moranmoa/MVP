@@ -1,0 +1,14 @@
+# Windows (MSVC) only: v0 symbol mangling (stable since Rust 1.59).
+#
+# With QUIC beside TCP (#243) some symbols, mostly trait impls on deeply
+# nested generic handler and transport types, grew past what the MSVC linker
+# writes into a PDB ("LNK4318 very long symbol name", then "LNK4319 a PDB
+# limit was hit while adding public symbols"), so `sync`, `api` and
+# `mvs-core` failed to link. Legacy mangling spells every generic argument
+# out in full; v0 compresses repeats with back-references.
+#
+# Applies to `cargo test` on a Windows runner and to release.yml's
+# `--target x86_64-pc-windows-msvc` builds alike (neither sets RUSTFLAGS,
+# which would replace this). Linux and macOS builds are unchanged.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "symbol-mangling-version=v0"]
