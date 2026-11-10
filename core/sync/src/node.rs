@@ -55,6 +55,7 @@ use crate::access::{self, Binder, Binding, Handle, ReadGate, ServerSecret};
 use crate::limits::{Acks, DialBackoff, Pending, PerIp, RateLimiter, Refused};
 use crate::presence::Presence;
 use crate::store::MAX_HAVE;
+use crate::voice::{VoiceError, VoiceLimits, MAX_VOICE_BLOB};
 use crate::{
     log_name, log_of, valid_log_name, Append, Authorizer, ChannelId, NoStubs, Record, RecordId, Scope, ServerId, Store,
     Stub, StubGate,
@@ -238,6 +239,10 @@ pub enum NodeEvent {
     /// A peer's connection became direct, or relayed (a new relayed one
     /// while no direct one exists). Ask [`Node::presence`] again for the UI.
     Link { peer: PeerId, direct: bool },
+    /// A voice signal (`/mvs/voice/1`) from a verified current member:
+    /// `from` is the identity its peer is bound to. Ephemeral: never stored
+    /// or forwarded. See `voice`.
+    VoiceSignal { from: PublicKey, bytes: Vec<u8> },
 }
 
 /// Presence on one server (M2). `online` holds bound identities (anyone
@@ -289,6 +294,7 @@ enum Command {
     #[cfg(test)]
     Served { peer: PeerId, log: String, reply: oneshot::Sender<usize> },
     Prune { id: RecordId, reply: oneshot::Sender<Result<bool>> },
+    VoiceSend { to: PublicKey, bytes: Vec<u8>, reply: oneshot::Sender<Result<(), VoiceError>> },
     Shutdown { reply: oneshot::Sender<()> },
 }
 
@@ -359,6 +365,8 @@ struct Behaviour {
     guard: DialGuard,
     /// Hole punching (DCUtR), with verified members only (`punch`).
     punch: crate::punch::MemberPunch,
+    /// Voice signalling (`/mvs/voice/1`), with verified members only (`voice`).
+    voice: crate::voice::VoiceBehaviour,
 }
 
 type SharedBackoff = Arc<Mutex<DialBackoff<PeerId>>>;
@@ -570,6 +578,7 @@ impl Node {
             reached: false,
             started: Instant::now(),
             pending_stubs: HashMap::new(),
+            voice_limits: VoiceLimits::new(),
         };
         for log in config.logs {
             task.open(log, None);
@@ -697,6 +706,18 @@ impl Node {
         Ok(rx.await?)
     }
 
+    /// Sends one voice signal (at most [`MAX_VOICE_BLOB`] bytes) to the
+    /// peer bound to `to`, if `to` is a current member (see `voice`). Best
+    /// effort: `Ok` means it went out, not that it arrived. Never stored.
+    pub async fn voice_send(&self, to: PublicKey, bytes: Vec<u8>) -> Result<(), VoiceError> {
+        if bytes.len() > MAX_VOICE_BLOB {
+            return Err(VoiceError::TooLarge);
+        }
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::VoiceSend { to, bytes, reply }).map_err(|_| VoiceError::Stopped)?;
+        rx.await.map_err(|_| VoiceError::Stopped)?
+    }
+
     /// Closes all connections and the store.
     pub async fn shutdown(self) -> Result<()> {
         let (reply, rx) = oneshot::channel();
@@ -802,6 +823,7 @@ async fn build_swarm(
                 limits: connection_limits::Behaviour::new(limits),
                 guard: DialGuard { backoff },
                 punch: crate::punch::MemberPunch::new(peer_id, allow_lan),
+                voice: crate::voice::behaviour(),
             })
         })?
         .with_swarm_config(|c| c.with_idle_connection_timeout(IDLE_TIMEOUT))
@@ -996,6 +1018,8 @@ struct Task {
     /// the delete or edit that replaced them when it arrives.
     pending_stubs: HashMap<RecordId, Stub>,
     stub_gate: Arc<dyn StubGate>,
+    /// Caps on accepted voice signals.
+    voice_limits: VoiceLimits,
 }
 
 /// What a pull may get: the log, the read check still to run, and the
@@ -1126,6 +1150,9 @@ impl Task {
             #[cfg(test)]
             Command::Served { peer, log, reply } => {
                 let _ = reply.send(self.served.get(&(peer, log)).copied().unwrap_or(0));
+            }
+            Command::VoiceSend { to, bytes, reply } => {
+                let _ = reply.send(self.voice_send(to, bytes));
             }
             Command::RelayOnly { on } => self.set_relay_only(on),
             Command::NoDirectDials => self.direct_dials = false,
@@ -1268,6 +1295,59 @@ impl Task {
         self.bound
             .iter()
             .any(|((p, server), (_, identity))| *p == peer && gate.may_read(identity, &self.store.control_log(*server)))
+    }
+
+    /// The identity `peer` is bound to as a current member (as for
+    /// [`Task::is_member`]); None if none, or if it is bound to more than one.
+    fn member_identity(&self, peer: PeerId) -> Option<PublicKey> {
+        let gate = self.access.read_gate.as_ref()?;
+        let mut found = None;
+        for ((p, server), (_, identity)) in &self.bound {
+            if *p != peer || !gate.may_read(identity, &self.store.control_log(*server)) {
+                continue;
+            }
+            match found {
+                Some(known) if known != *identity => return None,
+                _ => found = Some(*identity),
+            }
+        }
+        found
+    }
+
+    /// Voice (piece A): to a connected peer bound to `to` as a current
+    /// member; a peer with a direct connection first.
+    fn voice_send(&mut self, to: PublicKey, bytes: Vec<u8>) -> Result<(), VoiceError> {
+        if bytes.len() > MAX_VOICE_BLOB {
+            return Err(VoiceError::TooLarge);
+        }
+        let mut peers: Vec<PeerId> = self
+            .bound
+            .iter()
+            .filter(|(_, (_, identity))| *identity == to)
+            .map(|((peer, _), _)| *peer)
+            .filter(|peer| self.swarm.is_connected(peer))
+            .collect();
+        peers.sort_by_key(|peer| (!self.direct.contains_key(peer), *peer));
+        peers.dedup();
+        let peer =
+            peers.into_iter().find(|peer| self.member_identity(*peer) == Some(to)).ok_or(VoiceError::NotMember)?;
+        self.swarm.behaviour_mut().voice.send_request(&peer, bytes);
+        Ok(())
+    }
+
+    /// A voice signal came in: only a current member's, within its rate
+    /// cap, reaches the app. Anything else is dropped unanswered.
+    fn on_voice(&mut self, peer: PeerId, bytes: Vec<u8>, channel: ResponseChannel<()>) {
+        let Some(from) = self.member_identity(peer) else {
+            debug!(%peer, "voice signal from a non-member dropped");
+            return;
+        };
+        if !self.voice_limits.allow(peer, Instant::now()) {
+            debug!(%peer, "voice signal over the rate cap dropped");
+            return;
+        }
+        let _ = self.swarm.behaviour_mut().voice.send_response(channel, ());
+        self.emit(NodeEvent::VoiceSignal { from, bytes });
     }
 
     /// "Relay only" on: drop the direct listener (identify then announces
@@ -1655,6 +1735,13 @@ impl Task {
                     }
                 }
             }
+            SwarmEvent::Behaviour(BehaviourEvent::Voice(request_response::Event::Message {
+                peer,
+                message: request_response::Message::Request { request, channel, .. },
+            })) => self.on_voice(peer, request, channel),
+            SwarmEvent::Behaviour(BehaviourEvent::Voice(request_response::Event::OutboundFailure {
+                peer, error, ..
+            })) => debug!(%peer, %error, "voice signal not delivered"),
             SwarmEvent::Behaviour(BehaviourEvent::Punch(libp2p::dcutr::Event { remote_peer_id, result })) => {
                 // A success shows up as a direct connection: `track_connection`
                 // flips the link to direct and parks the relayed one (#206).

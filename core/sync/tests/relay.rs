@@ -12,7 +12,10 @@ use libp2p::{
     PeerId, StreamProtocol, SwarmBuilder,
 };
 use records::{ChannelId, Draft, Kind, RecordId, Scope, ServerId, SigningKey};
-use sync::{log_name, AcceptAll, Access, ControlLog, Node, NodeConfig, NodeEvent, ReadGate, Record, ServerSecret};
+use sync::{
+    log_name, AcceptAll, Access, ControlLog, Node, NodeConfig, NodeEvent, ReadGate, Record, ServerSecret, VoiceError,
+    MAX_VOICE_BLOB,
+};
 use tokio::sync::mpsc;
 
 #[derive(NetworkBehaviour)]
@@ -286,6 +289,17 @@ async fn two_peers_behind_nat_reuse_their_circuits() {
 /// A node of a server opened with its secret (so peers bind), meeting
 /// others only through relay circuits, with "LAN allowed" (F2) as given.
 async fn bound_node(name: &str, relay: &Multiaddr, key: u8, allow_lan: bool, gate: Arc<dyn ReadGate>) -> Node {
+    bound_node_events(name, relay, key, allow_lan, gate).await.0
+}
+
+/// [`bound_node`] with its events.
+async fn bound_node_events(
+    name: &str,
+    relay: &Multiaddr,
+    key: u8,
+    allow_lan: bool,
+    gate: Arc<dyn ReadGate>,
+) -> (Node, mpsc::Receiver<NodeEvent>) {
     let (server, channel) = test_server();
     let dir = std::env::temp_dir().join(format!("sync-relay-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -303,10 +317,10 @@ async fn bound_node(name: &str, relay: &Multiaddr, key: u8, allow_lan: bool, gat
         read_gate: Some(gate),
         ..Access::default()
     };
-    let (node, _events) = Node::start_with(config, access).await.unwrap();
+    let (node, events) = Node::start_with(config, access).await.unwrap();
     node.open_server(server, ServerSecret::from_bytes([42; 32])).unwrap();
     node.open_channel(server, channel).await.unwrap();
-    node
+    (node, events)
 }
 
 /// F2: two bound peers on one LAN, which first meet through the relay
@@ -523,4 +537,162 @@ async fn members_hole_punch_from_relayed_to_direct_or_stay_relayed() {
         a.shutdown().await.unwrap();
         b.shutdown().await.unwrap();
     }
+}
+
+// ---- voice signalling (voice v1, piece A) ----------------------------------
+
+fn voice_id(n: u8) -> records::PublicKey {
+    records::PublicKey::from_bytes(SigningKey::from_bytes(&[n; 32]).verifying_key().to_bytes())
+}
+
+/// A read gate whose refused identities can change (a member kicked, or a
+/// non-member admitted), as the control log would make them.
+#[derive(Clone, Default)]
+struct Refusing(Arc<std::sync::Mutex<std::collections::HashSet<records::PublicKey>>>);
+
+impl Refusing {
+    fn set(&self, who: records::PublicKey, refused: bool) {
+        let mut set = self.0.lock().unwrap();
+        if refused {
+            set.insert(who);
+        } else {
+            set.remove(&who);
+        }
+    }
+}
+
+impl ReadGate for Refusing {
+    fn may_read(&self, who: &records::PublicKey, _: &ControlLog<'_>) -> bool {
+        !self.0.lock().unwrap().contains(who)
+    }
+}
+
+/// A fresh in-process relay that only knows circuit addresses.
+fn voice_relay() -> (Multiaddr, tokio::task::JoinHandle<()>) {
+    let relay_key = identity::Keypair::generate_ed25519();
+    let port = free_port();
+    let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::from(relay_key.public())).parse().unwrap();
+    let handle = start_relay_counting(relay_key, port, Arc::default(), true);
+    (relay, handle)
+}
+
+/// Until each side has the other bound (online), and direct when asked.
+async fn voice_meet(a: &Node, b: &Node, ida: records::PublicKey, idb: records::PublicKey, direct: bool) {
+    let start = Instant::now();
+    loop {
+        let (sa, sb) = (a.presence(test_server().0).await.unwrap(), b.presence(test_server().0).await.unwrap());
+        let online = sa.online.contains(&idb) && sb.online.contains(&ida);
+        if online && (!direct || (sa.direct.contains(&idb) && sb.direct.contains(&ida))) {
+            return;
+        }
+        assert!(start.elapsed() < Duration::from_secs(60), "never met: A sees {sa:?}, B sees {sb:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// The voice signals that arrive within `wait`.
+async fn voice_signals(events: &mut mpsc::Receiver<NodeEvent>, wait: Duration) -> Vec<(records::PublicKey, Vec<u8>)> {
+    let mut got = Vec::new();
+    let deadline = tokio::time::Instant::now() + wait;
+    while let Ok(Some(event)) = tokio::time::timeout_at(deadline, events.recv()).await {
+        if let NodeEvent::VoiceSignal { from, bytes } = event {
+            got.push((from, bytes));
+        }
+    }
+    got
+}
+
+/// The next voice signal, within 20 s.
+async fn next_voice_signal(events: &mut mpsc::Receiver<NodeEvent>) -> (records::PublicKey, Vec<u8>) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        match tokio::time::timeout_at(deadline, events.recv()).await {
+            Ok(Some(NodeEvent::VoiceSignal { from, bytes })) => return (from, bytes),
+            Ok(Some(_)) => {}
+            other => panic!("no voice signal: {other:?}"),
+        }
+    }
+}
+
+/// Two members exchange blobs through the relay and over a direct
+/// connection; the sender is the identity the peer is bound to. A blob over
+/// 16 KiB, or one to an identity nobody connected is bound to, isn't sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn members_exchange_voice_signals_relayed_and_direct() {
+    for direct in [false, true] {
+        let (relay, _relay) = voice_relay();
+        let (a, mut ea) = bound_node_events(&format!("voice-a-{direct}"), &relay, 21, direct, Arc::new(AcceptAll)).await;
+        let (b, mut eb) = bound_node_events(&format!("voice-b-{direct}"), &relay, 22, direct, Arc::new(AcceptAll)).await;
+        voice_meet(&a, &b, voice_id(21), voice_id(22), direct).await;
+
+        let offer = vec![1u8; MAX_VOICE_BLOB];
+        a.voice_send(voice_id(22), offer.clone()).await.unwrap();
+        b.voice_send(voice_id(21), b"answer".to_vec()).await.unwrap();
+        assert_eq!(next_voice_signal(&mut eb).await, (voice_id(21), offer));
+        assert_eq!(next_voice_signal(&mut ea).await, (voice_id(22), b"answer".to_vec()));
+        if direct {
+            assert_eq!(a.direct_peers().await.unwrap(), vec![b.peer_id()]);
+        } else {
+            assert!(a.direct_peers().await.unwrap().is_empty(), "the relayed run went direct");
+        }
+
+        assert_eq!(a.voice_send(voice_id(22), vec![0; MAX_VOICE_BLOB + 1]).await, Err(VoiceError::TooLarge));
+        assert_eq!(a.voice_send(voice_id(99), b"x".to_vec()).await, Err(VoiceError::NotMember));
+        assert!(voice_signals(&mut eb, Duration::from_secs(2)).await.is_empty(), "something else arrived");
+        a.shutdown().await.unwrap();
+        b.shutdown().await.unwrap();
+    }
+}
+
+/// A peer bound to a non-member, then to a kicked member, is refused both
+/// ways: its signals are dropped unanswered, and none go to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn voice_signals_go_between_current_members_only() {
+    let (relay, _relay) = voice_relay();
+    let gate = Refusing::default();
+    // B doesn't count A as a member: A has the secret, but no membership.
+    gate.set(voice_id(23), true);
+    let (a, _ea) = bound_node_events("voice-gate-a", &relay, 23, false, Arc::new(AcceptAll)).await;
+    let (b, mut eb) = bound_node_events("voice-gate-b", &relay, 24, false, Arc::new(gate.clone())).await;
+    voice_meet(&a, &b, voice_id(23), voice_id(24), false).await;
+
+    // A thinks B a member and sends; B drops it.
+    a.voice_send(voice_id(24), b"from a non-member".to_vec()).await.unwrap();
+    assert!(voice_signals(&mut eb, Duration::from_secs(3)).await.is_empty(), "a non-member's signal arrived");
+    assert_eq!(b.voice_send(voice_id(23), b"to a non-member".to_vec()).await, Err(VoiceError::NotMember));
+
+    // Admitted: it goes through.
+    gate.set(voice_id(23), false);
+    a.voice_send(voice_id(24), b"member".to_vec()).await.unwrap();
+    assert_eq!(next_voice_signal(&mut eb).await, (voice_id(23), b"member".to_vec()));
+    b.voice_send(voice_id(23), b"to a member".to_vec()).await.unwrap();
+
+    // Kicked: dropped again, and nothing goes to it.
+    gate.set(voice_id(23), true);
+    a.voice_send(voice_id(24), b"from a kicked member".to_vec()).await.unwrap();
+    assert!(voice_signals(&mut eb, Duration::from_secs(3)).await.is_empty(), "a kicked member's signal arrived");
+    assert_eq!(b.voice_send(voice_id(23), b"to a kicked member".to_vec()).await, Err(VoiceError::NotMember));
+    a.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
+}
+
+/// A member's flood: at most a burst of 20, then 5 a second, reaches the
+/// app; the rest is dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_voice_rate_cap_holds() {
+    let (relay, _relay) = voice_relay();
+    let (a, _ea) = bound_node_events("voice-rate-a", &relay, 25, false, Arc::new(AcceptAll)).await;
+    let (b, mut eb) = bound_node_events("voice-rate-b", &relay, 26, false, Arc::new(AcceptAll)).await;
+    voice_meet(&a, &b, voice_id(25), voice_id(26), false).await;
+    let start = Instant::now();
+    for n in 0..100u32 {
+        a.voice_send(voice_id(26), n.to_le_bytes().to_vec()).await.unwrap();
+    }
+    let got = voice_signals(&mut eb, Duration::from_secs(3)).await;
+    let allowed = 20 + 5 * start.elapsed().as_secs_f64().ceil() as usize;
+    assert!(got.len() >= 20, "only {} arrived", got.len());
+    assert!(got.len() <= allowed, "{} arrived, at most {allowed} allowed", got.len());
+    assert!(got.iter().all(|(from, _)| *from == voice_id(25)));
+    a.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
 }

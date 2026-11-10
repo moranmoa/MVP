@@ -31,12 +31,14 @@ mod keyfile;
 mod limits;
 mod presence;
 mod punch;
+mod voice;
 #[cfg(test)]
 pub(crate) mod testutil;
 
 pub use access::{binding_message, Binder, Handle, ReadGate, ServerSecret};
 pub use node::{Access, Node, NodeConfig, NodeEvent, PresenceState, Reachability, Via};
 pub use records::{ChannelId, Record, RecordId, Scope, ServerId, Stub};
+pub use voice::{VoiceError, MAX_VOICE_BLOB};
 pub use store::{Append, ChannelLog, ControlLog, Held, IngestError, Store};
 
 /// Longest log name, in bytes. A channel log name is 64 + 1 + 64 characters.
