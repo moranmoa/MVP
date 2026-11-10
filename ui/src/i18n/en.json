@@ -322,6 +322,10 @@
 
   "settings.title": "Settings",
   "settings.nav.account": "Account",
+  "settings.nav.privacy": "Privacy",
+  "privacy.relayOnly.label": "Relay only",
+  "privacy.relayOnly.hint": "Connect to everyone only through the relay. Nobody connects to this computer directly, so other members never see your IP address.",
+  "privacy.relayOnly.calls": "Calls are off while this is on, because a call connects computers directly. Turning it on ends a call you are in.",
   "settings.nav.language": "Language",
   "settings.nav.appearance": "Appearance",
   "settings.nav.storage": "Storage",

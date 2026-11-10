@@ -131,6 +131,13 @@ export interface CoreCommands {
   exportDiagnostics(): Promise<string>;
   getAppInfo(): Promise<AppInfo>;
   setUpdateChannel(channel: UpdateChannel): Promise<void>;
+  /**
+   * Relay-only (GAP-6r, #272), per device: no direct connections, so members
+   * never see my IP; calls are off. On ends my call (a `call.state` with no
+   * participants and `relayOnly`), and `joinCall` answers `relay-only` until off.
+   * Shown up front as `AppInfo.relayOnly` and `VoiceRoom.relayOnly`.
+   */
+  setRelayOnly(on: boolean): Promise<void>;
   restartToUpdate(): Promise<void>;
 }
 

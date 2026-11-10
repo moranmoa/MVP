@@ -79,8 +79,8 @@ export interface StoreState {
   /** Each server's voice room (who is in it), by server id. */
   voiceRooms: Record<Id, VoiceRoom>;
   /**
-   * Calls are off because relay-only is on. The core doesn't say so up front, so
-   * this is learned from a join refused with relay-only and lasts the session.
+   * Relay-only is on (#272): calls are off. Read up front from AppInfo and every
+   * voice room, and also learned from a call ended or a join refused for it.
    */
   relayOnly: boolean;
   /** A short confirmation toast (an i18n id), e.g. "Copied" after a menu copy. */
@@ -166,13 +166,15 @@ export class Store {
       on('update.installed', (u) => this.set({ updateNote: { kind: 'installed', ...u } })),
       on('call.state', (c) => {
         const ended = !c.participants.length && !!this.state.call && !this.leaving;
+        const relayOnly = this.state.relayOnly || c.relayOnly === true;
         this.set({
           call: c.participants.length ? c : null,
+          relayOnly,
           // The core ends my call when relay-only goes on (#232 V3.4): say why.
-          ...(ended && this.state.relayOnly ? { callError: 'relay-only' } : {}),
+          ...(ended && relayOnly ? { callError: 'relay-only' } : {}),
         });
       }),
-      on('voice.room', (r) => this.set({ voiceRooms: { ...this.state.voiceRooms, [r.serverId]: r } })),
+      on('voice.room', (r) => this.setRoom(r)),
       on('update.rolledBack', (u) => this.set({ updateNote: { kind: 'rolledBack', ...u } })),
       on('notice', (n) => this.set({ notice: { ...n, at: Date.now() } })),
     );
@@ -185,6 +187,9 @@ export class Store {
   async init(): Promise<void> {
     const identity = await this.core.getIdentity();
     this.set({ identity });
+    // Relay-only is per device and needs no identity (#272).
+    const info = await this.core.getAppInfo().catch(() => null);
+    if (info) this.set({ relayOnly: info.relayOnly === true });
     if (identity) await this.loadServers();
   }
 
@@ -207,7 +212,12 @@ export class Store {
   /** Re-reads a server's voice room (events are hints): on start and on server switch. */
   async loadVoiceRoom(serverId: Id): Promise<void> {
     const room = await this.core.getVoiceRoom(serverId).catch(() => null);
-    if (room) this.set({ voiceRooms: { ...this.state.voiceRooms, [serverId]: room } });
+    if (room) this.setRoom(room);
+  }
+
+  /** Every room carries the device's relay-only flag (#272), so "Join" is off before trying. */
+  private setRoom(room: VoiceRoom): void {
+    this.set({ voiceRooms: { ...this.state.voiceRooms, [room.serverId]: room }, relayOnly: room.relayOnly === true });
   }
 
   window(channelId: Id): MessageWindow {
@@ -270,9 +280,10 @@ export class Store {
     this.set({ call: null });
   }
 
-  /** Relay-only is on (or off): until the core reports it up front, only a refused join says so. */
-  setRelayOnly(on: boolean): void {
-    this.set({ relayOnly: on });
+  /** Settings → Privacy (#272). The core ends a call in progress when it goes on. */
+  async setRelayOnly(on: boolean): Promise<void> {
+    await this.core.setRelayOnly(on);
+    this.set({ relayOnly: on, ...(on ? {} : { callError: this.state.callError === 'relay-only' ? null : this.state.callError }) });
   }
 
   clearCallError(): void {

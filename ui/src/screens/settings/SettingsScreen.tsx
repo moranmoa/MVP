@@ -9,8 +9,8 @@ import { CheckIcon, ShieldIcon } from '../../components/icons';
 import { LOCALES } from '../../i18n';
 import { textDir, useUiDir } from '../../app/textDir';
 
-type Section = 'account' | 'language' | 'appearance' | 'storage' | 'diagnostics' | 'about';
-const SECTIONS: Section[] = ['account', 'language', 'appearance', 'storage', 'diagnostics', 'about'];
+type Section = 'account' | 'privacy' | 'language' | 'appearance' | 'storage' | 'diagnostics' | 'about';
+const SECTIONS: Section[] = ['account', 'privacy', 'language', 'appearance', 'storage', 'diagnostics', 'about'];
 
 const GB = 1024 ** 3;
 const LIMIT_STEPS = [1, 2, 5, 10, 20, 50].map((g) => g * GB);
@@ -51,6 +51,7 @@ export function SettingsScreen({ open, onClose, onCheckWords }: { open: boolean;
           {section === 'storage' && <StorageSection />}
           {section === 'diagnostics' && <DiagnosticsSection />}
           {section === 'about' && <AboutSection />}
+          {section === 'privacy' && <PrivacySection />}
         </section>
       </div>
     </Dialog>
@@ -337,6 +338,54 @@ function DiagnosticsSection() {
           </span>
         )}
       </div>
+    </div>
+  );
+}
+
+// Relay-only (GAP-6r, #272), per device: nobody connects to me directly, so
+// members never see my IP address; calls are off while it is on.
+function PrivacySection() {
+  const store = useAppStore();
+  const relayOnly = useStore(store, (s) => s.relayOnly);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const toggle = async (on: boolean) => {
+    setBusy(true);
+    setFailed(false);
+    try {
+      await store.setRelayOnly(on);
+    } catch {
+      setFailed(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="stack">
+      <label className="check">
+        <input
+          type="checkbox"
+          role="switch"
+          checked={relayOnly}
+          disabled={busy}
+          aria-describedby="relay-only-hint relay-only-calls"
+          onChange={(e) => void toggle(e.target.checked)}
+        />
+        <span>
+          <FormattedMessage id="privacy.relayOnly.label" />
+        </span>
+      </label>
+      <p id="relay-only-hint" className="muted small">
+        <FormattedMessage id="privacy.relayOnly.hint" />
+      </p>
+      <p id="relay-only-calls" className="muted small">
+        <FormattedMessage id="privacy.relayOnly.calls" />
+      </p>
+      {failed && (
+        <p className="error small" role="alert">
+          <FormattedMessage id="invite.failed" />
+        </p>
+      )}
     </div>
   );
 }

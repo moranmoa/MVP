@@ -322,6 +322,10 @@
 
   "settings.title": "הגדרות",
   "settings.nav.account": "חשבון",
+  "settings.nav.privacy": "פרטיות",
+  "privacy.relayOnly.label": "ממסר בלבד",
+  "privacy.relayOnly.hint": "החיבור לכולם עובר רק דרך הממסר. אף אחד לא מתחבר ישירות למחשב הזה, ולכן חברים אחרים לא רואים את כתובת ה-IP שלך.",
+  "privacy.relayOnly.calls": "כשהאפשרות פעילה אין שיחות, כי בשיחה המחשבים מתחברים ישירות. ההפעלה מסיימת שיחה שמתקיימת עכשיו.",
   "settings.nav.language": "שפה",
   "settings.nav.appearance": "מראה",
   "settings.nav.storage": "אחסון",
