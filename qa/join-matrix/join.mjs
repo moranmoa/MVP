@@ -70,6 +70,10 @@ try {
     const pos = ch?.positions ?? [1, 5, 9];
     await call('checkRecoveryWords', { answers: Object.fromEntries(pos.map((p) => [p, words[p - 1]])) });
     await call('updateProfile', { input: { displayName: `join-${ROLE}` } });
+    if ((process.env.RELAY_ONLY ?? '').split(',').includes(ROLE) || process.env.RELAY_ONLY === 'both') {
+      await call('setRelayOnly', { on: true });
+      log('relay-only on');
+    }
     if (ROLE === 'a') {
       const s = await call('createServer', { input: { name: 'join matrix', ageRestriction: 'none' } });
       const channel = (await call('listChannels', { serverId: s.id }))[0].id;
@@ -88,6 +92,10 @@ try {
     if (MODE === 'restore') {
       const id = await call('restoreIdentity', { words });
       log(`restored: same identity as the owner = ${id.id === ownerId}`);
+      if (process.env.RELAY_ONLY === 'b' || process.env.RELAY_ONLY === 'both') {
+        await call('setRelayOnly', { on: true });
+        log('relay-only on');
+      }
       log('servers right after restore:', JSON.stringify((await call('listServers')).map((s) => s.name)));
     }
     const started = Date.now();

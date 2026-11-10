@@ -17,6 +17,12 @@ const require = createRequire('/repo/desktop/package.json');
 const { _electron: electron } = require('playwright-core');
 
 const ROLE = process.env.ROLE;
+// Join variants (#join hang repro): MODE=restore makes B the owner's identity
+// restored on a second computer; JOIN_VIA=ui joins from the app's own dialog;
+// JOIN_ONLY=1 stops after the join (no call).
+const MODE = process.env.MODE || 'new';
+const JOIN_VIA = process.env.JOIN_VIA || 'bridge';
+const JOIN_ONLY = !!process.env.JOIN_ONLY;
 const OTHER = ROLE === 'a' ? 'b' : 'a';
 const NAME = { a: 'QA-A owner', b: 'QA-B member' };
 const SERVER = 'voice e2e';
@@ -236,6 +242,30 @@ async function rosterHas(names) {
   return names.every((n) => got.some((g) => g.startsWith(n))) && got.length === names.length ? got : null;
 }
 
+/** Joins as a user does: Home → "Join with a link" → paste → Join. Logs what the dialog shows. */
+async function joinFromDialog(link) {
+  await page.reload();
+  await page.waitForFunction(() => typeof window.mvs?.invoke === 'function');
+  await page.getByRole('button', { name: /^(Join with a link|הצטרפות בלינק)/ }).first().click({ timeout: 30_000 });
+  await page.getByLabel(/^(Invite link|לינק הזמנה)$/).fill(link);
+  await page.getByRole('button', { name: /^(Join|הצטרפות)$/ }).click();
+  // Record each new text the dialog shows until the server is in the rail.
+  const seen = [];
+  const end = Date.now() + 120_000;
+  const railButton = page.getByRole('button', { name: new RegExp(`^${SERVER}`) });
+  while (Date.now() < end) {
+    const text = (await page.getByRole('dialog').allInnerTexts().catch(() => [])).join(' | ').replace(/\s+/g, ' ').slice(0, 160);
+    if (text && text !== seen[seen.length - 1]) {
+      seen.push(text);
+      log(`join dialog: ${text}`);
+    }
+    if (await railButton.count()) break;
+    await sleep(250);
+  }
+  log(`join dialog states: ${seen.length}; server in the rail: ${(await railButton.count()) > 0}`);
+  if (!(await railButton.count())) await page.screenshot({ path: join(RV, `${ROLE}-join-stuck.png`) }).catch(() => {});
+}
+
 async function openServer() {
   await page.reload();
   await page.waitForFunction(() => typeof window.mvs?.invoke === 'function');
@@ -302,24 +332,34 @@ async function mediaProbe(names = Object.keys(PROBES)) {
 let ok = true;
 let serverId;
 try {
+  scenario: {
   log('setting up the account');
-  await invoke('createIdentity', { locale: 'he', country: 'IL', birthDate: '1995-03-03' });
-  const words = await invoke('getRecoveryWords');
-  const challenge = await invoke('getRecoveryChallenge').catch(() => null);
-  const positions = challenge?.positions ?? [1, 5, 9];
-  await invoke('checkRecoveryWords', Object.fromEntries(positions.map((p) => [p, words[p - 1]])));
-  await invoke('updateProfile', { displayName: NAME[ROLE] });
+  // MODE=restore: B restores A's words (the same identity on a second computer).
+  let words = null;
+  if (!(ROLE === 'b' && MODE === 'restore')) {
+    await invoke('createIdentity', { locale: 'he', country: 'IL', birthDate: '1995-03-03' });
+    words = await invoke('getRecoveryWords');
+    const challenge = await invoke('getRecoveryChallenge').catch(() => null);
+    const positions = challenge?.positions ?? [1, 5, 9];
+    await invoke('checkRecoveryWords', Object.fromEntries(positions.map((p) => [p, words[p - 1]])));
+    await invoke('updateProfile', { displayName: NAME[ROLE] });
+  }
 
   if (ROLE === 'a') {
     const server = await invoke('createServer', { name: SERVER, ageRestriction: 'none' });
     serverId = server.id;
-    put('invite', { link: server.inviteLink });
+    put('invite', { link: server.inviteLink, ...(MODE === 'restore' ? { words } : {}) });
     log('server created, invite handed over');
     await take('joined');
   } else {
-    const { link } = await take('invite');
+    const { link, words: ownerWords } = await take('invite');
+    if (MODE === 'restore') {
+      const me = await invoke('restoreIdentity', ownerWords);
+      log(`restored the owner's identity (${me.id.slice(0, 8)})`);
+    }
     const started = Date.now();
-    await invoke('joinServer', link);
+    if (JOIN_VIA === 'ui') await joinFromDialog(link);
+    else await invoke('joinServer', link);
     const ok1 = await check('S1.1', 'B joins A\'s server by invite over the relay', async () => {
       await until('server in the list', async () => (await invoke('listServers')).some((s) => s.name === SERVER), 120_000, 1000);
       return `${((Date.now() - started) / 1000).toFixed(1)} s`;
@@ -328,6 +368,7 @@ try {
     serverId = (await invoke('listServers')).find((s) => s.name === SERVER).id;
     put('joined');
   }
+  if (JOIN_ONLY) break scenario;
 
   await openServer();
   log('server open in the UI');
@@ -644,6 +685,7 @@ try {
     const crashed = await page.evaluate(() => 1).then(() => false, () => true);
     return crashed ? `${res}; the renderer was killed` : res;
   });
+  }
 } catch (e) {
   ok = false;
   record('FAIL', 'run', 'the scenario stopped', e?.message ?? String(e));

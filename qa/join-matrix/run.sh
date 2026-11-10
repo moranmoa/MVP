@@ -5,6 +5,8 @@
 #
 #   OWNER=v0.2.5 JOINER=v0.3.1 MODE=new     bash qa/join-matrix/run.sh
 #   OWNER=v0.2.5 JOINER=v0.3.1 MODE=restore bash qa/join-matrix/run.sh   # joiner = owner's words
+#   SAME_LAN=1 ...      both on one Docker network (a home LAN: direct dials work)
+#   RELAY_ONLY=a|b|both ...  setRelayOnly(true) on that side before create/join
 #
 # Release cores come from qa/upgrade/run.sh's download (SHA256SUMS checked).
 # Logs, with addresses and peer IDs masked: qa/join-matrix/.build/<run>/.
@@ -46,7 +48,8 @@ for _ in $(seq 60); do
 done
 [ -n "$relay_id" ] || { echo "relay did not start"; exit 1; }
 side() { # role
-  docker run -d --name "$P-$1" --network "$P-$1" -e ROLE="$1" -e MODE="$MODE" -e JOIN_TIMEOUT="${JOIN_TIMEOUT:-120}" \
+  net="$P-$1"; [ -n "${SAME_LAN:-}" ] && net="$P-a" # one LAN: direct dials work
+  docker run -d --name "$P-$1" --network "$net" -e ROLE="$1" -e MODE="$MODE" -e RELAY_ONLY="${RELAY_ONLY:-}" -e JOIN_TIMEOUT="${JOIN_TIMEOUT:-120}" \
     -e MVS_RELAY="/dns4/relay/tcp/4001/p2p/$relay_id" \
     -v "$(mount "$rv/$1"):/core:ro" -v "$(mount "$here"):/qa:ro" -v "$(mount "$rv/rv"):/rendezvous" \
     mvs-voice-e2e-app sh -c "chmod 777 /rendezvous; runuser -u pwuser -- dbus-run-session -- sh -c 'echo -n test | gnome-keyring-daemon --unlock --components=secrets >/dev/null && node /qa/join.mjs'" >/dev/null
@@ -60,5 +63,5 @@ for r in a b; do
 done
 docker logs "$P-relay" 2>&1 | mask > "$rv/relay.log"
 rm -f "$rv"/rv/core-*.log
-echo "== owner $OWNER, joiner $JOINER, mode $MODE ($rv)"
+echo "== owner $OWNER, joiner $JOINER, mode $MODE, same LAN ${SAME_LAN:-no}, relay-only ${RELAY_ONLY:-none} ($rv)"
 grep -hE "core |restored|joinServer|event join|JOINED|HANG|FAIL|members now" "$rv/b.log" "$rv/a.log"
