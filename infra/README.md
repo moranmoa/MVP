@@ -236,6 +236,36 @@ Things to know about hosting at home:
 - The domain points at your home IP, so that IP is public. A proxy service that
   hides it (like Cloudflare's) does not carry the TCP/UDP ports above.
 
+## STUN for voice (`--profile stun`)
+
+Voice v1 needs each client to learn its public address. The `stun` service
+answers that question from **our** host, so no third-party STUN server sees
+users' IP addresses. It's coturn in **STUN-only** mode: no TURN, no relaying,
+no authentication and no TLS, and it carries no media. It listens on
+3478/udp, read-only with every capability dropped except the one its binary
+needs to start. **It keeps no logs** (`--no-stdout-log`, `--log-file=/dev/null`),
+so no client address is written anywhere on the host. The trade-off is that
+start-up errors aren't logged either: if `docker compose ps` shows it
+restarting, run the same command once by hand to see why.
+
+Owner steps:
+
+1. Forward **3478/udp** on the router to this host.
+2. Use the DNS-only (not Cloudflare-proxied) hostname, `<p2p-host>`, for it:
+   Cloudflare's proxy carries no UDP.
+3. Set the repository variable `MVS_STUN_URL` = `stun:<p2p-host>:3478`.
+   Release builds then put it into the app's config (`"stun"`). Never commit
+   the hostname.
+4. `docker compose --profile stun up -d stun`. Don't run it together with
+   `--profile voice`: both use 3478, and TURN answers STUN anyway.
+
+**Its answers are wrong while the relay host runs Docker Desktop.** A STUN
+server reports the source address it sees, and Docker Desktop rewrites every
+inbound source to its gateway (`172.17.x.1` / `172.18.x.1`). Clients would
+then learn a private address. Run it after the move to a Linux host with host
+networking (#220). Check: from a phone hotspot, a STUN client must get the
+hotspot's public IP back.
+
 ## Uptime and metrics
 
 Kept simple and private: nothing here publishes who connects.

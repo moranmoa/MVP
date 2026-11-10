@@ -109,6 +109,46 @@ services:
     read_only: true
     cap_drop: [ALL]
 
+  # STUN only, for voice v1: tells a client its public address, so no
+  # third-party STUN server sees users' IPs. No TURN, no relaying, no auth,
+  # no media through this host. Start with: --profile stun (needs 3478/udp
+  # forwarded). Don't run it together with --profile voice: both use 3478,
+  # and TURN answers STUN anyway. Its answers are only right once the host
+  # sees real source addresses (#220: host networking on Linux).
+  stun:
+    <<: *hardening
+    image: coturn/coturn:4.6.2@sha256:4873c54f213ec81f6b4c4c4938b69c922f50b2293ded427f5191472b9a127227
+    profiles: ["stun"]
+    command:
+      - -n
+      - --stun-only
+      - --no-cli
+      - --no-tls
+      - --no-dtls
+      - --fingerprint
+      - --listening-port=3478
+      # No logs at all: coturn would otherwise log every client's address
+      # (GAP-7: the relay host keeps no record of who talks to whom).
+      - --no-stdout-log
+      - --log-file=/dev/null
+      - --pidfile=/tmp/turnserver.pid
+    ports:
+      - "3478:3478/udp"
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m
+      - /var/lib/coturn:size=8m
+    cap_drop: [ALL]
+    # The image's turnserver binary carries this file capability; without it
+    # in the bounding set the kernel refuses to run it (exit 126).
+    cap_add: [NET_BIND_SERVICE]
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 64M
+          pids: 64
+
   # TURN for voice and the Web client (phase 2). Start with: --profile voice
   coturn:
     <<: *hardening
