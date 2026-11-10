@@ -128,6 +128,7 @@ impl SyncNetwork {
             // F2: a direct LAN connection to a peer that proved it shares a
             // server with us (sync never takes LAN addresses from the DHT).
             allow_lan: true,
+            relay_only: false,
         };
         // GAP-4: our pulls carry bindings signed with the identity key (once
         // unlocked), and channel logs are served to members only.
