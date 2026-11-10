@@ -59,7 +59,7 @@ export interface MockOptions {
   /** As the desktop shell would: report the core down, for the T8-01 screen. */
   coreDown?: 'missing' | 'start-failed' | 'crashed' | 'crash-loop' | 'keyring';
   /** joinCall rejects with this code, for the error states (screenshots). */
-  callError?: 'call-full' | 'relay-only' | 'not-implemented';
+  callError?: 'call-full' | 'relay-only' | 'in-call-elsewhere' | 'not-implemented';
   /**
    * As a member who just joined, before the channel key arrives (#288): sends
    * come back held (`pending-…`), then are sent (`arrive`), fail (`fail`), or

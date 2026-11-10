@@ -181,11 +181,20 @@ describe('voice room', () => {
   it.each([
     ['call-full', 'The call is full: up to 5 people.'],
     ['not-implemented', "Calls aren't available in this version yet."],
+    ['in-call-elsewhere', "You're already in this call on another computer. Leave it there to join from here."],
   ] as const)('says why a join failed: %s', async (code, text) => {
     const { join } = await setup({ callError: code });
     await join();
     expect(document.querySelector('.call-blocked')?.textContent).toContain(text);
     expect(screen.queryByRole('region', { name: 'Voice call' })).toBeNull();
+  });
+
+  it('a join refused with a code the UI does not know shows the generic reason, never the code', async () => {
+    const { join } = await setup({ callError: 'some-future-code' as unknown as 'call-full' });
+    await join();
+    const line = document.querySelector('.call-blocked')?.textContent ?? '';
+    expect(line).toContain("Couldn't join the call. You can try again.");
+    expect(line).not.toContain('some-future-code');
   });
 
   it('no microphone: stays in the call to listen, muted for everyone, and says so', async () => {
