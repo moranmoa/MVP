@@ -1970,11 +1970,12 @@ impl Task {
             SwarmEvent::Behaviour(BehaviourEvent::InvitePub(request_response::Event::Message {
                 peer,
                 message: request_response::Message::Request { request, channel, .. },
+                ..
             })) => self.on_invite_push(peer, request, channel),
             SwarmEvent::Behaviour(BehaviourEvent::InvitePub(request_response::Event::OutboundFailure {
                 peer, error, ..
             })) => debug!(%peer, %error, "invite publication not delivered"),
-            SwarmEvent::Behaviour(BehaviourEvent::InviteAsk(request_response::Event::Message { peer, message })) => {
+            SwarmEvent::Behaviour(BehaviourEvent::InviteAsk(request_response::Event::Message { peer, message, .. })) => {
                 match message {
                     request_response::Message::Request { request, channel, .. } => {
                         self.on_invite_ask(peer, request, channel)
