@@ -164,13 +164,13 @@ describe('context menus (B25)', () => {
     const rail = screen.getByRole('navigation', { name: /servers/i });
     const owned = within(rail).getAllByRole('button').find((b) => b.getAttribute('aria-current') === 'page')!;
     fireEvent.contextMenu(owned);
-    expect(menuItems()).toEqual(['Copy invite link', 'Server settings']);
+    expect(menuItems()).toEqual(['Copy invite link', 'Server settings', 'Move down']); // first in the rail (G-01)
     fireEvent.click(screen.getByRole('menuitem', { name: 'Server settings' }));
     expect(screen.getByRole('tab', { name: 'General' })).toBeTruthy();
     fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
 
     fireEvent.contextMenu(within(rail).getByRole('button', { name: /^Minecraft IL/ }));
-    expect(menuItems()).toEqual(['Copy invite link', 'Leave server']);
+    expect(menuItems()).toEqual(['Copy invite link', 'Leave server', 'Move up', 'Move down']);
   });
 });
 
