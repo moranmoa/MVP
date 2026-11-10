@@ -554,8 +554,9 @@ try {
     await check('V3.5', 'relay-only: no direct connection to A, and no direct listener', async () => {
       await sleep(3000); // turning it on closes direct links (#274)
       const now = sockets();
-      const direct = now.established.filter((s) => s.remote !== relayIp);
-      const listeners = now.listening.filter((s) => !s.local.startsWith('127.') && s.local !== '::1');
+      const loopback = (a) => a.startsWith('127.') || a === '::1';
+      const direct = now.established.filter((s) => s.remote !== relayIp && !loopback(s.remote));
+      const listeners = now.listening.filter((s) => !loopback(s.local));
       log('sockets before:', JSON.stringify(before), 'after:', JSON.stringify(now));
       if (direct.length) throw new Error(`still connected to ${direct.map((s) => s.remote).join(', ')}`);
       if (listeners.length) throw new Error(`still listening on ${listeners.map((s) => `${s.proto} ${s.local}:${s.port}`).join(', ')}`);
