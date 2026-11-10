@@ -96,29 +96,41 @@ describe('leave (member)', () => {
 
 describe('update-needed', () => {
   it('names the members still on an older version and says removing them is the other way', async () => {
+    const { sidebar } = await setup({ outdatedMembers: true });
+    const before = within(sidebar()).getByRole('heading', { level: 1 }).textContent;
+    const panel = openSettings(sidebar, 'General');
+    fireEvent.change(within(panel).getByLabelText('Server name'), { target: { value: 'New name' } });
+    await click(within(panel).getByRole('button', { name: 'Save name' }));
+    const alert = within(panel).getByRole('alert');
+    expect(alert.textContent).toContain('Some members use an older version of MVS');
+    // The names come from getUpdateNeeded.
+    await waitFor(() => expect(within(alert).getAllByRole('listitem').length).toBe(2));
+    expect(alert.textContent).toContain('or remove them from the server');
+    // Nothing happened: the name is unchanged.
+    expect(within(sidebar()).getByRole('heading', { level: 1 }).textContent).toBe(before);
+  });
+
+  it('a leave is never gated', async () => {
     const { rail } = await setup({ outdatedMembers: true });
     fireEvent.contextMenu(within(rail()).getByRole('button', { name: /^Minecraft IL/ }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Leave server' }));
-    const dialog = screen.getByRole('dialog', { name: 'Leave ⁨Minecraft IL⁩?' });
-    await click(within(dialog).getByRole('button', { name: 'Leave' }));
-    const alert = within(dialog).getByRole('alert');
-    expect(alert.textContent).toContain('Some members use an older version of MVS');
-    expect(within(alert).getAllByRole('listitem').length).toBe(2);
-    expect(alert.textContent).toContain('or remove them from the server');
-    // Nothing happened: the server is still there.
-    expect(within(rail()).getByRole('button', { name: /^Minecraft IL/ })).toBeTruthy();
+    await click(within(screen.getByRole('dialog', { name: 'Leave ⁨Minecraft IL⁩?' })).getByRole('button', { name: 'Leave' }));
+    await waitFor(() => expect(within(rail()).queryByRole('button', { name: /^Minecraft IL/ })).toBeNull());
   });
 });
 
 describe('a closed server', () => {
   it('stays listed, read-only, with no menu and no composer', async () => {
     const { rail } = await setup({ closedServer: true });
+    expect(document.querySelector('.voice-room')).not.toBeNull();
     const button = within(rail()).getByRole('button', { name: /^Minecraft IL, Closed/ });
     fireEvent.contextMenu(button);
     expect(screen.queryByRole('menu')).toBeNull();
     await openMinecraft(rail);
     expect(screen.getByRole('status', { name: '' }).textContent).toContain('The owner closed this server');
     expect(screen.queryByRole('textbox', { name: /^Message / })).toBeNull();
+    // No voice room either (the open servers have one).
+    expect(document.querySelector('.voice-room')).toBeNull();
   });
 
   it('when it is purged after 30 days, the app moves on with a toast', async () => {
@@ -126,6 +138,6 @@ describe('a closed server', () => {
     const id = (await core.listServers()).find((s) => s.name === 'Minecraft IL')!.id;
     act(() => (core as unknown as { emit: (e: string, p: unknown) => void }).emit('server.removed', { serverId: id, reason: 'closed' }));
     await waitFor(() => expect(within(rail()).queryByRole('button', { name: /^Minecraft IL/ })).toBeNull());
-    expect(screen.getAllByRole('status').some((s) => s.textContent === '⁨Minecraft IL⁩ was closed 30 days ago and is now removed from this device.')).toBe(true);
+    expect(screen.getAllByRole('status').some((s) => s.textContent === '⁨Minecraft IL⁩ was closed 30 days ago and no longer shows in the app.')).toBe(true);
   });
 });

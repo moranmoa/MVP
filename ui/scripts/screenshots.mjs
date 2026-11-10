@@ -753,11 +753,11 @@ for (const [lang, t] of [
 }
 {
   const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999&outdated=1', 'x');
-  await p.getByRole('button', { name: /^Minecraft IL/ }).click({ button: 'right' });
-  await p.getByRole('menuitem', { name: 'עזיבת השרת' }).click();
-  const d = p.getByRole('dialog', { name: /^לעזוב את/ });
-  await d.getByRole('button', { name: 'עזיבה' }).click();
-  await d.getByRole('alert').waitFor();
+  await p.getByRole('button', { name: 'הגדרות השרת' }).click();
+  const panel = p.getByRole('tabpanel');
+  await panel.getByLabel('שם השרת').fill('גיימרים ישראל HQ');
+  await panel.getByRole('button', { name: 'שמירת השם' }).click();
+  await panel.getByRole('alert').getByRole('listitem').first().waitFor();
   await shot(p, '255-server-update-needed-he');
   await p.close();
 }

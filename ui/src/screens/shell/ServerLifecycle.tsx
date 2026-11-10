@@ -1,8 +1,9 @@
 // Server lifecycle (#261, design docs/design/server-rename-leave-delete.md):
 // rename (in server settings), close for good (settings → Danger zone) and
-// leave (the server's menu in the rail). Every command can answer
+// leave (the server's menu in the rail). Rename and close answer
 // `update-needed` while a member still runs an older MVS; nothing was signed
-// then, and the UI says who, and that removing them is the other way out.
+// then. The UI asks the core who (`getUpdateNeeded`), and says that removing
+// them is the other way out. A leave is never gated.
 
 import { useEffect, useState, type FormEvent } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
@@ -10,24 +11,34 @@ import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import { useUserTextProps } from '../../app/textDir';
 import { Dialog, Name } from '../../components/common';
-import { isCoreError, useCore, type CoreError, type Member, type ServerSummary } from '../../core';
+import { isCoreError, useCore, type Member, type ServerSummary } from '../../core';
 import { SERVER_NAME_MAX } from '../../core/sanitize';
 import { displayName } from './MemberList';
 
 const NO_MEMBERS: Member[] = [];
 
-type Failure = { kind: 'update-needed'; memberIds?: string[] } | { kind: 'bad-name' } | { kind: 'other' };
+type Failure = { kind: 'update-needed' } | { kind: 'bad-name' } | { kind: 'other' };
 
 function failureOf(e: unknown): Failure {
-  if (isCoreError(e) && e.code === 'update-needed') return { kind: 'update-needed', memberIds: (e as CoreError).memberIds };
+  if (isCoreError(e) && e.code === 'update-needed') return { kind: 'update-needed' };
   if (isCoreError(e) && e.code === 'bad-request') return { kind: 'bad-name' };
   return { kind: 'other' };
 }
 
-/** `update-needed`: who still runs an older MVS (when the core says), and the two ways out. */
-export function UpdateNeeded({ server, memberIds }: { server: ServerSummary; memberIds?: string[] }) {
+/** `update-needed`: who still runs an older MVS, and the two ways out. */
+export function UpdateNeeded({ server }: { server: ServerSummary }) {
+  const core = useCore();
   const members = useStore(useAppStore(), (s) => s.members[server.id] ?? NO_MEMBERS);
-  const names = (memberIds ?? []).map((id) => members.find((m) => m.id === id)).filter((m): m is Member => !!m);
+  const [memberIds, setMemberIds] = useState<string[]>([]);
+  useEffect(() => {
+    let live = true;
+    // Without the list the alert still says what happened and what to do.
+    core.getUpdateNeeded(server.id).then((ids) => live && setMemberIds(ids), () => {});
+    return () => {
+      live = false;
+    };
+  }, [core, server.id]);
+  const names = memberIds.map((id) => members.find((m) => m.id === id)).filter((m): m is Member => !!m);
   return (
     <div className="warning update-needed" role="alert">
       <div>
@@ -58,7 +69,7 @@ export function UpdateNeeded({ server, memberIds }: { server: ServerSummary; mem
 
 function FailureNote({ server, failure }: { server: ServerSummary; failure: Failure | null }) {
   if (!failure) return null;
-  if (failure.kind === 'update-needed') return <UpdateNeeded server={server} memberIds={failure.memberIds} />;
+  if (failure.kind === 'update-needed') return <UpdateNeeded server={server} />;
   return (
     <p className="error small" role="alert">
       <FormattedMessage id={failure.kind === 'bad-name' ? 'name.invalidChars' : 'invite.failed'} />

@@ -833,10 +833,19 @@ export class MockCore implements CoreApi {
   // ---- server lifecycle (#261) ----------------------------------------------
 
   /** The rollout gate: with `outdatedMembers`, two members still run an old MVS. */
+  private outdatedOf(s: ServerState): Id[] {
+    if (!this.options.outdatedMembers) return [];
+    return s.members.filter((m) => m.id !== this.identity?.id).slice(0, 2).map((m) => m.id);
+  }
+
   private lifecycleGate(s: ServerState): void {
-    if (!this.options.outdatedMembers) return;
-    const others = s.members.filter((m) => m.id !== this.identity?.id).slice(0, 2);
-    throw err({ code: 'update-needed', memberIds: others.map((m) => m.id) });
+    if (this.outdatedOf(s).length) throw err({ code: 'update-needed' });
+  }
+
+  async getUpdateNeeded(serverId: Id): Promise<Id[]> {
+    const s = this.servers.get(serverId);
+    if (!s) throw err({ code: 'not-found' });
+    return this.outdatedOf(s);
   }
 
   async renameServer(serverId: Id, name: string): Promise<ServerSummary> {
@@ -858,8 +867,8 @@ export class MockCore implements CoreApi {
   async leaveServer(serverId: Id): Promise<void> {
     const s = this.servers.get(serverId);
     if (!s) throw err({ code: 'not-found' });
+    // A leave is never gated: it always succeeds here (CONFORMANCE).
     if (s.summary.ownerId === this.identity?.id) throw err({ code: 'not-allowed' });
-    this.lifecycleGate(s);
     await this.wait(150);
     this.servers.delete(serverId);
     for (const c of s.channels) this.channelIndex.delete(c.channel.id);

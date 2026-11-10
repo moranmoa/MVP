@@ -130,8 +130,6 @@ export interface CoreError {
   detail?: CoreDownDetail;
   /** 1-based word positions that were not recognised (restore). */
   positions?: number[];
-  /** With `update-needed`, when the core says: the members still to update. */
-  memberIds?: Id[];
 }
 
 /** Result of checking the words of the current recovery challenge. */

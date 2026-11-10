@@ -30,6 +30,7 @@ const COMMANDS = Object.freeze({
   renameServer: ['serverId', 'name'],
   leaveServer: ['serverId'],
   closeServer: ['serverId'],
+  getUpdateNeeded: ['serverId'],
   createInvite: ['serverId', 'input'],
   listInvites: ['serverId'],
   revokeInvite: ['serverId', 'inviteId'],

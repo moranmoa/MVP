@@ -74,15 +74,17 @@ export interface CoreCommands {
   joinServer(link: string): Promise<JoinStatus>;
   cancelJoin(link: string): Promise<void>;
   /**
-   * Server lifecycle (#261). Each answers `update-needed` while a member's MVS
-   * is too old, and signs nothing then. Rename: owner or admin; the name is
+   * Server lifecycle (#261). Rename and close answer `update-needed` while a
+   * member's MVS is too old (`getUpdateNeeded` says who), and sign nothing then. Rename: owner or admin; the name is
    * trimmed, 1–100 characters, no bidi or control characters (`bad-request`).
    */
   renameServer(serverId: Id, name: string): Promise<ServerSummary>;
-  /** Any member but the owner. Then `server.removed { reason: 'left' }`. */
+  /** Any member but the owner; never `update-needed`. Then `server.removed { reason: 'left' }`. */
   leaveServer(serverId: Id): Promise<void>;
   /** Owner only, for good. Then `server.closed`; 30 days later `server.removed { reason: 'closed' }`. */
   closeServer(serverId: Id): Promise<void>;
+  /** Who blocks rename and close: members whose MVS is too old. Empty when the gate is open. */
+  getUpdateNeeded(serverId: Id): Promise<Id[]>;
   /**
    * Invites (#214), moderator and up (`not-allowed` below). `expiresMs` is the last
    * moment a join is accepted (ms since epoch; absent = never, `bad-request` if

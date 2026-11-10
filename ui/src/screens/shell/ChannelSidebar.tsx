@@ -161,7 +161,8 @@ export function ChannelSidebar({
             );
           })}
         </ul>
-        <VoiceRoomEntry serverId={server.id} myId={identity.id} engine={engine} />
+        {/* A closed server is read-only (#261): no calls; the core ends any call there. */}
+        {!server.closed && <VoiceRoomEntry serverId={server.id} myId={identity.id} engine={engine} />}
       </nav>
       <CallBar myId={identity.id} engine={engine} />
       <footer className="me-panel">
