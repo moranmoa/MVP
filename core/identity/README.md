@@ -12,8 +12,16 @@ A user's identity, made from 12 recovery words ("מילות שחזור").
          └─ PRK = HKDF-SHA256-Extract(salt = "mvs/identity/v1", seed)
              ├─ HKDF-Expand(PRK, "identity/ed25519", 32)  → Ed25519 identity key (the user's ID)
              ├─ HKDF-Expand(PRK, "local-storage/key", 32) → local storage encryption key
-             └─ HKDF-Expand(PRK, "device/ed25519/" ‖ u32be(n), 32) → device key n (Subkey::Device)
+             ├─ HKDF-Expand(PRK, "device/ed25519/" ‖ u32be(n), 32) → device key n (Subkey::Device)
+             ├─ HKDF-Expand(PRK, "backup/key", 32)            → backup encryption key (BackupKeys::enc_key)
+             └─ HKDF-Expand(PRK, "backup/write/ed25519", 32)  → backup write key w (BackupKeys::write_key)
+                 └─ tag = BLAKE3 derive_key("mvs/backup-tag/v1", w_pub)  (public; holders recompute it)
 ```
+
+- The backup keys (`Identity::backup_keys`, design note
+  `docs/design/restore-servers-from-network.md`) are neither the identity key
+  nor derived from it, so the backup's holders can't link the tag to the
+  user's ID. They're frozen like the rest (`backup_key_vectors`).
 
 - Every step is deterministic: the same words give the same keys on every
   device. Vectors computed independently in Python are in

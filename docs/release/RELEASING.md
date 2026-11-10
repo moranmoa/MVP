@@ -314,6 +314,12 @@ PowerShell on your normal (online) PC, in the repo:
 Electron bumps follow [ELECTRON-UPGRADE.md](ELECTRON-UPGRADE.md): the Windows
 desktop e2e must be re-run green on the bump itself.
 
+The Windows binaries link the C runtime statically (`+crt-static` in
+`core/.cargo/config.toml`; release.yml fails on any VC++ runtime import). So
+Microsoft's CRT security fixes reach users **only through our rebuilds**,
+not through Windows Update. When Microsoft ships a CRT security fix, rebuild
+with the updated MSVC toolchain and release promptly.
+
 A manifest expires (at most 30 days, 14 by default). Clients refuse it after
 that, which stops an attacker freezing users on an old release. Before it
 runs out, re-sign the same release without a new build: download

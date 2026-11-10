@@ -133,6 +133,11 @@ pub fn serve<W: Write + Send>(
         };
         out.write(&reply)?;
         answered += 1;
+        // Signed out: answered, so stop; the shell restarts the core, which
+        // finishes the wipe before opening anything (`finish_sign_out`).
+        if core.signed_out() {
+            break;
+        }
     }
     Ok(answered)
 }

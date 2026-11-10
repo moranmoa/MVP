@@ -129,7 +129,31 @@ fn main() -> ExitCode {
         eprintln!("mvs-core: can't prepare the data dir: {e}");
         return ExitCode::FAILURE;
     }
-    let sync: Option<Arc<SyncNetwork>> = match args.relay {
+    // A sign-out: its files go before anything opens them, only once the
+    // keychain says the secret is gone. On failure stop (the shell
+    // retries): never start with the old node key.
+    let secret_present = match identity::Vault::new(OsKeychain::new()).state() {
+        Ok(identity::VaultState::Empty) => Some(false),
+        Ok(_) => Some(true),
+        Err(_) => None,
+    };
+    match api::finish_sign_out(&dir.join("core.db"), &dir.join("sync"), secret_present) {
+        Ok(true) => eprintln!("mvs-core: signed out; starting fresh"),
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("mvs-core: can't finish the sign-out: {}", e.kind());
+            return ExitCode::FAILURE;
+        }
+    }
+    // A sign-out still pending (the keychain couldn't be read): offline, so
+    // the network never starts with the old node key.
+    let relay = if api::sign_out_pending(&dir.join("core.db")) {
+        eprintln!("mvs-core: a sign-out is pending; starting offline");
+        None
+    } else {
+        args.relay
+    };
+    let sync: Option<Arc<SyncNetwork>> = match relay {
         None => None,
         Some(relay) => {
             let relay = match api::syncnet::relay_addr(&relay) {

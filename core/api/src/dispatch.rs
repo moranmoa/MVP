@@ -137,6 +137,16 @@ struct AnswersArg {
 }
 
 #[derive(Deserialize)]
+struct SignOutArg {
+    /// This identity's 12 words: proof the user can restore later.
+    #[serde(default)]
+    words: Option<Vec<String>>,
+    /// "I accept losing this account": signs out without the words.
+    #[serde(default, rename = "withoutWords")]
+    without_words: bool,
+}
+
+#[derive(Deserialize)]
 struct RestoreArg {
     words: Vec<String>,
     /// Country, birth date and language, asked again (spec, age §).
@@ -253,6 +263,10 @@ impl Core {
                 ok(self.restore_identity_with(words, input))
             }
             "updateProfile" => ok(self.update_profile(args::<InputArg<ProfileInput>>(raw)?.input)),
+            "signOut" => {
+                let SignOutArg { words, without_words } = args(raw)?;
+                ok(self.sign_out(words, without_words))
+            }
 
             "listServers" => ok(self.list_servers()),
             "listChannels" => ok(self.list_channels(&args::<ServerArg>(raw)?.server_id)),
