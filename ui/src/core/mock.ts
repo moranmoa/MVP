@@ -803,6 +803,28 @@ export class MockCore implements CoreApi {
     return ch.channel;
   }
 
+  async moveChannel(serverId: Id, channelId: Id, before?: Id, after?: Id): Promise<Channel[]> {
+    await this.wait(80);
+    const s = this.servers.get(serverId);
+    if (!s) throw err({ code: 'not-found' });
+    if (s.summary.ownerId !== this.identity?.id || s.summary.closed) throw err({ code: 'not-allowed' });
+    const from = s.channels.findIndex((c) => c.channel.id === channelId);
+    if (from < 0) throw err({ code: 'not-found' });
+    const moving = s.channels[from];
+    const rest = s.channels.filter((c) => c !== moving);
+    const at = before ? rest.findIndex((c) => c.channel.id === before) : after ? rest.findIndex((c) => c.channel.id === after) + 1 : rest.length;
+    if ((before || after) && at < 0 + (after ? 1 : 0)) throw err({ code: 'bad-request' });
+    rest.splice(at, 0, moving);
+    s.channels = rest;
+    // Like the core's rebalance: short evenly spread keys, none ending in 0.
+    const digits = '123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+    s.channels.forEach((c, i) => {
+      c.channel = { ...c.channel, position: digits[Math.min(i * 2, digits.length - 1)] + (i * 2 >= digits.length ? 'z'.repeat(1 + i) : '') };
+      this.emit('channel.updated', c.channel);
+    });
+    return s.channels.map((c) => c.channel);
+  }
+
   async updateChannel(channelId: Id, input: { name?: string; adult?: boolean }): Promise<Channel> {
     await this.wait(200);
     const ch = this.channelIndex.get(channelId);
