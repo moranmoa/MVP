@@ -94,6 +94,8 @@ pub const SYNC_EVERY: Duration = Duration::from_secs(2);
 /// moderator makes when they read the join), and how often it looks.
 pub const KEY_WAIT: Duration = Duration::from_secs(5);
 const KEY_WAIT_POLL: Duration = Duration::from_millis(200);
+/// At most one network pull per this, while a send waits for its key.
+const KEY_WAIT_PULL: Duration = Duration::from_secs(1);
 /// A join that found nobody online is retried in the background: first
 /// after `JOIN_RETRY_FIRST`, doubling up to `JOIN_RETRY_MAX`, for at most
 /// `JOIN_RETRY_FOR` (until then the inviter may still come online).
@@ -1237,6 +1239,7 @@ impl Core {
             return Err(ErrorCode::BadRequest.into());
         }
         let deadline = Instant::now() + KEY_WAIT;
+        let mut pulled = Instant::now();
         loop {
             let sent = self.run(|inner, ports, events| {
                 let (server, channel) = inner.find_channel(channel_id)?;
@@ -1262,8 +1265,12 @@ impl Core {
                 return Err(ErrorCode::NotAllowed.into());
             }
             std::thread::sleep(KEY_WAIT_POLL);
-            // The re-key may already be with a peer: pull it in.
-            let _ = self.sync_now();
+            // The background sync usually brings the re-key; pull it in
+            // ourselves too, but at most once a second (sec-lead).
+            if pulled.elapsed() >= KEY_WAIT_PULL {
+                pulled = Instant::now();
+                let _ = self.sync_now();
+            }
         }
     }
 
