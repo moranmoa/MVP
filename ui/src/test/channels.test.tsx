@@ -81,3 +81,14 @@ describe('channels (owner)', () => {
     expect(within(channels()).queryByRole('button', { name: /^Edit channel/ })).toBeNull();
   });
 });
+
+describe('channel rows with the owner gear', () => {
+  it('only the owner\'s rows reserve room for the gear, so badges stay clear of it', async () => {
+    const { channels } = await setup();
+    const row = within(channels()).getByRole('button', { name: /^clips/ }).closest('li')!;
+    expect(row.classList.contains('has-edit')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: /^Minecraft IL/ }));
+    const other = (await within(channels()).findByRole('button', { name: /^general/ })).closest('li')!;
+    expect(other.classList.contains('has-edit')).toBe(false);
+  });
+});

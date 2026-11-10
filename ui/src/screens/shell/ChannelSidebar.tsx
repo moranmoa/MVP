@@ -124,7 +124,7 @@ export function ChannelSidebar({
               c.unread && !active ? intl.formatMessage({ id: 'unread.label' }) : null,
             ];
             return (
-              <li key={c.id} className="channel-row">
+              <li key={c.id} className={owner ? 'channel-row has-edit' : 'channel-row'}>
                 <button
                   type="button"
                   className={`channel ${active ? 'active' : ''} ${c.unread && !active ? 'unread' : ''}`}
