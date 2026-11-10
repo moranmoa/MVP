@@ -182,14 +182,13 @@ export class Store {
       on('server.closed', ({ serverId }) =>
         this.set({ servers: this.state.servers.map((x) => (x.id === serverId ? { ...x, closed: true } : x)) }),
       ),
-      on('channel.updated', (c) =>
-        this.set({
-          channels: {
-            ...this.state.channels,
-            [c.serverId]: (this.state.channels[c.serverId] ?? []).map((x) => (x.id === c.id ? c : x)),
-          },
-        }),
-      ),
+      on('channel.updated', (c) => {
+        const list = this.state.channels[c.serverId] ?? [];
+        const moved = list.find((x) => x.id === c.id)?.position !== c.position;
+        this.set({ channels: { ...this.state.channels, [c.serverId]: list.map((x) => (x.id === c.id ? c : x)) } });
+        // G-11: the order is the core's list order; a new position means re-read it.
+        if (moved) this.reloadChannels(c.serverId);
+      }),
       on('channel.added', (c) =>
         this.set({
           channels: {
@@ -265,6 +264,27 @@ export class Store {
   /** Every room carries the device's relay-only flag (#272), so "Join" is off before trying. */
   private setRoom(room: VoiceRoom): void {
     this.set({ voiceRooms: { ...this.state.voiceRooms, [room.serverId]: room }, relayOnly: room.relayOnly === true });
+  }
+
+  private reloadTimers = new Map<Id, ReturnType<typeof setTimeout>>();
+  /** Re-reads a server's channel list (coalesced: one move updates several channels). */
+  reloadChannels(serverId: Id): void {
+    clearTimeout(this.reloadTimers.get(serverId));
+    this.reloadTimers.set(
+      serverId,
+      setTimeout(() => {
+        this.reloadTimers.delete(serverId);
+        void this.core
+          .listChannels(serverId)
+          .then((channels) => this.set({ channels: { ...this.state.channels, [serverId]: channels } }))
+          .catch(() => {});
+      }, 0),
+    );
+  }
+
+  /** G-11: sets the order the core answered a move with. */
+  setChannels(serverId: Id, channels: Channel[]): void {
+    this.set({ channels: { ...this.state.channels, [serverId]: channels } });
   }
 
   window(channelId: Id): MessageWindow {
