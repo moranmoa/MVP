@@ -372,7 +372,7 @@
   "signOut.noWordsWarning": "Without the recovery words, the account can't be restored, on this computer or a new one. Other computers still signed in to it keep it.",
   "signOut.noWordsPhrase": "sign out without words",
   "signOut.noWordsType": "To confirm, type: {phrase}",
-  "signOut.noWordsConfirm": "Sign out without the words",
+  "signOut.noWordsConfirm": "Sign out without words",
   "signOut.back": "Back",
   "signOut.error.incomplete": "Fill in all 12 words.",
   "signOut.error.other-account": "These are another account's words. Use this account's words.",

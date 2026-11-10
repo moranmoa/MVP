@@ -49,7 +49,7 @@ function clearLogFiles(dir) {
 /** The native dialog's text, in both languages (main has no catalogue). */
 const WITHOUT_WORDS_DIALOG = {
   type: 'warning',
-  buttons: ['ביטול / Cancel', 'יציאה בלי המילים / Sign out without the words'],
+  buttons: ['ביטול / Cancel', 'יציאה בלי מילים / Sign out without words'],
   defaultId: 0,
   cancelId: 0,
   noLink: true,

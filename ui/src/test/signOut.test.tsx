@@ -87,14 +87,14 @@ describe('sign out (#304)', () => {
     await click("I don't have my words");
     expect(dialog.textContent).toContain("the account can't be restored, on this computer or a new one");
     expect(dialog.textContent).toContain('Other computers still signed in to it keep it.');
-    const go = within(dialog).getByRole('button', { name: 'Sign out without the words' }) as HTMLButtonElement;
+    const go = within(dialog).getByRole('button', { name: 'Sign out without words' }) as HTMLButtonElement;
     expect(go.disabled).toBe(true);
     const box = within(dialog).getByRole('textbox', { name: /To confirm, type/ });
     fireEvent.change(box, { target: { value: 'sign out' } });
     expect(go.disabled).toBe(true);
     fireEvent.change(box, { target: { value: ' Sign out without words ' } });
     expect(go.disabled).toBe(false);
-    await click('Sign out without the words');
+    await click('Sign out without words');
     expect(await core.getIdentity()).toBeNull();
   });
 });

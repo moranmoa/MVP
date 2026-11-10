@@ -517,7 +517,7 @@ for (const [query, name, opts, steps] of [
   await dialog.getByRole('button', { name: 'אין לי את המילים' }).click();
   await dialog.locator('.field input').fill('יציאה בלי מילים');
   await shot(p, '303-sign-out-no-words-he');
-  await dialog.getByRole('button', { name: 'יציאה בלי המילים' }).click();
+  await dialog.getByRole('button', { name: 'יציאה בלי מילים' }).click();
   await p.getByText('כבר יש לי חשבון').waitFor();
   await p.waitForTimeout(300);
   await shot(p, '305-after-sign-out-he');

@@ -372,7 +372,7 @@
   "signOut.noWordsWarning": "בלי מילות השחזור, אי אפשר יהיה לשחזר את החשבון, לא במחשב הזה ולא במחשב חדש. מחשבים אחרים שעדיין מחוברים לחשבון ממשיכים להשתמש בו.",
   "signOut.noWordsPhrase": "יציאה בלי מילים",
   "signOut.noWordsType": "כדי לאשר, צריך להקליד: {phrase}",
-  "signOut.noWordsConfirm": "יציאה בלי המילים",
+  "signOut.noWordsConfirm": "יציאה בלי מילים",
   "signOut.back": "חזרה",
   "signOut.error.incomplete": "צריך למלא את כל 12 המילים.",
   "signOut.error.other-account": "אלה מילים של חשבון אחר. צריך את המילים של החשבון הזה.",
