@@ -99,6 +99,69 @@ fn keys_are_domain_separated() {
     assert_eq!(parse(LEGAL).identity().signing_key().to_bytes(), secrets[0]);
 }
 
+/// The backup keys (docs/design/restore-servers-from-network.md): HKDF
+/// labels `backup/key` and `backup/write/ed25519` under the same PRK, and
+/// the tag `blake3::derive_key("mvs/backup-tag/v1", w_pub)`. Pinned: a
+/// change would orphan every stored backup. The `enc` values were checked
+/// independently with Python's hashlib/hmac (HKDF-SHA256 over the BIP-39
+/// seed); `w` and the tag are pinned from this implementation.
+#[test]
+fn backup_key_vectors() {
+    let vectors = [
+        (
+            LEGAL,
+            "810371ac5c987d3459319c0de604d11ee11370d9ddca7eb4d7a79924bff5d1a7",
+            "89e05e868605fdd2103bdae2d1364a110e05df154f9751c24d0ee1d415d367a0",
+            "3c23422d3c7f52cad586ca73e664bdf21a88147ca679693164ebc847cddf3aa9",
+        ),
+        (
+            ZOO,
+            "e8a26da80b860e38cc64b5950787f2b80d5dd7a3708e78392a20a5bfba28df8b",
+            "2c81b7e2c68846124afdd41b76463bb00afab95f1b36dcce11b93cebccccf26f",
+            "fcdbaff9444abfc70278f8b650251905f2ea3fbee8c64d4b11802cf59d396d5d",
+        ),
+    ];
+    for (words, enc, write_pub, tag) in vectors {
+        let keys = parse(words).identity().backup_keys();
+        assert_eq!(hex::encode(keys.enc_key()), enc, "{words}");
+        assert_eq!(hex::encode(keys.write_key().verifying_key().to_bytes()), write_pub, "{words}");
+        assert_eq!(hex::encode(keys.tag()), tag, "{words}");
+    }
+    assert_eq!(identity::BACKUP_TAG_CONTEXT, "mvs/backup-tag/v1");
+}
+
+/// The backup keys are none of the other keys, and the tag can't be had
+/// from the identity key: it hashes the separate write key.
+#[test]
+fn backup_keys_are_separate_from_the_identity() {
+    let id = parse(LEGAL).identity();
+    let keys = id.backup_keys();
+    let secrets = [
+        id.signing_key().to_bytes(),
+        *id.storage_key().expose_secret(),
+        id.subkey(Subkey::Device(0)).to_bytes(),
+        *keys.enc_key(),
+        keys.write_key().to_bytes(),
+    ];
+    for i in 0..secrets.len() {
+        for j in i + 1..secrets.len() {
+            assert_ne!(secrets[i], secrets[j], "keys {i} and {j}");
+        }
+    }
+    let me = id.public_key();
+    let w_pub = keys.write_key().verifying_key().to_bytes();
+    assert_ne!(w_pub, *me.as_bytes());
+    assert_ne!(keys.tag(), *me.as_bytes());
+    assert_ne!(keys.tag(), identity::backup_tag(me.as_bytes()), "the tag must not come from the ID");
+    assert_eq!(keys.tag(), identity::backup_tag(&w_pub));
+    // Deterministic, and another person's words give another tag.
+    assert_eq!(parse(LEGAL).identity().backup_keys().tag(), keys.tag());
+    assert_ne!(parse(ZOO).identity().backup_keys().tag(), keys.tag());
+    // Debug shows the tag only.
+    let shown = format!("{keys:?}");
+    assert!(!shown.contains(&format!("{:?}", keys.enc_key())), "{shown}");
+}
+
 // --- Round trip ------------------------------------------------------------
 
 #[test]

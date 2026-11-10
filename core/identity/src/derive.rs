@@ -15,6 +15,12 @@ const SALT: &[u8] = b"mvs/identity/v1";
 const INFO_IDENTITY: &[u8] = b"identity/ed25519";
 const INFO_STORAGE: &[u8] = b"local-storage/key";
 const INFO_DEVICE: &[u8] = b"device/ed25519/";
+const INFO_BACKUP_KEY: &[u8] = b"backup/key";
+const INFO_BACKUP_WRITE: &[u8] = b"backup/write/ed25519";
+/// BLAKE3 `derive_key` context for the backup tag (design note
+/// `docs/design/restore-servers-from-network.md`). Holders compute it from
+/// the public write key, so it stays public and frozen.
+pub const BACKUP_TAG_CONTEXT: &str = "mvs/backup-tag/v1";
 
 const KEY_LEN: usize = 32;
 
@@ -76,6 +82,53 @@ impl Identity {
 
     pub fn subkey(&self, subkey: Subkey) -> SigningKey {
         SigningKey::from_bytes(&expand(&self.prk, &subkey.info()))
+    }
+
+    /// The keys of my encrypted backup (restore servers from the network).
+    /// None of them is the identity key or derived from it, so the backup's
+    /// holders can't link it to my ID.
+    pub fn backup_keys(&self) -> BackupKeys {
+        let write = SigningKey::from_bytes(&expand(&self.prk, INFO_BACKUP_WRITE));
+        let tag = backup_tag(&write.verifying_key().to_bytes());
+        BackupKeys { enc: expand(&self.prk, INFO_BACKUP_KEY), write, tag }
+    }
+}
+
+/// Where a backup lives: `derive_key("mvs/backup-tag/v1", w_pub)`. A holder
+/// stores a blob under `tag` only if it is signed by the write key whose
+/// public key gives `tag`.
+pub fn backup_tag(write_public: &[u8; 32]) -> [u8; 32] {
+    blake3::derive_key(BACKUP_TAG_CONTEXT, write_public)
+}
+
+/// The backup's keys: `enc` encrypts it (XChaCha20-Poly1305), `write`
+/// authorises every version holders store, `tag` is where it lives.
+/// Secret parts are zeroized on drop; `Debug` shows only the tag.
+pub struct BackupKeys {
+    enc: Zeroizing<[u8; KEY_LEN]>,
+    write: SigningKey,
+    tag: [u8; 32],
+}
+
+impl BackupKeys {
+    /// The backup's encryption key. Do not copy it anywhere else.
+    pub fn enc_key(&self) -> &[u8; KEY_LEN] {
+        &self.enc
+    }
+
+    /// Signs each version of the backup; never the identity key.
+    pub fn write_key(&self) -> &SigningKey {
+        &self.write
+    }
+
+    pub fn tag(&self) -> [u8; 32] {
+        self.tag
+    }
+}
+
+impl fmt::Debug for BackupKeys {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BackupKeys").field("tag", &self.tag).finish_non_exhaustive()
     }
 }
 
