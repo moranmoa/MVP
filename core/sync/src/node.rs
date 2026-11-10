@@ -105,7 +105,6 @@ const MAX_PULLS_IN_FLIGHT: usize = 3;
 /// refills between rounds, so a peer that holds none of our servers' logs
 /// (and answers each at once, empty) is never pushed over its limit.
 const PULLS_PER_PEER_ROUND: usize = 20;
-/// Most pulls `pull_all` sends one peer in one anti-entropy round: under the/// answering side's burst (`PULL_BURST`) and what its rate (`PULL_RATE`)/// refills between rounds, so a peer that holds none of our servers' logs/// (and answers each at once, empty) is never pushed over its limit.const PULLS_PER_PEER_ROUND: usize = 20;
 /// How a control log's name ends (`log_name`): queued first.
 const CONTROL_SUFFIX: &str = "/control";
 /// Per-peer pull buckets remembered (also after disconnecting).
@@ -3457,7 +3456,11 @@ mod tests {
         bootstrap: Option<u16>,
         access: Access,
     ) -> (Node, mpsc::Receiver<NodeEvent>) {
-        let dir = std::env::temp_dir().join(format!("sync-gap4-{}-{name}", std::process::id()));
+        // One folder per test node: parallel tests reuse names ("member",
+        // "stranger"), and a shared folder would share its key and store.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("sync-gap4-{}-{n}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let config = NodeConfig {
             // Nothing listens there: no relay in this test.
