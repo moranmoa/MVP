@@ -10,18 +10,14 @@ import { useStore } from '../../app/store';
 import { Avatar, Dialog, Name } from '../../components/common';
 import { AlertIcon, HangUpIcon, MicIcon, MicOffIcon, PhoneIcon, SpeakerIcon } from '../../components/icons';
 import { useCore, type Id, type Member } from '../../core';
-import { useVoiceEngine, type VoiceEngineView } from '../../voice';
+import { useVoiceEngine, type PeerFailure, type VoiceEngineView } from '../../voice';
 
-export type PeerFailure = 'failed' | 'refused';
-
-/** The voice engine (piece D, ui/src/voice) as the call UI uses it. */
+/**
+ * The voice engine (piece D, ui/src/voice) as the call UI uses it. `peerFailed`
+ * comes from the engine (#245): `failed` (the connection failed) or `refused` (a
+ * security check failed: fingerprint or unverified signal).
+ */
 export interface CallEngine extends VoiceEngineView {
-  /**
-   * People there's no audio with, and why: `failed` (the connection failed) or
-   * `refused` (a security check failed: fingerprint or unverified signal). From
-   * the engine view once voice D adds it (#245); until then only `?voiceSim=peerFailed|peerRefused`.
-   */
-  peerFailed: Record<Id, PeerFailure>;
   /** No microphone, denied, or one picked after joining without one: listen-only. */
   noMic: boolean;
 }
@@ -31,7 +27,7 @@ export interface CallEngine extends VoiceEngineView {
  * it down: each useVoiceEngine makes its own WebRTC engine.
  *
  * For demos and QA with the mock, `?voiceSim=noMic|rejoin|peerFailed|peerRefused`
- * acts out the engine's failure states.
+ * acts out the engine's failure states, on top of what the engine reports.
  */
 export function useCallEngine(myId: Id): CallEngine {
   const store = useAppStore();
@@ -50,8 +46,8 @@ export function useCallEngine(myId: Id): CallEngine {
     if (noMic && !meMuted) void core.setMuted(true).catch(() => {});
   }, [noMic, meMuted, core]);
   const simFailure: PeerFailure | null = sim === 'peerFailed' ? 'failed' : sim === 'peerRefused' ? 'refused' : null;
-  const fromEngine = (view as { peerFailed?: Record<Id, PeerFailure> }).peerFailed ?? NO_FAILURES;
-  return { ...view, error, noMic, peerFailed: simFailure && other ? { ...fromEngine, [other]: simFailure } : fromEngine };
+  const peerFailed = simFailure && other ? { ...view.peerFailed, [other]: simFailure } : view.peerFailed;
+  return { ...view, error, noMic, peerFailed };
 }
 
 /** The short code the app shows for someone not (yet) in the member list. */
@@ -68,7 +64,6 @@ const ERROR_TEXT: Record<string, string> = {
 };
 
 const NO_MEMBERS: Member[] = [];
-const NO_FAILURES: Record<Id, PeerFailure> = {};
 const FAILURE_TEXT: Record<PeerFailure, [text: string, hint: string]> = {
   failed: ['call.peerFailed', 'call.peerFailedHint'],
   refused: ['call.peerRefused', 'call.peerRefusedHint'],

@@ -12,10 +12,12 @@ import { cleanCall, cleanVoiceRoom, guardCore } from '../core/sanitize';
 
 // jsdom has no WebRTC: the engine (piece D) has its own tests in src/voice. Here it
 // is an idle engine with a working mic; ?voiceSim drives the failure states.
+const fakeEngine = vi.hoisted(() => ({ peerFailed: {} as Record<string, 'failed' | 'refused'> }));
 vi.mock('../voice', () => ({
   useVoiceEngine: () => ({
     ready: true,
     speaking: {},
+    peerFailed: fakeEngine.peerFailed,
     setMicMuted: () => {},
     inputs: [],
     outputs: [],
@@ -227,6 +229,21 @@ describe('voice room', () => {
       expect(within(roster).queryByText('No voice connection')).toBeNull();
     } finally {
       window.history.pushState({}, '', '/');
+    }
+  });
+
+  it('shows the per-person state the engine reports (#245), by reason', async () => {
+    const { core, join } = await setup();
+    const [server] = await core.listServers();
+    const others = (await core.getVoiceRoom(server.id)).participants.map((p) => p.userId);
+    fakeEngine.peerFailed = { [others[0]]: 'refused', [others[1]]: 'failed' };
+    try {
+      await join();
+      const roster = screen.getByRole('list', { name: 'In the voice chat' });
+      expect(within(roster).getAllByText('Connection blocked for security')).toHaveLength(1);
+      expect(within(roster).getAllByText('No voice connection')).toHaveLength(1);
+    } finally {
+      fakeEngine.peerFailed = {};
     }
   });
 
