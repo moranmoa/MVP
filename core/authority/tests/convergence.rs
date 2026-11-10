@@ -48,7 +48,13 @@ fn random_action(rng: &mut StdRng, author: u8, invites: &[RecordId], rich: bool)
                 },
             }
         }
-        4 if rich => Action::Unban { target },
+        4 if rich => match rng.gen_range(0..20u32) {
+            // Rare: a close ends the scenario.
+            0 => Action::ServerClose,
+            1..=4 => Action::Leave { cut: cut(rng) },
+            5..=8 => Action::ServerEdit { name: format!("s{author}") },
+            _ => Action::Unban { target },
+        },
         5 => Action::Invite {
             expires_ms: *[0, 30, 60].choose(rng).unwrap(),
             max_uses: rng.gen_range(0..3),
@@ -84,7 +90,8 @@ fn heads(known: &BTreeSet<RecordId>, all: &BTreeMap<RecordId, Record>) -> Vec<Re
 /// occasionally sync with each other, so plenty of records are concurrent.
 /// If `rich`, kicks and revokes carry random cuts, and unbans (far more
 /// often than an owner would), channel creates, renames and deletes (the
-/// owner's may win, the rest are refused) and age claims are written too.
+/// owner's may win, the rest are refused), age claims, renames, leaves and
+/// (rarely) closes are written too.
 /// Returns the records in
 /// the order they were written.
 fn random_scenario(rng: &mut StdRng, steps: usize, rich: bool) -> Vec<Record> {
