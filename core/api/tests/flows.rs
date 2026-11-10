@@ -2019,6 +2019,81 @@ fn no_keyring_is_its_own_error() {
     assert!(core.get_app_info().is_ok(), "the rest of the core still answers");
 }
 
+/// T8-02 piece 4: a short link joins (the envelope fetched, opened and
+/// checked), junk under its handle doesn't stop a join (C3), a forged
+/// publication is refused (C1), and the envelope stops being served when
+/// its invite is used up, revoked or expired (S1).
+#[test]
+fn short_links_join_and_die_with_their_invite() {
+    use api::crypto::invite::{handle, seal, InvitePublication};
+    use api::invite_link::{parse, InviteLink};
+
+    let world = World::new();
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let server = owner.core.create_server("Short", AgeRestriction::None).unwrap();
+    let server_id = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let made = owner.core.create_invite(&server.id, Some(common::NOW_MS + 3_600_000), Some(2)).unwrap();
+    let invite_id = records::RecordId::from_bytes(hex::decode(&made.id).unwrap().try_into().unwrap());
+
+    // Short, and shown again to its inviter; the v0 link is still made.
+    let payload = made.short_link.strip_prefix("mvs://join/").unwrap();
+    assert!(payload.len() <= 51 && !payload.contains('/'), "{} characters", payload.len());
+    assert!(made.link.contains(&made.id));
+    let listed = owner.core.list_invites(&server.id).unwrap();
+    assert_eq!(listed.iter().find(|i| i.id == made.id).unwrap().short_link, made.short_link);
+    let Ok(InviteLink::V1 { key, .. }) = parse(&made.short_link) else { panic!("not a v1 link") };
+    let h = handle(&key);
+
+    // Someone joins by it.
+    let joined = |peer: &Peer| peer.core.list_servers().unwrap().iter().any(|s| s.id == server.id);
+    let guest = world.peer();
+    sign_up(&guest, "Guest");
+    guest.core.join_server(&made.short_link).unwrap();
+    assert!(joined(&guest), "joined by the short link");
+    owner.core.sync_now().unwrap();
+
+    // Only junk under the handle: garbage, and a publication with the right
+    // k and envelope shape but signed by someone else. No join.
+    world.network.drop_invite(h);
+    world.network.serve_invite(server_id, h, b"junk", false);
+    let forged_envelope = seal(&key, &server_id, &invite_id, &[0; 32]);
+    let forged = InvitePublication::sign(&SigningKey::from_bytes(&[9; 32]), invite_id, h, forged_envelope).unwrap();
+    world.network.serve_invite(server_id, h, &forged.encode(), false);
+    let third = world.peer();
+    sign_up(&third, "Third");
+    third.core.join_server(&made.short_link).unwrap();
+    assert!(!joined(&third), "joined on a forged publication");
+    // The owner's next round serves the real one again, after the junk: it joins.
+    owner.core.sync_now().unwrap();
+    third.core.join_server(&made.short_link).unwrap();
+    assert!(joined(&third), "the junk blocked the real answer");
+
+    // That was its second use: used up, so no longer served or listed.
+    owner.core.sync_now().unwrap();
+    owner.core.sync_now().unwrap();
+    // Only the junk planted above is left under the handle.
+    let left = world.network.fetch_invite(h);
+    assert!(!left.iter().filter_map(|p| InvitePublication::decode(p)).any(|p| p != forged), "a used-up invite is still served");
+    let listed = owner.core.list_invites(&server.id).unwrap();
+    assert!(listed.iter().find(|i| i.id == made.id).unwrap().short_link.is_empty());
+
+    // Revoked: gone at once.
+    let open = owner.core.create_invite(&server.id, None, None).unwrap();
+    let Ok(InviteLink::V1 { key, .. }) = parse(&open.short_link) else { panic!("not a v1 link") };
+    assert_eq!(world.network.fetch_invite(handle(&key)).len(), 1);
+    owner.core.revoke_invite(&server.id, &open.id).unwrap();
+    assert!(world.network.fetch_invite(handle(&key)).is_empty(), "served after a revoke");
+
+    // Expired: gone at the next round.
+    let soon = owner.core.create_invite(&server.id, Some(common::NOW_MS + 7_200_000), None).unwrap();
+    let Ok(InviteLink::V1 { key, .. }) = parse(&soon.short_link) else { panic!("not a v1 link") };
+    assert_eq!(world.network.fetch_invite(handle(&key)).len(), 1);
+    *world.clock.0.lock().unwrap() += 10_000_000;
+    owner.core.sync_now().unwrap();
+    assert!(world.network.fetch_invite(handle(&key)).is_empty(), "served after it expired");
+}
+
 /// #208: invites made, listed and revoked; moderator and up, and a revoke
 /// only by the invite's author or someone ranked above it.
 #[test]

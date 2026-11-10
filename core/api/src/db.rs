@@ -30,14 +30,31 @@ CREATE INDEX IF NOT EXISTS stubs_server ON stubs (server);
 CREATE TABLE IF NOT EXISTS send_states (id BLOB PRIMARY KEY, state TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS servers (id BLOB PRIMARY KEY, joined_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS blocked (user BLOB PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS invite_publications (
+    invite BLOB PRIMARY KEY,
+    server BLOB NOT NULL,
+    bytes BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS invite_publications_server ON invite_publications (server);
 ";
 
 const PROFILE_KEY: &str = "profile";
 const PROFILE_AD: &[u8] = b"mvs/api/profile/v1";
 const SECRET_AD: &[u8] = b"mvs/api/server-secret/v1";
+const INVITE_KEY_AD: &[u8] = b"mvs/api/invite-key/v1";
 
 fn secret_key(server: ServerId) -> String {
     format!("server-secret/{}", hex::encode(server.as_bytes()))
+}
+
+/// T8-02: a short link's invite key k, per invite (S4: sealed like the
+/// server secret).
+fn invite_key_key(server: ServerId, invite: RecordId) -> String {
+    format!("{}{}", invite_key_prefix(server), hex::encode(invite.as_bytes()))
+}
+
+fn invite_key_prefix(server: ServerId) -> String {
+    format!("invite-key/{}/", hex::encode(server.as_bytes()))
 }
 const NONCE_LEN: usize = 24;
 
@@ -138,6 +155,92 @@ impl Db {
         );
         let secret: [u8; 32] = plain.as_slice().try_into().map_err(|_| internal("secret size"))?;
         Ok(Some(Zeroizing::new(secret)))
+    }
+
+    /// T8-02 (S4): a short link's invite key, sealed with the identity's
+    /// storage key, bound to its server and invite.
+    pub fn save_invite_key(
+        &self,
+        key: &[u8; 32],
+        server: ServerId,
+        invite: RecordId,
+        k: &[u8; 16],
+    ) -> Result<(), CoreError> {
+        let mut nonce = [0u8; NONCE_LEN];
+        OsRng.fill_bytes(&mut nonce);
+        let aad = [INVITE_KEY_AD, server.as_bytes().as_slice(), invite.as_bytes().as_slice()].concat();
+        let sealed = XChaCha20Poly1305::new(key.into())
+            .encrypt(XNonce::from_slice(&nonce), Payload { msg: k, aad: &aad })
+            .map_err(internal)?;
+        self.set(&invite_key_key(server, invite), &[nonce.as_slice(), &sealed].concat())
+    }
+
+    pub fn load_invite_key(
+        &self,
+        key: &[u8; 32],
+        server: ServerId,
+        invite: RecordId,
+    ) -> Result<Option<Zeroizing<[u8; 16]>>, CoreError> {
+        let Some(blob) = self.get(&invite_key_key(server, invite))? else { return Ok(None) };
+        if blob.len() < NONCE_LEN {
+            return Err(internal("short invite key"));
+        }
+        let (nonce, sealed) = blob.split_at(NONCE_LEN);
+        let aad = [INVITE_KEY_AD, server.as_bytes().as_slice(), invite.as_bytes().as_slice()].concat();
+        let plain = Zeroizing::new(
+            XChaCha20Poly1305::new(key.into())
+                .decrypt(XNonce::from_slice(nonce), Payload { msg: sealed, aad: &aad })
+                .map_err(internal)?,
+        );
+        let k: [u8; 16] = plain.as_slice().try_into().map_err(|_| internal("invite key size"))?;
+        Ok(Some(Zeroizing::new(k)))
+    }
+
+    /// T8-02: a verified invite publication we serve while its invite is
+    /// live. First wins: false if that invite already has one.
+    pub fn put_invite_publication(
+        &self,
+        server: ServerId,
+        invite: RecordId,
+        bytes: &[u8],
+    ) -> Result<bool, CoreError> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO invite_publications (invite, server, bytes) VALUES (?1, ?2, ?3)",
+                params![invite.as_bytes().as_slice(), server.as_bytes().as_slice(), bytes],
+            )
+            .map(|changed| changed == 1)
+            .map_err(internal)
+    }
+
+    pub fn invite_publications(&self, server: ServerId) -> Result<Vec<(RecordId, Vec<u8>)>, CoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT invite, bytes FROM invite_publications WHERE server = ?1")
+            .map_err(internal)?;
+        let rows = stmt
+            .query_map([server.as_bytes().as_slice()], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(internal)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (invite, bytes) = row.map_err(internal)?;
+            let invite: [u8; 32] = invite.try_into().map_err(|_| internal("invite id size"))?;
+            out.push((RecordId::from_bytes(invite), bytes));
+        }
+        Ok(out)
+    }
+
+    /// The invite died: its publication and key go (S1).
+    pub fn delete_invite(&self, server: ServerId, invite: RecordId) -> Result<(), CoreError> {
+        self.conn
+            .execute("DELETE FROM invite_publications WHERE invite = ?1", [invite.as_bytes().as_slice()])
+            .map_err(internal)?;
+        self.conn
+            .execute("DELETE FROM kv WHERE key = ?1", [invite_key_key(server, invite)])
+            .map(drop)
+            .map_err(internal)
     }
 
     pub fn put_record(&self, record: &Record) -> Result<(), CoreError> {
@@ -249,9 +352,17 @@ impl Db {
             .map_err(internal)
     }
 
+    /// Also purges the server's invite publications and short-link keys.
     pub fn remove_server(&self, server: ServerId) -> Result<(), CoreError> {
         self.conn
             .execute("DELETE FROM servers WHERE id = ?1", [server.as_bytes().as_slice()])
+            .map_err(internal)?;
+        self.conn
+            .execute("DELETE FROM invite_publications WHERE server = ?1", [server.as_bytes().as_slice()])
+            .map_err(internal)?;
+        let prefix = invite_key_prefix(server);
+        self.conn
+            .execute("DELETE FROM kv WHERE substr(key, 1, ?2) = ?1", params![prefix, prefix.len() as i64])
             .map(drop)
             .map_err(internal)
     }

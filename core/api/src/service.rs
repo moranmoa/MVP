@@ -496,7 +496,7 @@ impl Core {
     /// Resolves with the first status; the outcome follows as `join.status`.
     pub fn join_server(&self, link: &str) -> CoreResult<JoinStatus> {
         let link = link.trim().to_owned();
-        if model::parse_invite_link(&link).is_none() {
+        if crate::invite_link::parse(&link).is_err() {
             return Ok(JoinStatus::Invalid { link });
         }
         let searching = JoinStatus::Searching { link: link.clone() };
@@ -516,20 +516,70 @@ impl Core {
         Ok(searching)
     }
 
-    /// One attempt: open the server, fetch what reachable peers hold, join.
+    /// One attempt, for either link format (`crate::invite_link`).
     fn try_join(&self, link: &str) -> CoreResult<JoinStatus> {
-        let Some((server, invite, secret)) = model::parse_invite_link(link) else {
-            return Ok(JoinStatus::Invalid { link: link.to_owned() });
-        };
+        use crate::invite_link::InviteLink;
+        match crate::invite_link::parse(link) {
+            Ok(InviteLink::V0 { server, invite, secret }) => {
+                let fetched = self.open_and_fetch(server, &secret);
+                self.run(|inner, ports, events| {
+                    inner.join(ports, server, invite, &secret, link, fetched, events)
+                })
+            }
+            Ok(InviteLink::V1 { key, server_prefix }) => self.try_join_short(link, &key, &server_prefix),
+            Err(_) => Ok(JoinStatus::Invalid { link: link.to_owned() }),
+        }
+    }
+
+    /// Opens `server` with its secret and fetches what reachable peers hold.
+    fn open_and_fetch(&self, server: ServerId, secret: &[u8; 32]) -> Vec<Record> {
         // GAP-4: only the secret lets us ask for the server's logs.
         let general = BTreeSet::from([model::default_channel(server)]);
-        self.ports.network.open_server(server, &secret, &general);
+        self.ports.network.open_server(server, secret, &general);
         // Fetch without the lock, so UI commands don't wait on the network.
-        let fetched: Vec<Record> =
-            self.ports.network.fetch(server).into_iter().filter(|r| r.server() == server).collect();
-        self.run(|inner, ports, events| {
-            inner.join(ports, server, invite, &secret, link, fetched, events)
-        })
+        self.ports.network.fetch(server).into_iter().filter(|r| r.server() == server).collect()
+    }
+
+    /// T8-02: a short link carries only k and a server-ID prefix. Ask peers
+    /// for the envelope under `h`, and try each answer (C3, untrusted):
+    /// it must be named `h`, open under k for this prefix, name its own
+    /// invite (`names`), and, once the server's control log is in, be
+    /// signed by that invite's author (C1). The genesis check against the
+    /// full server ID is the join's own. The first answer that joins wins;
+    /// a bad one only moves on to the next.
+    fn try_join_short(&self, link: &str, key: &[u8; 16], prefix: &[u8; 16]) -> CoreResult<JoinStatus> {
+        use crate::crypto::invite::{handle, open, InvitePublication};
+        let h = handle(key);
+        let mut status = JoinStatus::NobodyOnline { link: link.to_owned() };
+        for answer in self.ports.network.fetch_invite(h) {
+            let Some(publication) = InvitePublication::decode(&answer) else { continue };
+            if *publication.handle() != h {
+                continue;
+            }
+            let Some(opened) = open(key, prefix, publication.envelope()) else { continue };
+            if !publication.names(key, &opened) {
+                continue;
+            }
+            let server = opened.server;
+            let fetched = self.open_and_fetch(server, &opened.secret);
+            if fetched.is_empty() {
+                continue;
+            }
+            let author = ServerView::build(server, &Log::new(server, fetched.clone()))
+                .and_then(|view| view.state.invites.get(&opened.invite).map(|invite| invite.author));
+            if !author.is_some_and(|author| publication.verify(&author)) {
+                status = JoinStatus::Invalid { link: link.to_owned() };
+                continue;
+            }
+            let joined = self.run(|inner, ports, events| {
+                inner.join(ports, server, opened.invite, &opened.secret, link, fetched, events)
+            })?;
+            match joined {
+                JoinStatus::Invalid { .. } | JoinStatus::NobodyOnline { .. } => status = joined,
+                _ => return Ok(joined),
+            }
+        }
+        Ok(status)
     }
 
     /// Joins that found nobody online, tried again with backoff until they
@@ -925,10 +975,13 @@ impl Core {
             Action::Invite { expires_ms: expires_ms.unwrap_or(0), max_uses: max_uses.unwrap_or(0) };
         let invite = self.control_record(server_id, action)?;
         let server = parse_server(server_id)?;
-        let secret = self.lock().secret(server)?.ok_or(ErrorCode::Internal)?;
+        let mut inner = self.lock();
+        let secret = inner.secret(server)?.ok_or(ErrorCode::Internal)?;
+        let short_link = inner.publish_invite(&self.ports, server, invite, &secret)?;
         Ok(CreatedInvite {
             id: model::hex_id(invite.as_bytes()),
             link: model::invite_link(server, invite, &secret),
+            short_link: short_link.as_str().to_owned(),
             expires_at: expires_ms,
             max_uses: max_uses.filter(|n| *n > 0),
         })
@@ -944,22 +997,31 @@ impl Core {
         if view.state.role(me) < authority::Role::Moderator {
             return Err(ErrorCode::NotAllowed.into());
         }
-        Ok(view
-            .records
-            .iter()
-            .filter(|r| r.kind() == Kind::Invite)
-            .filter_map(|r| {
-                let invite = view.state.invites.get(&r.id())?;
-                Some(InviteInfo {
-                    id: model::hex_id(r.id().as_bytes()),
-                    created_by: model::hex_id(invite.author.as_bytes()),
-                    expires_at: (invite.expires_ms > 0).then_some(invite.expires_ms),
-                    max_uses: invite.max_uses,
-                    uses: invite.uses,
-                    revoked: invite.revoked,
-                })
-            })
-            .collect())
+        let storage = inner.me.as_ref().map(|me| *me.identity.storage_key().expose_secret());
+        let now = self.ports.clock.now_ms();
+        let mut out = Vec::new();
+        for r in view.records.iter().filter(|r| r.kind() == Kind::Invite) {
+            let Some(invite) = view.state.invites.get(&r.id()) else { continue };
+            // A short link only while live (S1), and only where its key is.
+            let short_link = match (storage, view.live_invite_author(r.id(), now)) {
+                (Some(storage), Some(_)) => inner
+                    .db
+                    .load_invite_key(&storage, server, r.id())?
+                    .map(|k| crate::invite_link::encode_v1(&k, &server).as_str().to_owned())
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            out.push(InviteInfo {
+                id: model::hex_id(r.id().as_bytes()),
+                created_by: model::hex_id(invite.author.as_bytes()),
+                expires_at: (invite.expires_ms > 0).then_some(invite.expires_ms),
+                max_uses: invite.max_uses,
+                uses: invite.uses,
+                revoked: invite.revoked,
+                short_link,
+            });
+        }
+        Ok(out)
     }
 
     /// Rust addition (`revokeInvite`, #208): its author, or someone ranked
@@ -976,7 +1038,10 @@ impl Core {
                 return Err(ErrorCode::NotFound.into());
             }
         }
-        self.control_action(server_id, Action::RevokeInvite { invite })
+        self.control_action(server_id, Action::RevokeInvite { invite })?;
+        // S1: its short link stops being served at once.
+        let mut inner = self.lock();
+        inner.refresh_invites(&self.ports, parse_server(server_id)?)
     }
 
     // ---- messages ---------------------------------------------------------
@@ -1126,6 +1191,14 @@ impl Core {
                 inner.load(*server)?;
                 inner.open_sync(&self.ports, *server)?;
             }
+            // T8-02: publications members pushed (C1), then serve only what
+            // is still live (S1).
+            for (server, bytes) in self.ports.network.take_invite_publications() {
+                inner.accept_pushed_invite(&self.ports, server, &bytes)?;
+            }
+            for server in &servers {
+                inner.refresh_invites(&self.ports, *server)?;
+            }
             servers
         };
         // Fetch without the lock, so UI commands don't wait on the network.
@@ -1148,7 +1221,9 @@ impl Core {
                 }
                 let after = inner.view(server)?;
                 if after.is_kicked(&me) {
+                    // Purges its invite publications and keys too.
                     inner.db.remove_server(server)?;
+                    ports.network.drop_server_invites(server);
                     events
                         .push(Event::ServerRemoved { server_id: model::hex_id(server.as_bytes()) });
                 } else if changed {
@@ -1468,6 +1543,85 @@ impl Inner {
         let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?;
         let key = *me.identity.storage_key().expose_secret();
         self.db.save_server_secret(&key, server, secret)
+    }
+
+    /// T8-02: a short link for my new invite. A fresh k (kept sealed, S4),
+    /// the envelope sealed under it, the publication signed by me (the
+    /// invite's author, C1), stored and served and pushed to members.
+    fn publish_invite(
+        &mut self,
+        ports: &Ports,
+        server: ServerId,
+        invite: RecordId,
+        secret: &[u8; 32],
+    ) -> CoreResult<Zeroizing<String>> {
+        use crate::crypto::invite::{handle, seal, InvitePublication};
+        let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?;
+        let mut k = Zeroizing::new([0u8; crate::invite_link::KEY_LEN]);
+        OsRng.fill_bytes(k.as_mut());
+        let h = handle(&k);
+        let envelope = seal(&k, &server, &invite, secret);
+        let publication = InvitePublication::sign(me.identity.signing_key(), invite, h, envelope)
+            .ok_or(ErrorCode::Internal)?;
+        let storage = *me.identity.storage_key().expose_secret();
+        self.db.save_invite_key(&storage, server, invite, &k)?;
+        let bytes = publication.encode();
+        self.db.put_invite_publication(server, invite, &bytes)?;
+        ports.network.serve_invite(server, h, &bytes, true);
+        Ok(crate::invite_link::encode_v1(&k, &server))
+    }
+
+    /// T8-02 (S1): serve the publications of `server`'s live invites, and
+    /// drop and forget those whose invite died (revoked, expired, used up,
+    /// author kicked). Run on every authority change: each sync round, and
+    /// right after a revoke. Serving again is harmless (first wins).
+    fn refresh_invites(&mut self, ports: &Ports, server: ServerId) -> CoreResult<()> {
+        use crate::crypto::invite::InvitePublication;
+        let now = ports.clock.now_ms();
+        let held = self.db.invite_publications(server)?;
+        let view = self.view(server)?;
+        let mut dead = Vec::new();
+        for (invite, bytes) in held {
+            let Some(publication) = InvitePublication::decode(&bytes) else {
+                dead.push((invite, None));
+                continue;
+            };
+            if view.live_invite_author(invite, now).is_some() {
+                ports.network.serve_invite(server, *publication.handle(), &bytes, false);
+            } else {
+                dead.push((invite, Some(*publication.handle())));
+            }
+        }
+        for (invite, handle) in dead {
+            if let Some(handle) = handle {
+                ports.network.drop_invite(handle);
+            }
+            self.db.delete_invite(server, invite)?;
+        }
+        Ok(())
+    }
+
+    /// T8-02 (C1): a publication a member pushed, kept and served only if
+    /// it is for a live invite of a server I'm in and signed by that
+    /// invite's author. Served without pushing it on (no loops); members
+    /// that bind later get it from sync.
+    fn accept_pushed_invite(&mut self, ports: &Ports, server: ServerId, bytes: &[u8]) -> CoreResult<()> {
+        use crate::crypto::invite::InvitePublication;
+        if !self.db.has_server(server)? {
+            return Ok(());
+        }
+        let Some(publication) = InvitePublication::decode(bytes) else { return Ok(()) };
+        let view = self.view(server)?;
+        let Some(author) = view.live_invite_author(publication.invite(), ports.clock.now_ms()) else {
+            return Ok(());
+        };
+        if !publication.verify(&author) {
+            return Ok(());
+        }
+        if self.db.put_invite_publication(server, publication.invite(), bytes)? {
+            ports.network.serve_invite(server, *publication.handle(), bytes, false);
+        }
+        Ok(())
     }
 
     fn summary(&self, server: ServerId) -> CoreResult<ServerSummary> {

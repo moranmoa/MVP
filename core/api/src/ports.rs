@@ -130,6 +130,40 @@ pub trait Network: Send + Sync {
         let _ = id;
     }
 
+    /// T8-02: serve an invite publication under its envelope handle, to
+    /// anyone who asks for exactly that handle; with `announce`, also push
+    /// it to `server`'s connected members. The core calls it only for a
+    /// verified publication of a live invite (C1, S1). False if not served
+    /// (already served, or the network can't).
+    fn serve_invite(&self, server: ServerId, handle: [u8; 32], publication: &[u8], announce: bool) -> bool {
+        let _ = (server, handle, publication, announce);
+        false
+    }
+
+    /// T8-02: stop serving one envelope handle (the invite died: S1).
+    fn drop_invite(&self, handle: [u8; 32]) {
+        let _ = handle;
+    }
+
+    /// T8-02: stop serving every envelope of `server` (left, or its secret
+    /// rotated: S5).
+    fn drop_server_invites(&self, server: ServerId) {
+        let _ = server;
+    }
+
+    /// T8-02: every answer reachable peers give for an envelope handle.
+    /// Untrusted (C3): the core tries each.
+    fn fetch_invite(&self, handle: [u8; 32]) -> Vec<Vec<u8>> {
+        let _ = handle;
+        Vec::new()
+    }
+
+    /// T8-02: publications members pushed since the last call, for the core
+    /// to verify (C1) before serving any.
+    fn take_invite_publications(&self) -> Vec<(ServerId, Vec<u8>)> {
+        Vec::new()
+    }
+
     /// GAP-4: sync `server` members-only, with its secret, and these
     /// channels (the ones authority knows). Called at load and whenever
     /// the channels change; opening again is harmless.
@@ -143,10 +177,15 @@ pub trait Network: Send + Sync {
     }
 }
 
-/// All cores sharing one instance see each other's records instantly.
+/// An envelope handle, its server and the publication served under it.
+type ServedInvite = ([u8; 32], ServerId, Vec<u8>);
+
+/// All cores sharing one instance see each other's records instantly, and
+/// every served invite publication (as if each core were a reachable peer).
 #[derive(Default)]
 pub struct LoopbackNetwork {
     records: Mutex<HashMap<ServerId, Vec<Record>>>,
+    invites: Mutex<Vec<ServedInvite>>,
 }
 
 impl LoopbackNetwork {
@@ -166,6 +205,28 @@ impl Network for LoopbackNetwork {
 
     fn fetch(&self, server: ServerId) -> Vec<Record> {
         self.records.lock().expect("not poisoned").get(&server).cloned().unwrap_or_default()
+    }
+
+    fn serve_invite(&self, server: ServerId, handle: [u8; 32], publication: &[u8], _: bool) -> bool {
+        let mut invites = self.invites.lock().expect("not poisoned");
+        if invites.iter().any(|(h, _, p)| *h == handle && p == publication) {
+            return false;
+        }
+        invites.push((handle, server, publication.to_vec()));
+        true
+    }
+
+    fn drop_invite(&self, handle: [u8; 32]) {
+        self.invites.lock().expect("not poisoned").retain(|(h, _, _)| *h != handle);
+    }
+
+    fn drop_server_invites(&self, server: ServerId) {
+        self.invites.lock().expect("not poisoned").retain(|(_, s, _)| *s != server);
+    }
+
+    fn fetch_invite(&self, handle: [u8; 32]) -> Vec<Vec<u8>> {
+        let invites = self.invites.lock().expect("not poisoned");
+        invites.iter().filter(|(h, _, _)| *h == handle).map(|(_, _, p)| p.clone()).collect()
     }
 }
 
