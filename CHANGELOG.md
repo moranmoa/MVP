@@ -23,7 +23,7 @@ Never put the relay domain or any IP address here.
 
 ### ידוע
 - **שיחות קול עובדות כרגע רק כשכל המשתתפים באותה רשת** (למשל אותו Wi-Fi). אנחנו עובדים על שיחות בין רשתות שונות.
-- בפעם הראשונה Windows עשוי לשאול אם לאפשר ל-MVS גישה לרשת. מומלץ לאשר; בלי זה החיבור עובר רק דרך הממסר.
+- בפעם הראשונה Windows עשוי לשאול אם לאפשר ל-MVS גישה לרשת. מומלץ לאשר (גם ברשתות פרטיות); בלי זה החיבור עובר רק דרך הממסר, ושיחות קול לא יתחברו. אפשר לשנות את זה אחר כך בהגדרות חומת האש של Windows.
 
 ---
 
@@ -42,7 +42,7 @@ Never put the relay domain or any IP address here.
 
 ### Known
 - **Voice calls currently work only when everyone is on the same network** (for example the same Wi-Fi). Calls across networks are in progress.
-- On first run, Windows may ask whether to allow MVS on the network. Please allow it; otherwise connections go through the relay only.
+- On first run, Windows may ask whether to allow MVS on the network. Please allow it (also on private networks); otherwise connections go through the relay only, and voice calls won't connect. You can change this later in Windows Firewall settings.
 
 ## [0.2.5] - 2026-11-06
 
