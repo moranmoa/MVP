@@ -43,6 +43,10 @@
       {
         "from": "build/mvs-config.json",
         "to": "mvs-config.json"
+      },
+      {
+        "from": "build/THIRD-PARTY-NOTICES.txt",
+        "to": "THIRD-PARTY-NOTICES.txt"
       }
     ],
     "afterPack": "build/fuses.js",
