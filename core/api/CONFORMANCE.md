@@ -89,10 +89,10 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 - `Member.role: 'owner' | 'admin' | 'moderator' | 'member'`.
 - Voice calls (voice v1, piece B; `src/voice.rs`). IDs are 64 lower-case hex, and `identity` is a user ID.
   - Calls happen only in each server's one voice room, whose ID is derived: `blake3::derive_key("mvs/voice-room/v1", serverId)`. There is no channel record for it, no 18+ gate, and text channels carry no calls.
-  - `getVoiceRoom(serverId)` returns `VoiceRoom { serverId, roomId, participants: { userId, muted }[] }`.
+  - `getVoiceRoom(serverId)` returns `VoiceRoom { serverId, roomId, participants: { userId, muted }[], relayOnly }`.
     - Participants: me first when I'm in it, at most 5 (the first to arrive), built from verified hellos only, each dropped 30 s after we last received one.
     - Errors: `not-found` for a server I don't have (a kicked member's core removes it), `not-allowed` if I'm not a member or I'm kicked.
-  - `joinCall(channelId)` takes the room ID and returns `CallState { channelId, participants: { identity, muted }[], full }`, me first; `channelId` is the room ID. It leaves any other call first.
+  - `joinCall(channelId)` takes the room ID and returns `CallState { channelId, participants: { identity, muted }[], full, relayOnly }`, me first; `channelId` is the room ID. It leaves any other call first.
     - Errors:
       - `not-found`: an unknown ID.
       - `not-allowed`: a text channel's ID, not a member, or kicked.
@@ -120,6 +120,17 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
     - Hellos and byes go only to members who could join that call themselves, so a call in an 18+ channel isn't shown to anyone else.
     - A full call's refusal counts only if it comes from someone already in that call, within 10 s of joining.
   - `applyUpdate` answers `not-allowed` during a call.
+- Relay-only (GAP-6r), per device:
+  - `setRelayOnly(on: boolean)` returns `null`. It's stored in the core database and needs no identity. On:
+    - the network keeps no direct listener, makes no direct dials, and reaches peers only through relay circuits, and direct connections already open are closed (#274);
+    - my call ends at once (a bye to the others, then a `call.state` with `participants: []` and `relayOnly: true`);
+    - `joinCall` answers `relay-only` until it's off.
+  - At start, `mvs-core` reads the stored value before the network starts, and the node starts relay-only from the first moment (`NodeConfig.relay_only`: no direct listener, no bootstrap dial, no punching). It fails closed: a database that can't be opened or read, or a value other than off, means on.
+  - Shown up front:
+    - `AppInfo.relayOnly` from `getAppInfo`;
+    - `VoiceRoom.relayOnly`, so the UI can disable "Join" before trying;
+    - `CallState.relayOnly`.
+  - After a change, one `voice.room` per server at the next sync round carries the new value.
 - `CoreError.code`, voice: `'call-full' | 'relay-only'`.
 - Invites (#208), all moderator and up (`not-allowed` below that):
   - `createInvite(serverId, input?: { expiresMs?: number, maxUses?: number })`

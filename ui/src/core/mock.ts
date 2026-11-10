@@ -62,6 +62,8 @@ export interface MockOptions {
   callError?: 'call-full' | 'relay-only' | 'not-implemented';
   /** Every demo voice room starts with 5 people in it (full). */
   roomFull?: boolean;
+  /** Start with relay-only on (#272): no direct connections, calls off. */
+  relayOnly?: boolean;
   /** Server lifecycle (#261): two members run an old MVS, so rename and close answer `update-needed` (a leave never does). */
   outdatedMembers?: boolean;
   /** The demo server "Minecraft IL" starts closed by its owner (read-only). */
@@ -1017,7 +1019,12 @@ export class MockCore implements CoreApi {
   }
 
   private room(serverId: Id): VoiceRoom {
-    return { serverId, roomId: this.roomIdOf(serverId), participants: this.roster(serverId).map((p) => ({ ...p })) };
+    return {
+      serverId,
+      roomId: this.roomIdOf(serverId),
+      participants: this.roster(serverId).map((p) => ({ ...p })),
+      ...(this.relayOnly ? { relayOnly: true } : {}),
+    };
   }
 
   private setRoster(serverId: Id, participants: VoiceParticipant[]): void {
@@ -1051,6 +1058,7 @@ export class MockCore implements CoreApi {
 
   async joinCall(channelId: Id): Promise<CallState> {
     await this.wait(200);
+    if (this.relayOnly) throw err({ code: 'relay-only' });
     if (this.options.callError) throw err({ code: this.options.callError });
     const serverId = [...this.servers.keys()].find((id) => this.roomIdOf(id) === channelId);
     // Text channels don't carry calls any more (voice-room amendment).
@@ -1134,7 +1142,25 @@ export class MockCore implements CoreApi {
   }
 
   async getAppInfo(): Promise<AppInfo> {
-    return { version: '0.1.0-alpha', updateChannel: this.releaseChannel };
+    return { version: '0.1.0-alpha', updateChannel: this.releaseChannel, relayOnly: this.relayOnly };
+  }
+
+  /** Relay-only (#272): on ends my call; every room then says so (the core: at the next sync round). */
+  private relayOnlySet: boolean | null = null;
+  private get relayOnly(): boolean {
+    return this.relayOnlySet ?? !!this.options.relayOnly;
+  }
+
+  async setRelayOnly(on: boolean): Promise<void> {
+    await this.wait(100);
+    this.relayOnlySet = on;
+    const serverId = this.callServer();
+    if (on && this.call) {
+      this.emit('call.state', { ...this.call, participants: [], full: false, relayOnly: true });
+      this.call = null;
+      if (serverId) this.rooms.set(serverId, this.roster(serverId).filter((p) => p.userId !== this.identity?.id));
+    }
+    for (const id of this.servers.keys()) this.emit('voice.room', this.room(id));
   }
 
   async setUpdateChannel(channel: UpdateChannel): Promise<void> {

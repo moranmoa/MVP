@@ -593,8 +593,11 @@ fn dispatcher_errors() {
         serde_json::from_str(&peer.core.handle(r#"{"cmd":"getAppInfo"}"#)).unwrap();
     assert_eq!(
         info["ok"],
-        serde_json::json!({ "version": "0.1.0-alpha", "updateChannel": "stable" })
+        serde_json::json!({ "version": "0.1.0-alpha", "updateChannel": "stable", "relayOnly": false })
     );
+    // A bad argument is a bad request, not a change.
+    assert_eq!(error(r#"{"cmd":"setRelayOnly","args":{"on":"yes"}}"#), "bad-request");
+    assert!(!peer.core.get_app_info().unwrap().relay_only);
     peer.core.handle(r#"{"cmd":"setUpdateChannel","args":{"channel":"beta"}}"#);
     assert_eq!(peer.core.get_app_info().unwrap().update_channel, UpdateChannel::Beta);
 }
@@ -2555,6 +2558,144 @@ fn a_call_between_members() {
     hub.relay_only.store(false, std::sync::atomic::Ordering::SeqCst);
     owner.core.leave_call().unwrap();
     assert!(!owner.core.in_call());
+}
+
+/// A network that records each relay-only setting it was given.
+struct RelayOnlyNet {
+    world: Arc<LoopbackNetwork>,
+    applied: std::sync::Mutex<Vec<bool>>,
+}
+
+impl RelayOnlyNet {
+    fn new(world: &Arc<LoopbackNetwork>) -> Arc<RelayOnlyNet> {
+        Arc::new(RelayOnlyNet { world: world.clone(), applied: Default::default() })
+    }
+
+    fn applied(&self) -> Vec<bool> {
+        self.applied.lock().unwrap().clone()
+    }
+}
+
+impl Network for RelayOnlyNet {
+    fn publish(&self, record: &records::Record) {
+        self.world.publish(record);
+    }
+
+    fn fetch(&self, server: ServerId) -> Vec<records::Record> {
+        self.world.fetch(server)
+    }
+
+    fn set_relay_only(&self, on: bool) {
+        self.applied.lock().unwrap().push(on);
+    }
+}
+
+fn voice_rooms(events: Vec<Event>) -> Vec<VoiceRoom> {
+    events
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::VoiceRoom(room) => Some(room),
+            _ => None,
+        })
+        .collect()
+}
+
+/// GAP-6r: `setRelayOnly` is stored, given to the network at start and on
+/// each change, ends my call (with a bye), refuses calls while on, and is
+/// shown up front on `getAppInfo`, `getVoiceRoom`, `voice.room` and
+/// `call.state`. It survives a restart.
+#[test]
+fn relay_only_is_stored_applied_and_turns_calls_off() {
+    let dir = std::env::temp_dir().join(format!("mvs-api-relayonly-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("core.db");
+    let world = World::new();
+    let hub = Arc::new(VoiceHub::default());
+    let net = RelayOnlyNet::new(&world.network);
+    let open = |net: Arc<RelayOnlyNet>, secrets: Arc<MemoryStore>| {
+        world.peer_on(net, secrets, Some(db.clone()), Arc::new(PendingGroupKeys))
+    };
+    let owner = open(net.clone(), Arc::new(MemoryStore::new()));
+    let owner_id = sign_up(&owner, "Owner").id;
+    let alice = world.peer();
+    let alice_id = sign_up(&alice, "Alice").id;
+    let server = owner.core.create_server("Quiet", AgeRestriction::None).unwrap();
+    alice.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    alice.core.sync_now().unwrap();
+    let peers = [(owner_id.as_str(), &owner), (alice_id.as_str(), &alice)];
+    for (id, peer) in peers {
+        hub.connect(peer, id);
+    }
+
+    // Off by default, and the network was told so at start.
+    assert_eq!(net.applied(), [false]);
+    assert!(!owner.core.get_app_info().unwrap().relay_only);
+    let room = owner.core.get_voice_room(&server.id).unwrap();
+    assert!(!room.relay_only);
+    let state = owner.core.join_call(&room.room_id).unwrap();
+    assert!(!state.relay_only);
+    hub.pump(&peers);
+    alice.core.join_call(&room.room_id).unwrap();
+    hub.pump(&peers);
+    assert!(owner.core.in_call());
+
+    // On, through the dispatcher: my call ends at once with a bye, and the
+    // ended call.state says why.
+    owner.events.take();
+    let answer: serde_json::Value =
+        serde_json::from_str(&owner.core.handle(r#"{"cmd":"setRelayOnly","args":{"on":true}}"#))
+            .unwrap();
+    assert_eq!(answer, serde_json::json!({ "ok": null }));
+    assert!(!owner.core.in_call());
+    let ended = call_states(owner.events.take());
+    let last = ended.last().expect("a call.state for the ended call");
+    assert_eq!((last.participants.len(), last.relay_only), (0, true));
+    let sent = hub.pump(&peers);
+    assert!(sent.iter().any(|(from, to, blob)| {
+        *from == user_key(&owner_id)
+            && *to == user_key(&alice_id)
+            && String::from_utf8_lossy(blob).contains(r#"\"kind\":\"bye\""#)
+    }));
+    assert_eq!(net.applied(), [false, true]);
+
+    // Up front: app info, the room, and one voice.room per server at the
+    // next tick. Joining is refused.
+    assert!(owner.core.get_app_info().unwrap().relay_only);
+    assert!(owner.core.get_voice_room(&server.id).unwrap().relay_only);
+    owner.core.voice_tick();
+    let rooms = voice_rooms(owner.events.take());
+    assert_eq!(rooms.len(), 1);
+    assert!(rooms[0].relay_only && rooms[0].server_id == server.id);
+    assert_eq!(owner.core.join_call(&room.room_id).unwrap_err().code, ErrorCode::RelayOnly);
+    // Another member's setting is theirs: Alice's room isn't relay-only.
+    assert!(!alice.core.get_voice_room(&server.id).unwrap().relay_only);
+
+    // A restart keeps it: read before the network starts, and given to the
+    // network as the core opens.
+    let secrets = owner.secrets.clone();
+    drop(owner);
+    assert!(api::stored_relay_only(&db));
+    let net = RelayOnlyNet::new(&world.network);
+    let owner = open(net.clone(), secrets);
+    assert_eq!(net.applied(), [true]);
+    assert!(owner.core.get_app_info().unwrap().relay_only);
+    hub.connect(&owner, &owner_id);
+    assert_eq!(owner.core.join_call(&room.room_id).unwrap_err().code, ErrorCode::RelayOnly);
+
+    // Off again: applied, stored, and calls work.
+    owner.core.set_relay_only(false).unwrap();
+    assert_eq!(net.applied(), [true, false]);
+    assert!(!api::stored_relay_only(&db));
+    assert!(!owner.core.get_voice_room(&server.id).unwrap().relay_only);
+    assert!(!owner.core.join_call(&room.room_id).unwrap().relay_only);
+    owner.core.leave_call().unwrap();
+
+    // A database that can't be opened: on (fails closed, see the unit test).
+    assert!(api::stored_relay_only(&dir.join("missing").join("core.db")));
+    drop(owner);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Voice B: 5 is the cap; a kicked member's hello doesn't count.

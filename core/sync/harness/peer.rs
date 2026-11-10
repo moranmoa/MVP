@@ -151,6 +151,7 @@ async fn handle(peer: &Arc<Peer>, command: Command) -> Result<Value> {
                     .map(|p| format!("/dns4/{p}/tcp/4001").parse())
                     .collect::<Result<_, _>>()?,
                 allow_lan: true,
+                relay_only: false,
             };
             // Every harness peer may read; pulls carry this peer's binding.
             let access = Access { binder: Some(Arc::new(peer.key.clone())), read_gate: Some(Arc::new(AcceptAll)), stub_gate: None };

@@ -198,6 +198,8 @@ export type UpdateChannel = 'stable' | 'beta';
 export interface AppInfo {
   version: string;
   updateChannel: UpdateChannel;
+  /** Relay-only (GAP-6r, #272): this device is reached only through the relay; calls are off. */
+  relayOnly?: boolean;
 }
 
 /** An invite to a server (#214). `maxUses` 0 is unlimited; no `expiresAt` is never. */
@@ -228,6 +230,8 @@ export interface CallState {
   channelId: Id;
   participants: CallParticipant[];
   full: boolean;
+  /** Relay-only is on (#272): with no participants, my call was ended for it. */
+  relayOnly?: boolean;
 }
 
 /** Someone in a server's voice room. `userId` is a member id. */
@@ -244,6 +248,8 @@ export interface VoiceRoom {
   serverId: Id;
   roomId: Id;
   participants: VoiceParticipant[];
+  /** Relay-only is on here (#272): "Join" is off before trying. */
+  relayOnly?: boolean;
 }
 
 /** WebRTC signalling between call members; for the voice engine (ui/src/voice). */

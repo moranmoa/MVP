@@ -58,6 +58,7 @@ const COMMANDS = Object.freeze({
   exportDiagnostics: [],
   getAppInfo: [],
   setUpdateChannel: ['channel'],
+  setRelayOnly: ['on'],
   restartToUpdate: [],
 });
 
