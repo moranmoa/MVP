@@ -23,6 +23,8 @@
 //! 4. TODO(GAP-10): switch to a separate, published X25519 key derived with
 //!    its own context string when device keys arrive.
 
+pub mod invite;
+
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
@@ -127,6 +129,14 @@ fn cipher_error(error: Error) -> CipherError {
 }
 
 impl GroupCipher for GroupKeysCipher {
+    fn forget(&self, server: ServerId) {
+        let mut state = self.state.lock().expect("not poisoned");
+        state.channels.retain(|(s, _), _| *s != server);
+        state.members.remove(&server);
+        state.accepted.remove(&server);
+        state.known.remove(&server);
+    }
+
     /// Records the new member set. It doesn't rotate: service asks
     /// [`GroupCipher::rotate`] when `encrypt` says `RotationRequired`.
     fn membership_changed(&self, server: ServerId, members: &BTreeSet<PublicKey>) -> CipherOutcome {

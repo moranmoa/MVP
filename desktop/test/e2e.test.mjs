@@ -98,18 +98,44 @@ test('navigation away is blocked', async () => {
   assert.equal(await page.evaluate(() => location.origin), 'app://mvs');
 });
 
-test('permissions are refused, except the microphone', async () => {
-  // Voice v1: our page may use the microphone (whether a device exists is up
-  // to the machine); the camera and screen capture stay refused.
-  const state = (name) => page.evaluate((n) => navigator.permissions.query({ name: n }).then((s) => s.state, (e) => e.name), name);
-  assert.equal(await state('microphone'), 'granted');
-  assert.notEqual(await state('camera'), 'granted');
+const permissionState = (name) => page.evaluate((n) => navigator.permissions.query({ name: n }).then((s) => s.state, (e) => e.name), name);
+const until = async (cond, ms = 5_000) => {
+  const end = Date.now() + ms;
+  while (!(await cond())) {
+    if (Date.now() > end) return false;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return true;
+};
+
+test('permissions are refused, except the microphone during a call', async () => {
+  // V-C2: no call, no microphone.
+  assert.notEqual(await permissionState('microphone'), 'granted');
+  const outside = await page.evaluate(() => navigator.mediaDevices.getUserMedia({ audio: true }).then((s) => (s.getTracks().forEach((t) => t.stop()), 'granted'), (e) => e.name));
+  assert.notEqual(outside, 'granted');
+  // In a call: the microphone is ours (whether a device exists is up to the
+  // machine); the camera and screen capture stay refused.
+  const joined = await page.evaluate((id) => window.mvs.invoke('joinCall', [id]), 'c'.repeat(64));
+  assert.equal(joined.ok?.participants?.length, 1, JSON.stringify(joined));
+  assert.equal(await permissionState('microphone'), 'granted');
+  assert.notEqual(await permissionState('camera'), 'granted');
   const cam = await page.evaluate(() => navigator.mediaDevices?.getUserMedia({ video: true }).then(() => 'granted', (e) => e.name) ?? 'no-api');
   assert.notEqual(cam, 'granted');
   const screen = await page.evaluate(() => navigator.mediaDevices?.getDisplayMedia({ video: true }).then(() => 'granted', (e) => e.name) ?? 'no-api');
   assert.notEqual(screen, 'granted');
   const notif = await page.evaluate(() => Notification.requestPermission());
   assert.notEqual(notif, 'granted');
+  // Leaving shuts it again.
+  assert.deepEqual(await page.evaluate(() => window.mvs.invoke('leaveCall', [])), { ok: null });
+  assert.notEqual(await permissionState('microphone'), 'granted');
+});
+
+test('the microphone shuts when the core ends the call', async () => {
+  // The fake core ends a call in channel e…e by itself 300 ms after the join.
+  const joined = await page.evaluate((id) => window.mvs.invoke('joinCall', [id]), 'e'.repeat(64));
+  assert.ok(joined.ok, JSON.stringify(joined));
+  assert.equal(await permissionState('microphone'), 'granted');
+  assert.ok(await until(async () => (await permissionState('microphone')) !== 'granted'), 'still granted after the call ended');
 });
 
 // Legacy desktop capture through getUserMedia (chromeMediaSource 'desktop')

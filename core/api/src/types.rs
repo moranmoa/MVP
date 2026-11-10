@@ -81,6 +81,10 @@ pub struct ServerSummary {
     pub invite_link: String,
     pub unread: bool,
     pub mentions: u32,
+    /// Server lifecycle: the owner closed it. It stays listed, read-only,
+    /// for 30 days after the close was received (additive).
+    #[serde(default)]
+    pub closed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +228,10 @@ pub enum ErrorCode {
     CallFull,
     /// Voice: relay-only is on, so calls are off.
     RelayOnly,
+    /// Server lifecycle: a member still runs a version that can't read a
+    /// rename, leave or delete (no `server-lifecycle-v1` cap); nothing was
+    /// signed.
+    UpdateNeeded,
     /// Rust addition: malformed command JSON or arguments.
     BadRequest,
     /// Rust addition: in the contract, not done by this core yet.
@@ -283,6 +291,11 @@ pub enum JoinStatus {
     AgeBlocked {
         link: String,
         required: AgeRestriction,
+    },
+    /// Server lifecycle: the server was closed by its owner (an old invite,
+    /// or one a stale peer still serves).
+    Closed {
+        link: String,
     },
 }
 
@@ -378,8 +391,19 @@ pub enum Event {
     ServerAdded(ServerSummary),
     #[serde(rename = "server.updated")]
     ServerUpdated(ServerSummary),
+    /// I'm no longer in the server. `reason` (additive): `left` or
+    /// `closed`; absent for a kick (as before).
+    /// Server lifecycle: the owner closed the server (read, or my own
+    /// `closeServer`). It stays listed, read-only, until its 30 days are up;
+    /// then `server.removed` (`closed`).
+    #[serde(rename = "server.closed", rename_all = "camelCase")]
+    ServerClosed { server_id: Id },
     #[serde(rename = "server.removed", rename_all = "camelCase")]
-    ServerRemoved { server_id: Id },
+    ServerRemoved {
+        server_id: Id,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        reason: Option<RemovedReason>,
+    },
     #[serde(rename = "channel.added")]
     ChannelAdded(Channel),
     #[serde(rename = "channel.removed", rename_all = "camelCase")]
@@ -404,6 +428,11 @@ pub enum Event {
     /// answers come only verified (see `voice`), so the flag is always true.
     #[serde(rename = "call.signal", rename_all = "camelCase")]
     CallSignal { from: Id, kind: SignalKind, payload: String, fingerprint_verified: bool },
+    /// Voice: who is in a server's room changed (join, leave, mute,
+    /// timeout, kick), mine or not. At most one per room per sync round,
+    /// only while I'm a member. A hint: `getVoiceRoom` re-reads it.
+    #[serde(rename = "voice.room")]
+    VoiceRoom(VoiceRoom),
     /// Once, after `markHealthy` commits a new version. Text only.
     #[serde(rename = "update.installed")]
     UpdateInstalled { version: String, notes: Option<String> },
@@ -469,6 +498,36 @@ pub struct CallState {
 pub struct CallParticipant {
     /// A user ID.
     pub identity: Id,
+    pub muted: bool,
+}
+
+/// Why `server.removed` fired (server lifecycle).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RemovedReason {
+    /// I left (`leaveServer`).
+    Left,
+    /// The owner closed (deleted) it, mine or read; sent when its 30 days
+    /// are up and the rest of it is purged.
+    Closed,
+}
+
+/// Voice: a server's one voice room and who is in it, from verified hellos.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceRoom {
+    pub server_id: Id,
+    /// What `joinCall` takes; `CallState.channelId` in a call.
+    pub room_id: Id,
+    /// At most 5: me first when I'm in it, then the others.
+    pub participants: Vec<VoiceParticipant>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceParticipant {
+    pub user_id: Id,
+    /// A display hint only.
     pub muted: bool,
 }
 

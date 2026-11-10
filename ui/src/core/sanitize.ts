@@ -19,6 +19,7 @@ import type {
   MessageRange,
   ServerSummary,
   CallState,
+  VoiceRoom,
   Id,
 } from './types';
 
@@ -281,6 +282,32 @@ export function cleanCall(c: CallState): CallState {
   };
 }
 
+/**
+ * An id the UI accepts in a voice room: 64 lower-case hex from the real core, or a
+ * short (≤ 40) word-character id from the mock. Nothing else gets through.
+ */
+const ROOM_ID = /^(?:[0-9a-f]{64}|[A-Za-z0-9_-]{1,40})$/;
+const isRoomId = (v: unknown): v is Id => typeof v === 'string' && ROOM_ID.test(v);
+const onlyKeys = (o: object, keys: string[]) => Object.keys(o).every((k) => keys.includes(k));
+
+/**
+ * A voice room from the core, or null to drop it: a bad id, more than 5 people,
+ * a person twice, a non-boolean `muted` or any unknown field (voice-room contract).
+ */
+export function cleanVoiceRoom(r: unknown): VoiceRoom | null {
+  if (!r || typeof r !== 'object' || !onlyKeys(r, ['serverId', 'roomId', 'participants'])) return null;
+  const { serverId, roomId, participants } = r as Record<string, unknown>;
+  if (!isRoomId(serverId) || !isRoomId(roomId) || !Array.isArray(participants) || participants.length > 5) return null;
+  const out: VoiceRoom['participants'] = [];
+  for (const p of participants as unknown[]) {
+    if (!p || typeof p !== 'object' || !onlyKeys(p, ['userId', 'muted'])) return null;
+    const { userId, muted } = p as Record<string, unknown>;
+    if (!isRoomId(userId) || typeof muted !== 'boolean' || out.some((x) => x.userId === userId)) return null;
+    out.push({ userId, muted });
+  }
+  return { serverId, roomId, participants: out };
+}
+
 /** A cleaner may return null to drop the event altogether. */
 const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[E] | null } = {
   'identity.changed': cleanIdentity,
@@ -295,6 +322,7 @@ const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[
   'join.status': cleanJoin,
   'link.open': (p) => ({ link: cleanInviteLink(p?.link) }),
   'call.state': (c) => cleanCall(c),
+  'voice.room': (r) => cleanVoiceRoom(r),
   // For the voice engine: anything malformed is dropped, never coerced.
   'call.signal': (s) => {
     const kind = (['offer', 'answer', 'ice'] as const).find((k) => k === s?.kind);
@@ -340,6 +368,11 @@ export function guardCore(core: CoreApi): CoreApi {
     listInvites: wrap(core.listInvites, (l) => l.map(cleanInvite)),
     joinServer: wrap(core.joinServer, cleanJoin),
     joinCall: wrap(core.joinCall, cleanCall),
+    getVoiceRoom: wrap(core.getVoiceRoom, (r) => {
+      const room = cleanVoiceRoom(r);
+      if (!room) throw { code: 'internal' };
+      return room;
+    }),
     getMessages: wrap(core.getMessages, cleanRange),
     sendMessage: wrap(core.sendMessage, cleanMessage),
     on: <E extends CoreEventName>(event: E, handler: (p: CoreEvents[E]) => void) => {

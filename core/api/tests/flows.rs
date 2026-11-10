@@ -54,6 +54,7 @@ fn names(events: &[Event]) -> Vec<&'static str> {
             Event::ServerAdded(_) => "server.added",
             Event::ServerUpdated(_) => "server.updated",
             Event::ServerRemoved { .. } => "server.removed",
+            Event::ServerClosed { .. } => "server.closed",
             Event::ChannelUpdated(_) => "channel.updated",
             Event::ChannelAdded(_) => "channel.added",
             Event::ChannelRemoved { .. } => "channel.removed",
@@ -67,6 +68,7 @@ fn names(events: &[Event]) -> Vec<&'static str> {
             Event::MessageUpdated(_) => "message.updated",
             Event::CallState(_) => "call.state",
             Event::CallSignal { .. } => "call.signal",
+            Event::VoiceRoom(_) => "voice.room",
         })
         .collect()
 }
@@ -1681,111 +1683,196 @@ fn a_failed_join_re_key_fails_closed() {
     );
 }
 
-/// The security lead's rules for the join re-key: batched (one per channel
-/// per 10-30 s window, covering everyone who joined meanwhile), and the
-/// new key only, so a joiner can't open what was written before the join.
-#[test]
-fn join_re_keys_are_batched_and_cover_only_new_messages() {
+/// A server, its owner (real cipher), and a counter of rotations (one
+/// rotation's parts share their deps).
+fn keyed_server(world: &World, name: &str) -> (Peer, ServerSummary, String) {
     use api::crypto::GroupKeysCipher;
-
-    let world = World::new();
-    let open = |words: &str, name: &str| {
-        let cipher = Arc::new(GroupKeysCipher::locked());
-        let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
-        peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
-        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
-        peer.core.update_profile(profile).unwrap();
-        peer
-    };
-    let owner = open(OWNER_WORDS, "Owner");
-    let server = owner.core.create_server("Batch", AgeRestriction::None).unwrap();
-    let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
-    owner.core.send_message(&channel, "before anyone joined", None).unwrap();
-    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
-    let rotations =
-        || world.network.fetch(server_key).iter().filter(|r| r.kind() == Kind::KeyRotation).count();
-
-    // The first joiner: keyed at once; the message from before doesn't open.
-    let b = open(LEGAL, "B");
-    b.core.join_server(&server.invite_link).unwrap();
-    owner.core.sync_now().unwrap();
-    b.core.sync_now().unwrap();
-    assert_eq!(b.core.get_message_count(&channel).unwrap(), 0, "a pre-join message opened");
-    b.core.send_message(&channel, "B here", None).unwrap();
-
-    // A second joiner inside the window: no new rotation yet, C waits.
-    let after_b = rotations();
-    let c = open(
-        "letter advice cage absurd amount doctor acoustic avoid letter advice cage above",
-        "C",
-    );
-    c.core.join_server(&server.invite_link).unwrap();
-    owner.core.sync_now().unwrap();
-    assert_eq!(rotations(), after_b, "a second re-key inside the window");
-    c.core.sync_now().unwrap();
-    assert_eq!(
-        c.core.send_message(&channel, "too soon", None).unwrap_err().code,
-        ErrorCode::NotAllowed
-    );
-
-    // Past the window, one round keys C (no new records needed).
-    *world.clock.0.lock().unwrap() += 31_000;
-    owner.core.sync_now().unwrap();
-    assert!(rotations() > after_b);
-    c.core.sync_now().unwrap();
-    c.core.send_message(&channel, "C here", None).unwrap();
-    owner.core.sync_now().unwrap();
-    assert_eq!(owner.core.get_message_count(&channel).unwrap(), 3);
-}
-
-/// GAP-8 amplification: 10 joins in 5 s, with the owner syncing every
-/// 500 ms, give at most one rotation; once the window has passed, one more
-/// round keys everyone, and all 10 can write.
-#[test]
-fn ten_joins_in_five_seconds_make_at_most_one_rotation() {
-    use api::crypto::GroupKeysCipher;
-
-    let world = World::new();
     let owner =
         world.peer_with(Arc::new(MemoryStore::new()), None, Arc::new(GroupKeysCipher::locked()));
     owner.core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
     let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None };
     owner.core.update_profile(profile).unwrap();
-    let server = owner.core.create_server("Flood", AgeRestriction::None).unwrap();
+    let server = owner.core.create_server(name, AgeRestriction::None).unwrap();
     let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
-    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
-    // One rotation's parts share their deps; count rotations, not parts.
-    let rotations = || {
-        let mut seen = BTreeSet::new();
-        for r in world.network.fetch(server_key).iter().filter(|r| r.kind() == Kind::KeyRotation) {
-            seen.insert(r.deps().to_vec());
-        }
-        seen.len()
-    };
+    (owner, server, channel)
+}
+
+fn rotations(world: &World, server: &ServerSummary) -> usize {
+    let key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let mut seen = BTreeSet::new();
+    for r in world.network.fetch(key).iter().filter(|r| r.kind() == Kind::KeyRotation) {
+        seen.insert(r.deps().to_vec());
+    }
+    seen.len()
+}
+
+/// A member with the real cipher who joined `server` (the owner hasn't
+/// synced yet).
+fn joiner(world: &World, server: &ServerSummary, name: &str) -> Peer {
+    use api::crypto::GroupKeysCipher;
+    let peer =
+        world.peer_with(Arc::new(MemoryStore::new()), None, Arc::new(GroupKeysCipher::locked()));
+    sign_up(&peer, name);
+    peer.core.join_server(&server.invite_link).unwrap();
+    peer
+}
+
+fn advance(world: &World, ms: u64) {
+    *world.clock.0.lock().unwrap() += ms;
+}
+
+/// The security lead's token bucket for join re-keys (GAP-8): a burst of 3
+/// re-keys at once; a 4th waits for the next token (due 15 s after the
+/// first was spent) and shares that re-key with everyone who joined
+/// meanwhile. The new key only: a joiner can't open what came before.
+#[test]
+fn join_re_keys_spend_a_token_bucket() {
+    let world = World::new();
+    let (owner, server, channel) = keyed_server(&world, "Bucket");
+    owner.core.send_message(&channel, "before anyone joined", None).unwrap();
+
+    // A burst of 3: each re-keyed at once, each can write at once.
+    let mut first = Vec::new();
+    for i in 0..3 {
+        let before = rotations(&world, &server);
+        let peer = joiner(&world, &server, &format!("J{i}"));
+        advance(&world, 100);
+        owner.core.sync_now().unwrap();
+        assert_eq!(rotations(&world, &server), before + 1, "join {i} waited");
+        peer.core.sync_now().unwrap();
+        peer.core.send_message(&channel, &format!("J{i} here"), None).unwrap();
+        first.push(peer);
+    }
+    assert!(owner.core.next_rekey_in().is_none());
+
+    // The 4th and 5th: the bucket is empty, so they wait, together.
+    let after_burst = rotations(&world, &server);
+    let fourth = joiner(&world, &server, "J3");
+    let fifth = joiner(&world, &server, "J4");
+    owner.core.sync_now().unwrap();
+    assert_eq!(rotations(&world, &server), after_burst, "a 4th re-key without a token");
+    for peer in [&fourth, &fifth] {
+        peer.core.sync_now().unwrap();
+        assert_eq!(
+            peer.core.send_message(&channel, "too soon", None).unwrap_err().code,
+            ErrorCode::NotAllowed
+        );
+    }
+    // Due one refill after the first token was spent (a few hundred ms of
+    // test clock ago); the loop wakes exactly then.
+    let due = owner.core.next_rekey_in().expect("a waiting re-key");
+    let refill = std::time::Duration::from_millis(JOIN_REKEY_REFILL_MS);
+    assert!(due < refill && due > refill - std::time::Duration::from_secs(1), "{due:?}");
+    // The test clock moves 1 ms per read, so check within 50 ms either way.
+    advance(&world, due.as_millis() as u64 - 50);
+    owner.core.sync_now().unwrap();
+    assert_eq!(rotations(&world, &server), after_burst, "re-keyed before the token");
+    advance(&world, 100);
+    owner.core.sync_now().unwrap();
+    assert_eq!(rotations(&world, &server), after_burst + 1, "one shared re-key");
+    assert!(owner.core.next_rekey_in().is_none());
+    for peer in [&fourth, &fifth] {
+        peer.core.sync_now().unwrap();
+        peer.core.send_message(&channel, "now", None).unwrap();
+    }
+    owner.core.sync_now().unwrap();
+    // 1 from before, 3 from the burst, 2 shared.
+    assert_eq!(owner.core.get_message_count(&channel).unwrap(), 6);
+    // Nobody who joined opens the message from before they joined.
+    first[0].core.sync_now().unwrap();
+    let bodies: Vec<String> = first[0]
+        .core
+        .get_messages(&channel, 0, 9)
+        .unwrap()
+        .messages
+        .into_iter()
+        .map(|m| m.body)
+        .collect();
+    assert!(!bodies.iter().any(|b| b == "before anyone joined"), "{bodies:?}");
+}
+
+/// GAP-8 amplification: 10 joins in 5 s, with the owner syncing every
+/// 500 ms, give at most 3 rotations (the burst); the next token keys
+/// everyone else at once, and all 10 can write.
+#[test]
+fn ten_joins_in_five_seconds_make_at_most_three_rotations() {
+    let world = World::new();
+    let (owner, server, channel) = keyed_server(&world, "Flood");
     let joiners: Vec<Peer> = (0..10)
         .map(|i| {
-            let peer = world.peer_with(
-                Arc::new(MemoryStore::new()),
-                None,
-                Arc::new(GroupKeysCipher::locked()),
-            );
-            sign_up(&peer, &format!("J{i}"));
-            peer.core.join_server(&server.invite_link).unwrap();
-            *world.clock.0.lock().unwrap() += 500;
+            let peer = joiner(&world, &server, &format!("J{i}"));
+            advance(&world, 500);
             owner.core.sync_now().unwrap();
             peer
         })
         .collect();
-    assert!(rotations() <= 1, "{} rotations for 10 joins in 5 s", rotations());
+    let n = rotations(&world, &server);
+    assert!(n <= JOIN_REKEY_BURST as usize, "{n} rotations for 10 joins in 5 s");
 
-    *world.clock.0.lock().unwrap() += 20_000;
+    advance(&world, JOIN_REKEY_REFILL_MS);
     owner.core.sync_now().unwrap();
+    assert!(rotations(&world, &server) <= n + 1);
     for (i, joiner) in joiners.iter().enumerate() {
         joiner.core.sync_now().unwrap();
         joiner.core.send_message(&channel, &format!("hi {i}"), None).unwrap();
     }
     owner.core.sync_now().unwrap();
     assert_eq!(owner.core.get_message_count(&channel).unwrap(), 10);
+}
+
+/// The Tech Lead's hot-loop fix: the wait for a due re-key never drops
+/// below 250 ms, and a rotator who is demoted stops waiting at once (no
+/// due re-key left to spin the sync loop on).
+#[test]
+fn a_waiting_re_key_never_spins_and_a_demoted_rotator_stops_waiting() {
+    let world = World::new();
+    let (owner, server, _) = keyed_server(&world, "Spin");
+    let moderator = joiner(&world, &server, "Mod");
+    let mod_id = moderator.core.get_identity().unwrap().unwrap().id;
+    owner.core.sync_now().unwrap();
+    owner.core.grant_role(&server.id, &mod_id, Role::Moderator).unwrap();
+    moderator.core.sync_now().unwrap();
+
+    // Only the moderator syncs: it spends its 3 tokens, then waits.
+    for i in 0..4 {
+        joiner(&world, &server, &format!("J{i}"));
+        moderator.core.sync_now().unwrap();
+    }
+    assert!(moderator.core.next_rekey_in().is_some(), "the moderator isn't waiting");
+
+    // Past due, and the re-key hasn't happened yet: still at least 250 ms.
+    advance(&world, 2 * JOIN_REKEY_REFILL_MS);
+    assert_eq!(moderator.core.next_rekey_in(), Some(REKEY_WAKE_FLOOR));
+
+    // Demoted: the next round clears the wait.
+    owner.core.revoke_role(&server.id, &mod_id).unwrap();
+    moderator.core.sync_now().unwrap();
+    assert_eq!(moderator.core.next_rekey_in(), None, "a demoted rotator still waits");
+    moderator.core.sync_now().unwrap();
+    assert_eq!(moderator.core.next_rekey_in(), None);
+}
+
+/// A kick never waits for a token: with the bucket empty, it re-keys at
+/// once, and that re-key covers a joiner who was waiting too.
+#[test]
+fn a_kick_with_an_empty_bucket_re_keys_at_once() {
+    let world = World::new();
+    let (owner, server, channel) = keyed_server(&world, "Kick");
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let peer = joiner(&world, &server, &format!("J{i}"));
+        owner.core.sync_now().unwrap();
+        ids.push(peer.core.get_identity().unwrap().unwrap().id);
+    }
+    let waiting = joiner(&world, &server, "J3");
+    owner.core.sync_now().unwrap();
+    assert!(owner.core.next_rekey_in().is_some(), "the bucket isn't empty");
+    let before = rotations(&world, &server);
+    owner.core.kick_member(&server.id, &ids[0]).unwrap();
+    assert_eq!(rotations(&world, &server), before + 1, "the kick waited for a token");
+    assert!(owner.core.next_rekey_in().is_none());
+    waiting.core.sync_now().unwrap();
+    waiting.core.send_message(&channel, "covered by the kick's re-key", None).unwrap();
 }
 
 /// B11: the owner's channel commands, with names normalised and checked,
@@ -2173,30 +2260,64 @@ fn a_call_between_members() {
     for peer in [&owner, &alice, &bob] {
         peer.core.sync_now().unwrap();
     }
-    let general = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    let room = owner.core.get_voice_room(&server.id).unwrap().room_id;
     let peers = [(owner_id.as_str(), &owner), (alice_id.as_str(), &alice), (bob_id.as_str(), &bob)];
 
     // No transport yet: not-implemented. Then relay-only: calls are off.
-    assert_eq!(owner.core.join_call(&general).unwrap_err().code, ErrorCode::NotImplemented);
+    assert_eq!(owner.core.join_call(&room).unwrap_err().code, ErrorCode::NotImplemented);
     for (id, peer) in peers {
         hub.connect(peer, id);
     }
     hub.relay_only.store(true, std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(owner.core.join_call(&general).unwrap_err().code, ErrorCode::RelayOnly);
+    assert_eq!(owner.core.join_call(&room).unwrap_err().code, ErrorCode::RelayOnly);
     hub.relay_only.store(false, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(owner.core.join_call(&"ab".repeat(32)).unwrap_err().code, ErrorCode::NotFound);
+    // Calls happen only in the room: a text channel is not-allowed.
+    let general = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    assert_ne!(general, room);
+    assert_eq!(owner.core.join_call(&general).unwrap_err().code, ErrorCode::NotAllowed);
+    // Every member derives the same room; an unknown server is not-found.
+    assert_eq!(bob.core.get_voice_room(&server.id).unwrap().room_id, room);
+    assert_eq!(bob.core.get_voice_room(&"ab".repeat(32)).unwrap_err().code, ErrorCode::NotFound);
 
     // The owner, then Alice, join; each sees both.
-    let state = owner.core.join_call(&general).unwrap();
+    let state = owner.core.join_call(&room).unwrap();
     assert_eq!((who(&state), state.full), (vec![owner_id.as_str()], false));
     assert!(owner.core.in_call());
     hub.pump(&peers);
-    let state = alice.core.join_call(&general).unwrap();
+    let state = alice.core.join_call(&room).unwrap();
     assert_eq!(who(&state), [alice_id.as_str(), owner_id.as_str()]);
     owner.events.take();
     hub.pump(&peers);
     let seen = call_states(owner.events.take());
     assert_eq!(who(seen.last().unwrap()), [owner_id.as_str(), alice_id.as_str()]);
+
+    // Bob isn't in the call but sees who is: one voice.room at his tick,
+    // and the same from getVoiceRoom. Identity and muted only.
+    bob.events.take();
+    bob.core.voice_tick();
+    let rooms: Vec<VoiceRoom> = bob
+        .events
+        .take()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::VoiceRoom(room) => Some(room),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rooms.len(), 1);
+    let mut inside: Vec<&str> = rooms[0].participants.iter().map(|p| p.user_id.as_str()).collect();
+    inside.sort();
+    let mut want = [owner_id.as_str(), alice_id.as_str()];
+    want.sort();
+    assert_eq!(inside, want);
+    assert_eq!(
+        (rooms[0].server_id.as_str(), rooms[0].room_id.as_str()),
+        (server.id.as_str(), room.as_str())
+    );
+    assert_eq!(bob.core.get_voice_room(&server.id).unwrap(), rooms[0]);
+    let json = serde_json::to_value(&rooms[0]).unwrap();
+    assert_eq!(json["participants"][0].as_object().unwrap().len(), 2, "more than id and muted");
 
     // Signalling: only to a participant, offers and answers with a fingerprint.
     assert_eq!(
@@ -2252,13 +2373,36 @@ fn a_call_between_members() {
     let seen = call_states(owner.events.take());
     assert_eq!(who(seen.last().unwrap()), [owner_id.as_str()]);
 
-    bob.core.join_call(&general).unwrap();
+    bob.core.join_call(&room).unwrap();
     hub.pump(&peers);
     *world.clock.0.lock().unwrap() += 31_000;
     owner.events.take();
     owner.core.voice_tick();
     let seen = call_states(owner.events.take());
     assert_eq!(who(seen.last().unwrap()), [owner_id.as_str()], "Bob didn't time out");
+
+    // Relay-only turns on mid-call: the owner leaves at the next tick, says
+    // bye, and call.state keeps its shape.
+    hub.pump(&peers);
+    hub.relay_only.store(true, std::sync::atomic::Ordering::SeqCst);
+    owner.events.take();
+    owner.core.voice_tick();
+    assert!(!owner.core.in_call());
+    let seen = call_states(owner.events.take());
+    let last = seen.last().unwrap();
+    assert_eq!(
+        (last.channel_id.as_str(), last.participants.len(), last.full),
+        (room.as_str(), 0, false)
+    );
+    let sent = hub.pump(&peers);
+    assert!(
+        !sent.is_empty()
+            && sent.iter().all(|(from, _, blob)| {
+                *from == user_key(&owner_id)
+                    && String::from_utf8_lossy(blob).contains(r#"\"kind\":\"bye\""#)
+            })
+    );
+    hub.relay_only.store(false, std::sync::atomic::Ordering::SeqCst);
     owner.core.leave_call().unwrap();
     assert!(!owner.core.in_call());
 }
@@ -2282,7 +2426,7 @@ fn a_call_holds_five_and_kicked_members_are_ignored() {
     for (_, peer) in &others {
         peer.core.sync_now().unwrap();
     }
-    let general = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    let room = owner.core.get_voice_room(&server.id).unwrap().room_id;
     hub.connect(&owner, &owner_id);
     for (id, peer) in &others {
         hub.connect(peer, id);
@@ -2290,16 +2434,16 @@ fn a_call_holds_five_and_kicked_members_are_ignored() {
     let mut peers: Vec<(&str, &Peer)> = vec![(owner_id.as_str(), &owner)];
     peers.extend(others.iter().map(|(id, peer)| (id.as_str(), peer)));
 
-    owner.core.join_call(&general).unwrap();
+    owner.core.join_call(&room).unwrap();
     hub.pump(&peers);
     for (_, peer) in &others[..4] {
-        peer.core.join_call(&general).unwrap();
+        peer.core.join_call(&room).unwrap();
         hub.pump(&peers);
     }
-    let state = owner.core.join_call(&general).unwrap();
+    let state = owner.core.join_call(&room).unwrap();
     assert_eq!((state.participants.len(), state.full), (5, true));
     let (_, sixth) = &others[4];
-    assert_eq!(sixth.core.join_call(&general).unwrap_err().code, ErrorCode::CallFull);
+    assert_eq!(sixth.core.join_call(&room).unwrap_err().code, ErrorCode::CallFull);
     assert!(!sixth.core.in_call());
 
     // P0 is kicked; before it learns, its hellos go out and are ignored.
@@ -2312,6 +2456,352 @@ fn a_call_holds_five_and_kicked_members_are_ignored() {
     *world.clock.0.lock().unwrap() += 11_000;
     kicked.core.voice_tick();
     hub.pump(&peers);
-    let state = owner.core.join_call(&general).unwrap();
+    let state = owner.core.join_call(&room).unwrap();
     assert!(!who(&state).contains(&kicked_id.as_str()));
+    let roster = owner.core.get_voice_room(&server.id).unwrap();
+    assert!(!roster.participants.iter().any(|p| &p.user_id == kicked_id));
+    assert!(roster.participants.len() <= 5);
+
+    // Once P0 reads its kick: no roster for it, by command or event.
+    kicked.core.sync_now().unwrap();
+    kicked.events.take();
+    kicked.core.voice_tick();
+    assert!(!kicked.events.take().iter().any(|e| matches!(e, Event::VoiceRoom(_))));
+    let code = kicked.core.get_voice_room(&server.id).unwrap_err().code;
+    assert!(matches!(code, ErrorCode::NotFound | ErrorCode::NotAllowed), "{code:?}");
+}
+
+/// Server lifecycle (#229, #251), api piece: who may rename, leave and
+/// delete; the rollout gate (an older member, or one with no profile post,
+/// gives `update-needed` before anything is signed); and the purge.
+#[test]
+fn servers_are_renamed_left_and_deleted_behind_the_rollout_gate() {
+    let world = World::new();
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let guest = world.peer();
+    let guest_id = sign_up(&guest, "Guest").id;
+    let third = world.peer();
+    sign_up(&third, "Third");
+    let server = owner.core.create_server("Old name", AgeRestriction::None).unwrap();
+    for peer in [&guest, &third] {
+        peer.core.join_server(&server.invite_link).unwrap();
+    }
+    for peer in [&owner, &guest, &third] {
+        peer.core.sync_now().unwrap();
+    }
+    let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+
+    // Rename: trimmed, strict rule, owner or admin only.
+    assert_eq!(
+        guest.core.rename_server(&server.id, "Mine now").unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+    for bad in ["   ", "a\u{202E}b", &"x".repeat(101)] {
+        assert_eq!(
+            owner.core.rename_server(&server.id, bad).unwrap_err().code,
+            ErrorCode::BadRequest
+        );
+    }
+    let renamed = owner.core.rename_server(&server.id, "  New name ").unwrap();
+    assert_eq!(renamed.name, "New name");
+    guest.events.take();
+    guest.core.sync_now().unwrap();
+    let updated: Vec<String> = guest
+        .events
+        .take()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::ServerUpdated(s) => Some(s.name),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(updated, ["New name"]);
+    assert_eq!(guest.core.list_servers().unwrap()[0].name, "New name");
+
+    // The gate: a member on an older version (a fixed key here) joins with
+    // no profile post, then posts one without the cap.
+    let invite = model_invite(&server.invite_link);
+    let old = SigningKey::from_bytes(&[42; 32]);
+    let mut deps: BTreeSet<_> = world.network.fetch(server_key).iter().map(|r| r.id()).collect();
+    deps.insert(invite);
+    let join = authority::sign_control(
+        &old,
+        server_key,
+        1,
+        deps.into_iter().collect(),
+        1,
+        &authority::Action::Join { invite },
+    )
+    .unwrap();
+    world.network.publish(&join);
+    owner.core.sync_now().unwrap();
+    let signed = world.network.fetch(server_key).len();
+    assert_eq!(
+        owner.core.rename_server(&server.id, "Blocked").unwrap_err().code,
+        ErrorCode::UpdateNeeded,
+        "a member with no profile post"
+    );
+    let profile = |caps: &str, seq| {
+        let text = format!(r#"{{"mvs":"mvs/profile/v1","displayName":"Old"{caps}}}"#);
+        let heads = world.network.fetch(server_key).iter().map(|r| r.id()).collect();
+        authority::sign_control(&old, server_key, seq, heads, 2, &authority::Action::Post { text })
+            .unwrap()
+    };
+    world.network.publish(&profile("", 2));
+    owner.core.sync_now().unwrap();
+    for code in [
+        owner.core.rename_server(&server.id, "Blocked").unwrap_err().code,
+        owner.core.close_server(&server.id).unwrap_err().code,
+    ] {
+        assert_eq!(code, ErrorCode::UpdateNeeded, "an older member's profile");
+    }
+    // The UI can say who blocks it.
+    let old_id = hex::encode(old.verifying_key().to_bytes());
+    assert_eq!(owner.core.get_update_needed(&server.id).unwrap(), [old_id]);
+    assert_eq!(world.network.fetch(server_key).len(), signed + 1, "signed past the gate");
+    // It updates: the cap in its latest profile post opens the gate.
+    world.network.publish(&profile(r#","caps":["server-lifecycle-v1"]"#, 3));
+    for peer in [&owner, &guest, &third] {
+        peer.core.sync_now().unwrap();
+    }
+    assert!(owner.core.get_update_needed(&server.id).unwrap().is_empty());
+
+    // Leave: not the owner; a member leaves and the server leaves their
+    // device; the others see them gone.
+    assert_eq!(owner.core.leave_server(&server.id).unwrap_err().code, ErrorCode::NotAllowed);
+    guest.events.take();
+    guest.core.leave_server(&server.id).unwrap();
+    assert!(guest.events.take().contains(&Event::ServerRemoved {
+        server_id: server.id.clone(),
+        reason: Some(RemovedReason::Left),
+    }));
+    assert!(guest.core.list_servers().unwrap().is_empty());
+    assert_eq!(guest.core.get_messages(&channel, 0, 9).unwrap_err().code, ErrorCode::NotFound);
+    owner.core.sync_now().unwrap();
+    assert!(!owner.core.list_members(&server.id).unwrap().iter().any(|m| m.id == guest_id));
+
+    // Delete: the owner only. Not purged at once (the Tech Lead's #229
+    // answer): closed, read-only, still listed; no longer synced.
+    assert_eq!(third.core.close_server(&server.id).unwrap_err().code, ErrorCode::NotAllowed);
+    owner.events.take();
+    owner.core.close_server(&server.id).unwrap();
+    let closed = Event::ServerClosed { server_id: server.id.clone() };
+    assert!(owner.events.take().contains(&closed));
+    third.events.take();
+    third.core.sync_now().unwrap();
+    assert!(third.events.take().contains(&closed));
+    for peer in [&owner, &third] {
+        let listed = peer.core.list_servers().unwrap();
+        assert_eq!((listed.len(), listed[0].closed), (1, true));
+        assert_eq!(peer.core.list_channels(&server.id).unwrap().len(), 1, "history gone at once");
+    }
+    // A closed server isn't synced: a record a stale peer still serves
+    // isn't read.
+    let late = authority::sign_control(
+        &old,
+        server_key,
+        9,
+        world.network.fetch(server_key).iter().map(|r| r.id()).collect(),
+        3,
+        &authority::Action::Post { text: "late".into() },
+    )
+    .unwrap();
+    world.network.publish(&late);
+    third.events.take();
+    third.core.sync_now().unwrap();
+    assert!(third.events.take().is_empty(), "a closed server was synced");
+
+    // An old invite, for someone who was never in it: closed, not unknown.
+    let stranger = world.peer();
+    sign_up(&stranger, "Stranger");
+    stranger.core.join_server(&server.invite_link).unwrap();
+    assert!(matches!(
+        stranger.events.take().last(),
+        Some(Event::JoinStatus(JoinStatus::Closed { .. }))
+    ));
+    assert!(stranger.core.list_servers().unwrap().is_empty());
+
+    // 30 days after the close was received, the rest goes; the genesis and
+    // the close stay, so the old invite still reads as closed.
+    *world.clock.0.lock().unwrap() += CLOSED_RETENTION_MS - 10_000;
+    third.events.take();
+    third.core.sync_now().unwrap();
+    assert_eq!(third.core.list_servers().unwrap().len(), 1, "purged before 30 days");
+    *world.clock.0.lock().unwrap() += 20_000;
+    third.core.sync_now().unwrap();
+    let removed =
+        Event::ServerRemoved { server_id: server.id.clone(), reason: Some(RemovedReason::Closed) };
+    assert!(third.events.take().contains(&removed));
+    assert!(third.core.list_servers().unwrap().is_empty());
+    assert_eq!(third.core.list_channels(&server.id).unwrap_err().code, ErrorCode::NotFound);
+    third.core.join_server(&server.invite_link).unwrap();
+    assert!(matches!(
+        third.events.take().last(),
+        Some(Event::JoinStatus(JoinStatus::Closed { .. }))
+    ));
+    assert!(third.core.list_servers().unwrap().is_empty());
+}
+
+/// The invite record ID an invite link names.
+fn model_invite(link: &str) -> records::RecordId {
+    let invite = link.strip_prefix("mvs://join/").unwrap().split('/').nth(1).unwrap();
+    records::RecordId::from_bytes(hex::decode(invite).unwrap().try_into().unwrap())
+}
+
+/// A peer with the real group cipher (so re-keys happen), optionally on a
+/// database file (so it can restart).
+fn keyed_peer(world: &World, secrets: Arc<MemoryStore>, db: Option<std::path::PathBuf>) -> Peer {
+    world.peer_with(secrets, db, Arc::new(api::crypto::GroupKeysCipher::locked()))
+}
+
+fn key_rotations(world: &World, server: ServerId) -> usize {
+    let mut seen = BTreeSet::new();
+    for r in world.network.fetch(server).iter().filter(|r| r.kind() == Kind::KeyRotation) {
+        seen.insert(r.deps().to_vec());
+    }
+    seen.len()
+}
+
+fn leaves_by(world: &World, server: ServerId, who: &str) -> usize {
+    let who = PublicKey::from_bytes(hex::decode(who).unwrap().try_into().unwrap());
+    world
+        .network
+        .fetch(server)
+        .iter()
+        .filter(|r| r.kind() == Kind::Leave && r.author() == who)
+        .count()
+}
+
+/// An older member (a fixed key): joins, then posts a profile with or
+/// without the lifecycle cap.
+fn older_member(world: &World, server: &ServerSummary, key: &SigningKey) {
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let invite = model_invite(&server.invite_link);
+    let mut deps: BTreeSet<_> = world.network.fetch(server_key).iter().map(|r| r.id()).collect();
+    deps.insert(invite);
+    let join = authority::sign_control(
+        key,
+        server_key,
+        1,
+        deps.into_iter().collect(),
+        1,
+        &authority::Action::Join { invite },
+    )
+    .unwrap();
+    world.network.publish(&join);
+}
+
+fn older_profile(world: &World, server: &ServerSummary, key: &SigningKey, seq: u64, cap: bool) {
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let caps = if cap { r#","caps":["server-lifecycle-v1"]"# } else { "" };
+    let text = format!(r#"{{"mvs":"mvs/profile/v1","displayName":"Old"{caps}}}"#);
+    let heads = world
+        .network
+        .fetch(server_key)
+        .iter()
+        .filter(|r| r.scope() == Scope::Control)
+        .map(|r| r.id())
+        .collect();
+    let post =
+        authority::sign_control(key, server_key, seq, heads, 2, &authority::Action::Post { text })
+            .unwrap();
+    world.network.publish(&post);
+}
+
+/// The Tech Lead's #261 condition: the `Leave` reaches the others, who see
+/// the member gone and re-key.
+#[test]
+fn a_leave_reaches_the_others_and_they_re_key() {
+    let world = World::new();
+    let owner = keyed_peer(&world, Arc::new(MemoryStore::new()), None);
+    sign_up(&owner, "Owner");
+    let guest = keyed_peer(&world, Arc::new(MemoryStore::new()), None);
+    let guest_id = sign_up(&guest, "Guest").id;
+    let server = owner.core.create_server("Keys", AgeRestriction::None).unwrap();
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    guest.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    guest.core.sync_now().unwrap();
+    let before = key_rotations(&world, server_key);
+
+    guest.core.leave_server(&server.id).unwrap();
+    assert_eq!(leaves_by(&world, server_key, &guest_id), 1, "the Leave never went out");
+    owner.core.sync_now().unwrap();
+    assert!(!owner.core.list_members(&server.id).unwrap().iter().any(|m| m.id == guest_id));
+    assert!(key_rotations(&world, server_key) > before, "nobody re-keyed after the leave");
+    // Delivered: nothing is retried.
+    guest.core.sync_now().unwrap();
+    assert_eq!(leaves_by(&world, server_key, &guest_id), 1);
+}
+
+/// Both leads (#261): a leave is never blocked by the rollout gate. With
+/// an older member in, it's gone from the UI at once and its `Leave` waits
+/// in the outbox, across a restart, until the gate opens; a kick first
+/// drops it.
+#[test]
+fn a_leave_waits_in_the_outbox_until_the_gate_opens() {
+    let world = World::new();
+    let owner = keyed_peer(&world, Arc::new(MemoryStore::new()), None);
+    sign_up(&owner, "Owner");
+    let dir = std::env::temp_dir().join(format!("mvs-leave-outbox-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let secrets = Arc::new(MemoryStore::new());
+    let guest = keyed_peer(&world, secrets.clone(), Some(dir.join("core.db")));
+    let guest_id = sign_up(&guest, "Guest").id;
+    let kicked = keyed_peer(&world, Arc::new(MemoryStore::new()), None);
+    let kicked_id = sign_up(&kicked, "Kicked").id;
+    let server = owner.core.create_server("Outbox", AgeRestriction::None).unwrap();
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    for peer in [&guest, &kicked] {
+        peer.core.join_server(&server.invite_link).unwrap();
+    }
+    let old = SigningKey::from_bytes(&[43; 32]);
+    older_member(&world, &server, &old);
+    older_profile(&world, &server, &old, 2, false);
+    for peer in [&owner, &guest, &kicked] {
+        peer.core.sync_now().unwrap();
+    }
+
+    // The gate is shut: both leave anyway, and the server is gone at once.
+    for (peer, id) in [(&guest, &guest_id), (&kicked, &kicked_id)] {
+        peer.events.take();
+        peer.core.leave_server(&server.id).unwrap();
+        assert!(peer.events.take().contains(&Event::ServerRemoved {
+            server_id: server.id.clone(),
+            reason: Some(RemovedReason::Left),
+        }));
+        assert!(peer.core.list_servers().unwrap().is_empty());
+        assert_eq!(leaves_by(&world, server_key, id), 0, "a Leave went out past the gate");
+    }
+
+    // A kick while the Leave waits: it's dropped, never sent.
+    owner.core.kick_member(&server.id, &kicked_id).unwrap();
+    kicked.core.sync_now().unwrap();
+
+    // The guest restarts with the Leave still waiting.
+    drop(guest);
+    let guest = keyed_peer(&world, secrets, Some(dir.join("core.db")));
+    guest.core.sync_now().unwrap();
+    assert_eq!(leaves_by(&world, server_key, &guest_id), 0);
+    assert!(guest.core.list_servers().unwrap().is_empty());
+
+    // The older member updates: the gate opens, the waiting Leave goes out
+    // once, and the owner sees it and re-keys. The kicked one's never does.
+    owner.core.sync_now().unwrap();
+    let before = key_rotations(&world, server_key);
+    older_profile(&world, &server, &old, 3, true);
+    guest.core.sync_now().unwrap();
+    kicked.core.sync_now().unwrap();
+    assert_eq!(leaves_by(&world, server_key, &guest_id), 1);
+    assert_eq!(leaves_by(&world, server_key, &kicked_id), 0, "a kicked member's Leave went out");
+    owner.core.sync_now().unwrap();
+    assert!(!owner.core.list_members(&server.id).unwrap().iter().any(|m| m.id == guest_id));
+    assert!(key_rotations(&world, server_key) > before, "nobody re-keyed after the leave");
+    guest.core.sync_now().unwrap();
+    assert_eq!(leaves_by(&world, server_key, &guest_id), 1, "resent after delivery");
+    drop(guest);
+    let _ = std::fs::remove_dir_all(&dir);
 }
