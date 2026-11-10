@@ -69,7 +69,7 @@ describe('close (owner)', () => {
     fireEvent.change(within(dialog).getByRole('textbox'), { target: { value: name } });
     await click(confirm);
 
-    await screen.findByText('The owner closed this server. You can still read it for 30 days, but nothing new can be sent.');
+    await screen.findByText('The owner closed this server. You can still read it for 30 days, but no new messages can be sent.');
     expect(screen.queryByRole('textbox', { name: /^Message / })).toBeNull();
     expect(within(sidebar()).queryByRole('button', { name: 'Server settings' })).toBeNull();
     expect(within(sidebar()).queryByRole('button', { name: 'Create channel' })).toBeNull();
@@ -110,6 +110,19 @@ describe('update-needed', () => {
     expect(within(sidebar()).getByRole('heading', { level: 1 }).textContent).toBe(before);
   });
 
+  it('in the close confirmation, only Close remains once the gate answers', async () => {
+    const { sidebar } = await setup({ outdatedMembers: true });
+    const panel = openSettings(sidebar, 'Danger zone');
+    fireEvent.click(within(panel).getByRole('button', { name: 'Close server…' }));
+    const dialog = screen.getByRole('dialog', { name: /^Close .* for good\?$/ });
+    const name = within(sidebar()).getByRole('heading', { level: 1 }).textContent!;
+    fireEvent.change(within(dialog).getByRole('textbox'), { target: { value: name } });
+    await click(within(dialog).getByRole('button', { name: 'Close server' }));
+    expect(within(dialog).getByRole('alert').textContent).toContain('or remove them from the server');
+    expect(within(dialog).queryByRole('button', { name: 'Close server' })).toBeNull();
+    expect(within(dialog).getAllByRole('button', { name: 'Close' }).length).toBeGreaterThan(0);
+  });
+
   it('a leave is never gated', async () => {
     const { rail } = await setup({ outdatedMembers: true });
     fireEvent.contextMenu(within(rail()).getByRole('button', { name: /^Minecraft IL/ }));
@@ -139,5 +152,17 @@ describe('a closed server', () => {
     act(() => (core as unknown as { emit: (e: string, p: unknown) => void }).emit('server.removed', { serverId: id, reason: 'closed' }));
     await waitFor(() => expect(within(rail()).queryByRole('button', { name: /^Minecraft IL/ })).toBeNull());
     expect(screen.getAllByRole('status').some((s) => s.textContent === '⁨Minecraft IL⁩ was closed 30 days ago and no longer shows in the app.')).toBe(true);
+  });
+});
+
+describe('a long name from another client', () => {
+  it('a 100-character rename (the core allows it) is shown clipped to 48, in the header and the rail', async () => {
+    const { core, sidebar, rail } = await setup();
+    const s = (await core.listServers())[0];
+    const long = 'L'.repeat(100);
+    act(() => (core as unknown as { emit: (e: string, p: unknown) => void }).emit('server.updated', { ...s, name: long }));
+    const heading = await within(sidebar()).findByRole('heading', { name: 'L'.repeat(48) });
+    expect(heading.querySelector('bdi')).not.toBeNull();
+    expect(within(rail()).getByRole('button', { name: /^L{48}(,|$)/ })).toBeTruthy();
   });
 });

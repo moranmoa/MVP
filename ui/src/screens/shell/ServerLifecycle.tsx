@@ -28,7 +28,10 @@ function failureOf(e: unknown): Failure {
 /** `update-needed`: who still runs an older MVS, and the two ways out. */
 export function UpdateNeeded({ server }: { server: ServerSummary }) {
   const core = useCore();
-  const members = useStore(useAppStore(), (s) => s.members[server.id] ?? NO_MEMBERS);
+  const store = useAppStore();
+  const members = useStore(store, (s) => s.members[server.id] ?? NO_MEMBERS);
+  // Only the owner can remove members, so only the owner is offered that way out.
+  const owner = useStore(store, (s) => s.identity?.id === server.ownerId);
   const [memberIds, setMemberIds] = useState<string[]>([]);
   useEffect(() => {
     let live = true;
@@ -60,7 +63,7 @@ export function UpdateNeeded({ server }: { server: ServerSummary }) {
           </>
         )}
         <p className="small">
-          <FormattedMessage id="server.updateNeeded.remedy" />
+          <FormattedMessage id={owner ? 'server.updateNeeded.remedy' : 'server.updateNeeded.remedyMember'} />
         </p>
       </div>
     </div>
@@ -195,14 +198,23 @@ export function ClosePanel({ server }: { server: ServerSummary }) {
             <input {...typedProps} value={typed} autoFocus onChange={(e) => setTyped(e.target.value)} />
           </label>
           <FailureNote server={server} failure={failure} />
-          <div className="actions">
-            <button type="button" className="danger" disabled={!matches || busy} onClick={() => void close()}>
-              <FormattedMessage id="server.close.confirm" />
-            </button>
-            <button type="button" className="secondary" onClick={() => setConfirm(false)}>
-              <FormattedMessage id="common.cancel" />
-            </button>
-          </div>
+          {failure?.kind === 'update-needed' ? (
+            // Nothing can be done here until the gate opens: only Close remains.
+            <div className="actions">
+              <button type="button" className="secondary" autoFocus onClick={() => setConfirm(false)}>
+                <FormattedMessage id="common.close" />
+              </button>
+            </div>
+          ) : (
+            <div className="actions">
+              <button type="button" className="danger" disabled={!matches || busy} onClick={() => void close()}>
+                <FormattedMessage id="server.close.confirm" />
+              </button>
+              <button type="button" className="secondary" onClick={() => setConfirm(false)}>
+                <FormattedMessage id="common.cancel" />
+              </button>
+            </div>
+          )}
         </div>
       </Dialog>
     </div>
