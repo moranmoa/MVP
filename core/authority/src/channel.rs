@@ -182,6 +182,8 @@ pub enum Refusal {
     NotAllowed,
     /// The channel isn't live at its `auth_deps`: never created, or deleted.
     NoSuchChannel,
+    /// The owner deleted the server (`ServerClose`).
+    ServerClosed,
     /// An edit or delete whose body doesn't name a target in its deps, or
     /// whose target isn't a `Message`.
     BadTarget,
@@ -319,6 +321,10 @@ impl Context<'_> {
         // censor messages by serving stubs.
         if matches!(record, Entry::Pruned(_)) && !self.replaced(record) {
             return Verdict::Pending { missing: vec![record.id()] };
+        }
+        // A deleted server takes no channel records: its peers purge it.
+        if resolver.state().closed.is_some() {
+            return Verdict::Refused(Refusal::ServerClosed);
         }
         if record.auth_deps().is_empty() {
             return Verdict::Refused(Refusal::NoAuthDeps);

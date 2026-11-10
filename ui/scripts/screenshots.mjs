@@ -14,7 +14,8 @@ const BASE = `http://localhost:${PORT}/`;
 mkdirSync(OUT, { recursive: true });
 if (!process.argv.includes('--no-build')) execSync('npx vite build', { stdio: 'inherit' });
 const server = await preview({ preview: { port: PORT, strictPort: true, host: '127.0.0.1' }, logLevel: 'warn' });
-const browser = await chromium.launch();
+// A fake microphone, so the voice engine (piece D) finds one in call shots.
+const browser = await chromium.launch({ args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
 
 // Problems found while driving the built app; any of them fails the run.
 const problems = [];
@@ -381,10 +382,20 @@ for (const [detail, name] of [
   await p.close();
 }
 
-// ---- voice v1, piece E: calls (240-249) -------------------------------------------
+// ---- voice v1, pieces E and E2: the voice room and the call bar (240-249) -------
+// Joining: the room entry, then the one-time IP notice (243-244, docs/ux/specs/voice-ip-notice.md).
+async function joinRoom(p, ok = 'הבנתי') {
+  await p.locator('.voice-room-entry').click();
+  await p.getByRole('dialog').getByRole('button', { name: ok }).click();
+}
 {
   const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999', 'x');
-  await p.getByRole('button', { name: 'הצטרפות לשיחה' }).click();
+  await p.locator('.voice-room-people li').first().waitFor();
+  await shot(p, '245-voice-room-he');
+  await p.locator('.voice-room-entry').click();
+  await p.getByRole('dialog').waitFor();
+  await shot(p, '243-call-ip-notice-he');
+  await p.getByRole('dialog').getByRole('button', { name: 'הבנתי' }).click();
   const bar = p.getByRole('region', { name: 'שיחה קולית' });
   await bar.waitFor();
   await bar.getByRole('button', { name: 'השתקה' }).click();
@@ -392,14 +403,41 @@ for (const [detail, name] of [
   await shot(p, '240-call-bar-he');
   await p.close();
 }
-
-for (const [code, name] of [
-  ['relay-only', '241-call-relay-only-he'],
-  ['call-full', '242-call-full-he'],
+{
+  const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999&callError=relay-only', 'x');
+  await joinRoom(p);
+  await p.locator('.voice-room-reason').waitFor();
+  await shot(p, '241-call-relay-only-he');
+  await p.close();
+}
+{
+  const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999&roomFull=1', 'x');
+  await p.locator('.voice-room-reason').waitFor();
+  await shot(p, '242-call-full-he');
+  await p.close();
+}
+{
+  const p = await chat('?demo=1&still=1&lang=en&theme=dark&update=999999', 'x', { colorScheme: 'dark' });
+  await p.locator('.voice-room-people li').first().waitFor();
+  await shot(p, '246-voice-room-en-dark');
+  await p.close();
+}
+{
+  const p = await chat('?demo=1&still=1&lang=en&theme=light&update=999999', 'x');
+  await p.locator('.voice-room-entry').click();
+  await p.getByRole('dialog').waitFor();
+  await shot(p, '244-call-ip-notice-en-light');
+  await p.close();
+}
+for (const [sim, name, wait] of [
+  ['noMic', '247-call-no-mic-he', '.call-no-mic'],
+  ['peerFailed', '248-call-peer-failed-he', '.call-peer-failed'],
+  ['peerRefused', '249-call-peer-refused-he', '.call-peer-failed.refused'],
 ]) {
-  const p = await chat(`?demo=1&still=1&lang=he&theme=light&update=999999&callError=${code}`, 'x');
-  await p.getByRole('button', { name: 'הצטרפות לשיחה' }).click();
-  await p.locator('.call-blocked').waitFor();
+  const p = await chat(`?demo=1&still=1&lang=he&theme=light&update=999999&voiceSim=${sim}`, 'x');
+  await joinRoom(p);
+  await p.locator(wait).waitFor();
+  await p.waitForTimeout(300);
   await shot(p, name);
   await p.close();
 }

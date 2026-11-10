@@ -8,6 +8,8 @@
 import type { CoreApi, CoreEventName, CoreEvents, Unsubscribe } from './api';
 import type {
   CallState,
+  VoiceRoom,
+  VoiceParticipant,
   AgeRestriction,
   AppInfo,
   Channel,
@@ -58,6 +60,8 @@ export interface MockOptions {
   coreDown?: 'missing' | 'start-failed' | 'crashed' | 'crash-loop' | 'keyring';
   /** joinCall rejects with this code, for the error states (screenshots). */
   callError?: 'call-full' | 'relay-only' | 'not-implemented';
+  /** Every demo voice room starts with 5 people in it (full). */
+  roomFull?: boolean;
   /** Add members and messages written the way an attacker would (see SECURITY.md). */
   hostile?: boolean;
   /** `getRecoveryWords()` fails, to show the load error state. */
@@ -923,43 +927,90 @@ export class MockCore implements CoreApi {
   // ---- voice v1 (#223): calls only, no audio in the mock ----------------------------
 
   private call: CallState | null = null;
+  /** Who is in each server's voice room, by server id. Made on first use. */
+  private rooms = new Map<Id, VoiceParticipant[]>();
+
+  private roomIdOf(serverId: Id): Id {
+    return `${serverId}-voice`;
+  }
+
+  private roster(serverId: Id): VoiceParticipant[] {
+    let r = this.rooms.get(serverId);
+    if (!r) {
+      // Demo: two online people are already talking (the second one muted), or 5 with ?roomFull.
+      const others = (this.servers.get(serverId)?.members ?? []).filter((m) => m.id !== this.identity?.id);
+      const seed = this.options.roomFull ? others.slice(0, 5) : others.filter((m) => m.presence === 'online').slice(0, 2);
+      r = seed.map((m, i) => ({ userId: m.id, muted: i === 1 }));
+      this.rooms.set(serverId, r);
+    }
+    return r;
+  }
+
+  private room(serverId: Id): VoiceRoom {
+    return { serverId, roomId: this.roomIdOf(serverId), participants: this.roster(serverId).map((p) => ({ ...p })) };
+  }
+
+  private setRoster(serverId: Id, participants: VoiceParticipant[]): void {
+    this.rooms.set(serverId, participants);
+    this.emit('voice.room', this.room(serverId));
+  }
 
   private emitCall(): void {
     this.emit('call.state', this.call ?? { channelId: '', participants: [], full: false });
   }
 
+  /** The call as seen from the room it is in. */
+  private callOf(serverId: Id): CallState {
+    const people = this.roster(serverId);
+    return {
+      channelId: this.roomIdOf(serverId),
+      participants: people.map((p) => ({ identity: p.userId, muted: p.muted })),
+      full: people.length >= 5,
+    };
+  }
+
+  private callServer(): Id | null {
+    return [...this.servers.keys()].find((id) => this.roomIdOf(id) === this.call?.channelId) ?? null;
+  }
+
+  async getVoiceRoom(serverId: Id): Promise<VoiceRoom> {
+    await this.wait(50);
+    if (!this.servers.has(serverId)) throw err({ code: 'not-found' });
+    return this.room(serverId);
+  }
+
   async joinCall(channelId: Id): Promise<CallState> {
     await this.wait(200);
     if (this.options.callError) throw err({ code: this.options.callError });
-    const ch = this.channelIndex.get(channelId);
-    if (!ch) throw err({ code: 'not-found' });
-    const s = this.serverOf(ch);
-    // Me plus up to two others who are online, so the demo has a call to show.
-    const others = s.members.filter((m) => m.id !== this.identity!.id && m.presence === 'online').slice(0, 2);
-    this.call = {
-      channelId,
-      participants: [{ identity: this.identity!.id, muted: false }, ...others.map((m, i) => ({ identity: m.id, muted: i === 1 }))],
-      full: false,
-    };
+    const serverId = [...this.servers.keys()].find((id) => this.roomIdOf(id) === channelId);
+    // Text channels don't carry calls any more (voice-room amendment).
+    if (!serverId) throw err({ code: this.channelIndex.has(channelId) ? 'not-allowed' : 'not-found' });
+    if (this.call?.channelId === channelId) return this.call;
+    if (this.roster(serverId).length >= 5) throw err({ code: 'call-full' });
+    await this.leaveCall();
+    const me = this.identity!.id;
+    this.setRoster(serverId, [{ userId: me, muted: false }, ...this.roster(serverId).filter((p) => p.userId !== me)]);
+    this.call = this.callOf(serverId);
     this.emitCall();
     return this.call;
   }
 
   async leaveCall(): Promise<null> {
+    const serverId = this.callServer();
     if (this.call) {
       this.call = { ...this.call, participants: [], full: false };
       this.emitCall();
       this.call = null;
     }
+    if (serverId) this.setRoster(serverId, this.roster(serverId).filter((p) => p.userId !== this.identity!.id));
     return null;
   }
 
   async setMuted(muted: boolean): Promise<null> {
-    if (!this.call) throw err({ code: 'not-allowed' });
-    this.call = {
-      ...this.call,
-      participants: this.call.participants.map((p) => (p.identity === this.identity!.id ? { ...p, muted } : p)),
-    };
+    const serverId = this.callServer();
+    if (!this.call || !serverId) throw err({ code: 'not-allowed' });
+    this.setRoster(serverId, this.roster(serverId).map((p) => (p.userId === this.identity!.id ? { ...p, muted } : p)));
+    this.call = this.callOf(serverId);
     this.emitCall();
     return null;
   }

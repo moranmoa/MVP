@@ -6,6 +6,10 @@ publish = false
 
 [dependencies]
 records = { path = "../records" }
+# MIT OR Apache-2.0. The ServerEdit body is JSON (server lifecycle).
+serde = { version = "1", features = ["derive"] }
+# MIT OR Apache-2.0
+serde_json = "1"
 
 [dev-dependencies]
 # OsRng for sealing; the same rand_core as groupkeys and api.

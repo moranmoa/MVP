@@ -224,6 +224,22 @@ export interface CallState {
   full: boolean;
 }
 
+/** Someone in a server's voice room. `userId` is a member id. */
+export interface VoiceParticipant {
+  userId: Id;
+  muted: boolean;
+}
+
+/**
+ * The voice room of a server (voice v1 amendment): one per server, open to every
+ * member. `roomId` is what joinCall takes. At most 5 people, me included when in.
+ */
+export interface VoiceRoom {
+  serverId: Id;
+  roomId: Id;
+  participants: VoiceParticipant[];
+}
+
 /** WebRTC signalling between call members; for the voice engine (ui/src/voice). */
 export interface CallSignal {
   from: Id;
