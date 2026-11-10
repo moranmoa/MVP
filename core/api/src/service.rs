@@ -74,6 +74,58 @@ struct Profile {
     /// (#general). Older profiles and restored identities have none: English.
     #[serde(default)]
     locale: Option<Locale>,
+    /// B7 §9 / B13 §3 (decision 18): a birth date that raises my age over an
+    /// earlier "not adult" claim counts only from `effective_at`; until
+    /// then I count as under 18. `None`: nothing pending.
+    #[serde(default)]
+    pending_birth_date: Option<PendingBirth>,
+    /// The birth date is the one my claims were made from: set at sign-up
+    /// here, agreeing with a claim a server already holds, or past its 30
+    /// days. Turning 18 with a trusted date is just a birthday: no wait.
+    /// False after a restore (the date was entered again) until one of
+    /// those happens. Profiles saved before this field: trusted.
+    #[serde(default = "trusted")]
+    birth_date_trusted: bool,
+}
+
+fn trusted() -> bool {
+    true
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingBirth {
+    date: String,
+    effective_at: u64,
+}
+
+/// Decision 18: a raise of the age takes effect this long after it was found.
+pub const AGE_RAISE_DELAY_MS: u64 = 30 * 86_400_000;
+
+impl Profile {
+    /// A raise is waiting at `now`.
+    fn raise_pending(&self, now: u64) -> bool {
+        self.pending_birth_date.as_ref().is_some_and(|p| now < p.effective_at)
+    }
+
+    /// My age as it counts at `now`: from the birth date, but at most 17
+    /// while a raise is pending (the earlier "not adult" claim stands).
+    fn effective_age(&self, now: u64) -> Option<u32> {
+        let age = model::age_on(&self.birth_date, now)?;
+        Some(if self.raise_pending(now) { age.min(17) } else { age })
+    }
+
+    /// A pending raise whose 30 days are up takes effect. True if it did.
+    fn settle(&mut self, now: u64) -> bool {
+        match &self.pending_birth_date {
+            Some(p) if now >= p.effective_at => {
+                self.birth_date_trusted = true;
+                self.pending_birth_date = None;
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Kept in the store so a restart neither resets the count nor offers new
@@ -504,6 +556,8 @@ impl Core {
                 country: input.country,
                 birth_date: input.birth_date,
                 locale: Some(input.locale),
+                // Entered at sign-up here: my claims come from it.
+                birth_date_trusted: true,
                 ..Profile::default()
             };
             let me = inner.new_me(phrase, profile)?;
@@ -750,9 +804,10 @@ impl Core {
                 ports.network.publish(&record);
                 inner.store(server, record)?;
             }
-            let claim = inner.sign_age_claim(ports, server)?;
-            ports.network.publish(&claim);
-            inner.store(server, claim)?;
+            if let Some(claim) = inner.age_claim(ports, server)? {
+                ports.network.publish(&claim);
+                inner.store(server, claim)?;
+            }
             inner.db.add_server(server, ports.clock.now_ms())?;
             let summary = inner.summary(server)?;
             events.push(Event::ServerAdded(summary.clone()));
@@ -1679,6 +1734,8 @@ impl Core {
             // Closed servers past their 30 days: purged but for their
             // genesis and close.
             inner.expire_closed(ports, events)?;
+            // Decision 18: a raise whose 30 days are up takes effect.
+            inner.apply_due_birth_date(ports, events)?;
             for (server, records) in fetched {
                 if !inner.db.has_server(server)? {
                     continue;
@@ -2010,20 +2067,123 @@ impl Inner {
     /// Our age claim for `server` (B7): 18+ or not, from the sealed birth
     /// date, which never leaves this device. A restored identity has no
     /// birth date yet and claims "not 18+".
-    fn sign_age_claim(&self, ports: &Ports, server: ServerId) -> CoreResult<Record> {
-        let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?;
+    /// The age claim to post in `server` now, if any (decision 18, B13 §3,
+    /// B7 §9), from my latest accepted claim there:
+    /// - a raise ("not adult" there, adult by my birth date) that hasn't
+    ///   taken effect yet posts nothing and starts its 30 days
+    ///   (`pendingBirthDate`); until then I count as under 18;
+    /// - a lowering, or a first claim, is posted at once;
+    /// - the same as my current claim: nothing.
+    ///
+    /// So a restore (a birth date entered again) can't skip the 30 days, while
+    /// turning 18 with the date my claims came from (`birth_date_trusted`:
+    /// set at sign-up here) is just a birthday, with no wait.
+    fn age_claim(&mut self, ports: &Ports, server: ServerId) -> CoreResult<Option<Record>> {
         let now = ports.clock.now_ms();
-        let adult = model::age_on(&me.profile.birth_date, now).is_some_and(|age| age >= 18);
+        self.settle_birth_date(now)?;
+        let mut trust = false;
+        let (prior, adult, raise, pending) = {
+            let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?;
+            let key = me.key();
+            let view = self.view(server)?;
+            let claimed =
+                view.records.iter().any(|r| r.kind() == Kind::AgeClaim && r.author() == key);
+            let prior = claimed.then(|| view.state.adults.contains(&key));
+            let profile = &me.profile;
+            let by_date = model::age_on(&profile.birth_date, now).is_some_and(|age| age >= 18);
+            let pending = profile.raise_pending(now);
+            // A raise is a *changed* date (a restore entered it again): with
+            // the date my claims came from, turning 18 is just a birthday.
+            let raise = prior == Some(false) && by_date && !pending && !profile.birth_date_trusted;
+            // Only an *adult* agreement (a server already holds "adult" and
+            // the date says adult) makes a restored date the one my claims
+            // come from. A "not adult" agreement proves nothing: a date a day
+            // short of 18 would agree, then skip the wait the next day
+            // (Security Lead). Nor does a server with no claim.
+            let agrees =
+                !profile.birth_date_trusted && !pending && prior == Some(true) && by_date;
+            if agrees {
+                trust = true;
+            }
+            (prior, profile.effective_age(now).is_some_and(|age| age >= 18), raise, pending)
+        };
+        if trust {
+            self.update_profile_with(|p| p.birth_date_trusted = true)?;
+        }
+        if raise {
+            let date = self.me.as_ref().expect("checked above").profile.birth_date.clone();
+            self.update_profile_with(|p| {
+                p.pending_birth_date =
+                    Some(PendingBirth { date, effective_at: now + AGE_RAISE_DELAY_MS });
+            })?;
+            return Ok(None);
+        }
+        // Nothing new to say; and while a raise waits, a server that already
+        // holds "adult" keeps it (no lowering from the wait itself).
+        if prior == Some(adult) || (prior == Some(true) && pending) {
+            return Ok(None);
+        }
+        let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?;
+        let key = me.key();
         let view = self.view(server)?;
-        authority::sign_control(
+        let record = authority::sign_control(
             me.identity.signing_key(),
             server,
-            view.next_seq(&me.key()),
+            view.next_seq(&key),
             view.deps(None),
             now,
             &Action::AgeClaim { adult },
         )
-        .map_err(|_| ErrorCode::BadRequest.into())
+        .map_err(|_| CoreError::from(ErrorCode::BadRequest))?;
+        Ok(Some(record))
+    }
+
+    /// Changes my stored profile and saves it (sealed).
+    fn update_profile_with(&mut self, change: impl FnOnce(&mut Profile)) -> CoreResult<()> {
+        let me = self.me.as_mut().ok_or(ErrorCode::NotFound)?;
+        change(&mut me.profile);
+        let key = *me.identity.storage_key().expose_secret();
+        let json = serde_json::to_vec(&me.profile).expect("plain struct");
+        self.db.save_profile(&key, &json)
+    }
+
+    /// A pending raise whose 30 days are up takes effect (and is saved).
+    /// True if it did.
+    fn settle_birth_date(&mut self, now: u64) -> CoreResult<bool> {
+        let due = self.me.as_ref().is_some_and(|me| {
+            me.profile.pending_birth_date.as_ref().is_some_and(|p| now >= p.effective_at)
+        });
+        if due {
+            self.update_profile_with(|p| {
+                p.settle(now);
+            })?;
+        }
+        Ok(due)
+    }
+
+    /// Each sync round: a raise whose 30 days are up takes effect, and its
+    /// "adult" claim goes to every server I'm still in.
+    fn apply_due_birth_date(&mut self, ports: &Ports, events: &mut Events) -> CoreResult<()> {
+        if !self.settle_birth_date(ports.clock.now_ms())? {
+            return Ok(());
+        }
+        let key = self.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+        for server in self.db.servers()? {
+            if self.db.closed_at(server)?.is_some() {
+                continue;
+            }
+            self.load(server)?;
+            if !self.view(server)?.state.is_member(key) {
+                continue;
+            }
+            if let Some(claim) = self.age_claim(ports, server)? {
+                self.store(server, claim.clone())?;
+                ports.network.publish(&claim);
+            }
+        }
+        let identity = self.identity_json(self.me.as_ref().expect("checked above"))?;
+        events.push(Event::IdentityChanged(identity));
+        Ok(())
     }
 
     /// B6-p: every full record an accepted delete or edit replaced is pruned
@@ -2697,6 +2857,10 @@ impl Inner {
             bio: me.profile.bio.clone(),
             country: me.profile.country.clone(),
             birth_date: me.profile.birth_date.clone(),
+            pending_birth_date: me.profile.pending_birth_date.as_ref().map(|p| PendingBirthDate {
+                date: p.date.clone(),
+                effective_at: p.effective_at,
+            }),
             recovery_checked: self.vault.recovery_check_done(&me.identity).map_err(vault_error)?,
         })
     }
@@ -3056,7 +3220,8 @@ impl Inner {
         // the server already holds about me.
         let member = view.state.is_member(key);
         let required = view.genesis.age_restriction;
-        let age = model::age_on(&me.profile.birth_date, ports.clock.now_ms());
+        // As it counts now: at most 17 while a raise waits its 30 days.
+        let age = me.profile.effective_age(ports.clock.now_ms());
         // A member's earlier age claim stands while this device has no birth
         // date (a restore doesn't carry it yet); a known age too low still
         // blocks.
@@ -3112,9 +3277,10 @@ impl Inner {
         // Likewise a member without a birth date keeps its earlier claim:
         // a claim from no date would say "not adult", which counts at once.
         if !age_unknown_member {
-            let claim = self.sign_age_claim(ports, server)?;
-            mine.push(claim.clone());
-            self.store(server, claim)?;
+            if let Some(claim) = self.age_claim(ports, server)? {
+                mine.push(claim.clone());
+                self.store(server, claim)?;
+            }
         }
         for record in &mine {
             ports.network.publish(record);
