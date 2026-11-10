@@ -193,7 +193,7 @@ PowerShell on your normal (online) PC, in the repo:
    ```powershell
    # Dry run first: every check and the build, no key, nothing signed or uploaded.
    .\.github\scripts\publish-release.ps1 -Tag v0.1.0 -WhatIf
-   # Then for real. Every release goes to beta; add -Channel alpha for stable.
+   # Then for real: signs and publishes alpha and beta, in one key-drive session.
    .\.github\scripts\publish-release.ps1 -Tag v0.1.0 -Key E:\mvs-keys\root.key
    ```
 
@@ -212,7 +212,16 @@ PowerShell on your normal (online) PC, in the repo:
      `core/updater/trust/root.json`, each payload included. Then it asks you
      to **remove the drive** before anything is uploaded.
    - It publishes the release as a pre-release, then runs
-     `publish-update.ps1` for the channel (step 6).
+     `publish-update.ps1` for each channel (step 6).
+
+   **Channels: both by default.** The app's **"stable"** setting reads the
+   **alpha** manifest (`core/api/src/update.rs`: `Stable` → `"alpha"`), and
+   "beta" reads beta. A release published to beta only never reaches stable
+   users, which is what happened with 0.3.2 at first. So the script signs both
+   bodies while the key drive is connected once, and publishes `update-alpha`
+   and `update-beta`, creating either on its first run. `-Channels beta`
+   publishes one channel only, and the summary warns that stable users won't
+   get it.
    - Any failed check stops it with a message, and nothing after that step
      runs.
 
@@ -308,6 +317,14 @@ PowerShell on your normal (online) PC, in the repo:
    **Windows-only for now**: the updater fetches and unpacks only `.zip`, so
    the manifests list only `windows-*`. The Linux `.tar.gz` stays a plain
    release file.
+
+   **First run on a channel:** `update-<channel>` doesn't exist yet, so the
+   script creates it ("… does not exist yet: creating it"); that is expected.
+   It works in Windows PowerShell 5.1 and in PowerShell 7: every `gh` and
+   `updater` call is judged by its exit code, not by what it writes to stderr
+   (before 0.3.3, 5.1 stopped with "release not found" on the first run).
+   Any failed download, create or upload stops the script before it prints
+   "published".
 
 ## Keeping a release alive
 

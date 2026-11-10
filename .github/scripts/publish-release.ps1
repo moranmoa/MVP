@@ -2,7 +2,12 @@
 # steps 3-6 of docs/release/RELEASING.md. Run locally, never in CI: it is the
 # only place the update root key is used.
 #
-#   .\.github\scripts\publish-release.ps1 -Tag v0.3.1 [-Channel beta|alpha] [-Key <path>] [-WhatIf]
+#   .\.github\scripts\publish-release.ps1 -Tag v0.3.1 [-Channels alpha,beta] [-Key <path>] [-WhatIf]
+#
+# Channels: both by default, signed in one key-drive session. The app's
+# "stable" setting reads the **alpha** manifest (core/api/src/update.rs:
+# Stable -> "alpha"), "beta" reads beta; a release published to beta only
+# never reaches stable users. -Channels beta publishes one channel only.
 #
 # The key comes from -Key or $env:MVS_ROOT_KEY, on an encrypted removable
 # drive that is connected only while signing (core/updater/SECURITY.md). This
@@ -26,7 +31,7 @@
 # and uploading (no key needed, no confirmation asked).
 param(
   [Parameter(Mandatory)][ValidatePattern('^v\d+\.\d+\.\d+$')][string]$Tag,
-  [ValidateSet('beta', 'alpha')][string]$Channel = 'beta',
+  [Alias('Channel')][ValidateSet('beta', 'alpha')][string[]]$Channels = @('alpha', 'beta'),
   [string]$Key,
   # Root rotations (root-2.json, ...), oldest first; passed to verify and
   # uploaded by publish-update.ps1. Read while the key drive is connected.
@@ -51,11 +56,16 @@ function Fail([string]$why) {
 }
 function Step([string]$what) { Write-Host "`n== $what" -ForegroundColor Cyan }
 function Ok([string]$what) { Write-Host "ok: $what" }
-# A native command that must succeed.
+# A native command that must succeed. Judged by its exit code only: under
+# 'Stop', Windows PowerShell 5.1 turns a redirected stderr line of a native
+# program into a terminating error, even on success (publish-update.ps1).
 function Run([string]$what, [scriptblock]$cmd) {
-  & $cmd
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { & $cmd } finally { $ErrorActionPreference = $prev }
   if ($LASTEXITCODE -ne 0) { Fail "$what (exit code $LASTEXITCODE)" }
 }
+$Channels = @($Channels | Select-Object -Unique)
 
 # --- 0. Preconditions -------------------------------------------------------
 Step 'Checks before starting'
@@ -113,35 +123,39 @@ foreach ($line in Get-Content $sumsFile) {
 }
 Ok "$($sums.Count) files match SHA256SUMS"
 
-# --- 3. The channel's manifest body -----------------------------------------
-Step "Manifest body for $Channel"
-$bodyFile = Join-Path $dl "manifest-body-$Channel.json"
-if (-not (Test-Path $bodyFile)) { Fail "the release has no manifest-body-$Channel.json" }
-$body = Get-Content -Raw -Encoding UTF8 $bodyFile | ConvertFrom-Json
-if ($body.version -ne $version) { Fail "body version is '$($body.version)', not $version" }
-if ($body.channel -ne $Channel) { Fail "body channel is '$($body.channel)', not $Channel" }
-$platforms = @($body.artifacts.PSObject.Properties)
-if ($platforms.Count -eq 0) { Fail 'the body lists no artifacts' }
-$payloads = @()
-foreach ($p in $platforms) {
-  # The updater fetches only mvs-<version>-<platform>.zip (publish-update.ps1).
-  $name = "mvs-$version-$($p.Name).zip"
-  if (-not $sums.ContainsKey($name)) { Fail "$name is not in SHA256SUMS" }
-  if ($p.Value.sha256 -ne $sums[$name]) { Fail "the body's sha256 for $name differs from SHA256SUMS" }
-  if ((Get-Item (Join-Path $dl $name)).Length -ne $p.Value.size) { Fail "the body's size for $name differs from the file" }
-  $payloads += [pscustomobject]@{ Platform = $p.Name; File = (Join-Path $dl $name); Name = $name; Sha256 = $p.Value.sha256; Size = $p.Value.size }
-}
-Ok "the body's artifacts match SHA256SUMS and the files"
-
+# --- 3. Each channel's manifest body ----------------------------------------
 $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-$restamped = $false
-if ($now - [int64]$body.issued_at -gt $RestampAfterHours * 3600) {
-  Run 'restamping the body' { node (Join-Path $src '.github/scripts/manifest-body.mjs') --restamp $bodyFile --days 14 }
+$plans = @()
+foreach ($Channel in $Channels) {
+  Step "Manifest body for $Channel"
+  $bodyFile = Join-Path $dl "manifest-body-$Channel.json"
+  if (-not (Test-Path $bodyFile)) { Fail "the release has no manifest-body-$Channel.json" }
   $body = Get-Content -Raw -Encoding UTF8 $bodyFile | ConvertFrom-Json
-  $restamped = $true
-  Ok 'body restamped: valid 14 days from now (hashes untouched)'
+  if ($body.version -ne $version) { Fail "$Channel body version is '$($body.version)', not $version" }
+  if ($body.channel -ne $Channel) { Fail "body channel is '$($body.channel)', not $Channel" }
+  $platforms = @($body.artifacts.PSObject.Properties)
+  if ($platforms.Count -eq 0) { Fail "the $Channel body lists no artifacts" }
+  $payloads = @()
+  foreach ($p in $platforms) {
+    # The updater fetches only mvs-<version>-<platform>.zip (publish-update.ps1).
+    $name = "mvs-$version-$($p.Name).zip"
+    if (-not $sums.ContainsKey($name)) { Fail "$name is not in SHA256SUMS" }
+    if ($p.Value.sha256 -ne $sums[$name]) { Fail "the $Channel body's sha256 for $name differs from SHA256SUMS" }
+    if ((Get-Item (Join-Path $dl $name)).Length -ne $p.Value.size) { Fail "the $Channel body's size for $name differs from the file" }
+    $payloads += [pscustomobject]@{ Platform = $p.Name; File = (Join-Path $dl $name); Name = $name; Sha256 = $p.Value.sha256; Size = $p.Value.size }
+  }
+  Ok "the $Channel body's artifacts match SHA256SUMS and the files"
+
+  $restamped = $false
+  if ($now - [int64]$body.issued_at -gt $RestampAfterHours * 3600) {
+    Run "restamping the $Channel body" { node (Join-Path $src '.github/scripts/manifest-body.mjs') --restamp $bodyFile --days 14 }
+    $body = Get-Content -Raw -Encoding UTF8 $bodyFile | ConvertFrom-Json
+    $restamped = $true
+    Ok "$Channel body restamped: valid 14 days from now (hashes untouched)"
+  }
+  if ([int64]$body.expires_at -le $now) { Fail "the $Channel body has already expired" }
+  $plans += [pscustomobject]@{ Channel = $Channel; BodyFile = $bodyFile; Body = $body; Payloads = $payloads; Restamped = $restamped; Manifest = (Join-Path $work "manifest-$Channel.json") }
 }
-if ([int64]$body.expires_at -le $now) { Fail 'the body has already expired' }
 
 # --- 4. The updater, built from the tag -------------------------------------
 Step "Building updater from $Tag (not a downloaded binary)"
@@ -161,11 +175,17 @@ $utc = { param($t) [DateTimeOffset]::FromUnixTimeSeconds([int64]$t).UtcDateTime.
 $state = 'pre-release'
 if ($rel.isDraft) { $state = 'draft' }
 Write-Host "  version   $version   ($Tag, $state, commit $($commit.Substring(0, 10)))"
-Write-Host "  channel   $Channel  -> update-$Channel"
-Write-Host "  issued    $(& $utc $body.issued_at)$(if ($restamped) { '  (restamped now)' })"
-Write-Host "  expires   $(& $utc $body.expires_at)"
-foreach ($p in $payloads) { Write-Host ("  {0,-16} {1}  {2} bytes  {3}" -f $p.Platform, $p.Sha256, $p.Size, $p.Name) }
-if ($body.revoked -and @($body.revoked).Count) { Write-Host "  revokes   $(@($body.revoked) -join ', ')" -ForegroundColor Yellow }
+foreach ($pl in $plans) {
+  $label = $pl.Channel
+  if ($pl.Channel -eq 'alpha') { $label = 'alpha (the app''s "stable")' }
+  Write-Host "  channel   $label  -> update-$($pl.Channel)"
+  Write-Host "    issued  $(& $utc $pl.Body.issued_at)$(if ($pl.Restamped) { '  (restamped now)' })"
+  Write-Host "    expires $(& $utc $pl.Body.expires_at)"
+  foreach ($p in $pl.Payloads) { Write-Host ("    {0,-16} {1}  {2} bytes  {3}" -f $p.Platform, $p.Sha256, $p.Size, $p.Name) }
+  if ($pl.Body.revoked -and @($pl.Body.revoked).Count) { Write-Host "    revokes $(@($pl.Body.revoked) -join ', ')" -ForegroundColor Yellow }
+}
+if (-not ($Channels -contains 'alpha')) { Write-Host '  note: not publishing to alpha, so users on "stable" will not get this update' -ForegroundColor Yellow }
+$body = $plans[0].Body
 if ($body.notes) {
   foreach ($n in $body.notes.PSObject.Properties) {
     $lines = @(($n.Value -split "`n") | Where-Object { $_.Trim() } | Select-Object -First 3)
@@ -177,15 +197,15 @@ if ($Roots.Count) { Write-Host "  rotations $(($Roots | ForEach-Object { Split-P
 
 if ($WhatIf) {
   Step 'WhatIf: stopping before signing and uploading'
-  Write-Host "  would ask you to connect the key drive, check the key, and sign manifest-body-$Channel.json"
-  Write-Host "  would run: updater verify --root <tag>/core/updater/trust/root.json, each payload included"
+  Write-Host "  would ask you to connect the key drive once, check the key, and sign $(($plans | ForEach-Object { "manifest-body-$($_.Channel).json" }) -join ' and ')"
+  Write-Host "  would run: updater verify --root <tag>/core/updater/trust/root.json, for each channel and payload"
   if ($rel.isDraft) { Write-Host "  would run: gh release edit $Tag --draft=false --prerelease" }
-  Write-Host "  would run: publish-update.ps1 -Tag $Tag -Channel $Channel"
+  foreach ($pl in $plans) { Write-Host "  would run: publish-update.ps1 -Tag $Tag -Channel $($pl.Channel)  (creates update-$($pl.Channel) if it doesn't exist)" }
   Write-Host "  checked files are in $work"
   exit 0
 }
 
-$answer = Read-Host "`nType the version ($version) to sign and publish it to $Channel, anything else to stop"
+$answer = Read-Host "`nType the version ($version) to sign and publish it to $($Channels -join ' and '), anything else to stop"
 if ($answer.Trim() -ne $version) { Fail 'not confirmed' }
 
 # --- 6. Key drive, sign and verify ------------------------------------------
@@ -228,24 +248,26 @@ foreach ($r in $Roots) {
 }
 $Roots = $rotations
 
-Step 'Signing'
-$manifest = Join-Path $work "manifest-$Channel.json"
-$prev = $ErrorActionPreference
-$ErrorActionPreference = 'Continue'
-$out = & $updater sign-manifest --key $keyPath --body $bodyFile --out $manifest 2>&1 | Out-String
-$code = $LASTEXITCODE
-$ErrorActionPreference = $prev
-# The updater names the key file in its errors; never echo the path.
-Write-Host ($out.Replace($keyPath, '<key>'))
-if ($code -ne 0) { Fail 'updater sign-manifest failed' }
+# Every channel is signed and verified while the drive is connected, once.
+foreach ($pl in $plans) {
+  Step "Signing $($pl.Channel)"
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  $out = & $updater sign-manifest --key $keyPath --body $pl.BodyFile --out $pl.Manifest 2>&1 | Out-String
+  $code = $LASTEXITCODE
+  $ErrorActionPreference = $prev
+  # The updater names the key file in its errors; never echo the path.
+  Write-Host ($out.Replace($keyPath, '<key>'))
+  if ($code -ne 0) { Fail "updater sign-manifest failed ($($pl.Channel))" }
 
-Step 'Verifying'
-foreach ($p in $payloads) {
-  $verifyArgs = @('verify', '--manifest', $manifest, '--root', $root, '--artifact', $p.File, '--platform', $p.Platform)
-  foreach ($r in $Roots) { $verifyArgs += @('--root-update', $r) }
-  Run "updater verify ($($p.Platform))" { & $updater @verifyArgs }
+  Step "Verifying $($pl.Channel)"
+  foreach ($p in $pl.Payloads) {
+    $verifyArgs = @('verify', '--manifest', $pl.Manifest, '--root', $root, '--artifact', $p.File, '--platform', $p.Platform)
+    foreach ($r in $Roots) { $verifyArgs += @('--root-update', $r) }
+    Run "updater verify ($($pl.Channel), $($p.Platform))" { & $updater @verifyArgs }
+  }
+  Ok "$($pl.Channel): signature, root chain, expiry and payload hashes verified"
 }
-Ok 'signature, root chain, expiry and payload hashes verified'
 $keyPath = $null
 $Key = $null
 [void](Read-Host "`nRemove the key drive now, then press Enter to upload")
@@ -256,9 +278,12 @@ if ($rel.isDraft) {
   Run 'publishing the release' { gh release edit $Tag --repo $Repo --draft=false --prerelease }
   Ok "$Tag published as a pre-release"
 }
-$publishArgs = @{ Tag = $Tag; Channel = $Channel; Manifest = $manifest; Root = $root; Updater = $updater; Repo = $Repo }
-if ($Roots.Count) { $publishArgs.Roots = $Roots }
-try { & (Join-Path $PSScriptRoot 'publish-update.ps1') @publishArgs }
-catch { Fail "publish-update.ps1: $_ (the release itself may already be published; re-run to retry the channel upload)" }
-Write-Host "`nDone: $version is on update-$Channel. Installed apps on $Channel pick it up at their next check (6 h ± 30 min, or on restart)." -ForegroundColor Green
-Write-Host "Signed manifest kept at $manifest"
+foreach ($pl in $plans) {
+  $publishArgs = @{ Tag = $Tag; Channel = $pl.Channel; Manifest = $pl.Manifest; Root = $root; Updater = $updater; Repo = $Repo }
+  if ($Roots.Count) { $publishArgs.Roots = $Roots }
+  try { & (Join-Path $PSScriptRoot 'publish-update.ps1') @publishArgs }
+  catch { Fail "publish-update.ps1 ($($pl.Channel)): $_ (the release and any channel above may already be published; re-run with -Channels $($pl.Channel) to retry this one)" }
+  Ok "$version is on update-$($pl.Channel)"
+}
+Write-Host "`nDone: $version is on $(($plans | ForEach-Object { "update-$($_.Channel)" }) -join ' and '). Installed apps pick it up at their next check (6 h ± 30 min, or on restart): ""stable"" reads alpha, ""beta"" reads beta." -ForegroundColor Green
+Write-Host "Signed manifests kept in $work"
