@@ -90,6 +90,8 @@
   "onb.check.showAgain": "Show the words again",
 
   "onb.profile.title": "What should we call you?",
+  "onb.restored.title": "Your account is restored",
+  "onb.restored.servers": "Your servers don't come back automatically yet. To return to a server, open an invite link to it – from another of your devices, or ask someone in the server. You'll be recognized as the same account, with your role.",
   "onb.profile.hint": "Members of your servers see this name. You can change it any time.",
   "onb.profile.name": "Display name",
   "onb.profile.bio": "A few words about you (optional)",

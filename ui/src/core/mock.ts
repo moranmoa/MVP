@@ -688,14 +688,14 @@ export class MockCore implements CoreApi {
     return [...this.words];
   }
 
-  async restoreIdentity(words: string[]): Promise<Identity> {
+  async restoreIdentity(words: string[], input?: NewIdentityInput): Promise<Identity> {
     await this.wait(600);
     const clean = words.map((w) => w.trim().toLowerCase());
     const bad = clean.flatMap((w, i) => (WORDS.includes(w) ? [] : [i + 1]));
     if (clean.length !== 12 || bad.length) throw err({ code: 'invalid-words', positions: bad });
     const id = `me-${hashString(clean.join(' ')).toString(36)}`;
     this.identity = {
-      ...this.makeIdentity(id, { locale: 'he', country: 'IL', birthDate: '1995-01-01' }),
+      ...this.makeIdentity(id, input ?? { locale: 'he', country: 'IL', birthDate: '1995-01-01' }),
       displayName: '',
       recoveryChecked: true,
     };
