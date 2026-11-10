@@ -6,6 +6,7 @@
 #   bash core/api/tests/two_peers.sh
 #
 # IMAGE (default mvs-relay:test) is built from infra/relay unless it exists.
+# TEST_TIMEOUT (seconds, default 1200) stops a run that hangs.
 #
 # Several runs at once (other worktrees, other agents) don't meet: each run's
 # network and containers are named after its process ID, and cleanup removes
@@ -27,6 +28,7 @@ fi
 
 # This run's resources only: the test container first (it holds the network).
 cleanup() {
+  if [ -n "${watchdog:-}" ]; then kill "$watchdog" 2>/dev/null || true; fi
   docker rm -f "$P-test" "$P-relay" >/dev/null 2>&1 || true
   docker network rm "$P" >/dev/null 2>&1 || true
 }
@@ -45,6 +47,17 @@ for _ in $(seq 30); do
 done
 [ -n "$relay_id" ] || { docker logs "$P-relay"; echo "relay did not start"; exit 1; }
 
+# A hung run (a join that never completes, or a panicked test whose threads
+# keep the test binary alive) would otherwise never end and never clean up:
+# after TEST_TIMEOUT seconds (default 1200, a cold build included) the test
+# container is removed, so the run fails and cleanup runs.
+timeout_s=${TEST_TIMEOUT:-1200}
+(
+  sleep "$timeout_s"
+  echo "two_peers.sh: no result after ${timeout_s}s; stopping the test container" >&2
+  docker rm -f "$P-test" >/dev/null 2>&1
+) &
+watchdog=$!
 docker run --rm --name "$P-test" --network "$P" -e RELAY="/dns4/relay/tcp/4001/p2p/$relay_id" \
   -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" -v "$(mount "$core"):/work" \
   -v cargo-registry:/usr/local/cargo/registry -v "$TARGET_VOLUME":/target -e CARGO_TARGET_DIR=/target \
