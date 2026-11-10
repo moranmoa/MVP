@@ -142,10 +142,12 @@ function isAudioOnly(mediaTypes) {
  * URL and (when given) the security origin must all be app://mvs. Camera,
  * screen/display capture, a remote origin, a subframe or any other
  * permission: refused. `pageUrl` is the URL of the asking webContents.
+ * V-C2: and only while we are in a call (`inCall`, from createCallGate), so
+ * script in our page can't record without joining one.
  */
-function allowPermissionRequest(pageUrl, permission, details) {
+function allowPermissionRequest(pageUrl, permission, details, inCall) {
   if (ALLOWED_PERMISSIONS.has(permission)) return true;
-  if (permission !== 'media' || !details) return false;
+  if (permission !== 'media' || !details || inCall !== true) return false;
   if (!isInternalUrl(pageUrl) || details.isMainFrame !== true) return false;
   if (!isInternalUrl(details.requestingUrl)) return false;
   if (details.securityOrigin !== undefined && !isInternalUrl(details.securityOrigin)) return false;
@@ -156,15 +158,65 @@ function allowPermissionRequest(pageUrl, permission, details) {
  * The matching check (setPermissionCheckHandler): 'media' with mediaType
  * 'audio', from our own origin, top frame. Anything else: false. `pageUrl`
  * is the URL of the asking webContents, or undefined when Electron gives none.
+ * Also only while `inCall` is true.
  */
-function allowPermissionCheck(pageUrl, permission, requestingOrigin, details) {
+function allowPermissionCheck(pageUrl, permission, requestingOrigin, details, inCall) {
   if (ALLOWED_PERMISSIONS.has(permission)) return true;
-  if (permission !== 'media' || !details) return false;
+  if (permission !== 'media' || !details || inCall !== true) return false;
   if (pageUrl !== undefined && !isInternalUrl(pageUrl)) return false;
   if (!isInternalUrl(requestingOrigin) || details.isMainFrame !== true) return false;
   if (details.securityOrigin !== undefined && !isInternalUrl(details.securityOrigin)) return false;
   if (details.requestingUrl !== undefined && !isInternalUrl(details.requestingUrl)) return false;
   return details.mediaType === 'audio';
+}
+
+const hasParticipants = (state) => !!state && Array.isArray(state.participants) && state.participants.length > 0;
+
+/**
+ * V-C2: whether we are in a call, as main sees it from the core's answers and
+ * events. It opens only on a successful joinCall (a CallState with
+ * participants) and fails closed: it shuts on leaveCall (when sent), on any
+ * joinCall that fails, on a call.state with no participants (left, ended,
+ * timed out, refused), whenever the core is not up (a restarted core has no
+ * call), and on quit. A joinCall answer that arrives after a leave, a core
+ * restart or quit (an older generation) can't reopen it.
+ */
+function createCallGate() {
+  let inCall = false;
+  let gen = 0;
+  const shut = () => {
+    inCall = false;
+    gen += 1;
+  };
+  return {
+    get inCall() {
+      return inCall;
+    },
+    /** Before a command goes to the core; returns a token for its answer. */
+    beforeCommand(cmd) {
+      if (cmd === 'leaveCall') shut();
+      return gen;
+    },
+    /** The core's answer ({ ok } or { error }) to a command sent with `token`. */
+    afterCommand(cmd, token, res) {
+      if (cmd !== 'joinCall') return;
+      // joinCall leaves any other call first, so a failed one leaves us out.
+      if (!res || res.error || !hasParticipants(res.ok)) return void shut();
+      if (token === gen) inCall = true;
+    },
+    /** Every core event. */
+    onEvent(name, payload) {
+      // Only shuts: a join that is still being answered must not lose its
+      // generation to the leave of the call it replaces.
+      if (name === 'call.state' && !hasParticipants(payload)) inCall = false;
+    },
+    /** Every core status ({ state: 'starting' | 'up' | 'down', ... }). */
+    onCoreStatus(status) {
+      if (!status || status.state !== 'up') shut();
+    },
+    /** Quit. */
+    end: shut,
+  };
 }
 
 module.exports = {
@@ -176,6 +228,7 @@ module.exports = {
   WEBRTC_IP_POLICY,
   allowPermissionRequest,
   allowPermissionCheck,
+  createCallGate,
   cspFromIndexHtml,
   responseHeaders,
   mimeOf,

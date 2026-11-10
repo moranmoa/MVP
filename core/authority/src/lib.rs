@@ -46,6 +46,14 @@
 //!   genesis ([`sign_new_server`]) and can't be deleted (ש-20).
 //! - Age: a member claims their own age, 18+ or not, and the latest claim in
 //!   linear order counts. The birth date never leaves the device (B7).
+//! - Server lifecycle: the owner or an admin renames the server
+//!   (`ServerEdit`, strict name rule); the latest rename in linear order
+//!   names it. A member other than the owner leaves (`Leave`): their role and
+//!   membership end, a rejoin starts as a member, and a kicked key can't
+//!   leave, so a ban survives. The owner deletes the server (`ServerClose`):
+//!   the first close in linear order with the genesis in its past wins, and
+//!   only that close's causal past stays accepted; everything concurrent
+//!   with it or after it is refused, on every arrival order.
 //! - Ties between concurrent records are broken by the record ID.
 //!
 //! Records come from the `records` crate, so they are signed and their IDs are
@@ -156,6 +164,20 @@ pub enum Action {
     Unban {
         target: Actor,
     },
+    /// The owner or an admin renames the server. Body: `history u8` (0), then
+    /// JSON `{"v": 1, "name": ...}`; unknown fields are ignored, so later
+    /// versions can add some. The name follows [`server_name_ok`].
+    ServerEdit {
+        name: String,
+    },
+    /// A member other than the owner leaves the server. It ends their role
+    /// and membership; unlike a kick, they may join again. Body: a cut.
+    Leave {
+        cut: Cut,
+    },
+    /// The owner deletes the server for good. Body: empty. Only the first
+    /// close and its causal past stay accepted.
+    ServerClose,
 }
 
 impl Action {
@@ -184,6 +206,9 @@ impl Action {
             Action::ChannelEdit { .. } => Kind::ChannelEdit,
             Action::ChannelDelete { .. } => Kind::ChannelDelete,
             Action::Unban { .. } => Kind::Unban,
+            Action::ServerEdit { .. } => Kind::ServerEdit,
+            Action::Leave { .. } => Kind::Leave,
+            Action::ServerClose => Kind::ServerClose,
         }
     }
 
@@ -219,6 +244,16 @@ impl Action {
             Action::ChannelDelete { channel } => channel.as_bytes().to_vec(),
             Action::AgeClaim { adult } => vec![u8::from(*adult)],
             Action::Unban { target } => target.as_bytes().to_vec(),
+            Action::ServerEdit { name } => {
+                let json = serde_json::json!({ "v": 1, "name": name });
+                [vec![0], serde_json::to_vec(&json).expect("a JSON object")].concat()
+            }
+            Action::Leave { cut } => {
+                let mut body = Vec::new();
+                cut.encode(&mut body);
+                body
+            }
+            Action::ServerClose => Vec::new(),
         }
     }
 
@@ -282,16 +317,20 @@ impl Action {
                 channel: ChannelId::from_bytes(body.try_into().ok()?),
             }),
             Kind::Unban => Some(Action::Unban { target: key(body)? }),
-            // Channel kinds are judged by the channel checks (B4-4); server,
-            // channel and leave records come in B4-3. Until then they are
-            // never accepted.
-            Kind::ServerEdit
-            | Kind::ServerClose
-            | Kind::Leave
-            | Kind::Message
-            | Kind::MessageEdit
-            | Kind::MessageDelete
-            | Kind::KeyRotation => None,
+            Kind::ServerEdit => {
+                // No history mode is defined before D30.
+                let (&history, json) = body.split_first()?;
+                if history != 0 {
+                    return None;
+                }
+                let edit: ServerEditBody = serde_json::from_slice(json).ok()?;
+                (edit.v == 1 && server_name_ok(&edit.name))
+                    .then_some(Action::ServerEdit { name: edit.name })
+            }
+            Kind::Leave => Some(Action::Leave { cut: Cut::parse(body)? }),
+            Kind::ServerClose => body.is_empty().then_some(Action::ServerClose),
+            // Channel kinds are judged by the channel checks (B4-4).
+            Kind::Message | Kind::MessageEdit | Kind::MessageDelete | Kind::KeyRotation => None,
         }
     }
 
@@ -310,15 +349,18 @@ impl Action {
             | Action::ChannelCreate { .. }
             | Action::ChannelEdit { .. }
             | Action::ChannelDelete { .. }
-            | Action::AgeClaim { .. } => None,
+            | Action::AgeClaim { .. }
+            | Action::ServerEdit { .. }
+            | Action::Leave { .. }
+            | Action::ServerClose => None,
         }
     }
 
     /// The actor whose role history this action writes to, if any: the
-    /// target, or the author of a join.
+    /// target, or the author of a join or a leave.
     fn subject(&self, author: Actor) -> Option<Actor> {
         match self {
-            Action::Join { .. } => Some(author),
+            Action::Join { .. } | Action::Leave { .. } => Some(author),
             _ => self.target(),
         }
     }
@@ -351,6 +393,8 @@ impl Action {
                     | Action::ChannelCreate { .. }
                     | Action::ChannelEdit { .. }
                     | Action::ChannelDelete { .. }
+                    | Action::ServerEdit { .. }
+                    | Action::ServerClose
             )
     }
 
@@ -432,6 +476,27 @@ pub const MAX_CHANNEL_NAME: usize = 32;
 /// and [`display_text_ok`].
 pub fn channel_name_ok(name: &str) -> bool {
     (1..=MAX_CHANNEL_NAME).contains(&name.chars().count()) && display_text_ok(name)
+}
+
+/// Most Unicode code points in a server name, the same limit as
+/// `createServer`.
+pub const MAX_SERVER_NAME: usize = 100;
+
+/// Whether `name` can name a server: trimmed, 1 to [`MAX_SERVER_NAME`] code
+/// points, and the strict [`display_text_ok`] (never [`display_name_ok`]:
+/// it is in a control record every member renders).
+pub fn server_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.trim() == name
+        && name.chars().count() <= MAX_SERVER_NAME
+        && display_text_ok(name)
+}
+
+/// A `ServerEdit` body after its history byte. Unknown fields are ignored.
+#[derive(serde::Deserialize)]
+struct ServerEditBody {
+    v: u32,
+    name: String,
 }
 
 /// Whether text other people see as a name (a channel, a display name, a
@@ -679,6 +744,12 @@ pub struct State {
     pub channels: BTreeMap<ChannelId, Channel>,
     /// Deleted channels: their IDs aren't created again.
     pub deleted_channels: BTreeSet<ChannelId>,
+    /// The latest accepted rename in linear order; `None` keeps the genesis
+    /// name.
+    pub server_name: Option<String>,
+    /// The accepted `ServerClose`: the server is deleted, and only the
+    /// close's causal past is accepted.
+    pub closed: Option<RecordId>,
     /// Accepted posts, in display order.
     pub posts: Vec<RecordId>,
     pub accepted: BTreeSet<RecordId>,
@@ -858,6 +929,14 @@ fn permitted(view: &impl View, record: &Record, action: &Action) -> bool {
         }
         // A member claims their own age.
         Action::AgeClaim { .. } => view.is_member(author),
+        // Renaming is the owner's or an admin's.
+        Action::ServerEdit { .. } => author_role >= Role::Admin,
+        // A member leaves, but the owner can't (no ownership transfer in v1),
+        // and a kicked key can't (refused above), so a ban survives.
+        Action::Leave { .. } => view.is_member(author) && author_role != Role::Owner,
+        // Only the owner deletes the server. Which close wins is decided before
+        // the fold (see `full_run`).
+        Action::ServerClose => author_role == Role::Owner,
     }
 }
 
@@ -910,13 +989,31 @@ fn apply(state: &mut State, record: &Record, action: &Action) -> Option<(Actor, 
             state.removed.remove(target);
             Some((*target, write(Role::Member, false, false)))
         }
+        Action::Leave { .. } => {
+            // The role ends with the leave; a rejoin starts as a member.
+            state.roles.remove(&record.author());
+            state.members.remove(&record.author());
+            Some((record.author(), write(Role::Member, false, false)))
+        }
         Action::Post { .. }
         | Action::Invite { .. }
         | Action::RevokeInvite { .. }
         | Action::ChannelCreate { .. }
         | Action::ChannelEdit { .. }
         | Action::ChannelDelete { .. }
-        | Action::AgeClaim { .. } => None,
+        | Action::AgeClaim { .. }
+        | Action::ServerEdit { .. }
+        | Action::ServerClose => None,
+    }
+}
+
+/// Applies an accepted rename or close: the latest rename in linear order
+/// counts.
+fn apply_server(state: &mut State, record: &Record, action: &Action) {
+    match action {
+        Action::ServerEdit { name } => state.server_name = Some(name.clone()),
+        Action::ServerClose => state.closed = Some(record.id()),
+        _ => {}
     }
 }
 
@@ -1025,7 +1122,53 @@ fn full_run<'a>(server: ServerId, records: impl IntoIterator<Item = &'a Record>)
         .map(|r| (r.id(), r))
         .collect();
     let order = linear_order(&by_id);
-    let graph = Graph::new(&by_id, &order);
+    // A deleted server: only the first close and its causal past count.
+    // That past is closed under ancestry, so its linear order is the full
+    // order restricted to it.
+    if let Some(past) = closed_past(&by_id, &order) {
+        let kept: HashMap<RecordId, &Record> =
+            by_id.iter().filter(|(id, _)| past.contains(*id)).map(|(id, r)| (*id, *r)).collect();
+        let mut run = resolve_set(&kept, linear_order(&kept));
+        run.excluded.extend(order.iter().filter(|id| !past.contains(*id)));
+        run.order = order;
+        return run;
+    }
+    resolve_set(&by_id, order)
+}
+
+/// The causal past of the first `ServerClose` in linear order that the owner
+/// signed with the genesis among its ancestors, the close included; `None`
+/// while the server is open. The owner is the author of the first genesis,
+/// as in the fold, and the owner can't be removed, so this close is accepted
+/// in every pass: no other record decides it.
+fn closed_past(
+    by_id: &HashMap<RecordId, &Record>,
+    order: &[RecordId],
+) -> Option<HashSet<RecordId>> {
+    let genesis = order
+        .iter()
+        .map(|id| by_id[id])
+        .find(|r| r.kind() == Kind::Genesis && r.deps().is_empty())?;
+    order.iter().map(|id| by_id[id]).find_map(|record| {
+        if record.kind() != Kind::ServerClose
+            || record.author() != genesis.author()
+            || Action::from_record(record) != Some(Action::ServerClose)
+        {
+            return None;
+        }
+        let mut past = HashSet::from([record.id()]);
+        let mut stack = record.deps().to_vec();
+        while let Some(id) = stack.pop() {
+            if past.insert(id) {
+                stack.extend_from_slice(by_id[&id].deps());
+            }
+        }
+        past.contains(&genesis.id()).then_some(past)
+    })
+}
+
+fn resolve_set(by_id: &HashMap<RecordId, &Record>, order: Vec<RecordId>) -> Run {
+    let graph = Graph::new(by_id, &order);
 
     // A valid removal can void records that came earlier in the linear
     // order, so fold again until no new records get voided. The excluded set
@@ -1219,6 +1362,7 @@ impl<'a> Graph<'a> {
             apply_invite(&mut pass.state, record, action);
             apply_channel(&mut pass.state, record, action);
             apply_age(&mut pass.state, record, action);
+            apply_server(&mut pass.state, record, action);
             match action {
                 Action::Post { .. } => {
                     pass.state.posts.push(record.id());
@@ -1228,14 +1372,19 @@ impl<'a> Graph<'a> {
                 | Action::ChannelCreate { .. }
                 | Action::ChannelEdit { .. }
                 | Action::ChannelDelete { .. }
-                | Action::AgeClaim { .. } => continue,
+                | Action::AgeClaim { .. }
+                | Action::ServerEdit { .. }
+                | Action::ServerClose => continue,
                 Action::RevokeInvite { invite } => {
                     pass.voided.extend(self.voids_of(i));
                     pass.revoked_invites.push(*invite);
                     continue;
                 }
                 Action::Genesis => pass.genesis = Some(record.id()),
-                Action::Grant { .. } | Action::Join { .. } | Action::Unban { .. } => {}
+                Action::Grant { .. }
+                | Action::Join { .. }
+                | Action::Unban { .. }
+                | Action::Leave { .. } => {}
                 Action::Revoke { target, .. } => {
                     pass.voided.extend(self.voids_of(i));
                     pass.revoke_targets.push((*target, record.id()));

@@ -79,6 +79,7 @@ export function Dialog({
   children,
   className,
   hideClose,
+  describedBy,
 }: {
   open: boolean;
   onClose: () => void;
@@ -86,6 +87,8 @@ export function Dialog({
   children: ReactNode;
   className?: string;
   hideClose?: boolean;
+  /** The id of the text that explains the dialog, read with its title. */
+  describedBy?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
@@ -103,6 +106,7 @@ export function Dialog({
       ref={ref}
       className={['dialog', className].filter(Boolean).join(' ')}
       aria-labelledby={titleId}
+      aria-describedby={describedBy}
       onCancel={(e) => {
         e.preventDefault();
         onClose();
