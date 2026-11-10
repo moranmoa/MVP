@@ -11,7 +11,8 @@
     "test": "vitest run",
     "typecheck": "tsc -b",
     "licenses": "node scripts/check-licenses.mjs",
-    "screenshots": "node scripts/screenshots.mjs"
+    "screenshots": "node scripts/screenshots.mjs",
+    "perf": "node perf/run.mjs"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.25",
