@@ -818,13 +818,37 @@ impl Core {
         self.lock().calls.in_call()
     }
 
-    /// `joinCall`: leaves any other call first.
-    pub fn join_call(&self, channel_id: &str) -> CoreResult<CallState> {
-        let channel =
-            model::parse_hex32(channel_id).map(ChannelId::from_bytes).ok_or(ErrorCode::NotFound)?;
+    /// `joinCall(roomId)`: leaves any other call first. Calls happen only in
+    /// a server's voice room: a text channel answers `not-allowed`.
+    pub fn join_call(&self, room_id: &str) -> CoreResult<CallState> {
+        let room =
+            model::parse_hex32(room_id).map(ChannelId::from_bytes).ok_or(ErrorCode::NotFound)?;
         self.voice(|calls, ctx, inner| {
-            let server = inner.channel_server(channel)?;
-            calls.join(ctx, inner, server, channel)
+            let server = match inner.room_server(room)? {
+                Some(server) => server,
+                None => {
+                    inner.channel_server(room)?;
+                    return Err(ErrorCode::NotAllowed.into());
+                }
+            };
+            calls.join(ctx, inner, server, room)
+        })
+    }
+
+    /// `getVoiceRoom`: who is in the server's voice room. `not-found` for a
+    /// server I don't have, `not-allowed` if I'm not a member (or kicked).
+    pub fn get_voice_room(&self, server_id: &str) -> CoreResult<VoiceRoom> {
+        let server = parse_server(server_id)?;
+        self.voice(|calls, ctx, inner| {
+            if !inner.db.has_server(server)? {
+                return Err(ErrorCode::NotFound.into());
+            }
+            let me = ctx.key.verifying_key().to_bytes();
+            let room = voice::room_id(server);
+            if !voice::Members::may_call(inner, PublicKey::from_bytes(me), server, room) {
+                return Err(ErrorCode::NotAllowed.into());
+            }
+            Ok(calls.voice_room(ctx, inner, server))
         })
     }
 
@@ -1335,18 +1359,19 @@ fn update_event(e: UpdateEvent) -> Event {
 }
 
 impl voice::Members for Inner {
+    /// Room-only: the server's voice room, a server of mine whose genesis
+    /// is accepted (its ID checked against it), a member, not kicked. No
+    /// 18+ gate: the room isn't a channel record.
     fn may_call(&mut self, who: PublicKey, server: ServerId, channel: ChannelId) -> bool {
-        let mine = self.db.servers().is_ok_and(|servers| servers.contains(&server));
-        if !mine || self.load(server).is_err() {
+        if channel != voice::room_id(server) {
             return false;
         }
-        let Ok(known) = self.known(server) else { return false };
+        let mine = self.db.servers().is_ok_and(|servers| servers.contains(&server));
+        if !mine || self.load(server).is_err() || self.view(server).is_err() {
+            return false;
+        }
         let state = self.logs[&server].resolver.state();
-        let adult_only = state.channels.get(&channel).is_some_and(|c| c.adult);
-        state.members.contains(&who)
-            && !state.kicked.contains(&who)
-            && known.contains(&channel)
-            && (!adult_only || state.adults.contains(&who))
+        state.members.contains(&who) && !state.kicked.contains(&who)
     }
 
     fn audience(&mut self, server: ServerId) -> Vec<PublicKey> {
@@ -1769,6 +1794,11 @@ impl Inner {
     /// other. Loads the server.
     /// The server a channel of mine is in, 18+ ones included (whether I may
     /// use it is the caller's check).
+    /// The server of mine whose voice room is `room`, if any.
+    fn room_server(&self, room: ChannelId) -> CoreResult<Option<ServerId>> {
+        Ok(self.db.servers()?.into_iter().find(|server| voice::room_id(*server) == room))
+    }
+
     fn channel_server(&mut self, channel: ChannelId) -> CoreResult<ServerId> {
         for server in self.db.servers()? {
             self.load(server)?;
