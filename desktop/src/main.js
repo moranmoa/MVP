@@ -5,8 +5,9 @@
 // Security model (ui/SECURITY.md, GAP-17): the renderer is an untrusted web
 // page. It runs sandboxed with context isolation and no Node, is served only
 // from app://mvs with the UI's CSP as a header, cannot navigate, open
-// windows, embed webviews or get permissions, and opens external links only
-// through the OS after the user confirms.
+// windows, embed webviews or get permissions (except the microphone, for its
+// own top frame), and opens external links only through the OS after the user
+// confirms.
 
 'use strict';
 
@@ -20,6 +21,14 @@ const deeplink = require('./deeplink');
 const { relayFor, bootstrapFor, logHost } = require('./config');
 const update = require('./update');
 const { createLog } = require('./logfile');
+
+// Tests only, and only in a checkout (never a release build): a throwaway
+// profile, so a test run never shares the installed app's profile
+// (%APPDATA%\MVS, ~/.config/MVS) or its single-instance lock. Set before the
+// lock below, which lives in the profile.
+if (!app.isPackaged && process.env.MVS_TEST_USER_DATA && path.isAbsolute(process.env.MVS_TEST_USER_DATA)) {
+  app.setPath('userData', process.env.MVS_TEST_USER_DATA);
+}
 
 // One instance only: a second launch (e.g. an mvs:// link, B1-3) focuses this one.
 if (!app.requestSingleInstanceLock()) {
@@ -185,6 +194,9 @@ async function openExternal(win, url) {
 
 /** Applied to every webContents, including any created later. */
 function lockDown(contents) {
+  // Voice: WebRTC gathers candidates only on the default route's interface
+  // (public and private address), never every local adapter (VPNs, VMs).
+  contents.setWebRTCIPHandlingPolicy(sec.WEBRTC_IP_POLICY);
   contents.setWindowOpenHandler(({ url }) => {
     const win = BrowserWindow.fromWebContents(contents);
     if (win) openExternal(win, url).catch(() => {});
@@ -200,8 +212,32 @@ function lockDown(contents) {
 }
 
 function lockDownSession(ses) {
-  ses.setPermissionRequestHandler((_wc, permission, done) => done(sec.ALLOWED_PERMISSIONS.has(permission)));
-  ses.setPermissionCheckHandler((_wc, permission) => sec.ALLOWED_PERMISSIONS.has(permission));
+  // Voice v1: the microphone (audio only) for our own top frame; nothing
+  // else. Camera and screen capture stay refused (rules in security.js).
+  // A destroyed or unreadable webContents gives '' (never internal).
+  const urlOf = (wc) => {
+    try {
+      return wc.isDestroyed() ? '' : wc.getURL();
+    } catch {
+      return '';
+    }
+  };
+  ses.setPermissionRequestHandler((wc, permission, done, details) => {
+    let ok = false;
+    try {
+      ok = sec.allowPermissionRequest(wc ? urlOf(wc) : '', permission, details) === true;
+    } catch {
+      ok = false;
+    }
+    done(ok);
+  });
+  ses.setPermissionCheckHandler((wc, permission, requestingOrigin, details) => {
+    try {
+      return sec.allowPermissionCheck(wc ? urlOf(wc) : undefined, permission, requestingOrigin, details) === true;
+    } catch {
+      return false;
+    }
+  });
   ses.setDevicePermissionHandler(() => false);
   ses.setDisplayMediaRequestHandler((_req, done) => done({}));
   // Nothing the UI needs lives on the network; any other request is a bug or an attack.

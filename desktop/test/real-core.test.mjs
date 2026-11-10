@@ -8,9 +8,14 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { _electron as electron } from 'playwright-core';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const CORE = process.env.MVS_CORE_PATH;
 let app;
+// A throwaway profile, never the real app's.
+const PROFILE = mkdtempSync(join(tmpdir(), 'mvs-e2e-core-'));
 let page;
 let mainOutput = '';
 
@@ -18,7 +23,7 @@ const invoke = (cmd, args = []) => page.evaluate(([c, a]) => window.mvs.invoke(c
 
 before(async () => {
   assert.ok(CORE, 'set MVS_CORE_PATH to the mvs-core binary');
-  app = await electron.launch({ args: ['.'], env: { ...process.env } });
+  app = await electron.launch({ args: ['.'], env: { ...process.env, MVS_TEST_USER_DATA: PROFILE } });
   const proc = app.process();
   proc.stdout.on('data', (d) => (mainOutput += d));
   proc.stderr.on('data', (d) => (mainOutput += d));
@@ -28,6 +33,7 @@ before(async () => {
 
 after(async () => {
   await app?.close();
+  rmSync(PROFILE, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 });
 
 let words;

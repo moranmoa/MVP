@@ -1,7 +1,7 @@
 // Phone layout behaviour (below 40rem). jsdom has no layout, so these tests
 // check state, focus and accessibility; the screenshots check the looks.
 
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { App } from '../app/App';
 import type { Settings } from '../app/settings';
@@ -81,5 +81,32 @@ describe('phone layout', () => {
     expect(screen.queryByRole('dialog', { name: 'Server members' })).toBeNull();
     expect((document.querySelector('.main') as HTMLElement).inert).toBe(false);
     expect(document.activeElement?.classList.contains('members-button')).toBe(true);
+  });
+});
+
+describe('context menus on a phone (B25 §5)', () => {
+  it('a channel menu opens as a bottom sheet with a title; keys and focus work as on desktop', async () => {
+    render(<App core={new MockCore({ demo: true, speed: 0, simulateActivity: false })} initialSettings={en} />);
+    const row = await screen.findByRole('button', { name: /^clips/ });
+    fireEvent.contextMenu(row);
+    const menu = screen.getByRole('menu', { name: 'Actions for ⁨#clips⁩' });
+    expect(menu.classList.contains('sheet')).toBe(true);
+    expect(menu.querySelector('.context-menu-title')?.textContent).toBe('Actions for ⁨#clips⁩');
+    expect(menu.getAttribute('style')).toBeNull();
+    expect(document.activeElement?.getAttribute('role')).toBe('menuitem');
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    expect(document.activeElement?.textContent).toBe('Rename');
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    expect(screen.queryByRole('menu')).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(row));
+  });
+
+  it('a tap on the backdrop closes the sheet', async () => {
+    render(<App core={new MockCore({ demo: true, speed: 0, simulateActivity: false })} initialSettings={en} />);
+    const rail = await screen.findByRole('navigation', { name: /servers/i });
+    fireEvent.contextMenu(rail.querySelector('[aria-current="page"]')!);
+    expect(screen.getByRole('menu').classList.contains('sheet')).toBe(true);
+    fireEvent.mouseDown(document.querySelector('.context-menu-backdrop')!);
+    expect(screen.queryByRole('menu')).toBeNull();
   });
 });
