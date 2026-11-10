@@ -188,7 +188,55 @@ PowerShell on your normal (online) PC, in the repo:
 2. **Wait for the Release workflow** (Actions tab). Its summary lists the
    checksums. The release is a draft: only repo collaborators can see it.
 
-3. **Download and check** the draft's files:
+3. **Sign and publish, in one command** (steps 3–6 below, done for you):
+
+   ```powershell
+   # Dry run first: every check and the build, no key, nothing signed or uploaded.
+   .\.github\scripts\publish-release.ps1 -Tag v0.1.0 -WhatIf
+   # Then for real. Every release goes to beta; add -Channel alpha for stable.
+   .\.github\scripts\publish-release.ps1 -Tag v0.1.0 -Key E:\mvs-keys\root.key
+   ```
+
+   [`publish-release.ps1`](../../.github/scripts/publish-release.ps1) does this:
+   - It downloads the draft (or pre-release) and checks every file against
+     `SHA256SUMS`, and the channel's manifest body against both: version,
+     channel, and each payload's hash and size.
+   - It restamps the body when it is older than 2 days.
+   - It builds `updater` from the tag's own source. The tag must be on
+     `origin/main`, and the source comes from `git archive` of the tag. It
+     never uses a downloaded binary.
+   - It shows a summary (version, channel, hashes, expiry, the first lines of
+     the notes) and asks you to **type the version** to go on.
+   - Only then does it ask you to **connect the key drive**. It checks the
+     key, signs, and runs `updater verify` against the tag's
+     `core/updater/trust/root.json`, each payload included. Then it asks you
+     to **remove the drive** before anything is uploaded.
+   - It publishes the release as a pre-release, then runs
+     `publish-update.ps1` for the channel (step 6).
+   - Any failed check stops it with a message, and nothing after that step
+     runs.
+
+   **The key.** It comes from `-Key` or `$env:MVS_ROOT_KEY`, and the script
+   never prints, copies or uploads it. It reads `MVS_ROOT_KEY` once and
+   clears it from the session before running anything else, so git, gh,
+   cargo build scripts and node never see it. It refuses to run in CI. It
+   also refuses a key inside the repository or in a cloud-synced folder
+   (OneDrive, Dropbox, Google Drive, iCloud), and warns when the drive isn't
+   removable. The key path goes only to `updater sign-manifest`. With this
+   script the key is used on the online PC, which is fine for the closed
+   alpha (SECURITY.md): keep it on an **encrypted removable drive** (for
+   example a USB stick with BitLocker To Go), plugged in and unlocked only
+   when the script asks, and removed when it says so. `updater` is already
+   built by then, so the key is never present while cargo or a `build.rs`
+   runs. Never put the path in the repo, a
+   script or `$PROFILE`. If you would rather keep the key on an offline machine, do
+   steps 3–6 by hand as below.
+
+   After a root rotation, add `-Roots E:\mvs-keys\root-2.json`.
+
+   The manual steps, for reference or for offline signing:
+
+   **Download and check** the draft's files:
 
    ```powershell
    gh release download v0.1.0 --repo moranmoa/MVP --dir release-v0.1.0

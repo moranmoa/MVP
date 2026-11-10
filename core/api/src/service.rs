@@ -1,7 +1,7 @@
 //! The core: `CoreCommands` from `ui/src/core/api.ts`, one method each.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -28,6 +28,31 @@ use updater::client::UpdateEvent;
 const DEFAULT_STORAGE_LIMIT: u64 = 5 * 1024 * 1024 * 1024;
 const KV_STORAGE_LIMIT: &str = "storage-limit";
 const KV_UPDATE_CHANNEL: &str = "update-channel";
+/// GAP-6r: `[1]` while relay-only is on. Per device, not per identity: it's
+/// about this computer's network.
+const KV_RELAY_ONLY: &str = "relay-only";
+
+/// Fails closed: off only when never set or set to off (`[0]`); any other
+/// value is on.
+fn relay_only_in(db: &Db) -> CoreResult<bool> {
+    Ok(!matches!(db.get(KV_RELAY_ONLY)?.as_deref(), None | Some([0])))
+}
+
+/// GAP-6r: the stored relay-only setting in the core database at
+/// `db_path`, read before the network starts so the node starts with it.
+/// Fails closed: a database that can't be opened or read means on, so an
+/// error never starts a relay-only user with direct connections. A fresh
+/// data dir (no `core.db` yet) is off: the database is created empty.
+pub fn stored_relay_only(db_path: &Path) -> bool {
+    match Db::open(Some(db_path)).and_then(|db| relay_only_in(&db)) {
+        Ok(on) => on,
+        Err(e) => {
+            // No path: it names the user's profile folder.
+            eprintln!("mvs-core: can't read the relay-only setting ({:?}); starting relay-only", e.code);
+            true
+        }
+    }
+}
 const KV_RECOVERY_CHALLENGE: &str = "recovery-challenge";
 
 pub struct Config {
@@ -65,6 +90,13 @@ pub const CHALLENGE_POSITIONS: usize = 3;
 pub const MAX_CHECK_FAILURES: u8 = 5;
 /// How often the background sync runs without a hint.
 pub const SYNC_EVERY: Duration = Duration::from_secs(2);
+/// How long a message held for its channel key (the re-key a moderator
+/// makes when they read the join) waits before it is marked `failed`.
+pub const KEY_PENDING_FOR: Duration = Duration::from_secs(120);
+/// Provisional IDs of messages held for their key.
+pub const KEY_PENDING_PREFIX: &str = "pending-";
+/// Messages held for their key per channel at once; more get `not-allowed`.
+pub const MAX_KEY_PENDING: usize = 50;
 /// A join that found nobody online is retried in the background: first
 /// after `JOIN_RETRY_FIRST`, doubling up to `JOIN_RETRY_MAX`, for at most
 /// `JOIN_RETRY_FOR` (until then the inviter may still come online).
@@ -116,6 +148,39 @@ struct Inner {
     join_waiting: BTreeSet<ServerId>,
     /// Voice calls: mine, and who is in which call.
     calls: voice::Calls,
+    /// Messages written before their channel key reached me (a member who
+    /// just joined), oldest first: sent by the sync loop when it comes.
+    /// In memory only (never the plain text on disk): lost on restart.
+    key_pending: Vec<KeyPending>,
+}
+
+/// A message held for its channel key (`Core::send_message`).
+struct KeyPending {
+    /// Provisional, `pending-` + 16 random hex: never a record ID.
+    id: String,
+    server: ServerId,
+    channel: ChannelId,
+    author: PublicKey,
+    body: Zeroizing<String>,
+    created_at: u64,
+    failed: bool,
+}
+
+impl KeyPending {
+    fn message(&self, index: usize) -> Message {
+        Message {
+            id: self.id.clone(),
+            channel_id: model::hex_id(self.channel.as_bytes()),
+            index,
+            author_id: model::hex_id(self.author.as_bytes()),
+            body: self.body.as_str().to_owned(),
+            created_at: self.created_at,
+            edited_at: None,
+            deleted: None,
+            send_state: Some(if self.failed { SendState::Failed } else { SendState::Pending }),
+            replaces: None,
+        }
+    }
 }
 
 pub struct Core {
@@ -192,7 +257,13 @@ impl Core {
             join_buckets: HashMap::new(),
             join_waiting: BTreeSet::new(),
             calls: voice::Calls::default(),
+            key_pending: Vec::new(),
         };
+        // GAP-6r: the stored relay-only setting, applied before anything
+        // else reaches the network.
+        let relay_only = relay_only_in(&inner.db)?;
+        inner.calls.set_relay_only(relay_only);
+        ports.network.set_relay_only(relay_only);
         // QA-20: without a usable keychain the core still starts, and says so
         // (`keyring-unavailable`) instead of crashing or looking empty.
         let state = match inner.vault.state() {
@@ -381,6 +452,19 @@ impl Core {
     }
 
     pub fn restore_identity(&self, words: Vec<String>) -> CoreResult<Identity> {
+        self.restore_identity_with(words, None)
+    }
+
+    /// `restoreIdentity(words, input?)`: the words don't carry the country
+    /// or birth date (spec, age §), so the UI asks them again before the
+    /// words and passes them here, as `createIdentity` takes them. Without
+    /// `input` this device has neither, and a rejoin keeps what my servers
+    /// already hold (no age claim from no date).
+    pub fn restore_identity_with(
+        &self,
+        words: Vec<String>,
+        input: Option<NewIdentityInput>,
+    ) -> CoreResult<Identity> {
         self.run(|inner, ports, _| {
             if inner.me.is_some() {
                 return Err(ErrorCode::NotAllowed.into());
@@ -388,9 +472,19 @@ impl Core {
             let phrase = RecoveryPhrase::parse(&words.join(" ")).map_err(phrase_error)?;
             inner.vault.restore(&phrase).map_err(vault_error)?;
             inner.db.delete(KV_RECOVERY_CHALLENGE)?;
-            // TODO(backup): the spec restores the birth date from the
-            // encrypted identity backup; until then the UI asks again.
-            let me = inner.new_me(phrase, Profile::default())?;
+            // TODO(backup): the spec restores these from the encrypted
+            // identity backup (docs/design, restore servers); until then the
+            // UI asks again. The name comes after, from `updateProfile`.
+            let profile = match input {
+                Some(input) => Profile {
+                    country: input.country,
+                    birth_date: input.birth_date,
+                    locale: Some(input.locale),
+                    ..Profile::default()
+                },
+                None => Profile::default(),
+            };
+            let me = inner.new_me(phrase, profile)?;
             let identity = inner.identity_json(&me)?;
             inner.me = Some(me);
             unlock_cipher(ports, inner.me.as_ref());
@@ -1186,8 +1280,13 @@ impl Core {
 
     /// Seals `body` for the channel's members and sends it. The first
     /// message of a channel, or the first after a removal, needs a key
-    /// rotation: a moderator or above makes one on the way; anyone else
-    /// gets `not-allowed` until one arrives.
+    /// rotation: a moderator or above makes one on the way. A plain member
+    /// without the key yet (just joined: the moderator's re-key is on its
+    /// way) gets the message back at once as `sendState: pending`, with a
+    /// provisional `pending-…` ID. The sync loop sends it when the key comes
+    /// (`message.updated` carrying `replaces`), or after
+    /// [`KEY_PENDING_FOR`] marks it `failed` (`message.updated`, and
+    /// `notice: rekey-waiting`). Never a wait on the request thread.
     pub fn send_message(
         &self,
         channel_id: &str,
@@ -1200,9 +1299,17 @@ impl Core {
         if body.trim().is_empty() || !authority::message_text_ok(body) {
             return Err(ErrorCode::BadRequest.into());
         }
-        self.run(|inner, ports, events| {
+        let message = self.run(|inner, ports, events| {
             let (server, channel) = inner.find_channel(channel_id)?;
-            let sealed = inner.seal(ports, server, channel, body)?;
+            let sealed = match inner.seal(ports, server, channel, body) {
+                Ok(sealed) => sealed,
+                Err(e) if e.code == ErrorCode::NotAllowed && inner.awaiting_key(server)? => {
+                    let message = inner.hold_for_key(ports, server, channel, body)?;
+                    events.push(Event::MessageAdded(message.clone()));
+                    return Ok(message);
+                }
+                Err(e) => return Err(e),
+            };
             let record =
                 inner.sign_in_channel(ports, server, channel, None, Kind::Message, sealed)?;
             inner.store(server, record.clone())?;
@@ -1210,7 +1317,12 @@ impl Core {
             let message = inner.message(&*ports.cipher, server, channel, record.id())?;
             events.push(Event::MessageAdded(message.clone()));
             Ok(message)
-        })
+        })?;
+        if message.send_state == Some(SendState::Pending) && message.id.starts_with(KEY_PENDING_PREFIX) {
+            // A round of the background sync now: it brings the re-key in.
+            self.ports.network.wake();
+        }
+        Ok(message)
     }
 
     /// The author only (authority's rule). The new text is sealed like a
@@ -1225,6 +1337,18 @@ impl Core {
             let body = [target.as_bytes().as_slice(), &sealed].concat();
             inner.tombstone_or_edit(ports, events, server, channel, target, Kind::MessageEdit, body)
         })
+    }
+
+    /// Drops a message held for its key (`pending-…`, pending or failed)
+    /// before it was sent: its text is wiped from memory now, and nothing
+    /// was ever sent. For "send again" (discard, then a new `sendMessage`)
+    /// or dismissing a failed one. `not-found` for any other ID, or one
+    /// already sent or discarded.
+    pub fn discard_message(&self, message_id: &str) -> CoreResult<()> {
+        let mut inner = self.lock();
+        let at = inner.key_pending.iter().position(|p| p.id == message_id).ok_or(ErrorCode::NotFound)?;
+        inner.key_pending.remove(at);
+        Ok(())
     }
 
     /// The author, or a moderator or above who outranks them. The message
@@ -1263,7 +1387,9 @@ impl Core {
     pub fn get_message_count(&self, channel_id: &str) -> CoreResult<usize> {
         let mut inner = self.lock();
         let (server, channel) = inner.find_channel(channel_id)?;
-        inner.message_count(&*self.ports.cipher, server, channel)
+        // Messages held for their key are listed after the stored ones.
+        let held = inner.key_pending.iter().filter(|p| p.channel == channel).count();
+        Ok(inner.message_count(&*self.ports.cipher, server, channel)? + held)
     }
 
     /// Messages `start..end` (0-based, end exclusive) of the channel.
@@ -1277,13 +1403,14 @@ impl Core {
         let (server, channel) = inner.find_channel(channel_id)?;
         let me = inner.me.as_ref().map(Me::key);
         let shown = inner.shown(&*self.ports.cipher, server, channel)?;
-        let end = end.min(shown.len());
+        // Messages held for their key come after the stored ones.
+        let held: Vec<&KeyPending> = inner.key_pending.iter().filter(|p| p.channel == channel).collect();
+        let end = end.min(shown.len() + held.len());
         let start = start.min(end);
-        let messages = shown[start..end]
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                message_json(s, start + i, channel, me, &Status { net: &*inner.net, db: &inner.db })
+        let messages = (start..end)
+            .map(|index| match shown.get(index) {
+                Some(s) => message_json(s, index, channel, me, &Status { net: &*inner.net, db: &inner.db }),
+                None => held[index - shown.len()].message(index),
             })
             .collect();
         Ok(MessageRange { channel_id: channel_id.to_owned(), start, messages })
@@ -1431,7 +1558,8 @@ impl Core {
                     });
                 }
             }
-            Ok(())
+            // Messages held for their key: sent now if it came.
+            inner.send_key_pending(ports, events)
         })
     }
 
@@ -1500,7 +1628,28 @@ impl Core {
             Some(b"beta") => UpdateChannel::Beta,
             _ => UpdateChannel::Stable,
         };
-        Ok(AppInfo { version: self.app_version.clone(), update_channel: channel })
+        let relay_only = relay_only_in(&self.lock().db)?;
+        Ok(AppInfo { version: self.app_version.clone(), update_channel: channel, relay_only })
+    }
+
+    /// `setRelayOnly(on)` (GAP-6r): stored, then applied to the network. On
+    /// ends my call first (its media would go direct) and refuses calls
+    /// until it's off. Each of my servers gets a `voice.room` with the new
+    /// `relayOnly` at the next tick. Needs no identity.
+    pub fn set_relay_only(&self, on: bool) -> CoreResult<()> {
+        if on {
+            self.lock().calls.set_relay_only(true);
+            self.leave_call()?;
+        }
+        self.run(|inner, ports, _| {
+            inner.db.set(KV_RELAY_ONLY, &[u8::from(on)])?;
+            inner.calls.set_relay_only(on);
+            for server in inner.db.servers()? {
+                inner.calls.mark_dirty(server);
+            }
+            ports.network.set_relay_only(on);
+            Ok(())
+        })
     }
 
     pub fn set_update_channel(&self, channel: UpdateChannel) -> CoreResult<()> {
@@ -1885,6 +2034,112 @@ impl Inner {
 
     /// Seals `text` for `channel`'s members. If no key is usable yet, a
     /// moderator or above rotates first; anyone else gets `not-allowed`.
+    /// Whether a refused seal in `server` only means the key hasn't reached
+    /// me yet: I'm a current member of an open server who can't rotate
+    /// (`seal`'s `not-allowed` for anyone else is final).
+    /// Holds a message until its channel key reaches me (`send_message`),
+    /// shown after the channel's stored messages.
+    fn hold_for_key(
+        &mut self,
+        ports: &Ports,
+        server: ServerId,
+        channel: ChannelId,
+        body: &str,
+    ) -> CoreResult<Message> {
+        let author = self.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+        // Bounded (tech lead): past the cap, the plain refusal.
+        if self.key_pending.iter().filter(|p| p.channel == channel && !p.failed).count() >= MAX_KEY_PENDING {
+            return Err(ErrorCode::NotAllowed.into());
+        }
+        let mut tag = [0u8; 8];
+        OsRng.fill_bytes(&mut tag);
+        let held = KeyPending {
+            id: format!("{KEY_PENDING_PREFIX}{}", hex::encode(tag)),
+            server,
+            channel,
+            author,
+            body: Zeroizing::new(body.to_owned()),
+            created_at: ports.clock.now_ms(),
+            failed: false,
+        };
+        let index = self.message_count(&*ports.cipher, server, channel)?
+            + self.key_pending.iter().filter(|p| p.channel == channel).count();
+        let message = held.message(index);
+        self.key_pending.push(held);
+        Ok(message)
+    }
+
+    /// The sync loop's part (`sync_now`): each held message whose key has
+    /// come is sealed and sent (`message.updated` with `replaces`, then
+    /// listed like any other); one still without it after
+    /// [`KEY_PENDING_FOR`], or that can no longer be sent (kicked, left,
+    /// closed), turns `failed` (`message.updated`, `notice: rekey-waiting`)
+    /// and stays listed until a restart.
+    fn send_key_pending(&mut self, ports: &Ports, events: &mut Events) -> CoreResult<()> {
+        let now = ports.clock.now_ms();
+        let mut i = 0;
+        while i < self.key_pending.len() {
+            if self.key_pending[i].failed {
+                i += 1;
+                continue;
+            }
+            let (server, channel) = (self.key_pending[i].server, self.key_pending[i].channel);
+            let body = self.key_pending[i].body.clone();
+            let waiting = self.db.has_server(server)? && {
+                self.load(server)?;
+                match self.seal(ports, server, channel, &body) {
+                    Ok(sealed) => {
+                        let held = self.key_pending.remove(i);
+                        let record =
+                            self.sign_in_channel(ports, server, channel, None, Kind::Message, sealed)?;
+                        self.store(server, record.clone())?;
+                        ports.network.publish(&record);
+                        let mut message = self.message(&*ports.cipher, server, channel, record.id())?;
+                        message.replaces = Some(held.id);
+                        events.push(Event::MessageUpdated(message));
+                        continue;
+                    }
+                    Err(e) => e.code == ErrorCode::NotAllowed && self.awaiting_key(server)?,
+                }
+            };
+            let held = &self.key_pending[i];
+            let expired = now.saturating_sub(held.created_at) >= KEY_PENDING_FOR.as_millis() as u64;
+            if !waiting || expired {
+                self.key_pending[i].failed = true;
+                let index = self.message_count(&*ports.cipher, server, channel)?
+                    + self.key_pending[..i].iter().filter(|p| p.channel == channel).count();
+                events.push(Event::MessageUpdated(self.key_pending[i].message(index)));
+                events.push(Event::Notice {
+                    kind: NoticeKind::RekeyWaiting,
+                    server_id: model::hex_id(server.as_bytes()),
+                });
+            }
+            i += 1;
+        }
+        // Failed ones are bounded too (sec-lead): beyond MAX_KEY_PENDING in
+        // a channel, the oldest are dropped, their text with them.
+        let channels: BTreeSet<ChannelId> = self.key_pending.iter().map(|p| p.channel).collect();
+        for channel in channels {
+            let failed = self.key_pending.iter().filter(|p| p.channel == channel && p.failed).count();
+            let mut extra = failed.saturating_sub(MAX_KEY_PENDING);
+            self.key_pending.retain(|p| {
+                let drop = extra > 0 && p.channel == channel && p.failed;
+                extra -= usize::from(drop);
+                !drop
+            });
+        }
+        Ok(())
+    }
+
+    fn awaiting_key(&self, server: ServerId) -> CoreResult<bool> {
+        let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+        let view = self.view(server)?;
+        Ok(view.state.is_member(me)
+            && !view.is_kicked(&me)
+            && view.state.closed.is_none()
+            && view.state.role(me) < authority::Role::Moderator)
+    }
+
     fn seal(
         &mut self,
         ports: &Ports,
@@ -2583,12 +2838,23 @@ impl Inner {
         if view.state.closed.is_some() {
             return Ok(JoinStatus::Closed { link });
         }
+        let key = me.key();
+        // Already a member (this device lost its copy, e.g. a restore on a
+        // new computer): no new join, and nothing that would overwrite what
+        // the server already holds about me.
+        let member = view.state.is_member(key);
         let required = view.genesis.age_restriction;
         let age = model::age_on(&me.profile.birth_date, ports.clock.now_ms());
-        if required.min_age() > 0 && age.is_none_or(|age| age < required.min_age()) {
+        // A member's earlier age claim stands while this device has no birth
+        // date (a restore doesn't carry it yet); a known age too low still
+        // blocks.
+        let age_unknown_member = member && age.is_none();
+        if required.min_age() > 0
+            && !age_unknown_member
+            && age.is_none_or(|age| age < required.min_age())
+        {
             return Ok(JoinStatus::AgeBlocked { link, required });
         }
-        let key = me.key();
         if view.is_kicked(&key) {
             // TODO(ui): a "you were removed from this server" phase.
             return Ok(JoinStatus::Invalid { link });
@@ -2604,9 +2870,8 @@ impl Inner {
             )
             .map_err(|_| CoreError::from(ErrorCode::BadRequest))
         };
-        // Already a member (this device lost its copy): no new join needed.
         let mut mine = Vec::new();
-        if !view.state.is_member(key) {
+        if !member {
             // An invite we don't hold, revoked or used up: `authority`
             // refuses the join, and nothing is stored or sent.
             // TODO(ui): phases for "invite expired" and "invite used up".
@@ -2618,17 +2883,27 @@ impl Inner {
             mine.push(join);
         }
         let view = ServerView::build(server, &log).ok_or(ErrorCode::Internal)?;
-        let profile =
-            sign(&view, view.deps(None), &model::profile_action(&me.profile.display_name))?;
+        // A member without a name here (a restore) keeps the profile the
+        // server holds: an empty one would replace my name for everyone.
+        let post_profile = !(member && me.profile.display_name.trim().is_empty());
+        let profile = post_profile
+            .then(|| sign(&view, view.deps(None), &model::profile_action(&me.profile.display_name)))
+            .transpose()?;
         for record in log.records.iter().chain(&log.channel) {
             self.db.put_record(record)?;
         }
         self.logs.insert(server, log);
-        mine.push(profile.clone());
-        self.store(server, profile)?;
-        let claim = self.sign_age_claim(ports, server)?;
-        mine.push(claim.clone());
-        self.store(server, claim)?;
+        if let Some(profile) = profile {
+            mine.push(profile.clone());
+            self.store(server, profile)?;
+        }
+        // Likewise a member without a birth date keeps its earlier claim:
+        // a claim from no date would say "not adult", which counts at once.
+        if !age_unknown_member {
+            let claim = self.sign_age_claim(ports, server)?;
+            mine.push(claim.clone());
+            self.store(server, claim)?;
+        }
         for record in &mine {
             ports.network.publish(record);
         }
@@ -2761,6 +3036,7 @@ fn message_json(
         edited_at: s.edited_at,
         deleted: s.deleted.then_some(true),
         send_state: send_state(s, me, st),
+        replaces: None,
     }
 }
 
@@ -2783,5 +3059,37 @@ fn unlock_cipher(ports: &Ports, me: Option<&Me>) {
         ports.cipher.unlock(Arc::new(MemberSecret::new(me.identity.signing_key())));
         // GAP-4: peer bindings with the identity key.
         ports.network.unlock(me.identity.signing_key());
+    }
+}
+
+#[cfg(test)]
+mod relay_only_tests {
+    use super::{stored_relay_only, Db, KV_RELAY_ONLY};
+
+    fn dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("mvs-relayonly-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Security lead (#272): stored_relay_only fails closed.
+    #[test]
+    fn the_stored_setting_fails_closed() {
+        let dir = dir("unit");
+        let db = dir.join("core.db");
+        // A fresh data dir: no setting yet, so off.
+        assert!(!stored_relay_only(&db));
+        // Off and on as stored; anything else is on.
+        for (value, on) in [(&[0u8][..], false), (&[1], true), (&[2], true), (b"", true)] {
+            Db::open(Some(&db)).unwrap().set(KV_RELAY_ONLY, value).unwrap();
+            assert_eq!(stored_relay_only(&db), on, "{value:?}");
+        }
+        // Can't be opened (its folder is missing) or isn't a database: on.
+        assert!(stored_relay_only(&dir.join("missing").join("core.db")));
+        let junk = dir.join("junk.db");
+        std::fs::write(&junk, vec![0x5a; 4096]).unwrap();
+        assert!(stored_relay_only(&junk));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

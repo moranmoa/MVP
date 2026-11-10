@@ -231,10 +231,18 @@ export function cleanMember(m: Member): Member {
   };
 }
 
+/** A message held for its channel key (#288): `pending-` and 16 lower-case hex. */
+export const HELD_ID = /^pending-[0-9a-f]{16}$/;
+export const isHeld = (m: Pick<Message, 'id'>): boolean => HELD_ID.test(m.id);
+
 export function cleanMessage(m: Message): Message {
   const { text, clipped } = cleanText(m.body);
+  // Only the exact held-id shape is a replacement; anything else is dropped.
+  const replaces = typeof m.replaces === 'string' && HELD_ID.test(m.replaces) ? m.replaces : undefined;
+  const { replaces: _ignored, ...rest } = m;
   return {
-    ...m,
+    ...rest,
+    ...(replaces ? { replaces } : {}),
     body: text,
     clipped: clipped || undefined,
     replyTo: m.replyTo && { ...m.replyTo, excerpt: cleanExcerpt(m.replyTo.excerpt) },
@@ -281,6 +289,7 @@ export function cleanCall(c: CallState): CallState {
       .map((p) => ({ identity: cleanHexId(p?.identity), muted: p?.muted === true }))
       .filter((p) => p.identity),
     full: c?.full === true,
+    ...(c?.relayOnly === true ? { relayOnly: true } : {}),
   };
 }
 
@@ -297,9 +306,10 @@ const onlyKeys = (o: object, keys: string[]) => Object.keys(o).every((k) => keys
  * a person twice, a non-boolean `muted` or any unknown field (voice-room contract).
  */
 export function cleanVoiceRoom(r: unknown): VoiceRoom | null {
-  if (!r || typeof r !== 'object' || !onlyKeys(r, ['serverId', 'roomId', 'participants'])) return null;
-  const { serverId, roomId, participants } = r as Record<string, unknown>;
+  if (!r || typeof r !== 'object' || !onlyKeys(r, ['serverId', 'roomId', 'participants', 'relayOnly'])) return null;
+  const { serverId, roomId, participants, relayOnly } = r as Record<string, unknown>;
   if (!isRoomId(serverId) || !isRoomId(roomId) || !Array.isArray(participants) || participants.length > 5) return null;
+  if (relayOnly !== undefined && typeof relayOnly !== 'boolean') return null;
   const out: VoiceRoom['participants'] = [];
   for (const p of participants as unknown[]) {
     if (!p || typeof p !== 'object' || !onlyKeys(p, ['userId', 'muted'])) return null;
@@ -307,7 +317,7 @@ export function cleanVoiceRoom(r: unknown): VoiceRoom | null {
     if (!isRoomId(userId) || typeof muted !== 'boolean' || out.some((x) => x.userId === userId)) return null;
     out.push({ userId, muted });
   }
-  return { serverId, roomId, participants: out };
+  return { serverId, roomId, participants: out, ...(relayOnly === true ? { relayOnly: true } : {}) };
 }
 
 /** A cleaner may return null to drop the event altogether. */
@@ -323,6 +333,11 @@ const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[
   'members.changed': (p) => ({ ...p, members: p.members.map(cleanMember) }),
   'message.added': cleanMessage,
   'message.updated': cleanMessage,
+  // Only the kinds the UI knows; anything else is dropped.
+  'notice': (n) =>
+    (n?.kind === 'encryption-renewed' || n?.kind === 'rekey-waiting') && typeof n.serverId === 'string'
+      ? { kind: n.kind, serverId: id(n.serverId) }
+      : null,
   'join.status': cleanJoin,
   'link.open': (p) => ({ link: cleanInviteLink(p?.link) }),
   'call.state': (c) => cleanCall(c),

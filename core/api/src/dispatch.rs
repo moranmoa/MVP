@@ -137,8 +137,11 @@ struct AnswersArg {
 }
 
 #[derive(Deserialize)]
-struct WordsArg {
+struct RestoreArg {
     words: Vec<String>,
+    /// Country, birth date and language, asked again (spec, age §).
+    #[serde(default)]
+    input: Option<NewIdentityInput>,
 }
 
 #[derive(Deserialize)]
@@ -195,6 +198,11 @@ struct ChannelArg {
     channel: UpdateChannel,
 }
 
+#[derive(Deserialize)]
+struct RelayOnlyArg {
+    on: bool,
+}
+
 fn args<T: DeserializeOwned>(value: Value) -> CoreResult<T> {
     serde_json::from_value(value).map_err(|_| ErrorCode::BadRequest.into())
 }
@@ -240,7 +248,10 @@ impl Core {
             }
             "getRecoveryChallenge" => ok(self.get_recovery_challenge()),
             "getRecoveryWords" => ok(self.get_recovery_words()),
-            "restoreIdentity" => ok(self.restore_identity(args::<WordsArg>(raw)?.words)),
+            "restoreIdentity" => {
+                let RestoreArg { words, input } = args(raw)?;
+                ok(self.restore_identity_with(words, input))
+            }
             "updateProfile" => ok(self.update_profile(args::<InputArg<ProfileInput>>(raw)?.input)),
 
             "listServers" => ok(self.list_servers()),
@@ -259,6 +270,7 @@ impl Core {
                 ok(self.edit_message(&a.message_id, &a.body))
             }
             "deleteMessage" => ok(self.delete_message(&args::<MessageIdArg>(raw)?.message_id)),
+            "discardMessage" => ok(self.discard_message(&args::<MessageIdArg>(raw)?.message_id)),
             "retryMessage" => ok(self.retry_message(&args::<MessageIdArg>(raw)?.message_id)),
             "listMembers" => ok(self.list_members(&args::<ServerArg>(raw)?.server_id)),
             "createServer" => {
@@ -316,6 +328,7 @@ impl Core {
             "exportDiagnostics" => ok(self.export_diagnostics()),
             "getAppInfo" => ok(self.get_app_info()),
             "setUpdateChannel" => ok(self.set_update_channel(args::<ChannelArg>(raw)?.channel)),
+            "setRelayOnly" => ok(self.set_relay_only(args::<RelayOnlyArg>(raw)?.on)),
             // The shell restarts; nothing for the core to do.
             "restartToUpdate" => Ok(Value::Null),
 

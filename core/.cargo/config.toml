@@ -1,4 +1,12 @@
-# Windows (MSVC) only: v0 symbol mangling (stable since Rust 1.59).
+# Windows (MSVC) only: static C runtime, and v0 symbol mangling.
+#
+# +crt-static: the VC++ runtime (vcruntime140.dll, the api-ms-win-crt-* UCRT
+# set) is linked into every binary, so mvs-core.exe and mvs-launcher.exe start
+# on a clean Windows install without the VC++ Redistributable. v0.3.0 failed
+# there: "VCRUNTIME140.dll was not found". release.yml checks each shipped
+# .exe/.dll for those imports (pe-imports.mjs).
+#
+# v0 symbol mangling (stable since Rust 1.59):
 #
 # With QUIC beside TCP (#243) some symbols, mostly trait impls on deeply
 # nested generic handler and transport types, grew past what the MSVC linker
@@ -11,4 +19,4 @@
 # `--target x86_64-pc-windows-msvc` builds alike (neither sets RUSTFLAGS,
 # which would replace this). Linux and macOS builds are unchanged.
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "symbol-mangling-version=v0"]
+rustflags = ["-C", "symbol-mangling-version=v0", "-C", "target-feature=+crt-static"]

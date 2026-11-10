@@ -593,8 +593,11 @@ fn dispatcher_errors() {
         serde_json::from_str(&peer.core.handle(r#"{"cmd":"getAppInfo"}"#)).unwrap();
     assert_eq!(
         info["ok"],
-        serde_json::json!({ "version": "0.1.0-alpha", "updateChannel": "stable" })
+        serde_json::json!({ "version": "0.1.0-alpha", "updateChannel": "stable", "relayOnly": false })
     );
+    // A bad argument is a bad request, not a change.
+    assert_eq!(error(r#"{"cmd":"setRelayOnly","args":{"on":"yes"}}"#), "bad-request");
+    assert!(!peer.core.get_app_info().unwrap().relay_only);
     peer.core.handle(r#"{"cmd":"setUpdateChannel","args":{"channel":"beta"}}"#);
     assert_eq!(peer.core.get_app_info().unwrap().update_channel, UpdateChannel::Beta);
 }
@@ -913,10 +916,10 @@ fn a_kick_re_keys_the_channel() {
     guest.events.take();
     guest.core.sync_now().unwrap();
     assert_eq!(notices(&guest), [NoticeKind::RekeyWaiting]);
-    assert_eq!(
-        guest.core.send_message(&channel, "anyone?", None).unwrap_err().code,
-        ErrorCode::NotAllowed
-    );
+    // No key until a moderator re-keys: held, not refused (sent below).
+    let held = guest.core.send_message(&channel, "anyone?", None).unwrap();
+    assert_eq!(held.send_state, Some(SendState::Pending));
+    assert!(held.id.starts_with(api::KEY_PENDING_PREFIX));
     // The owner reads the kick and re-keys; then the guest can write again.
     owner.events.take();
     owner.core.sync_now().unwrap();
@@ -932,7 +935,7 @@ fn a_kick_re_keys_the_channel() {
         .into_iter()
         .map(|m| m.body)
         .collect();
-    assert_eq!(bodies, ["before", "after", "still here", "back"]);
+    assert_eq!(bodies, ["before", "after", "still here", "anyone?", "back"]);
 }
 
 /// Edits (author only), deletes (author, or a higher rank) as tombstones that
@@ -1605,6 +1608,156 @@ fn send_states_survive_a_restart() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// v0.3.0 smoke (QA): a joiner sends the moment the join resolves, before
+/// the owner's re-key has reached it. The send waits for the key (the
+/// owner's background sync makes it, the joiner's brings it in), and never
+/// surfaces `not-allowed` to a legit member.
+#[test]
+fn a_joiners_first_send_right_after_the_join_succeeds() {
+    use api::crypto::GroupKeysCipher;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let world = World::new();
+    let open = |words: &str, name: &str| {
+        let cipher = Arc::new(GroupKeysCipher::locked());
+        let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
+        peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        peer.core.update_profile(profile).unwrap();
+        peer
+    };
+    let owner = open(OWNER_WORDS, "Owner");
+    let guest = open(LEGAL, "Guest");
+    let server = owner.core.create_server("Instant", AgeRestriction::None).unwrap();
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        // Both apps' background sync loops.
+        for peer in [&owner, &guest] {
+            let stop = &stop;
+            scope.spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let _ = peer.core.sync_now();
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            });
+        }
+        guest.core.join_server(&server.invite_link).unwrap();
+        assert!(guest.core.list_servers().unwrap().iter().any(|s| s.id == server.id));
+        let channel = guest.core.list_channels(&server.id).unwrap().remove(0).id;
+        let sent = guest.core.send_message(&channel, "typed at once", None);
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(sent.map(|m| m.body).map_err(|e| e.code), Ok("typed at once".to_owned()));
+    });
+}
+
+/// #285 follow-up (tech lead): a send before the key comes returns at once
+/// as `pending` with a provisional ID, is listed, and is sent by the sync
+/// loop when the re-key arrives (`message.updated` with `replaces`).
+#[test]
+fn a_message_held_for_its_key_is_sent_when_the_key_comes() {
+    let world = World::new();
+    let owner = keyed_peer(&world, Arc::new(MemoryStore::new()), None);
+    owner.core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
+    let guest = keyed_peer(&world, Arc::new(MemoryStore::new()), None);
+    guest.core.restore_identity(LEGAL.split(' ').map(String::from).collect()).unwrap();
+    let server = owner.core.create_server("Held", AgeRestriction::None).unwrap();
+    guest.core.join_server(&server.invite_link).unwrap();
+    let channel = guest.core.list_channels(&server.id).unwrap().remove(0).id;
+
+    // The owner hasn't read the join yet: no key. Held, not refused.
+    guest.events.take();
+    let held = guest.core.send_message(&channel, "before the key", None).unwrap();
+    assert_eq!(held.send_state, Some(SendState::Pending));
+    assert!(held.id.starts_with(api::KEY_PENDING_PREFIX), "{}", held.id);
+    assert!(guest.events.take().contains(&Event::MessageAdded(held.clone())));
+    assert_eq!(guest.core.get_message_count(&channel).unwrap(), 1);
+    assert_eq!(guest.core.get_messages(&channel, 0, 9).unwrap().messages, std::slice::from_ref(&held));
+    // Still no key at the guest's next round: still held, nothing said.
+    guest.core.sync_now().unwrap();
+    assert!(!guest.events.take().iter().any(|e| matches!(e, Event::MessageUpdated(_))));
+
+    // The owner's round re-keys; the guest's next round sends it.
+    owner.core.sync_now().unwrap();
+    guest.core.sync_now().unwrap();
+    let sent: Vec<Message> = guest
+        .events
+        .take()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::MessageUpdated(m) if m.replaces.is_some() => Some(m),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent.len(), 1, "one replacement");
+    assert_eq!(sent[0].replaces.as_deref(), Some(held.id.as_str()));
+    assert_eq!((sent[0].body.as_str(), sent[0].send_state), ("before the key", Some(SendState::Sent)));
+    assert!(!sent[0].id.starts_with(api::KEY_PENDING_PREFIX));
+    let listed = guest.core.get_messages(&channel, 0, 9).unwrap().messages;
+    assert_eq!(listed.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), [sent[0].id.as_str()]);
+    // The owner reads it.
+    owner.core.sync_now().unwrap();
+    let got = owner.core.get_messages(&channel, 0, 9).unwrap().messages;
+    assert_eq!(got.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(), ["before the key"]);
+}
+
+/// A message held for its key that never gets it turns `failed` after
+/// `KEY_PENDING_FOR` (`message.updated`, and `notice: rekey-waiting`).
+#[test]
+fn a_message_held_without_a_key_fails_after_two_minutes() {
+    let world = World::new();
+    let owner = keyed_peer(&world, Arc::new(MemoryStore::new()), None);
+    owner.core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
+    let guest = keyed_peer(&world, Arc::new(MemoryStore::new()), None);
+    guest.core.restore_identity(LEGAL.split(' ').map(String::from).collect()).unwrap();
+    let server = owner.core.create_server("Silent", AgeRestriction::None).unwrap();
+    guest.core.join_server(&server.invite_link).unwrap();
+    let channel = guest.core.list_channels(&server.id).unwrap().remove(0).id;
+    let held = guest.core.send_message(&channel, "nobody keys me", None).unwrap();
+    assert_eq!(held.send_state, Some(SendState::Pending));
+
+    // The owner never comes back. Two minutes pass.
+    *world.clock.0.lock().unwrap() += api::KEY_PENDING_FOR.as_millis() as u64 + 1;
+    guest.events.take();
+    guest.core.sync_now().unwrap();
+    let events = guest.events.take();
+    let failed = Message { send_state: Some(SendState::Failed), ..held.clone() };
+    assert!(events.contains(&Event::MessageUpdated(failed.clone())), "{events:?}");
+    assert!(events.contains(&Event::Notice { kind: NoticeKind::RekeyWaiting, server_id: server.id.clone() }));
+    assert_eq!(guest.core.get_messages(&channel, 0, 9).unwrap().messages, [failed]);
+    // Said once, not every round.
+    guest.core.sync_now().unwrap();
+    assert!(!guest.events.take().iter().any(|e| matches!(e, Event::MessageUpdated(_))));
+
+    // Discarded (sec-lead): gone from the list; its text with it.
+    guest.core.discard_message(&held.id).unwrap();
+    assert!(guest.core.get_messages(&channel, 0, 9).unwrap().messages.is_empty());
+    assert_eq!(guest.core.discard_message(&held.id).unwrap_err().code, ErrorCode::NotFound);
+
+    // Bounded: at most MAX_KEY_PENDING held at once per channel (the failed
+    // one doesn't count); then the plain refusal.
+    for i in 0..api::MAX_KEY_PENDING {
+        let held = guest.core.send_message(&channel, &format!("held {i}"), None).unwrap();
+        assert_eq!(held.send_state, Some(SendState::Pending));
+    }
+    assert_eq!(
+        guest.core.send_message(&channel, "one too many", None).unwrap_err().code,
+        ErrorCode::NotAllowed
+    );
+
+    // Failed ones are bounded too: they all fail; one more fails after
+    // them; only the newest MAX_KEY_PENDING failed stay.
+    *world.clock.0.lock().unwrap() += api::KEY_PENDING_FOR.as_millis() as u64 + 1;
+    guest.core.sync_now().unwrap();
+    let last = guest.core.send_message(&channel, "the newest", None).unwrap();
+    *world.clock.0.lock().unwrap() += api::KEY_PENDING_FOR.as_millis() as u64 + 1;
+    guest.core.sync_now().unwrap();
+    let listed = guest.core.get_messages(&channel, 0, 999).unwrap().messages;
+    assert_eq!(listed.len(), api::MAX_KEY_PENDING);
+    assert!(listed.iter().all(|m| m.send_state == Some(SendState::Failed)));
+    assert_eq!(listed.last().unwrap().id, last.id, "the newest kept");
+    assert!(!listed.iter().any(|m| m.body == "held 0"), "the oldest dropped");
+}
+
 /// v0.2.0 smoke: a member who joins writes first, and the owner never
 /// sends. The owner's sync sees the join and keys the channel for the new
 /// member set, so the joiner can write (and the owner can read it).
@@ -1677,10 +1830,10 @@ fn a_failed_join_re_key_fails_closed() {
     );
     guest.core.sync_now().unwrap();
     let channel = guest.core.list_channels(&server.id).unwrap().remove(0).id;
-    assert_eq!(
-        guest.core.send_message(&channel, "x", None).unwrap_err().code,
-        ErrorCode::NotAllowed
-    );
+    // Fails closed: nothing sealed or sent without the key; only held.
+    let held = guest.core.send_message(&channel, "x", None).unwrap();
+    assert_eq!(held.send_state, Some(SendState::Pending));
+    assert!(held.id.starts_with(api::KEY_PENDING_PREFIX));
 }
 
 /// A server, its owner (real cipher), and a counter of rotations (one
@@ -1753,10 +1906,9 @@ fn join_re_keys_spend_a_token_bucket() {
     assert_eq!(rotations(&world, &server), after_burst, "a 4th re-key without a token");
     for peer in [&fourth, &fifth] {
         peer.core.sync_now().unwrap();
-        assert_eq!(
-            peer.core.send_message(&channel, "too soon", None).unwrap_err().code,
-            ErrorCode::NotAllowed
-        );
+        // No key yet: held (sent once the shared re-key reaches them).
+        let held = peer.core.send_message(&channel, "too soon", None).unwrap();
+        assert_eq!(held.send_state, Some(SendState::Pending));
     }
     // Due one refill after the first token was spent (a few hundred ms of
     // test clock ago); the loop wakes exactly then.
@@ -1776,8 +1928,8 @@ fn join_re_keys_spend_a_token_bucket() {
         peer.core.send_message(&channel, "now", None).unwrap();
     }
     owner.core.sync_now().unwrap();
-    // 1 from before, 3 from the burst, 2 shared.
-    assert_eq!(owner.core.get_message_count(&channel).unwrap(), 6);
+    // 1 from before, 3 from the burst, 2 held then sent, 2 shared.
+    assert_eq!(owner.core.get_message_count(&channel).unwrap(), 8);
     // Nobody who joined opens the message from before they joined.
     first[0].core.sync_now().unwrap();
     let bodies: Vec<String> = first[0]
@@ -2557,6 +2709,144 @@ fn a_call_between_members() {
     assert!(!owner.core.in_call());
 }
 
+/// A network that records each relay-only setting it was given.
+struct RelayOnlyNet {
+    world: Arc<LoopbackNetwork>,
+    applied: std::sync::Mutex<Vec<bool>>,
+}
+
+impl RelayOnlyNet {
+    fn new(world: &Arc<LoopbackNetwork>) -> Arc<RelayOnlyNet> {
+        Arc::new(RelayOnlyNet { world: world.clone(), applied: Default::default() })
+    }
+
+    fn applied(&self) -> Vec<bool> {
+        self.applied.lock().unwrap().clone()
+    }
+}
+
+impl Network for RelayOnlyNet {
+    fn publish(&self, record: &records::Record) {
+        self.world.publish(record);
+    }
+
+    fn fetch(&self, server: ServerId) -> Vec<records::Record> {
+        self.world.fetch(server)
+    }
+
+    fn set_relay_only(&self, on: bool) {
+        self.applied.lock().unwrap().push(on);
+    }
+}
+
+fn voice_rooms(events: Vec<Event>) -> Vec<VoiceRoom> {
+    events
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::VoiceRoom(room) => Some(room),
+            _ => None,
+        })
+        .collect()
+}
+
+/// GAP-6r: `setRelayOnly` is stored, given to the network at start and on
+/// each change, ends my call (with a bye), refuses calls while on, and is
+/// shown up front on `getAppInfo`, `getVoiceRoom`, `voice.room` and
+/// `call.state`. It survives a restart.
+#[test]
+fn relay_only_is_stored_applied_and_turns_calls_off() {
+    let dir = std::env::temp_dir().join(format!("mvs-api-relayonly-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("core.db");
+    let world = World::new();
+    let hub = Arc::new(VoiceHub::default());
+    let net = RelayOnlyNet::new(&world.network);
+    let open = |net: Arc<RelayOnlyNet>, secrets: Arc<MemoryStore>| {
+        world.peer_on(net, secrets, Some(db.clone()), Arc::new(PendingGroupKeys))
+    };
+    let owner = open(net.clone(), Arc::new(MemoryStore::new()));
+    let owner_id = sign_up(&owner, "Owner").id;
+    let alice = world.peer();
+    let alice_id = sign_up(&alice, "Alice").id;
+    let server = owner.core.create_server("Quiet", AgeRestriction::None).unwrap();
+    alice.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    alice.core.sync_now().unwrap();
+    let peers = [(owner_id.as_str(), &owner), (alice_id.as_str(), &alice)];
+    for (id, peer) in peers {
+        hub.connect(peer, id);
+    }
+
+    // Off by default, and the network was told so at start.
+    assert_eq!(net.applied(), [false]);
+    assert!(!owner.core.get_app_info().unwrap().relay_only);
+    let room = owner.core.get_voice_room(&server.id).unwrap();
+    assert!(!room.relay_only);
+    let state = owner.core.join_call(&room.room_id).unwrap();
+    assert!(!state.relay_only);
+    hub.pump(&peers);
+    alice.core.join_call(&room.room_id).unwrap();
+    hub.pump(&peers);
+    assert!(owner.core.in_call());
+
+    // On, through the dispatcher: my call ends at once with a bye, and the
+    // ended call.state says why.
+    owner.events.take();
+    let answer: serde_json::Value =
+        serde_json::from_str(&owner.core.handle(r#"{"cmd":"setRelayOnly","args":{"on":true}}"#))
+            .unwrap();
+    assert_eq!(answer, serde_json::json!({ "ok": null }));
+    assert!(!owner.core.in_call());
+    let ended = call_states(owner.events.take());
+    let last = ended.last().expect("a call.state for the ended call");
+    assert_eq!((last.participants.len(), last.relay_only), (0, true));
+    let sent = hub.pump(&peers);
+    assert!(sent.iter().any(|(from, to, blob)| {
+        *from == user_key(&owner_id)
+            && *to == user_key(&alice_id)
+            && String::from_utf8_lossy(blob).contains(r#"\"kind\":\"bye\""#)
+    }));
+    assert_eq!(net.applied(), [false, true]);
+
+    // Up front: app info, the room, and one voice.room per server at the
+    // next tick. Joining is refused.
+    assert!(owner.core.get_app_info().unwrap().relay_only);
+    assert!(owner.core.get_voice_room(&server.id).unwrap().relay_only);
+    owner.core.voice_tick();
+    let rooms = voice_rooms(owner.events.take());
+    assert_eq!(rooms.len(), 1);
+    assert!(rooms[0].relay_only && rooms[0].server_id == server.id);
+    assert_eq!(owner.core.join_call(&room.room_id).unwrap_err().code, ErrorCode::RelayOnly);
+    // Another member's setting is theirs: Alice's room isn't relay-only.
+    assert!(!alice.core.get_voice_room(&server.id).unwrap().relay_only);
+
+    // A restart keeps it: read before the network starts, and given to the
+    // network as the core opens.
+    let secrets = owner.secrets.clone();
+    drop(owner);
+    assert!(api::stored_relay_only(&db));
+    let net = RelayOnlyNet::new(&world.network);
+    let owner = open(net.clone(), secrets);
+    assert_eq!(net.applied(), [true]);
+    assert!(owner.core.get_app_info().unwrap().relay_only);
+    hub.connect(&owner, &owner_id);
+    assert_eq!(owner.core.join_call(&room.room_id).unwrap_err().code, ErrorCode::RelayOnly);
+
+    // Off again: applied, stored, and calls work.
+    owner.core.set_relay_only(false).unwrap();
+    assert_eq!(net.applied(), [true, false]);
+    assert!(!api::stored_relay_only(&db));
+    assert!(!owner.core.get_voice_room(&server.id).unwrap().relay_only);
+    assert!(!owner.core.join_call(&room.room_id).unwrap().relay_only);
+    owner.core.leave_call().unwrap();
+
+    // A database that can't be opened: on (fails closed, see the unit test).
+    assert!(api::stored_relay_only(&dir.join("missing").join("core.db")));
+    drop(owner);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Voice B: 5 is the cap; a kicked member's hello doesn't count.
 #[test]
 fn a_call_holds_five_and_kicked_members_are_ignored() {
@@ -2954,4 +3244,285 @@ fn a_leave_waits_in_the_outbox_until_the_gate_opens() {
     assert_eq!(leaves_by(&world, server_key, &guest_id), 1, "resent after delivery");
     drop(guest);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Records of `kind` that `who` (a user ID) wrote in `server`.
+fn records_by(world: &World, server: &str, who: &str, kind: Kind) -> usize {
+    let server = ServerId::from_bytes(hex::decode(server).unwrap().try_into().unwrap());
+    let who = PublicKey::from_bytes(hex::decode(who).unwrap().try_into().unwrap());
+    world.network.fetch(server).iter().filter(|r| r.kind() == kind && r.author() == who).count()
+}
+
+/// Owner bug (0.3.1): an owner restores their words on a new computer and
+/// rejoins their 18+ server by its invite link. They come back as the same
+/// member (no new join), still the owner, and nothing they post overwrites
+/// what the server holds: no empty name, no "not adult" claim from a
+/// birth date this device doesn't have. A member who restored and set a
+/// name posts the name, still with no claim.
+#[test]
+fn a_restored_member_rejoins_without_blanking_their_name_or_age() {
+    let world = World::new();
+    let owner = world.peer();
+    let created = owner.core.create_identity(adult()).unwrap();
+    assert!(answer(&owner, &created.words, &[]).1.unwrap().ok);
+    let owner_id = owner
+        .core
+        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None })
+        .unwrap()
+        .id;
+    let server = owner.core.create_server("Night", AgeRestriction::Eighteen).unwrap();
+    let bob = world.peer();
+    sign_up(&bob, "Bob");
+    assert!(matches!(
+        bob.core.join_server(&server.invite_link).unwrap(),
+        JoinStatus::Searching { .. }
+    ));
+    owner.core.sync_now().unwrap();
+    bob.core.sync_now().unwrap();
+    let joins = records_by(&world, &server.id, &owner_id, Kind::Join);
+    let posts = records_by(&world, &server.id, &owner_id, Kind::Post);
+    let claims = records_by(&world, &server.id, &owner_id, Kind::AgeClaim);
+
+    // A new computer: the same words, no name, no birth date.
+    let laptop = world.peer();
+    let restored = laptop.core.restore_identity(created.words.clone()).unwrap();
+    assert_eq!(restored.id, owner_id);
+    // Someone who isn't a member yet, with no birth date, is still blocked.
+    let stranger = world.peer();
+    stranger.core.restore_identity(stranger_words()).unwrap();
+    stranger.core.join_server(&server.invite_link).unwrap();
+    assert!(stranger.core.list_servers().unwrap().is_empty(), "joined an 18+ server with no birth date");
+
+    laptop.core.join_server(&server.invite_link).unwrap();
+    let listed = laptop.core.list_servers().unwrap();
+    assert_eq!(listed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), [server.id.as_str()]);
+    assert_eq!(listed[0].owner_id, owner_id);
+    // Nothing new from me: no join, no profile post, no age claim.
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::Join), joins);
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::Post), posts);
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::AgeClaim), claims);
+    // Bob still sees MoA, the owner.
+    bob.core.sync_now().unwrap();
+    let me = bob
+        .core
+        .list_members(&server.id)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.id == owner_id)
+        .unwrap();
+    assert_eq!((me.display_name.as_str(), me.is_owner), ("MoA", true));
+
+    // A second restore that sets a name first posts it, but still no claim.
+    let other = world.peer();
+    other.core.restore_identity(created.words.clone()).unwrap();
+    other
+        .core
+        .update_profile(ProfileInput { display_name: "MoA 2".into(), bio: None, avatar_data_url: None })
+        .unwrap();
+    other.core.join_server(&server.invite_link).unwrap();
+    assert_eq!(other.core.list_servers().unwrap().len(), 1);
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::Post), posts + 1);
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::AgeClaim), claims);
+    bob.core.sync_now().unwrap();
+    let names: Vec<String> =
+        bob.core.list_members(&server.id).unwrap().into_iter().map(|m| m.display_name).collect();
+    assert!(names.contains(&"MoA 2".to_owned()), "{names:?}");
+}
+
+/// Words for an identity nobody else in the test uses.
+fn stranger_words() -> Vec<String> {
+    let world = World::new();
+    let peer = world.peer();
+    peer.core.create_identity(adult()).unwrap().words
+}
+
+/// Fix 1's api: `restoreIdentity(words, input)` takes the country and birth
+/// date asked again; a rejoin then posts a claim from that date.
+#[test]
+fn a_restore_takes_the_birth_date_asked_again() {
+    let world = World::new();
+    let owner = world.peer();
+    let created = owner.core.create_identity(adult()).unwrap();
+    assert!(answer(&owner, &created.words, &[]).1.unwrap().ok);
+    let owner_id = owner
+        .core
+        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None })
+        .unwrap()
+        .id;
+    let server = owner.core.create_server("Night", AgeRestriction::Eighteen).unwrap();
+    owner.core.sync_now().unwrap();
+    let claims = records_by(&world, &server.id, &owner_id, Kind::AgeClaim);
+
+    let laptop = world.peer();
+    let request = serde_json::json!({
+        "cmd": "restoreIdentity",
+        "args": {
+            "words": created.words,
+            "input": { "locale": "he", "country": "IL", "birthDate": "1990-05-01" }
+        }
+    });
+    let answer: serde_json::Value =
+        serde_json::from_str(&laptop.core.handle(&request.to_string())).unwrap();
+    assert_eq!(answer["ok"]["id"], serde_json::json!(owner_id));
+    assert_eq!(answer["ok"]["birthDate"], serde_json::json!("1990-05-01"));
+    // Without input, the words alone still restore (as before).
+    let bare = world.peer();
+    let request = serde_json::json!({ "cmd": "restoreIdentity", "args": { "words": created.words } });
+    let answer: serde_json::Value =
+        serde_json::from_str(&bare.core.handle(&request.to_string())).unwrap();
+    assert_eq!(answer["ok"]["birthDate"], serde_json::json!(""));
+
+    laptop.core.join_server(&server.invite_link).unwrap();
+    assert_eq!(laptop.core.list_servers().unwrap().len(), 1);
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::AgeClaim), claims + 1);
+}
+
+/// One side of a network partition: while cut, it sees only what the world
+/// held when it was cut, and what it publishes waits until it heals.
+struct Partition {
+    world: Arc<LoopbackNetwork>,
+    cut: std::sync::Mutex<Option<BTreeSet<records::RecordId>>>,
+    held: std::sync::Mutex<Vec<records::Record>>,
+}
+
+impl Partition {
+    fn new(world: &Arc<LoopbackNetwork>) -> Arc<Partition> {
+        Arc::new(Partition { world: world.clone(), cut: Default::default(), held: Default::default() })
+    }
+
+    fn cut(&self, server: ServerId) {
+        *self.cut.lock().unwrap() = Some(self.world.fetch(server).iter().map(|r| r.id()).collect());
+    }
+
+    fn heal(&self) {
+        *self.cut.lock().unwrap() = None;
+        for record in std::mem::take(&mut *self.held.lock().unwrap()) {
+            self.world.publish(&record);
+        }
+    }
+}
+
+impl Network for Partition {
+    fn publish(&self, record: &records::Record) {
+        if self.cut.lock().unwrap().is_some() {
+            self.held.lock().unwrap().push(record.clone());
+        } else {
+            self.world.publish(record);
+        }
+    }
+
+    fn fetch(&self, server: ServerId) -> Vec<records::Record> {
+        let all = self.world.fetch(server);
+        match &*self.cut.lock().unwrap() {
+            Some(seen) => all.into_iter().filter(|r| seen.contains(&r.id())).collect(),
+            None => all,
+        }
+    }
+
+    fn fetch_invite(&self, handle: [u8; 32]) -> Vec<Vec<u8>> {
+        self.world.fetch_invite(handle)
+    }
+}
+
+/// Tech Lead and Security Lead (restore design): one owner identity on two
+/// computers re-keys the same join concurrently, neither seeing the other's
+/// rotation. Both rotations are valid; a third member reads what each
+/// computer sealed; a later kick shuts the kicked member out of what both
+/// seal next.
+#[test]
+fn one_identity_on_two_cores_re_keys_concurrently_and_converges() {
+    use api::crypto::GroupKeysCipher;
+
+    let world = World::new();
+    let (owner, server, channel) = keyed_server(&world, "Twins");
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let carol = joiner(&world, &server, "Carol");
+    owner.core.sync_now().unwrap();
+    // The same owner on a second computer: restored, rejoined by the link.
+    let partition = Partition::new(&world.network);
+    let laptop = world.peer_on(
+        partition.clone(),
+        Arc::new(MemoryStore::new()),
+        None,
+        Arc::new(GroupKeysCipher::locked()),
+    );
+    laptop.core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
+    laptop.core.join_server(&server.invite_link).unwrap();
+    advance(&world, JOIN_REKEY_REFILL_MS * 4);
+    for peer in [&owner, &laptop, &carol] {
+        peer.core.sync_now().unwrap();
+    }
+    assert_eq!(laptop.core.list_servers().unwrap().len(), 1);
+
+    // Dan joins; both owner cores re-key for it without seeing each other.
+    let dan_cipher = Arc::new(GroupKeysCipher::locked());
+    let dan = world.peer_with(Arc::new(MemoryStore::new()), None, dan_cipher.clone());
+    sign_up(&dan, "Dan");
+    dan.core.join_server(&server.invite_link).unwrap();
+    advance(&world, JOIN_REKEY_REFILL_MS * 4);
+    let rotation_ids = |records: &[records::Record]| -> BTreeSet<records::RecordId> {
+        records.iter().filter(|r| r.kind() == Kind::KeyRotation).map(|r| r.id()).collect()
+    };
+    let before = rotation_ids(&world.network.fetch(server_key));
+    partition.cut(server_key);
+    owner.core.sync_now().unwrap();
+    laptop.core.sync_now().unwrap();
+    owner.core.send_message(&channel, "from the PC", None).unwrap();
+    laptop.core.send_message(&channel, "from the laptop", None).unwrap();
+    // Each side rotated, neither seeing the other's rotation.
+    let from_pc: BTreeSet<_> =
+        rotation_ids(&world.network.fetch(server_key)).difference(&before).copied().collect();
+    let from_laptop = rotation_ids(&partition.held.lock().unwrap());
+    assert!(!from_pc.is_empty(), "the PC didn't re-key for the join");
+    assert!(!from_laptop.is_empty(), "the laptop didn't re-key for the join");
+    assert!(from_pc.is_disjoint(&from_laptop));
+    partition.heal();
+
+    // Everyone, Dan included, reads both.
+    for peer in [&owner, &laptop, &carol, &dan] {
+        peer.core.sync_now().unwrap();
+    }
+    let bodies = |peer: &Peer| -> Vec<String> {
+        let mut bodies: Vec<String> = peer
+            .core
+            .get_messages(&channel, 0, 50)
+            .unwrap()
+            .messages
+            .into_iter()
+            .map(|m| m.body)
+            .collect();
+        bodies.sort();
+        bodies
+    };
+    for peer in [&owner, &laptop, &carol, &dan] {
+        assert_eq!(bodies(peer), ["from the PC", "from the laptop"]);
+    }
+
+    // A kick from the PC: what either computer seals next is shut to Dan.
+    let dan_id = dan.core.get_identity().unwrap().unwrap().id;
+    owner.core.kick_member(&server.id, &dan_id).unwrap();
+    let after_pc = owner.core.send_message(&channel, "PC after", None).unwrap();
+    laptop.core.sync_now().unwrap();
+    let after_laptop = laptop.core.send_message(&channel, "laptop after", None).unwrap();
+    carol.core.sync_now().unwrap();
+    let carol_bodies = bodies(&carol);
+    for body in ["PC after", "laptop after"] {
+        assert!(carol_bodies.contains(&body.to_owned()), "Carol can't read {body:?}: {carol_bodies:?}");
+    }
+    let held = world.network.fetch(server_key);
+    for record in held.iter().filter(|r| r.kind() == Kind::KeyRotation) {
+        let _ = dan_cipher.apply_rotation(record);
+    }
+    let accepted = held.iter().filter(|r| r.kind() == Kind::KeyRotation).map(|r| r.id()).collect();
+    dan_cipher.set_accepted(server_key, &accepted);
+    for sent in [&after_pc, &after_laptop] {
+        let record =
+            held.iter().find(|r| hex::encode(r.id().as_bytes()) == sent.id).expect("published");
+        let Scope::Channel(ch) = record.scope() else { panic!("a channel record") };
+        assert!(
+            dan_cipher.decrypt(server_key, ch, record.author(), record.body()).is_err(),
+            "the kicked member read {:?}",
+            sent.body
+        );
+    }
 }

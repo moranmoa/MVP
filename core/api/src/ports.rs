@@ -125,6 +125,10 @@ pub trait Network: Send + Sync {
         None
     }
 
+    /// Asks the background sync loop (`Core::run_sync_loop`) for a round
+    /// now rather than at its next tick. Nothing to do without one.
+    fn wake(&self) {}
+
     /// B6-p: replace a held record by its stub, if the stub gate agrees.
     fn prune(&self, id: records::RecordId) {
         let _ = id;
@@ -180,6 +184,13 @@ pub trait Network: Send + Sync {
     /// is forgotten by the caller.
     fn close_server(&self, server: ServerId) {
         let _ = server;
+    }
+
+    /// GAP-6r: the user's relay-only setting, at start and on each change.
+    /// On: no direct listener, no direct dials, peers through relay circuits
+    /// only.
+    fn set_relay_only(&self, on: bool) {
+        let _ = on;
     }
 }
 

@@ -60,8 +60,16 @@ export interface MockOptions {
   coreDown?: 'missing' | 'start-failed' | 'crashed' | 'crash-loop' | 'keyring';
   /** joinCall rejects with this code, for the error states (screenshots). */
   callError?: 'call-full' | 'relay-only' | 'not-implemented';
+  /**
+   * As a member who just joined, before the channel key arrives (#288): sends
+   * come back held (`pending-…`), then are sent (`arrive`), fail (`fail`), or
+   * stay held (`wait`, for screenshots).
+   */
+  keyPending?: 'arrive' | 'fail' | 'wait';
   /** Every demo voice room starts with 5 people in it (full). */
   roomFull?: boolean;
+  /** Start with relay-only on (#272): no direct connections, calls off. */
+  relayOnly?: boolean;
   /** Server lifecycle (#261): two members run an old MVS, so rename and close answer `update-needed` (a leave never does). */
   outdatedMembers?: boolean;
   /** The demo server "Minecraft IL" starts closed by its owner (read-only). */
@@ -561,6 +569,41 @@ export class MockCore implements CoreApi {
     return s.members.some((m) => m.id !== this.identity?.id && m.presence === 'online');
   }
 
+  /**
+   * #288: a message held for its key. It is listed at once as `pending-…`; then
+   * the key comes (the real message replaces it) or, after the wait (2 minutes
+   * in the core, ~2 s here), it fails with a rekey-waiting notice.
+   */
+  private heldSeq = 0;
+
+  private sendHeld(ch: ChannelState, index: number, body: string): Message {
+    const held: Message = {
+      id: `pending-${(++this.heldSeq).toString(16).padStart(16, '0')}`,
+      channelId: ch.channel.id,
+      index,
+      authorId: this.identity!.id,
+      body,
+      createdAt: Date.now(),
+      sendState: 'pending',
+    };
+    this.put(ch, held, true);
+    if (this.options.keyPending === 'wait') return held;
+    if (this.options.keyPending === 'fail') {
+      this.later(2000, () => {
+        this.put(ch, { ...held, sendState: 'failed' }, false);
+        this.emit('notice', { kind: 'rekey-waiting', serverId: ch.channel.serverId });
+      });
+    } else {
+      this.later(900, () => {
+        const real: Message = { ...held, id: this.messageId(ch.channel.id, index), sendState: 'sent' };
+        ch.overrides.set(index, real);
+        this.emit('message.updated', { ...real, replaces: held.id });
+        this.later(700, () => this.put(ch, { ...real, sendState: 'received' }, false));
+      });
+    }
+    return held;
+  }
+
   /** Walks a local message through pending → sent → received. */
   private deliver(ch: ChannelState, index: number): void {
     const s = this.serverOf(ch);
@@ -927,6 +970,7 @@ export class MockCore implements CoreApi {
     if (this.servers.get(ch.channel.serverId)?.summary.closed) throw err({ code: 'not-allowed' });
     const index = this.count(ch);
     ch.appendedCount++;
+    if (this.options.keyPending) return this.sendHeld(ch, index, body);
     const msg: Message = {
       id: this.messageId(channelId, index),
       channelId,
@@ -964,6 +1008,23 @@ export class MockCore implements CoreApi {
     const mine = m.authorId === this.identity?.id;
     if (!mine && s.summary.ownerId !== this.identity?.id) throw err({ code: 'not-allowed' });
     this.put(ch, { ...m, body: '', deleted: true, replyTo: undefined }, false);
+  }
+
+  async discardMessage(messageId: Id): Promise<null> {
+    for (const ch of this.channelIndex.values()) {
+      const at = [...ch.overrides.values()].find((m) => m.id === messageId && /^pending-/.test(m.id))?.index;
+      if (at === undefined) continue;
+      const later = [...ch.overrides.values()].filter((m) => m.index > at).sort((a, b) => a.index - b.index);
+      ch.overrides.delete(at);
+      for (const m of later) {
+        ch.overrides.delete(m.index);
+        const index = m.index - 1;
+        ch.overrides.set(index, { ...m, index, id: /^pending-/.test(m.id) ? m.id : this.messageId(ch.channel.id, index) });
+      }
+      ch.appendedCount--;
+      return null;
+    }
+    throw err({ code: 'not-found' });
   }
 
   async retryMessage(messageId: Id): Promise<void> {
@@ -1017,7 +1078,12 @@ export class MockCore implements CoreApi {
   }
 
   private room(serverId: Id): VoiceRoom {
-    return { serverId, roomId: this.roomIdOf(serverId), participants: this.roster(serverId).map((p) => ({ ...p })) };
+    return {
+      serverId,
+      roomId: this.roomIdOf(serverId),
+      participants: this.roster(serverId).map((p) => ({ ...p })),
+      ...(this.relayOnly ? { relayOnly: true } : {}),
+    };
   }
 
   private setRoster(serverId: Id, participants: VoiceParticipant[]): void {
@@ -1051,6 +1117,7 @@ export class MockCore implements CoreApi {
 
   async joinCall(channelId: Id): Promise<CallState> {
     await this.wait(200);
+    if (this.relayOnly) throw err({ code: 'relay-only' });
     if (this.options.callError) throw err({ code: this.options.callError });
     const serverId = [...this.servers.keys()].find((id) => this.roomIdOf(id) === channelId);
     // Text channels don't carry calls any more (voice-room amendment).
@@ -1134,7 +1201,25 @@ export class MockCore implements CoreApi {
   }
 
   async getAppInfo(): Promise<AppInfo> {
-    return { version: '0.1.0-alpha', updateChannel: this.releaseChannel };
+    return { version: '0.1.0-alpha', updateChannel: this.releaseChannel, relayOnly: this.relayOnly };
+  }
+
+  /** Relay-only (#272): on ends my call; every room then says so (the core: at the next sync round). */
+  private relayOnlySet: boolean | null = null;
+  private get relayOnly(): boolean {
+    return this.relayOnlySet ?? !!this.options.relayOnly;
+  }
+
+  async setRelayOnly(on: boolean): Promise<void> {
+    await this.wait(100);
+    this.relayOnlySet = on;
+    const serverId = this.callServer();
+    if (on && this.call) {
+      this.emit('call.state', { ...this.call, participants: [], full: false, relayOnly: true });
+      this.call = null;
+      if (serverId) this.rooms.set(serverId, this.roster(serverId).filter((p) => p.userId !== this.identity?.id));
+    }
+    for (const id of this.servers.keys()) this.emit('voice.room', this.room(id));
   }
 
   async setUpdateChannel(channel: UpdateChannel): Promise<void> {

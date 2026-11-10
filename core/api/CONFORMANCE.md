@@ -81,18 +81,23 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 | The mock's `getRecoveryWords` answers at any time | The Rust core answers only until the check passes, then `not-allowed` (until the app lock, #31); the mock should too |
 | The mock accepts any `updateProfile` input | The Rust core refuses oversize fields and any avatar other than a base64 PNG, JPEG, WebP or GIF `data:` URL (`bad-request`) |
 | The mock has no `grantRole` / `revokeRole` | Add them to `CoreCommands` (proposed below) |
+| The mock never holds a message for its key | The Rust core (see "Messages held for their key" below): a plain member without the channel key yet gets the message back at once as `pending`, with a provisional ID, instead of `not-allowed`. The mock should do the same when it simulates a fresh join |
 
 ## Proposed contract additions (Rust has them; `api.ts` doesn't yet)
+
+- Restore on a new computer:
+  - `restoreIdentity(words, input?: { locale, country, birthDate })`. The words don't carry the country or birth date, so the UI asks them again (with the agreement) before the words and passes them here, as `createIdentity` takes them. The name follows with `updateProfile`.
+  - Rejoining a server I'm still a member of (its invite link, after a restore) signs no new join. It never posts an empty display name or an age claim without a birth date: the server keeps the profile and claim it holds. With no birth date it isn't age-blocked either: my earlier claim stands. A known age below the server's minimum still blocks.
 
 - `grantRole(serverId, userId, role: 'admin' | 'moderator' | 'member')` and
   `revokeRole(serverId, userId)`.
 - `Member.role: 'owner' | 'admin' | 'moderator' | 'member'`.
 - Voice calls (voice v1, piece B; `src/voice.rs`). IDs are 64 lower-case hex, and `identity` is a user ID.
   - Calls happen only in each server's one voice room, whose ID is derived: `blake3::derive_key("mvs/voice-room/v1", serverId)`. There is no channel record for it, no 18+ gate, and text channels carry no calls.
-  - `getVoiceRoom(serverId)` returns `VoiceRoom { serverId, roomId, participants: { userId, muted }[] }`.
+  - `getVoiceRoom(serverId)` returns `VoiceRoom { serverId, roomId, participants: { userId, muted }[], relayOnly }`.
     - Participants: me first when I'm in it, at most 5 (the first to arrive), built from verified hellos only, each dropped 30 s after we last received one.
     - Errors: `not-found` for a server I don't have (a kicked member's core removes it), `not-allowed` if I'm not a member or I'm kicked.
-  - `joinCall(channelId)` takes the room ID and returns `CallState { channelId, participants: { identity, muted }[], full }`, me first; `channelId` is the room ID. It leaves any other call first.
+  - `joinCall(channelId)` takes the room ID and returns `CallState { channelId, participants: { identity, muted }[], full, relayOnly }`, me first; `channelId` is the room ID. It leaves any other call first.
     - Errors:
       - `not-found`: an unknown ID.
       - `not-allowed`: a text channel's ID, not a member, or kicked.
@@ -120,6 +125,17 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
     - Hellos and byes go only to members who could join that call themselves, so a call in an 18+ channel isn't shown to anyone else.
     - A full call's refusal counts only if it comes from someone already in that call, within 10 s of joining.
   - `applyUpdate` answers `not-allowed` during a call.
+- Relay-only (GAP-6r), per device:
+  - `setRelayOnly(on: boolean)` returns `null`. It's stored in the core database and needs no identity. On:
+    - the network keeps no direct listener, makes no direct dials, and reaches peers only through relay circuits, and direct connections already open are closed (#274);
+    - my call ends at once (a bye to the others, then a `call.state` with `participants: []` and `relayOnly: true`);
+    - `joinCall` answers `relay-only` until it's off.
+  - At start, `mvs-core` reads the stored value before the network starts, and the node starts relay-only from the first moment (`NodeConfig.relay_only`: no direct listener, no bootstrap dial, no punching). It fails closed: a database that can't be opened or read, or a value other than off, means on.
+  - Shown up front:
+    - `AppInfo.relayOnly` from `getAppInfo`;
+    - `VoiceRoom.relayOnly`, so the UI can disable "Join" before trying;
+    - `CallState.relayOnly`.
+  - After a change, one `voice.room` per server at the next sync round carries the new value.
 - `CoreError.code`, voice: `'call-full' | 'relay-only'`.
 - Invites (#208), all moderator and up (`not-allowed` below that):
   - `createInvite(serverId, input?: { expiresMs?: number, maxUses?: number })`
@@ -149,6 +165,20 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
     - A short link stops working when its invite is revoked, expires or is
       used up, and when the server is closed, left or purged.
 - `Member.connection: 'direct' | 'relay' | null` (#187): how we reach an online member, a direct connection (LAN) or through the relay; `null` for us and for members who are offline. A change fires `members.changed`.
+- Messages held for their key (#285 follow-up). A plain member who just joined has no channel key until a moderator's re-key reaches them (usually well under a second).
+  - `sendMessage` then resolves at once with `{ ..., id: 'pending-<16 hex>', sendState: 'pending' }`, and fires `message.added` with it. Nothing is sealed or sent yet.
+    - The message is listed after the channel's stored messages (`getMessages`, `getMessageCount`).
+    - It lives in memory only: a restart drops it.
+    - At most 50 are held per channel at once; past that, `not-allowed`. Failed ones are bounded too: beyond 50 failed in a channel the oldest are dropped (the UI may still show them until it re-reads the channel).
+  - When the key comes, the core's background sync seals and sends it, and fires `message.updated` with the real message: its record `id`, `sendState: 'sent'`, and **`replaces: 'pending-…'`**. From then on it is an ordinary message (`sent`, then `received`).
+    - **Its `index` may differ from the pending entry's.** The same round can bring in other messages first: the key can make earlier messages readable, and others may have written meanwhile. These come as their own `message.added` events, before the replacement. The real message is placed after them, and any other held messages after it.
+    - So on `replaces`, the UI drops the entry with that `pending-…` ID (wherever it sits) before applying the message at its `index`. It should also re-read `getMessageCount` (or the visible window) rather than keep its own count.
+  - With no key after **2 minutes**, or if I can no longer send there (kicked, left, closed), it turns failed:
+    - `message.updated` with the same `pending-…` ID and `sendState: 'failed'`;
+    - and `notice: rekey-waiting` for the server.
+    - It stays listed, failed, until a restart or `discardMessage(messageId)`, which drops a held or failed `pending-…` message and wipes its text (`not-found` for any other ID). "Send again" is `discardMessage` plus a new `sendMessage`.
+  - `Message.replaces?: string` is new, and appears only on that one `message.updated`.
+  - A moderator or above never gets a pending message: they make the key on the way. A non-member, or someone kicked, still gets `not-allowed` at once.
 - `CoreError.code`: `'bad-request' | 'not-implemented' | 'internal'`, and `'keyring-unavailable'` (QA-20): the OS keychain (Secret Service on Linux) is missing or unusable. The core still starts; `getIdentity` and anything needing the identity reject with it, and the UI shows the keyring cause.
 - `NoticeKind`: `'rekey-waiting'`, sent when removed members still hold a channel key and only a moderator can renew it. Until a moderator does, sending there answers `not-allowed`.
 - Server lifecycle (#229 design, #251 authority; `docs/design/server-rename-leave-delete.md`):

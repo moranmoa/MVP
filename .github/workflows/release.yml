@@ -28,6 +28,8 @@ on:
       - CHANGELOG.md
       - .github/scripts/manifest-body.mjs
       - .github/scripts/third-party-notices.mjs
+      - .github/scripts/pe-imports.mjs
+      - core/.cargo/config.toml
       - desktop/package.json
       - desktop/package-lock.json
       - desktop/build/**
@@ -276,6 +278,16 @@ jobs:
             windows-*) npx electron-builder --win nsis --x64 --publish never ;;
             linux-*) npx electron-builder --linux AppImage deb --x64 --publish never ;;
           esac
+
+      # Every Windows binary we ship must start on a clean install, without the
+      # VC++ Redistributable (v0.3.0: "VCRUNTIME140.dll was not found" from
+      # mvs-launcher). Fails on any vcruntime*/msvcp*/api-ms-win-crt-* import.
+      # Our Rust binaries get +crt-static from core/.cargo/config.toml.
+      - name: No VC++ runtime imports (Windows)
+        if: startsWith(matrix.platform, 'windows-')
+        run: |
+          shopt -s nullglob
+          node .github/scripts/pe-imports.mjs desktop/.core/mvs-core.exe desktop/.core/mvs-launcher.exe desktop/dist/win-unpacked/*.exe desktop/dist/*Setup*.exe
 
       # Release names. The updater payload is the unpacked app folder
       # (win-unpacked / linux-unpacked, contents at the archive root) with no

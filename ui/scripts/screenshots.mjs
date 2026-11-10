@@ -442,6 +442,21 @@ for (const [sim, name, wait] of [
   await p.close();
 }
 
+// ---- #288: messages held for the channel key (280-289) ----------------------
+for (const [mode, name, wait] of [
+  ['wait', '280-held-sending-he', '.send-state.held.pending'],
+  ['fail', '281-held-failed-he', '.send-state.held.failed'],
+]) {
+  const p = await chat(`?demo=1&still=1&lang=he&theme=light&update=999999&keyPending=${mode}`, 'x');
+  const box = p.getByRole('textbox', { name: /כתיבה ב/ });
+  await box.fill('הצטרפתי עכשיו, שלום לכולם');
+  await box.press('Enter');
+  await p.locator(wait).waitFor();
+  await p.waitForTimeout(300);
+  await shot(p, name);
+  await p.close();
+}
+
 // ---- security demo: what other people could send ---------------------------
 {
   const p = await chat('?demo=1&hostile=1&still=1&lang=he&theme=light&update=999999', 'x');
@@ -767,6 +782,21 @@ for (const [lang, t] of [
   await p.locator('.closed-banner').waitFor();
   await p.waitForTimeout(600);
   await shot(p, '256-server-closed-he');
+  await p.close();
+}
+
+// Relay-only (#272): 270–271.
+{
+  const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999&relayOnly=1&settings=privacy', 'x');
+  await p.getByRole('button', { name: 'הגדרות' }).first().click();
+  await p.getByRole('switch', { name: 'ממסר בלבד' }).waitFor();
+  await shot(p, '270-settings-privacy-relay-only-he');
+  await p.close();
+}
+{
+  const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999&relayOnly=1', 'x');
+  await p.locator('.voice-room-reason').waitFor();
+  await shot(p, '271-voice-room-relay-only-he');
   await p.close();
 }
 

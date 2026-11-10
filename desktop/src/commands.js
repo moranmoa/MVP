@@ -41,6 +41,7 @@ const COMMANDS = Object.freeze({
   editMessage: ['messageId', 'body'],
   deleteMessage: ['messageId'],
   retryMessage: ['messageId'],
+  discardMessage: ['messageId'],
   markRead: ['channelId'],
   // Safety
   blockUser: ['userId'],
@@ -58,6 +59,7 @@ const COMMANDS = Object.freeze({
   exportDiagnostics: [],
   getAppInfo: [],
   setUpdateChannel: ['channel'],
+  setRelayOnly: ['on'],
   restartToUpdate: [],
 });
 

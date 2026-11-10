@@ -282,8 +282,8 @@ describe('voice room', () => {
     await store.leaveCall();
     expect(store.getState().callError).toBeNull();
     await store.joinCall(room.roomId);
-    store.setRelayOnly(true);
-    await core.leaveCall(); // as the core does when relay-only goes on
+    // The core ends my call when relay-only goes on, and says why (#272).
+    await store.setRelayOnly(true);
     expect(store.getState().call).toBeNull();
     expect(store.getState().callError).toBe('relay-only');
   });
@@ -334,6 +334,18 @@ describe('voice room', () => {
     ]) {
       expect(cleanVoiceRoom(bad)).toBeNull();
     }
+  });
+
+  it('cleanVoiceRoom and cleanCall read relayOnly (#272): only a boolean, passed on only when true', () => {
+    const id = (c: string) => c.repeat(64);
+    const room = { serverId: id('a'), roomId: id('b'), participants: [] };
+    // #272 adds the field to every room: it must not get the room dropped.
+    expect(cleanVoiceRoom({ ...room, relayOnly: true })).toEqual({ ...room, relayOnly: true });
+    expect(cleanVoiceRoom({ ...room, relayOnly: false })).toEqual(room);
+    expect(cleanVoiceRoom({ ...room, relayOnly: 'yes' })).toBeNull();
+    const call = { channelId: id('b'), participants: [], full: false };
+    expect(cleanCall({ ...call, relayOnly: true }).relayOnly).toBe(true);
+    expect(cleanCall({ ...call, relayOnly: 'yes' as unknown as boolean }).relayOnly).toBeUndefined();
   });
 
   it('a malformed voice.room event is dropped; a good one updates the roster', async () => {

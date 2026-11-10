@@ -1,0 +1,87 @@
+# Two-peer voice e2e. Run through run.sh, which builds mvs-core and the UI into
+# .build/, starts the relay, reads its peer ID and passes it in as MVS_RELAY.
+# Each run is its own compose project (-p mvs-voice-<time>-<random>).
+#
+# The apps and the relay share one private network of their own; the live
+# relay is never involved and no STUN server is set, so nothing calls out.
+# It is not `internal`: the shell gathers WebRTC candidates only on the
+# default route's interface (security.js WEBRTC_IP_POLICY), and an internal
+# network has no default route, so a call would gather no candidates at all.
+
+services:
+  # Electron and playwright-core for desktop/, into a shared cache volume
+  # (deps.sh: one per lockfile, locked, skipped when already installed).
+  deps:
+    image: mcr.microsoft.com/playwright:v1.56.1-noble
+    working_dir: /repo/desktop
+    volumes:
+      - ../..:/repo
+      - desktop_node_modules:/repo/desktop/node_modules
+      - deps_lock:/lock
+      - ./deps.sh:/deps.sh:ro
+    command: ["sh", "/deps.sh"]
+
+  # A throwaway relay from infra/relay. Private addresses are allowed because
+  # the Docker network is private; never set that on the live relay.
+  relay:
+    image: mvs-relay:voice-e2e
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /data:uid=10001,mode=700
+    environment:
+      ALLOW_PRIVATE_ADDRS: "1"
+      EXTERNAL_ADDRS: /dns4/relay/tcp/4001
+      RUST_LOG: info
+    networks:
+      voice:
+        aliases: [relay]
+
+  # The owner (a) and the member (b): the desktop app with the real core, a
+  # temp profile, a session D-Bus with an unlocked test keyring, Xvfb, and
+  # Chromium's fake microphone (a beep), no fake permission UI: the shell's
+  # own permission handler still decides (#228, V-C2).
+  a: &app
+    build: { context: ../../desktop, dockerfile: Dockerfile.e2e }
+    image: mvs-voice-e2e-app
+    working_dir: /repo/desktop
+    volumes:
+      - ../..:/repo:ro
+      - desktop_node_modules:/repo/desktop/node_modules:ro
+      - ./.build:/build:ro
+      - rendezvous:/rendezvous
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    shm_size: 512m
+    environment: &env
+      ROLE: a
+      MVS_RELAY: ${MVS_RELAY:-}
+      MVS_CORE_PATH: /build/mvs-core
+      MVS_UI_DIR: /build/ui
+    networks: [voice]
+    command:
+      - sh
+      - -c
+      - >-
+        chown pwuser /rendezvous &&
+        runuser -u pwuser -- dbus-run-session -- sh -c 'echo -n test | gnome-keyring-daemon --unlock --components=secrets >/dev/null && xvfb-run -a node /repo/qa/voice-e2e/call.mjs'
+
+  b:
+    <<: *app
+    environment:
+      <<: *env
+      ROLE: b
+
+networks:
+  voice: {}
+
+volumes:
+  rendezvous:
+  # Shared across runs (run.sh creates them, and `down -v` leaves them).
+  desktop_node_modules:
+    name: mvs-voice-e2e-desktop-nm-${DEPS_KEY:?run through run.sh}
+    external: true
+  deps_lock:
+    name: mvs-voice-e2e-deps-lock
+    external: true

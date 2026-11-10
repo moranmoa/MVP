@@ -103,6 +103,12 @@ export interface CoreCommands {
   editMessage(messageId: Id, body: string): Promise<void>;
   deleteMessage(messageId: Id): Promise<void>;
   retryMessage(messageId: Id): Promise<void>;
+  /**
+   * #288: drops a held or failed `pending-…` message and wipes its text. No
+   * event: the caller removes it. `not-found` for any other id. "Send again" is
+   * this plus a new sendMessage.
+   */
+  discardMessage(messageId: Id): Promise<null>;
   markRead(channelId: Id): Promise<void>;
 
   // Safety
@@ -131,6 +137,13 @@ export interface CoreCommands {
   exportDiagnostics(): Promise<string>;
   getAppInfo(): Promise<AppInfo>;
   setUpdateChannel(channel: UpdateChannel): Promise<void>;
+  /**
+   * Relay-only (GAP-6r, #272), per device: no direct connections, so members
+   * never see my IP; calls are off. On ends my call (a `call.state` with no
+   * participants and `relayOnly`), and `joinCall` answers `relay-only` until off.
+   * Shown up front as `AppInfo.relayOnly` and `VoiceRoom.relayOnly`.
+   */
+  setRelayOnly(on: boolean): Promise<void>;
   restartToUpdate(): Promise<void>;
 }
 
@@ -156,7 +169,8 @@ export interface CoreEvents {
   /** Once, after the launcher went back to the previous version. */
   'update.rolledBack': { failed: string; running: string };
   /** e.g. after a kick: the server's encryption was renewed. */
-  'notice': { kind: 'encryption-renewed'; serverId: Id };
+  /** rekey-waiting: a message held for its key failed; sending there waits for a moderator's re-key. */
+  'notice': { kind: 'encryption-renewed' | 'rekey-waiting'; serverId: Id };
   /**
    * Desktop app only: an mvs:// invite link the OS handed to the app (a click
    * in a browser or chat). The UI opens the join dialog with it and joins only

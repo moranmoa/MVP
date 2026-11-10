@@ -22,6 +22,7 @@ export * from './types';
  *   ?rolledBack=1    the last update failed and the previous version is back
  *   ?coreDown=<detail> the desktop shell reports the core down (missing, start-failed, crashed, crash-loop)
  *   ?callError=<code> joinCall fails with call-full, relay-only or not-implemented
+ *   ?keyPending=arrive|fail|wait  sends wait for the channel key, then go out, fail or keep waiting (#288)
  *   ?roomFull=1      every demo voice room already has 5 people
  *   ?stun=<url>      the desktop shell's STUN URL for voice (stun:host:port)
  *   ?inCall=1        restartToUpdate is refused as during a call (not-allowed)
@@ -51,6 +52,8 @@ export function createCore(search = typeof location !== 'undefined' ? location.s
     coreDown: (params.get('coreDown') as MockOptions['coreDown']) ?? undefined,
     callError: (params.get('callError') as MockOptions['callError']) ?? undefined,
     roomFull: params.has('roomFull'),
+    keyPending: (params.get('keyPending') as MockOptions['keyPending']) ?? undefined,
+    relayOnly: params.has('relayOnly'),
     outdatedMembers: params.has('outdated'),
     closedServer: params.has('closed'),
     stunUrl: params.get('stun') ?? undefined,

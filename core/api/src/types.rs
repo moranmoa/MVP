@@ -128,6 +128,10 @@ pub struct Message {
     /// Only on messages written on this device.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub send_state: Option<SendState>,
+    /// On the `message.updated` that sends a message held for its key: the
+    /// provisional ID (`pending-…`) it replaces in the list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<Id>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -327,6 +331,10 @@ pub enum UpdateChannel {
 pub struct AppInfo {
     pub version: String,
     pub update_channel: UpdateChannel,
+    /// The relay-only setting (`setRelayOnly`): peers are reached only
+    /// through the relay, and calls are off.
+    #[serde(default)]
+    pub relay_only: bool,
 }
 
 /// `getRecoveryChallenge`'s result: 1-based positions.
@@ -500,6 +508,10 @@ pub struct CallState {
     pub participants: Vec<CallParticipant>,
     /// 5 participants: nobody else can join.
     pub full: bool,
+    /// Relay-only is on: calls are off. An ended call (no participants)
+    /// with this set ended because relay-only went on.
+    #[serde(default)]
+    pub relay_only: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -530,6 +542,10 @@ pub struct VoiceRoom {
     pub room_id: Id,
     /// At most 5: me first when I'm in it, then the others.
     pub participants: Vec<VoiceParticipant>,
+    /// Relay-only is on: `joinCall` answers `relay-only`, so the UI can
+    /// disable "Join" up front. A new `voice.room` follows each change.
+    #[serde(default)]
+    pub relay_only: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
