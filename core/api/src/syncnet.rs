@@ -8,6 +8,9 @@
 //! - Node events are hints, never data, and nothing depends on them: the
 //!   [`MemberGate`] ties each reject to the control log's count, and the
 //!   data is always re-read from the store (so a `Lagged` loses nothing).
+//! - Voice (piece A): [`VoiceNet`] over sync's `/mvs/voice/1`, members
+//!   only. Received signals wait in a small queue (dropped when it is full:
+//!   signals are best effort) for [`deliver_voice`] to hand to the core.
 //! - TODO(#64): a node that won't start (the `node.key` ACL) must reach the
 //!   user as an error or notice; today `SyncNetwork::start` fails and the
 //!   sidecar exits with a log line.
@@ -27,11 +30,19 @@ use crate::access::{KeyBinder, MemberReadGate, MemberStubGate};
 use crate::gate::MemberGate;
 use crate::ports::{Network, Reach};
 use crate::types::SendState;
+use crate::voice::VoiceNet;
+use crate::Core;
 
 /// How long `fetch` waits for a server it has never seen to arrive, so a
 /// join right after opening the log can find it.
 const FIRST_FETCH_WAIT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(200);
+/// Received voice signals waiting for the core; more are dropped. Sync
+/// caps them at 80 at once and 10 a second from everyone together.
+const VOICE_QUEUE: usize = 256;
+
+/// A voice signal from sync: the sender's bound identity and the blob.
+pub type VoiceSignal = (PublicKey, Vec<u8>);
 
 /// A `--relay` address: a multiaddr that ends in `/p2p/<peer id>`, so Noise
 /// checks it reached that very relay. Without the peer ID it would accept
@@ -79,12 +90,25 @@ pub struct SyncNetwork {
     send_states: SendStates,
     hints: Mutex<Option<Receiver<()>>>,
     waker: SyncSender<()>,
+    voice: Mutex<Option<Receiver<VoiceSignal>>>,
 }
 
 impl SyncNetwork {
     /// Starts a node in `data_dir` (its `store.db` and `node.key`) that
     /// reaches peers through `relay`.
     pub fn start(relay: Multiaddr, data_dir: &Path, gate: Arc<MemberGate>) -> anyhow::Result<Self> {
+        Self::start_with_bootstrap(relay, Vec::new(), data_dir, gate)
+    }
+
+    /// Like [`SyncNetwork::start`], also dialling `bootstrap` directly (each
+    /// checked by [`relay_addr`]): the relay's plain TCP address, so that
+    /// identify observes our public address for hole punching (#219).
+    pub fn start_with_bootstrap(
+        relay: Multiaddr,
+        bootstrap: Vec<Multiaddr>,
+        data_dir: &Path,
+        gate: Arc<MemberGate>,
+    ) -> anyhow::Result<Self> {
         let runtime =
             tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
         let config = NodeConfig {
@@ -93,7 +117,7 @@ impl SyncNetwork {
             logs: Vec::new(),
             authorizer: gate,
             listen: "/ip4/0.0.0.0/tcp/0".parse().expect("valid multiaddr"),
-            bootstrap: Vec::new(),
+            bootstrap,
             // F2: a direct LAN connection to a peer that proved it shares a
             // server with us (sync never takes LAN addresses from the DHT).
             allow_lan: true,
@@ -116,9 +140,16 @@ impl SyncNetwork {
         let states = send_states.clone();
         let (hint, hints) = std::sync::mpsc::sync_channel(1);
         let waker = hint.clone();
+        let (voice_tx, voice) = std::sync::mpsc::sync_channel(VOICE_QUEUE);
         runtime.spawn(async move {
             while let Some(event) = events.recv().await {
                 let wake = match event {
+                    // Voice: from a verified current member (sync checked);
+                    // the core checks the envelope.
+                    NodeEvent::VoiceSignal { from, bytes } => {
+                        let _ = voice_tx.try_send((from, bytes));
+                        false
+                    }
                     NodeEvent::Stored { .. } | NodeEvent::Lagged { .. } => true,
                     // B6: my messages' send state moves on; a round re-announces.
                     NodeEvent::Sent { id } => advance(&states, id, SendState::Sent),
@@ -143,7 +174,13 @@ impl SyncNetwork {
             send_states,
             hints: Mutex::new(Some(hints)),
             waker,
+            voice: Mutex::new(Some(voice)),
         })
+    }
+
+    /// The voice signals for [`deliver_voice`] (once; `None` after).
+    pub fn take_voice(&self) -> Option<Receiver<VoiceSignal>> {
+        self.voice.lock().expect("not poisoned").take()
     }
 
     /// The hints for `Core::run_sync_loop` (once; `None` after).
@@ -183,6 +220,24 @@ impl SyncNetwork {
             .filter_map(|s| Record::decode(&s.bytes).ok())
             .filter(|r| log_of(r) == log)
             .collect()
+    }
+}
+
+/// Hands each received voice signal to the core until the node stops.
+/// Its own thread: the core may answer through [`VoiceNet::send`].
+pub fn deliver_voice(signals: Receiver<VoiceSignal>, core: &Core) {
+    for (from, blob) in signals {
+        core.voice_received(Some(from), &blob);
+    }
+}
+
+impl VoiceNet for SyncNetwork {
+    /// Best effort: a signal to an identity no connected member peer is
+    /// bound to is dropped (the call's hellos and timeouts cover it).
+    fn send(&self, to: PublicKey, blob: Vec<u8>) {
+        if let Err(e) = self.runtime.block_on(self.node.voice_send(to, blob)) {
+            tracing::debug!(%e, "voice signal not sent");
+        }
     }
 }
 

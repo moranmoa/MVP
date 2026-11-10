@@ -77,7 +77,11 @@
 | 180 | `180-sidebar-settings-button-he` | ראש פס הערוצים עם גלגל השיניים |
 | 181 | `181-server-settings-general-he` | "כללי" עם הניווט |
 | 182 | `182-server-settings-channels-he` | "ערוצים", ו-#general בלי מחיקה |
-| 183 | `183-server-settings-removed-he` | "חשבונות שהורחקו" עם 2 שורות |
-| 184 | `184-server-settings-unsaved-he` | אישור שינויים שלא נשמרו |
-| 185 | `185-server-settings-phone-he` | 375px: הרשימה |
+| 183 | `183-server-settings-invites-he` | "לינק הזמנה" עם הלינק ו"העתקה" |
+| 183b | `183b-server-settings-members-he` | "חברים" עם "הרחקה" |
+| 184 | `184-server-settings-invite-created-he` | לינק חדש אחרי יצירה |
+| 185 | `185-server-settings-invite-revoke-he` | אישור ביטול הלינק |
 | 186 | `186-server-settings-en-light` | "כללי" באנגלית, LTR |
+| 187 | `187-server-settings-removed-he` | "חשבונות שהורחקו" עם 2 שורות (כשיהיו פקודות בליבה) |
+| 188 | `188-server-settings-unsaved-he` | אישור שינויים שלא נשמרו (כשיהיה "כללי" לעריכה) |
+| 189 | `189-server-settings-phone-he` | 375px: הרשימה |

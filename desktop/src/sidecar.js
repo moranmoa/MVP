@@ -43,11 +43,12 @@ class Sidecar {
    * @param {string} o.exe absolute path of mvs-core
    * @param {string} o.dataDir absolute path of its data folder
    * @param {string|null} [o.relay] relay multiaddr, already checked (config.js)
+   * @param {string[]} [o.bootstrap] the relay's direct multiaddrs, already checked (config.js)
    * @param {string[]} [o.extraArgs] further switches for mvs-core
    * @param {(name: string, payload: unknown) => void} o.onEvent
    * @param {(line: string) => void} [o.log] for stderr lines and lifecycle notes
    */
-  constructor({ exe, dataDir, relay = null, extraArgs = [], onEvent, onStatus = () => {}, log = () => {}, timeouts = {}, backoffBase = 500, spawnImpl = spawn }) {
+  constructor({ exe, dataDir, relay = null, bootstrap = [], extraArgs = [], onEvent, onStatus = () => {}, log = () => {}, timeouts = {}, backoffBase = 500, spawnImpl = spawn }) {
     if (!path.isAbsolute(exe)) throw new Error('mvs-core must be given by an absolute path');
     if (!path.isAbsolute(dataDir)) throw new Error('the data folder must be an absolute path');
     this.exe = exe;
@@ -55,6 +56,9 @@ class Sidecar {
     // Optional: the relay multiaddr (config.js checks it) and extra switches
     // from other parts of the shell (e.g. the updater); strings only.
     this.relay = relay;
+    // The relay's direct addresses (config.js checks them); only with a relay.
+    if (!Array.isArray(bootstrap) || bootstrap.some((a) => typeof a !== 'string')) throw new Error('bootstrap must be strings');
+    this.bootstrap = bootstrap;
     if (!Array.isArray(extraArgs) || extraArgs.some((a) => typeof a !== 'string')) throw new Error('extraArgs must be strings');
     this.extraArgs = extraArgs;
     this.onEvent = onEvent;
@@ -93,7 +97,12 @@ class Sidecar {
 
   start() {
     this.stopped = false;
-    const args = ['--data-dir', this.dataDir, ...(this.relay ? ['--relay', this.relay] : []), ...this.extraArgs];
+    const args = [
+      '--data-dir',
+      this.dataDir,
+      ...(this.relay ? ['--relay', this.relay, ...this.bootstrap.flatMap((b) => ['--bootstrap', b])] : []),
+      ...this.extraArgs,
+    ];
     const child = this.spawnImpl(this.exe, args, {
       shell: false,
       windowsHide: true,
