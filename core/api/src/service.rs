@@ -612,7 +612,11 @@ impl Core {
         }
         let searching = JoinStatus::Searching { link: link.clone() };
         self.ports.events.emit(&Event::JoinStatus(searching.clone()));
+        let short = matches!(crate::invite_link::parse(&link), Ok(crate::invite_link::InviteLink::V1 { .. }));
+        tracing::info!(target: "mvs::join", short_link = short, "join: started");
+        self.log_links("join: links at start");
         let status = self.try_join(&link)?;
+        tracing::info!(target: "mvs::join", outcome = join_status_name(&status), "join: first attempt done");
         if matches!(status, JoinStatus::NobodyOnline { .. }) {
             // The inviter may not be reachable yet: keep trying (`retry_joins`).
             let now = Instant::now();
@@ -637,6 +641,7 @@ impl Core {
                     return Ok(JoinStatus::Closed { link: link.to_owned() });
                 }
                 let fetched = self.open_and_fetch(server, &secret);
+                tracing::info!(target: "mvs::join", records = fetched.len(), "join: fetched the server's control log");
                 self.run(|inner, ports, events| {
                     inner.join(ports, server, invite, &secret, link, fetched, events)
                 })
@@ -666,13 +671,23 @@ impl Core {
         use crate::crypto::invite::{handle, open, InvitePublication};
         let h = handle(key);
         let mut status = JoinStatus::NobodyOnline { link: link.to_owned() };
-        for answer in self.ports.network.fetch_invite(h) {
-            let Some(publication) = InvitePublication::decode(&answer) else { continue };
+        let answers = self.ports.network.fetch_invite(h);
+        tracing::info!(target: "mvs::join", answers = answers.len(), "join: asked peers for the invite");
+        for answer in answers {
+            let Some(publication) = InvitePublication::decode(&answer) else {
+                tracing::info!(target: "mvs::join", "join: an answer didn't decode");
+                continue;
+            };
             if *publication.handle() != h {
+                tracing::info!(target: "mvs::join", "join: an answer named another invite");
                 continue;
             }
-            let Some(opened) = open(key, prefix, publication.envelope()) else { continue };
+            let Some(opened) = open(key, prefix, publication.envelope()) else {
+                tracing::info!(target: "mvs::join", "join: an answer didn't open with this link");
+                continue;
+            };
             if !publication.names(key, &opened) {
+                tracing::info!(target: "mvs::join", "join: an answer didn't name its invite");
                 continue;
             }
             let server = opened.server;
@@ -681,8 +696,12 @@ impl Core {
                 return Ok(JoinStatus::Closed { link: link.to_owned() });
             }
             let fetched = self.open_and_fetch(server, &opened.secret);
+            tracing::info!(target: "mvs::join", records = fetched.len(), "join: fetched the server's control log");
             let author = ServerView::build(server, &Log::new(server, fetched.clone()))
                 .and_then(|view| view.state.invites.get(&opened.invite).map(|invite| invite.author));
+            if !fetched.is_empty() && !author.is_some_and(|author| publication.verify(&author)) {
+                tracing::info!(target: "mvs::join", invite_known = author.is_some(), "join: the answer's signature didn't check");
+            }
             let joined = if fetched.is_empty() {
                 JoinStatus::NobodyOnline { link: link.to_owned() }
             } else if !author.is_some_and(|author| publication.verify(&author)) {
@@ -727,6 +746,7 @@ impl Core {
             pending.iter().filter(|(_, p)| now >= p.next).map(|(link, _)| link.clone()).collect()
         };
         for link in due {
+            self.log_links("join: retrying");
             let status = match self.try_join(&link) {
                 Ok(status) => status,
                 Err(e) => {
@@ -734,6 +754,7 @@ impl Core {
                     continue;
                 }
             };
+            tracing::info!(target: "mvs::join", outcome = join_status_name(&status), "join: retry done");
             let mut pending = self.pending_joins.lock().expect("not poisoned");
             if matches!(status, JoinStatus::NobodyOnline { .. }) {
                 if let Some(p) = pending.get_mut(&link) {
@@ -747,6 +768,15 @@ impl Core {
                 drop(pending);
                 self.ports.events.emit(&Event::JoinStatus(status));
             }
+        }
+    }
+
+    /// The join log's view of the network: how many peers we're connected to
+    /// (through the relay or directly). Counts only, never who.
+    fn log_links(&self, step: &str) {
+        match self.ports.network.link_counts() {
+            Some((peers, direct)) => tracing::info!(target: "mvs::join", peers, direct, "{step}"),
+            None => tracing::info!(target: "mvs::join", "{step}"),
         }
     }
 
@@ -3059,6 +3089,18 @@ fn unlock_cipher(ports: &Ports, me: Option<&Me>) {
         ports.cipher.unlock(Arc::new(MemberSecret::new(me.identity.signing_key())));
         // GAP-4: peer bindings with the identity key.
         ports.network.unlock(me.identity.signing_key());
+    }
+}
+
+/// A join status's name for the join log (no link, no IDs).
+fn join_status_name(status: &JoinStatus) -> &'static str {
+    match status {
+        JoinStatus::Searching { .. } => "searching",
+        JoinStatus::NobodyOnline { .. } => "nobody-online",
+        JoinStatus::Joined { .. } => "joined",
+        JoinStatus::Invalid { .. } => "invalid",
+        JoinStatus::AgeBlocked { .. } => "age-blocked",
+        JoinStatus::Closed { .. } => "closed",
     }
 }
 
