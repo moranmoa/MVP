@@ -4,7 +4,8 @@
 // MVS_RELAY (and MVS_BOOTSTRAP) environment variables instead.
 //
 //   { "relay": "/dns4/<host>/tcp/443/wss/p2p/<peer id>",
-//     "bootstrap": ["/dns4/<host>/tcp/4001/p2p/<peer id>"] }   (optional)
+//     "bootstrap": ["/dns4/<host>/tcp/4001/p2p/<peer id>"],   (optional)
+//     "stun": "stun:<host>:3478" }                            (optional, voice)
 //
 // Anything malformed is ignored with a warning: the app then runs without a
 // relay (offline) rather than handing the core something unchecked.
@@ -92,6 +93,53 @@ function bootstrapFor({ packaged, resourcesPath, env = process.env, warn = (m) =
   return ok.slice(0, MAX_BOOTSTRAP);
 }
 
+/** Longest STUN URL passed on. */
+const MAX_STUN = 256;
+
+/**
+ * A plain STUN URL, the same rule as the UI's iceServersFor (ui/src/voice/
+ * sdp.ts): `stun:` or `stuns:`, then a host (and port) with no whitespace,
+ * credentials (@), path, query or fragment. TURN or anything else: no.
+ */
+function validStun(value) {
+  return typeof value === 'string' && value.length <= MAX_STUN && /^stuns?:[^\s@/?#]+$/i.test(value.trim());
+}
+
+/**
+ * Our own STUN server for voice (#222), for the page's WebRTC: `stun` in
+ * mvs-config.json, or MVS_STUN in a checkout. Null when there is none (calls
+ * then work on the same network only); a malformed one is ignored with a
+ * warning that never names it.
+ * @param {{ packaged: boolean, resourcesPath?: string, env?: object, warn?: (m: string) => void }} o
+ * @returns {string | null}
+ */
+function stunFor({ packaged, resourcesPath, env = process.env, warn = (m) => console.warn(m) }) {
+  let value;
+  if (packaged) {
+    const file = path.join(resourcesPath, 'mvs-config.json');
+    if (!fs.existsSync(file)) return null;
+    try {
+      value = JSON.parse(fs.readFileSync(file, 'utf8')).stun;
+    } catch {
+      return null; // relayFor already warned
+    }
+  } else {
+    value = env.MVS_STUN;
+  }
+  if (value === undefined || value === null || value === '') return null;
+  if (!validStun(value)) {
+    warn('ignoring a malformed STUN URL; no STUN');
+    return null;
+  }
+  return value.trim();
+}
+
+/** The host of a STUN URL (for the file log to hide), or null. */
+function stunHost(url) {
+  const m = typeof url === 'string' && /^stuns?:(?:\[([^\]]+)\]|([^:]+))/i.exec(url);
+  return m ? m[1] || m[2] : null;
+}
+
 /**
  * The host of a relay or bootstrap multiaddr (`/dns4/<name>` and the other
  * DNS forms, `/ip4/<addr>` or `/ip6/<addr>`), to hide from the file log;
@@ -102,4 +150,4 @@ function logHost(addr) {
   return m ? m[1] : null;
 }
 
-module.exports = { MAX_RELAY, MAX_BOOTSTRAP, validRelay, relayFor, bootstrapFor, logHost };
+module.exports = { MAX_RELAY, MAX_BOOTSTRAP, MAX_STUN, validRelay, relayFor, bootstrapFor, logHost, validStun, stunFor, stunHost };

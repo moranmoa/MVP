@@ -62,6 +62,8 @@ export interface MockOptions {
   callError?: 'call-full' | 'relay-only' | 'not-implemented';
   /** Every demo voice room starts with 5 people in it (full). */
   roomFull?: boolean;
+  /** As the desktop shell would: a STUN URL on core.status (#222), given to every listener. */
+  stunUrl?: string;
   /** Add members and messages written the way an attacker would (see SECURITY.md). */
   hostile?: boolean;
   /** `getRecoveryWords()` fails, to show the load error state. */
@@ -207,6 +209,11 @@ export class MockCore implements CoreApi {
     let set = this.listeners.get(event);
     if (!set) this.listeners.set(event, (set = new Set()));
     set.add(handler as (p: unknown) => void);
+    // Like the shell's core.status, which every listener gets, also late ones.
+    const stunUrl = this.options.stunUrl;
+    if (event === 'core.status' && stunUrl !== undefined) {
+      this.timers.push(setTimeout(() => set!.has(handler as (p: unknown) => void) && (handler as (p: unknown) => void)({ state: 'up', stunUrl }), 0));
+    }
     return () => set!.delete(handler as (p: unknown) => void);
   }
 

@@ -33,7 +33,8 @@ export function useCallEngine(myId: Id): CallEngine {
   const store = useAppStore();
   const core = useCore();
   const call = useStore(store, (s) => s.call);
-  const view = useVoiceEngine(call, myId);
+  const stunUrl = useStunUrl();
+  const view = useVoiceEngine(call, myId, { stunUrl });
   const sim = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('voiceSim') : null;
   const error = call && sim === 'noMic' ? 'no-device' : call && sim === 'rejoin' ? 'rejoin-to-talk' : view.error;
   const other = call?.participants.find((p) => p.identity !== myId)?.identity;
@@ -48,6 +49,18 @@ export function useCallEngine(myId: Id): CallEngine {
   const simFailure: PeerFailure | null = sim === 'peerFailed' ? 'failed' : sim === 'peerRefused' ? 'refused' : null;
   const peerFailed = simFailure && other ? { ...view.peerFailed, [other]: simFailure } : view.peerFailed;
   return { ...view, error, noMic, peerFailed };
+}
+
+/**
+ * Our STUN server (#222): the desktop shell puts it on every core.status (the
+ * latest one reaches late listeners too). Null without one: calls then work
+ * on the same network only.
+ */
+function useStunUrl(): string | null {
+  const core = useCore();
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => core.on('core.status', (s) => setUrl(s.stunUrl ?? null)), [core]);
+  return url;
 }
 
 /** The short code the app shows for someone not (yet) in the member list. */
