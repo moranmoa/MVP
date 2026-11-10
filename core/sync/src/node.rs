@@ -55,6 +55,7 @@ use crate::access::{self, Binder, Binding, Handle, ReadGate, ServerSecret};
 use crate::limits::{Acks, DialBackoff, Pending, PerIp, RateLimiter, Refused};
 use crate::presence::Presence;
 use crate::store::MAX_HAVE;
+use crate::invite::InviteLimits;
 use crate::voice::{VoiceError, VoiceLimits, MAX_VOICE_BLOB};
 use crate::{
     log_name, log_of, valid_log_name, Append, Authorizer, ChannelId, NoStubs, Record, RecordId, Scope, ServerId, Store,
@@ -120,6 +121,10 @@ const MAX_CONNECTIONS_PER_PEER: u32 = 3;
 const MAX_CONNECTIONS_PER_IP: usize = 8;
 /// Connections with nothing going on are closed after this long.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long [`Node::fetch_invite`] waits for answers (T8-02).
+pub const INVITE_FETCH_WAIT: Duration = Duration::from_secs(3);
+/// Peers one envelope fetch asks.
+const MAX_FETCH_PEERS: usize = 16;
 /// Traffic on every connection at least this often, well under the 100 s a
 /// proxy like Cloudflare lets a WebSocket sit idle.
 const PING_INTERVAL: Duration = Duration::from_secs(15);
@@ -243,6 +248,10 @@ pub enum NodeEvent {
     /// `from` is the identity its peer is bound to. Ephemeral: never stored
     /// or forwarded. See `voice`.
     VoiceSignal { from: PublicKey, bytes: Vec<u8> },
+    /// An invite publication (`/mvs/invite-pub/1`) from a verified current
+    /// member of `server`, `from` its identity. Opaque here: the api
+    /// verifies it (C1) and calls [`Node::serve_invite`] if it holds.
+    InvitePublication { server: ServerId, from: PublicKey, bytes: Vec<u8> },
 }
 
 /// Presence on one server (M2). `online` holds bound identities (anyone
@@ -295,6 +304,10 @@ enum Command {
     Served { peer: PeerId, log: String, reply: oneshot::Sender<usize> },
     Prune { id: RecordId, reply: oneshot::Sender<Result<bool>> },
     VoiceSend { to: PublicKey, bytes: Vec<u8>, reply: oneshot::Sender<Result<(), VoiceError>> },
+    ServeInvite { server: ServerId, handle: [u8; 32], publication: Vec<u8>, announce: bool, reply: oneshot::Sender<bool> },
+    DropInvite { handle: [u8; 32] },
+    DropServerInvites { server: ServerId },
+    FetchInvite { handle: [u8; 32], reply: oneshot::Sender<Vec<Vec<u8>>> },
     Shutdown { reply: oneshot::Sender<()> },
 }
 
@@ -367,6 +380,10 @@ struct Behaviour {
     punch: crate::punch::MemberPunch,
     /// Voice signalling (`/mvs/voice/1`), with verified members only (`voice`).
     voice: crate::voice::VoiceBehaviour,
+    /// Invite publications between members (`/mvs/invite-pub/1`).
+    invite_pub: crate::invite::PublishBehaviour,
+    /// Envelope asks, from anyone (`/mvs/invite/1`).
+    invite_ask: crate::invite::AskBehaviour,
 }
 
 type SharedBackoff = Arc<Mutex<DialBackoff<PeerId>>>;
@@ -579,6 +596,11 @@ impl Node {
             started: Instant::now(),
             pending_stubs: HashMap::new(),
             voice_limits: VoiceLimits::new(),
+            invites: HashMap::new(),
+            invite_limits: InviteLimits::new(),
+            fetches: HashMap::new(),
+            fetch_of: HashMap::new(),
+            next_fetch: 0,
         };
         for log in config.logs {
             task.open(log, None);
@@ -718,6 +740,43 @@ impl Node {
         rx.await.map_err(|_| VoiceError::Stopped)?
     }
 
+    /// Serves `publication` under the envelope handle `handle` for
+    /// `server` (T8-02): answered to anyone who asks for exactly that
+    /// handle (`/mvs/invite/1`). The api calls it only for an invite that
+    /// is live and a publication it verified (C1), and drops it when the
+    /// invite dies ([`Node::drop_invite`]). With `announce`, it also goes to
+    /// the server's connected members now; members it binds later get every
+    /// served publication of their server. False (nothing stored) when the
+    /// handle is already served (first wins), the server isn't opened, it
+    /// already has [`crate::MAX_INVITES_PER_SERVER`], or the publication is
+    /// empty or over [`crate::MAX_INVITE_PUBLICATION`].
+    pub async fn serve_invite(&self, server: ServerId, handle: [u8; 32], publication: Vec<u8>, announce: bool) -> Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::ServeInvite { server, handle, publication, announce, reply })?;
+        Ok(rx.await?)
+    }
+
+    /// Stops serving one envelope handle.
+    pub fn drop_invite(&self, handle: [u8; 32]) -> Result<()> {
+        self.send(Command::DropInvite { handle })
+    }
+
+    /// Stops serving every envelope of `server` (e.g. after its secret
+    /// rotated: S5).
+    pub fn drop_server_invites(&self, server: ServerId) -> Result<()> {
+        self.send(Command::DropServerInvites { server })
+    }
+
+    /// Asks every connected peer for the envelope handle `handle` and
+    /// returns the non-empty answers (at most one per peer) that came within
+    /// [`crate::node::INVITE_FETCH_WAIT`]. Untrusted (C3): the caller tries
+    /// each. Needs no server secret: a joiner asks before joining.
+    pub async fn fetch_invite(&self, handle: [u8; 32]) -> Result<Vec<Vec<u8>>> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::FetchInvite { handle, reply })?;
+        Ok(rx.await?)
+    }
+
     /// Closes all connections and the store.
     pub async fn shutdown(self) -> Result<()> {
         let (reply, rx) = oneshot::channel();
@@ -824,6 +883,8 @@ async fn build_swarm(
                 guard: DialGuard { backoff },
                 punch: crate::punch::MemberPunch::new(peer_id, allow_lan),
                 voice: crate::voice::behaviour(),
+                invite_pub: crate::invite::publish_behaviour(),
+                invite_ask: crate::invite::ask_behaviour(),
             })
         })?
         .with_swarm_config(|c| c.with_idle_connection_timeout(IDLE_TIMEOUT))
@@ -1020,6 +1081,22 @@ struct Task {
     stub_gate: Arc<dyn StubGate>,
     /// Caps on accepted voice signals.
     voice_limits: VoiceLimits,
+    /// T8-02: envelope handle → the server and publication we serve.
+    invites: HashMap<[u8; 32], (ServerId, Vec<u8>)>,
+    invite_limits: InviteLimits,
+    /// Envelope asks in flight, and which ask each request belongs to.
+    fetches: HashMap<u64, Fetch>,
+    fetch_of: HashMap<request_response::OutboundRequestId, u64>,
+    next_fetch: u64,
+}
+
+/// One [`Node::fetch_invite`]: answers so far, until every peer answered or
+/// [`INVITE_FETCH_WAIT`] passed.
+struct Fetch {
+    reply: oneshot::Sender<Vec<Vec<u8>>>,
+    waiting: usize,
+    answers: Vec<Vec<u8>>,
+    until: Instant,
 }
 
 /// What a pull may get: the log, the read check still to run, and the
@@ -1075,6 +1152,7 @@ impl Task {
                     self.pull_soon();
                     self.direct_fallback();
                     self.recheck_punch();
+                    self.expire_fetches();
                     let gone = self.presence.expire(Instant::now());
                     self.went_offline(gone);
                 }
@@ -1154,6 +1232,14 @@ impl Task {
             Command::VoiceSend { to, bytes, reply } => {
                 let _ = reply.send(self.voice_send(to, bytes));
             }
+            Command::ServeInvite { server, handle, publication, announce, reply } => {
+                let _ = reply.send(self.serve_invite(server, handle, publication, announce));
+            }
+            Command::DropInvite { handle } => {
+                self.invites.remove(&handle);
+            }
+            Command::DropServerInvites { server } => self.invites.retain(|_, (s, _)| *s != server),
+            Command::FetchInvite { handle, reply } => self.fetch_invite(handle, reply),
             Command::RelayOnly { on } => self.set_relay_only(on),
             Command::NoDirectDials => self.direct_dials = false,
             Command::NoHolePunch => self.swarm.behaviour_mut().punch.set_enabled(false),
@@ -1350,6 +1436,141 @@ impl Task {
         self.emit(NodeEvent::VoiceSignal { from, bytes });
     }
 
+    /// The identity `peer` is bound to on `server`, if our read gate
+    /// accepts it there as a current member.
+    fn member_on(&self, peer: PeerId, server: ServerId) -> Option<PublicKey> {
+        let gate = self.access.read_gate.as_ref()?;
+        let (_, identity) = self.bound.get(&(peer, server))?;
+        gate.may_read(identity, &self.store.control_log(server)).then_some(*identity)
+    }
+
+    /// Connected peers that are current members of `server`.
+    fn member_peers(&self, server: ServerId) -> Vec<PeerId> {
+        let mut peers: Vec<PeerId> = self
+            .bound
+            .keys()
+            .filter(|(peer, s)| *s == server && self.swarm.is_connected(peer))
+            .map(|(peer, _)| *peer)
+            .filter(|peer| self.member_on(*peer, server).is_some())
+            .collect();
+        peers.dedup();
+        peers
+    }
+
+    /// See [`Node::serve_invite`].
+    fn serve_invite(&mut self, server: ServerId, handle: [u8; 32], publication: Vec<u8>, announce: bool) -> bool {
+        if publication.is_empty()
+            || publication.len() > crate::invite::MAX_PUBLICATION
+            || !self.secrets.contains_key(&server)
+            || self.invites.contains_key(&handle)
+            || self.invites.values().filter(|(s, _)| *s == server).count() >= crate::invite::MAX_PER_SERVER
+        {
+            return false;
+        }
+        self.invites.insert(handle, (server, publication.clone()));
+        if announce {
+            for peer in self.member_peers(server) {
+                self.push_invite(peer, server, publication.clone());
+            }
+        }
+        true
+    }
+
+    fn push_invite(&mut self, peer: PeerId, server: ServerId, publication: Vec<u8>) {
+        let Some(secret) = self.secrets.get(&server) else { return };
+        let control = *secret.handle(Scope::Control).as_bytes();
+        self.swarm.behaviour_mut().invite_pub.send_request(&peer, crate::invite::Push { control, publication });
+    }
+
+    /// A member we just bound: hand it every publication we serve for that
+    /// server, so a member who was offline when an invite was made catches up.
+    fn share_invites(&mut self, peer: PeerId, server: ServerId) {
+        if self.member_on(peer, server).is_none() {
+            return;
+        }
+        let ours: Vec<Vec<u8>> =
+            self.invites.values().filter(|(s, _)| *s == server).map(|(_, publication)| publication.clone()).collect();
+        for publication in ours {
+            self.push_invite(peer, server, publication);
+        }
+    }
+
+    /// A publication came in: only a current member's, for a server we
+    /// hold, within its rate cap, reaches the api (which verifies it).
+    fn on_invite_push(&mut self, peer: PeerId, push: crate::invite::Push, channel: ResponseChannel<()>) {
+        let server = self.secrets.iter().find(|(_, secret)| *secret.handle(Scope::Control).as_bytes() == push.control);
+        let Some(server) = server.map(|(server, _)| *server) else {
+            debug!(%peer, "invite publication for a server we don't hold dropped");
+            return;
+        };
+        let Some(from) = self.member_on(peer, server) else {
+            debug!(%peer, "invite publication from a non-member dropped");
+            return;
+        };
+        if !self.invite_limits.allow_push(peer, Instant::now()) {
+            debug!(%peer, "invite publication over the rate cap dropped");
+            return;
+        }
+        let _ = self.swarm.behaviour_mut().invite_pub.send_response(channel, ());
+        self.emit(NodeEvent::InvitePublication { server, from, bytes: push.publication });
+    }
+
+    /// An ask for an envelope handle: the publication served under exactly
+    /// that handle, else the same empty answer whatever the reason (S2).
+    fn on_invite_ask(&mut self, peer: PeerId, handle: [u8; 32], channel: ResponseChannel<Vec<u8>>) {
+        let allowed = self.invite_limits.allow_ask(peer, Instant::now());
+        let answer = match self.invites.get(&handle) {
+            Some((_, publication)) if allowed => publication.clone(),
+            _ => Vec::new(),
+        };
+        let _ = self.swarm.behaviour_mut().invite_ask.send_response(channel, answer);
+    }
+
+    /// See [`Node::fetch_invite`]: one ask to each connected peer (not the
+    /// relay, which serves none), at most [`MAX_FETCH_PEERS`].
+    fn fetch_invite(&mut self, handle: [u8; 32], reply: oneshot::Sender<Vec<Vec<u8>>>) {
+        let mut peers: Vec<PeerId> = self.connected.iter().copied().collect();
+        peers.sort_by_key(|peer| (!self.direct.contains_key(peer), *peer));
+        peers.truncate(MAX_FETCH_PEERS);
+        if peers.is_empty() {
+            let _ = reply.send(Vec::new());
+            return;
+        }
+        let id = self.next_fetch;
+        self.next_fetch += 1;
+        for peer in &peers {
+            let request = self.swarm.behaviour_mut().invite_ask.send_request(peer, handle);
+            self.fetch_of.insert(request, id);
+        }
+        let until = Instant::now() + INVITE_FETCH_WAIT;
+        self.fetches.insert(id, Fetch { reply, waiting: peers.len(), answers: Vec::new(), until });
+    }
+
+    fn on_invite_answer(&mut self, request: request_response::OutboundRequestId, answer: Option<Vec<u8>>) {
+        let Some(id) = self.fetch_of.remove(&request) else { return };
+        let Some(fetch) = self.fetches.get_mut(&id) else { return };
+        fetch.waiting = fetch.waiting.saturating_sub(1);
+        if let Some(answer) = answer.filter(|a| !a.is_empty()) {
+            fetch.answers.push(answer);
+        }
+        if fetch.waiting == 0 {
+            let fetch = self.fetches.remove(&id).expect("just seen");
+            let _ = fetch.reply.send(fetch.answers);
+        }
+    }
+
+    /// Asks past [`INVITE_FETCH_WAIT`] return what they have.
+    fn expire_fetches(&mut self) {
+        let now = Instant::now();
+        let due: Vec<u64> = self.fetches.iter().filter(|(_, f)| f.until <= now).map(|(id, _)| *id).collect();
+        for id in due {
+            let fetch = self.fetches.remove(&id).expect("just seen");
+            let _ = fetch.reply.send(fetch.answers);
+        }
+        let live: HashSet<u64> = self.fetches.keys().copied().collect();
+        self.fetch_of.retain(|_, id| live.contains(id));
+    }
+
     /// "Relay only" on: drop the direct listener (identify then announces
     /// only our relay circuit), and stop every direct path. Off: listen
     /// directly again.
@@ -1521,10 +1742,14 @@ impl Task {
         }
         let control = self.secrets.get(&server)?.handle(Scope::Control);
         let identity = binding.verify(&peer, &control, now)?;
-        self.bound.insert((peer, server), (binding, identity));
+        let new = self.bound.insert((peer, server), (binding, identity)).is_none();
         // Now bound: a LAN address it reported may be tried (F2).
         self.try_direct(peer);
         self.try_punch(peer);
+        if new {
+            // T8-02: a member who was offline catches up on live invites.
+            self.share_invites(peer, server);
+        }
         Some(identity)
     }
 
@@ -1742,6 +1967,27 @@ impl Task {
             SwarmEvent::Behaviour(BehaviourEvent::Voice(request_response::Event::OutboundFailure {
                 peer, error, ..
             })) => debug!(%peer, %error, "voice signal not delivered"),
+            SwarmEvent::Behaviour(BehaviourEvent::InvitePub(request_response::Event::Message {
+                peer,
+                message: request_response::Message::Request { request, channel, .. },
+            })) => self.on_invite_push(peer, request, channel),
+            SwarmEvent::Behaviour(BehaviourEvent::InvitePub(request_response::Event::OutboundFailure {
+                peer, error, ..
+            })) => debug!(%peer, %error, "invite publication not delivered"),
+            SwarmEvent::Behaviour(BehaviourEvent::InviteAsk(request_response::Event::Message { peer, message })) => {
+                match message {
+                    request_response::Message::Request { request, channel, .. } => {
+                        self.on_invite_ask(peer, request, channel)
+                    }
+                    request_response::Message::Response { request_id, response } => {
+                        self.on_invite_answer(request_id, Some(response))
+                    }
+                }
+            }
+            SwarmEvent::Behaviour(BehaviourEvent::InviteAsk(request_response::Event::OutboundFailure {
+                request_id,
+                ..
+            })) => self.on_invite_answer(request_id, None),
             SwarmEvent::Behaviour(BehaviourEvent::Punch(libp2p::dcutr::Event { remote_peer_id, result })) => {
                 // A success shows up as a direct connection: `track_connection`
                 // flips the link to direct and parks the relayed one (#206).
