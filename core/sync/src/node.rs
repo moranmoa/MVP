@@ -24,7 +24,7 @@
 //! rate per peer and in total, concurrent answers, gossip message size and
 //! topics, connections, and the pending-record buffer.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -95,6 +95,19 @@ const GLOBAL_PULL_BURST: u32 = 100;
 const GLOBAL_PULL_RATE: u32 = 50;
 /// Pulls being answered on blocking threads at once; more are dropped.
 const MAX_ANSWERING: usize = 8;
+/// Pulls out to one peer at once; more wait in `queued_pulls`. The answering
+/// side reserves up to a page (`PAGE_BYTES`) of its per-peer served-bytes
+/// budget (`SERVED_BYTES_BURST`) for each pull until the answer goes out, so
+/// 3 stay under it: a burst of pulls is never refused for the budget.
+const MAX_PULLS_IN_FLIGHT: usize = 3;
+/// Most pulls `pull_all` sends one peer in one anti-entropy round: under the
+/// answering side's burst (`PULL_BURST`) and what its rate (`PULL_RATE`)
+/// refills between rounds, so a peer that holds none of our servers' logs
+/// (and answers each at once, empty) is never pushed over its limit.
+const PULLS_PER_PEER_ROUND: usize = 20;
+/// Most pulls `pull_all` sends one peer in one anti-entropy round: under the/// answering side's burst (`PULL_BURST`) and what its rate (`PULL_RATE`)/// refills between rounds, so a peer that holds none of our servers' logs/// (and answers each at once, empty) is never pushed over its limit.const PULLS_PER_PEER_ROUND: usize = 20;
+/// How a control log's name ends (`log_name`): queued first.
+const CONTROL_SUFFIX: &str = "/control";
 /// Per-peer pull buckets remembered (also after disconnecting).
 const MAX_TRACKED_PEERS: usize = 4096;
 /// Node events waiting for the app; beyond this, events are dropped and a
@@ -307,6 +320,8 @@ enum Command {
     NoHolePunch,
     #[cfg(test)]
     Served { peer: PeerId, log: String, reply: oneshot::Sender<usize> },
+    #[cfg(test)]
+    RateLimited { reply: oneshot::Sender<usize> },
     Prune { id: RecordId, reply: oneshot::Sender<Result<bool>> },
     VoiceSend { to: PublicKey, bytes: Vec<u8>, reply: oneshot::Sender<Result<(), VoiceError>> },
     ServeInvite { server: ServerId, handle: [u8; 32], publication: Vec<u8>, announce: bool, reply: oneshot::Sender<bool> },
@@ -608,6 +623,10 @@ impl Node {
             dial_backoff: backoff,
             #[cfg(test)]
             served: HashMap::new(),
+            #[cfg(test)]
+            rate_limited: 0,
+            queued_pulls: HashMap::new(),
+            pull_round: 0,
             presence: Presence::default(),
             last_seen: HashMap::new(),
             reached: false,
@@ -697,6 +716,14 @@ impl Node {
     /// The addresses the node listens on right now (empty until the listener
     /// is up; a relay circuit shows once reserved).
     /// Tests: how many entries our pull answers to `peer` for `log` carried.
+    /// Tests: how many inbound pulls this node refused (any of the three limits).
+    #[cfg(test)]
+    async fn rate_limited(&self) -> usize {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::RateLimited { reply }).unwrap();
+        rx.await.unwrap()
+    }
+
     #[cfg(test)]
     async fn served(&self, peer: PeerId, log: &str) -> usize {
         let (reply, rx) = oneshot::channel();
@@ -1092,6 +1119,14 @@ struct Task {
     /// Tests: entries served per (peer, log).
     #[cfg(test)]
     served: HashMap<(PeerId, String), usize>,
+    /// Tests: inbound pulls refused (rate limit, answering cap or byte budget).
+    #[cfg(test)]
+    rate_limited: usize,
+    /// Pulls waiting for one of the `MAX_PULLS_IN_FLIGHT` slots, per peer.
+    queued_pulls: HashMap<PeerId, BTreeSet<String>>,
+    /// Anti-entropy rounds so far: which slice of the other control logs
+    /// `pull_shared` takes this round.
+    pull_round: usize,
     /// Who is online, per server (M2).
     presence: Presence,
     last_seen: HashMap<ServerId, SystemTime>,
@@ -1251,6 +1286,10 @@ impl Task {
             #[cfg(test)]
             Command::Served { peer, log, reply } => {
                 let _ = reply.send(self.served.get(&(peer, log)).copied().unwrap_or(0));
+            }
+            #[cfg(test)]
+            Command::RateLimited { reply } => {
+                let _ = reply.send(self.rate_limited);
             }
             Command::VoiceSend { to, bytes, reply } => {
                 let _ = reply.send(self.voice_send(to, bytes));
@@ -1721,10 +1760,61 @@ impl Task {
     }
 
     fn pull_all(&mut self) {
+        self.pull_round = self.pull_round.wrapping_add(1);
         for peer in self.connected.clone() {
-            for log in self.logs.clone() {
-                self.pull(peer, &log);
+            self.pull_shared(peer);
+        }
+    }
+
+    /// Sends `peer` the next queued pull, control logs first (where joins
+    /// and bindings start), while fewer than [`MAX_PULLS_IN_FLIGHT`] are out.
+    fn pull_next(&mut self, peer: PeerId) {
+        let Some(queue) = self.queued_pulls.get_mut(&peer) else { return };
+        let next = queue.iter().find(|log| log.ends_with(CONTROL_SUFFIX)).or_else(|| queue.iter().next()).cloned();
+        let Some(log) = next else {
+            self.queued_pulls.remove(&peer);
+            return;
+        };
+        queue.remove(&log);
+        self.pull(peer, &log);
+    }
+
+    /// Whether `log` is worth pulling from `peer`. A plain-named log, and a
+    /// server's control log (where bindings and joins start), from anyone;
+    /// a channel log only from a peer bound to its server. A long-used node
+    /// with many servers so no longer pulls every channel it holds from a
+    /// peer that shares one server (it would refuse most of them).
+    fn shares(&self, peer: PeerId, log: &str) -> bool {
+        match self.sealing.get(log) {
+            None => true,
+            Some(sealed) => {
+                log == log_name(sealed.server, Scope::Control) || self.bound.contains_key(&(peer, sealed.server))
             }
+        }
+    }
+
+    /// Pulls `peer`'s share of our logs, at most [`PULLS_PER_PEER_ROUND`] a
+    /// round: those of servers it is bound to first, then the other control
+    /// logs in turn (a different slice each round), so a node with many
+    /// servers never sends a peer more pulls than its limits take. `pull`
+    /// also keeps at most [`MAX_PULLS_IN_FLIGHT`] out at once.
+    fn pull_shared(&mut self, peer: PeerId) {
+        let (mut bound, mut rest): (Vec<String>, Vec<String>) = self
+            .logs
+            .iter()
+            .filter(|log| self.shares(peer, log))
+            .cloned()
+            .partition(|log| self.sealing.get(log).is_none_or(|s| self.bound.contains_key(&(peer, s.server))));
+        bound.sort();
+        rest.sort();
+        bound.truncate(PULLS_PER_PEER_ROUND);
+        let room = PULLS_PER_PEER_ROUND - bound.len();
+        if !rest.is_empty() && room > 0 {
+            let start = self.pull_round.wrapping_mul(room) % rest.len();
+            bound.extend((0..room.min(rest.len())).map(|i| rest[(start + i) % rest.len()].clone()));
+        }
+        for log in bound {
+            self.pull(peer, &log);
         }
     }
 
@@ -1732,6 +1822,12 @@ impl Task {
         let key = (peer, log.to_string());
         if self.decoding.contains(&key) || self.inflight.values().any(|k| *k == key) {
             self.again.insert(key);
+            return;
+        }
+        // At most MAX_PULLS_IN_FLIGHT out to one peer; the rest wait their
+        // turn (`pull_next`) instead of being refused for its byte budget.
+        if self.inflight.values().filter(|(p, _)| *p == peer).count() >= MAX_PULLS_IN_FLIGHT {
+            self.queued_pulls.entry(peer).or_default().insert(key.1);
             return;
         }
         // Records we refused count as "have", so the peer stops sending them.
@@ -1788,6 +1884,20 @@ impl Task {
         if new {
             // T8-02: a member who was offline catches up on live invites.
             self.share_invites(peer, server);
+            // Now it shares this server's channels (`shares`): pull them at
+            // once rather than at the next anti-entropy round.
+            let channels: Vec<String> = self
+                .logs
+                .iter()
+                .filter(|log| {
+                    self.sealing.get(log).is_some_and(|s| s.server == server)
+                        && **log != log_name(server, Scope::Control)
+                })
+                .cloned()
+                .collect();
+            for log in channels {
+                self.pull(peer, &log);
+            }
         }
         Some(identity)
     }
@@ -1848,9 +1958,7 @@ impl Task {
                     info!(%peer_id, "peer connected");
                     self.reached = true;
                     self.emit(NodeEvent::PeerConnected(peer_id));
-                    for log in self.logs.clone() {
-                        self.pull(peer_id, &log);
-                    }
+                    self.pull_shared(peer_id);
                 }
             }
             SwarmEvent::ConnectionClosed { peer_id, connection_id, num_established, .. } => {
@@ -1898,6 +2006,7 @@ impl Task {
                 self.inflight.retain(|_, (p, _)| *p != peer_id);
                 self.decoding.retain(|(p, _)| *p != peer_id);
                 self.again.retain(|(p, _)| *p != peer_id);
+                self.queued_pulls.remove(&peer_id);
             }
             SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
                 if peer_id == self.relay_peer {
@@ -2009,6 +2118,7 @@ impl Task {
                     request_response::Message::Response { request_id, response } => {
                         if let Some(key) = self.inflight.remove(&request_id) {
                             self.on_response(key, response);
+                            self.pull_next(peer);
                         }
                     }
                 }
@@ -2062,6 +2172,7 @@ impl Task {
                 // The anti-entropy timer retries.
                 if let Some(key) = self.inflight.remove(&request_id) {
                     self.again.remove(&key);
+                    self.pull_next(peer);
                 }
             }
             _ => {}
@@ -2075,6 +2186,10 @@ impl Task {
         let now = Instant::now();
         if !self.inbound_pulls.allow(peer, now) || !self.all_inbound_pulls.allow((), now) {
             debug!(%peer, "pull rate limit exceeded");
+            #[cfg(test)]
+            {
+                self.rate_limited += 1;
+            }
             return;
         }
         let Some(Readable { log, check: gate, reader }) = self.who_may_read(peer, request.log, request.binding) else {
@@ -2083,6 +2198,10 @@ impl Task {
         };
         if self.answering >= MAX_ANSWERING {
             debug!(%peer, "too many pulls being answered");
+            #[cfg(test)]
+            {
+                self.rate_limited += 1;
+            }
             return;
         }
         // A ~100-byte request can ask for a 4 MiB page: the page is cut to the
@@ -2090,6 +2209,10 @@ impl Task {
         let budget = self.served_bytes.available(peer, now).min(self.all_served_bytes.available((), now));
         if budget < MIN_PAGE_BUDGET {
             debug!(%peer, "served-bytes budget exhausted");
+            #[cfg(test)]
+            {
+                self.rate_limited += 1;
+            }
             return;
         }
         let max_bytes = budget.min(PAGE_BYTES);
@@ -3406,6 +3529,43 @@ mod tests {
         assert_eq!(tick(&mut events, second.id(), 1).await, Some("sent"));
         assert_eq!(tick(&mut events, second.id(), 10).await, Some("delivered"));
         for node in [author, stranger, member] {
+            node.shutdown().await.unwrap();
+        }
+    }
+
+    /// P0 (0.3.1 joins): a long-used node with many servers no longer floods
+    /// a peer that shares one of them with pulls for every log it holds. A
+    /// fresh peer opening that one server gets its records in normal time,
+    /// and neither side ever has to refuse the other's pulls.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_node_with_many_servers_pulls_only_what_a_peer_shares() {
+        use crate::testutil::{message, test_key};
+        let key = |n: u8| -> Option<Arc<dyn Binder>> { Some(Arc::new(test_key(n))) };
+        let access = |n: u8| Access { binder: key(n), read_gate: Some(Arc::new(AcceptAll)), stub_gate: None };
+        let secret = ServerSecret::from_bytes([10; 32]);
+        let (many, _events) = test_node_events("many", None, None, access(1)).await;
+        let port = port_of(&many).await;
+        for i in 0..40u8 {
+            let other = ServerId::from_bytes([100 + i; 32]);
+            many.open_server(other, ServerSecret::from_bytes([200 - i; 32])).unwrap();
+            many.open_channel(other, ChannelId::from_bytes([150 + i; 32])).await.unwrap();
+        }
+        many.open_server(server(), secret.clone()).unwrap();
+        many.open_channel(server(), channel()).await.unwrap();
+        many.append(message(0, &[], 0)).await.unwrap();
+
+        let start = Instant::now();
+        let fresh = test_node("fresh", None, Some(port), access(0)).await;
+        fresh.open_server(server(), secret).unwrap();
+        fresh.open_channel(server(), channel()).await.unwrap();
+        eventually(&fresh, (0, 1), 15).await;
+        let took = start.elapsed();
+        assert!(took < Duration::from_secs(10), "the shared server's records took {took:?}");
+        // Two more anti-entropy rounds with 82 logs on one side: nobody had to
+        // refuse a pull (before, the first round alone was 82 pulls at once).
+        tokio::time::sleep(ANTI_ENTROPY * 2 + Duration::from_secs(1)).await;
+        assert_eq!((many.rate_limited().await, fresh.rate_limited().await), (0, 0), "pulls refused (many, fresh)");
+        for node in [many, fresh] {
             node.shutdown().await.unwrap();
         }
     }
