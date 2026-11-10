@@ -22,12 +22,12 @@
 
 ## 1. The personal backup
 
-**Keys** come from the BIP-39 seed, which the 12 words give. The seed carries 128 bits of entropy, so no slow KDF is needed. Each value uses BLAKE3 `derive_key` under its own frozen `mvs/` context, in `core/identity` (Security Lead):
+**Keys** come from the BIP-39 seed, which the 12 words give. The seed carries 128 bits of entropy, so no slow KDF is needed. Each secret key gets its own frozen label in `core/identity`'s existing HKDF-SHA256 tree (PRK from salt `mvs/identity/v1`), and the public tag uses a BLAKE3 context (#292; Security Lead: each value under its own context):
 
 | Value | Derivation | Use |
 |---|---|---|
-| `k_enc` | `derive_key("mvs/backup-key/v1", seed)` | XChaCha20-Poly1305, random 24-byte nonce, AAD = `"mvs/backup/v1" ‖ tag ‖ version` |
-| `w` | Ed25519 from `derive_key("mvs/backup-write/v1", seed)` | a **separate write key**: it authorises every write |
+| `k_enc` | HKDF-Expand(PRK, `"backup/key"`) | XChaCha20-Poly1305, random 24-byte nonce, AAD = `"mvs/backup/v1" ‖ tag ‖ version` |
+| `w` | Ed25519 from HKDF-Expand(PRK, `"backup/write/ed25519"`) | a **separate write key**: it authorises every write |
 | `tag` | `derive_key("mvs/backup-tag/v1", w_pub)` | where the backup lives; no rotation in v1 |
 
 - **Unlinkable:** the tag isn't the identity key and isn't derived from it. Nobody can look up a named person's backup, or link a tag to an identity, from the tag alone.
