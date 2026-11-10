@@ -66,6 +66,8 @@ export interface MockOptions {
    * stay held (`wait`, for screenshots).
    */
   keyPending?: 'arrive' | 'fail' | 'wait';
+  /** updateProfile fails (B11e: the save error state). */
+  profileError?: boolean;
   /** Every demo voice room starts with 5 people in it (full). */
   roomFull?: boolean;
   /** Start with relay-only on (#272): no direct connections, calls off. */
@@ -707,11 +709,19 @@ export class MockCore implements CoreApi {
 
   async updateProfile(input: ProfileInput): Promise<Identity> {
     if (!this.identity) throw err({ code: 'not-found' });
-    this.identity = { ...this.identity, ...input };
+    await this.wait(150);
+    if (this.options.profileError) throw err({ code: 'internal' });
+    // Like the core: every field is replaced (no avatar or bio = removed).
+    this.identity = { ...this.identity, displayName: input.displayName, bio: input.bio, avatarDataUrl: input.avatarDataUrl };
     for (const s of this.servers.values()) {
-      s.members = s.members.map((m) => (m.id === this.identity!.id ? { ...m, displayName: input.displayName } : m));
+      s.members = s.members.map((m) => (m.id === this.identity!.id ? { ...m, displayName: input.displayName, bio: input.bio } : m));
+      this.emit('members.changed', { serverId: s.summary.id, members: s.members });
     }
-    this.save();
+    try {
+      this.save();
+    } catch {
+      throw err({ code: 'internal' }); // e.g. storage full (QA-03): say so, don't hang
+    }
     this.emit('identity.changed', this.identity);
     return this.identity;
   }

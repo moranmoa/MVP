@@ -465,6 +465,40 @@ for (const [mode, name, wait] of [
   await p.close();
 }
 
+// ---- B11e: edit my profile in Settings → Account (90-99) --------------------
+// 94 (onboarding, no Skip), 95 (profile card with bio and banner) and 96 (long
+// name at 200%) wait for the onboarding change and the banner.
+for (const [query, name, opts, steps] of [
+  ['lang=he&theme=light', '90-account-he', {}, 'open'],
+  ['lang=he&theme=light', '91-account-dirty-he', {}, 'dirty'],
+  ['lang=en&theme=light', '92-account-en-light', {}, 'open'],
+  ['lang=he&theme=light&profileError=1', '93-account-save-error-he', {}, 'error'],
+  ['lang=he&theme=light', '97-account-phone-he', { width: 375, height: 812, phone: true }, 'dirty'],
+]) {
+  const p = opts.phone
+    ? await page(`?demo=1&still=1&update=999999&settings=account&${query}`, opts)
+    : await chat(`?demo=1&still=1&update=999999&${query}`, 'x', opts);
+  if (opts.phone) {
+    await p.getByRole('button', { name: 'הגדרות' }).first().click();
+  } else {
+    await p.locator('.me-profile').click();
+  }
+  const dialog = p.getByRole('dialog');
+  const field = dialog.locator('.profile-editor input:not([type=file])');
+  await field.waitFor();
+  if (steps !== 'open') {
+    await field.fill(name.includes('-en') ? 'Moran B' : 'מורן ב.');
+    await dialog.locator('.profile-editor textarea').fill('גיימרית בלילות, מתכנתת בימים');
+  }
+  if (steps === 'error') {
+    await dialog.locator('.profile-actions .primary').click();
+    await dialog.locator('.profile-actions .error').waitFor();
+  }
+  await p.waitForTimeout(300);
+  await shot(p, name);
+  await p.close();
+}
+
 // ---- security demo: what other people could send ---------------------------
 {
   const p = await chat('?demo=1&hostile=1&still=1&lang=he&theme=light&update=999999', 'x');
