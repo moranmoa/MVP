@@ -26,7 +26,7 @@ describe('calls', () => {
     const { join } = await setup();
     await join();
     const bar = screen.getByRole('region', { name: 'Voice call' });
-    expect(bar.textContent).toContain('In a call in #⁨כללי⁩');
+    expect(bar.textContent).toContain('In a call in ⁨#כללי⁩');
     expect(within(bar).getAllByRole('listitem')).toHaveLength(3); // me + two online members
     expect(screen.getByRole('img', { name: 'Call in progress here' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Join call' })).toBeNull();

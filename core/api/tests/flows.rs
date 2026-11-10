@@ -67,6 +67,7 @@ fn names(events: &[Event]) -> Vec<&'static str> {
             Event::MessageUpdated(_) => "message.updated",
             Event::CallState(_) => "call.state",
             Event::CallSignal { .. } => "call.signal",
+            Event::VoiceRoom(_) => "voice.room",
         })
         .collect()
 }
@@ -2258,30 +2259,64 @@ fn a_call_between_members() {
     for peer in [&owner, &alice, &bob] {
         peer.core.sync_now().unwrap();
     }
-    let general = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    let room = owner.core.get_voice_room(&server.id).unwrap().room_id;
     let peers = [(owner_id.as_str(), &owner), (alice_id.as_str(), &alice), (bob_id.as_str(), &bob)];
 
     // No transport yet: not-implemented. Then relay-only: calls are off.
-    assert_eq!(owner.core.join_call(&general).unwrap_err().code, ErrorCode::NotImplemented);
+    assert_eq!(owner.core.join_call(&room).unwrap_err().code, ErrorCode::NotImplemented);
     for (id, peer) in peers {
         hub.connect(peer, id);
     }
     hub.relay_only.store(true, std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(owner.core.join_call(&general).unwrap_err().code, ErrorCode::RelayOnly);
+    assert_eq!(owner.core.join_call(&room).unwrap_err().code, ErrorCode::RelayOnly);
     hub.relay_only.store(false, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(owner.core.join_call(&"ab".repeat(32)).unwrap_err().code, ErrorCode::NotFound);
+    // Calls happen only in the room: a text channel is not-allowed.
+    let general = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    assert_ne!(general, room);
+    assert_eq!(owner.core.join_call(&general).unwrap_err().code, ErrorCode::NotAllowed);
+    // Every member derives the same room; an unknown server is not-found.
+    assert_eq!(bob.core.get_voice_room(&server.id).unwrap().room_id, room);
+    assert_eq!(bob.core.get_voice_room(&"ab".repeat(32)).unwrap_err().code, ErrorCode::NotFound);
 
     // The owner, then Alice, join; each sees both.
-    let state = owner.core.join_call(&general).unwrap();
+    let state = owner.core.join_call(&room).unwrap();
     assert_eq!((who(&state), state.full), (vec![owner_id.as_str()], false));
     assert!(owner.core.in_call());
     hub.pump(&peers);
-    let state = alice.core.join_call(&general).unwrap();
+    let state = alice.core.join_call(&room).unwrap();
     assert_eq!(who(&state), [alice_id.as_str(), owner_id.as_str()]);
     owner.events.take();
     hub.pump(&peers);
     let seen = call_states(owner.events.take());
     assert_eq!(who(seen.last().unwrap()), [owner_id.as_str(), alice_id.as_str()]);
+
+    // Bob isn't in the call but sees who is: one voice.room at his tick,
+    // and the same from getVoiceRoom. Identity and muted only.
+    bob.events.take();
+    bob.core.voice_tick();
+    let rooms: Vec<VoiceRoom> = bob
+        .events
+        .take()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::VoiceRoom(room) => Some(room),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rooms.len(), 1);
+    let mut inside: Vec<&str> = rooms[0].participants.iter().map(|p| p.user_id.as_str()).collect();
+    inside.sort();
+    let mut want = [owner_id.as_str(), alice_id.as_str()];
+    want.sort();
+    assert_eq!(inside, want);
+    assert_eq!(
+        (rooms[0].server_id.as_str(), rooms[0].room_id.as_str()),
+        (server.id.as_str(), room.as_str())
+    );
+    assert_eq!(bob.core.get_voice_room(&server.id).unwrap(), rooms[0]);
+    let json = serde_json::to_value(&rooms[0]).unwrap();
+    assert_eq!(json["participants"][0].as_object().unwrap().len(), 2, "more than id and muted");
 
     // Signalling: only to a participant, offers and answers with a fingerprint.
     assert_eq!(
@@ -2337,13 +2372,36 @@ fn a_call_between_members() {
     let seen = call_states(owner.events.take());
     assert_eq!(who(seen.last().unwrap()), [owner_id.as_str()]);
 
-    bob.core.join_call(&general).unwrap();
+    bob.core.join_call(&room).unwrap();
     hub.pump(&peers);
     *world.clock.0.lock().unwrap() += 31_000;
     owner.events.take();
     owner.core.voice_tick();
     let seen = call_states(owner.events.take());
     assert_eq!(who(seen.last().unwrap()), [owner_id.as_str()], "Bob didn't time out");
+
+    // Relay-only turns on mid-call: the owner leaves at the next tick, says
+    // bye, and call.state keeps its shape.
+    hub.pump(&peers);
+    hub.relay_only.store(true, std::sync::atomic::Ordering::SeqCst);
+    owner.events.take();
+    owner.core.voice_tick();
+    assert!(!owner.core.in_call());
+    let seen = call_states(owner.events.take());
+    let last = seen.last().unwrap();
+    assert_eq!(
+        (last.channel_id.as_str(), last.participants.len(), last.full),
+        (room.as_str(), 0, false)
+    );
+    let sent = hub.pump(&peers);
+    assert!(
+        !sent.is_empty()
+            && sent.iter().all(|(from, _, blob)| {
+                *from == user_key(&owner_id)
+                    && String::from_utf8_lossy(blob).contains(r#"\"kind\":\"bye\""#)
+            })
+    );
+    hub.relay_only.store(false, std::sync::atomic::Ordering::SeqCst);
     owner.core.leave_call().unwrap();
     assert!(!owner.core.in_call());
 }
@@ -2367,7 +2425,7 @@ fn a_call_holds_five_and_kicked_members_are_ignored() {
     for (_, peer) in &others {
         peer.core.sync_now().unwrap();
     }
-    let general = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    let room = owner.core.get_voice_room(&server.id).unwrap().room_id;
     hub.connect(&owner, &owner_id);
     for (id, peer) in &others {
         hub.connect(peer, id);
@@ -2375,16 +2433,16 @@ fn a_call_holds_five_and_kicked_members_are_ignored() {
     let mut peers: Vec<(&str, &Peer)> = vec![(owner_id.as_str(), &owner)];
     peers.extend(others.iter().map(|(id, peer)| (id.as_str(), peer)));
 
-    owner.core.join_call(&general).unwrap();
+    owner.core.join_call(&room).unwrap();
     hub.pump(&peers);
     for (_, peer) in &others[..4] {
-        peer.core.join_call(&general).unwrap();
+        peer.core.join_call(&room).unwrap();
         hub.pump(&peers);
     }
-    let state = owner.core.join_call(&general).unwrap();
+    let state = owner.core.join_call(&room).unwrap();
     assert_eq!((state.participants.len(), state.full), (5, true));
     let (_, sixth) = &others[4];
-    assert_eq!(sixth.core.join_call(&general).unwrap_err().code, ErrorCode::CallFull);
+    assert_eq!(sixth.core.join_call(&room).unwrap_err().code, ErrorCode::CallFull);
     assert!(!sixth.core.in_call());
 
     // P0 is kicked; before it learns, its hellos go out and are ignored.
@@ -2397,6 +2455,17 @@ fn a_call_holds_five_and_kicked_members_are_ignored() {
     *world.clock.0.lock().unwrap() += 11_000;
     kicked.core.voice_tick();
     hub.pump(&peers);
-    let state = owner.core.join_call(&general).unwrap();
+    let state = owner.core.join_call(&room).unwrap();
     assert!(!who(&state).contains(&kicked_id.as_str()));
+    let roster = owner.core.get_voice_room(&server.id).unwrap();
+    assert!(!roster.participants.iter().any(|p| &p.user_id == kicked_id));
+    assert!(roster.participants.len() <= 5);
+
+    // Once P0 reads its kick: no roster for it, by command or event.
+    kicked.core.sync_now().unwrap();
+    kicked.events.take();
+    kicked.core.voice_tick();
+    assert!(!kicked.events.take().iter().any(|e| matches!(e, Event::VoiceRoom(_))));
+    let code = kicked.core.get_voice_room(&server.id).unwrap_err().code;
+    assert!(matches!(code, ErrorCode::NotFound | ErrorCode::NotAllowed), "{code:?}");
 }

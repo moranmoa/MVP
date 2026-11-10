@@ -1,9 +1,13 @@
 //! The core as a sidecar process: JSON lines on stdin and stdout (see
 //! `api::sidecar`). Logs go to stderr and never hold words, keys or text.
 //!
-//! Usage: `mvs-core --data-dir <dir> [--relay <multiaddr>] [--update-root <dir>]`.
+//! Usage: `mvs-core --data-dir <dir> [--relay <multiaddr>] [--bootstrap <multiaddr>]... [--update-root <dir>]`.
 //! With a relay the core syncs through `sync` (its store and node key in
 //! `<dir>/sync`); without one nothing leaves this process for sync.
+//! `--bootstrap` (repeatable, at most [`MAX_BOOTSTRAP`], each pinned like
+//! `--relay`) is dialled directly as well: the relay's plain TCP address, so
+//! identify sees our public address for hole punching. Ignored without
+//! `--relay`.
 //! `--update-root` (the shell passes it only in a packaged app whose root
 //! checks out) turns in-app update on: HTTPS to the channel's GitHub release
 //! (B8, `api::update`). Without it the core never contacts the update host.
@@ -48,27 +52,37 @@ fn updates(root: PathBuf, data_dir: PathBuf) -> Result<Updates, &'static str> {
     }))
 }
 
+/// `--bootstrap` addresses accepted.
+const MAX_BOOTSTRAP: usize = 4;
+
+#[derive(Debug)]
 struct Args {
     data_dir: PathBuf,
     relay: Option<String>,
+    bootstrap: Vec<String>,
     update_root: Option<PathBuf>,
 }
 
 fn args() -> Option<Args> {
+    parse(std::env::args_os().skip(1))
+}
+
+fn parse(mut args: impl Iterator<Item = std::ffi::OsString>) -> Option<Args> {
     let mut data_dir = None;
     let mut relay = None;
+    let mut bootstrap = Vec::new();
     let mut update_root = None;
-    let mut args = std::env::args_os().skip(1);
     while let Some(flag) = args.next() {
         let value = args.next()?;
         match flag.to_str()? {
             "--data-dir" if data_dir.is_none() => data_dir = Some(PathBuf::from(value)),
             "--relay" if relay.is_none() => relay = Some(value.into_string().ok()?),
+            "--bootstrap" if bootstrap.len() < MAX_BOOTSTRAP => bootstrap.push(value.into_string().ok()?),
             "--update-root" if update_root.is_none() => update_root = Some(PathBuf::from(value)),
             _ => return None,
         }
     }
-    Some(Args { data_dir: data_dir?, relay, update_root })
+    Some(Args { data_dir: data_dir?, relay, bootstrap, update_root })
 }
 
 /// Logs to stderr only when RUST_LOG is set (the desktop captures and
@@ -92,7 +106,9 @@ fn init_logging() {
 fn main() -> ExitCode {
     init_logging();
     let Some(args) = args() else {
-        eprintln!("usage: mvs-core --data-dir <dir> [--relay <multiaddr>] [--update-root <dir>]");
+        eprintln!(
+            "usage: mvs-core --data-dir <dir> [--relay <multiaddr>] [--bootstrap <multiaddr>]... [--update-root <dir>]"
+        );
         return ExitCode::from(2);
     };
     let dir = args.data_dir;
@@ -111,9 +127,19 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
+            let mut bootstrap = Vec::new();
+            for text in &args.bootstrap {
+                match api::syncnet::relay_addr(text) {
+                    Ok(addr) => bootstrap.push(addr),
+                    Err(why) => {
+                        eprintln!("mvs-core: --bootstrap {why}");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
             // TODO(#64): a start failure (the node.key ACL) as a notice
             // the UI shows, not only this log line and an exit.
-            match SyncNetwork::start(relay, &dir.join("sync"), Arc::new(MemberGate::new())) {
+            match SyncNetwork::start_with_bootstrap(relay, bootstrap, &dir.join("sync"), Arc::new(MemberGate::new())) {
                 Ok(net) => Some(Arc::new(net)),
                 Err(e) => {
                     eprintln!("mvs-core: sync didn't start: {e}");
@@ -192,5 +218,28 @@ fn main() -> ExitCode {
             eprintln!("mvs-core: i/o error: {}", e.kind());
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed(list: &[&str]) -> Option<Args> {
+        parse(list.iter().map(std::ffi::OsString::from))
+    }
+
+    #[test]
+    fn bootstrap_is_repeatable_up_to_the_cap() {
+        let args = parsed(&["--data-dir", "/d", "--relay", "/r", "--bootstrap", "/a", "--bootstrap", "/b"]).unwrap();
+        assert_eq!(args.bootstrap, ["/a", "/b"]);
+        assert_eq!(args.relay.as_deref(), Some("/r"));
+        assert!(parsed(&["--data-dir", "/d"]).unwrap().bootstrap.is_empty());
+        let mut many = vec!["--data-dir", "/d"];
+        for _ in 0..=MAX_BOOTSTRAP {
+            many.extend(["--bootstrap", "/a"]);
+        }
+        assert!(parsed(&many).is_none(), "more than {MAX_BOOTSTRAP} bootstrap addresses");
+        assert!(parsed(&["--data-dir", "/d", "--bootstrap"]).is_none(), "a flag without its value");
     }
 }

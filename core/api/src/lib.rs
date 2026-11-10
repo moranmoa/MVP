@@ -16,6 +16,7 @@ mod datadir;
 mod db;
 mod dispatch;
 mod gate;
+pub mod invite_link;
 mod model;
 mod ports;
 mod rekey;

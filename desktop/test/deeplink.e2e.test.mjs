@@ -6,7 +6,8 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,7 +19,10 @@ const FAKE_CORE = fileURLToPath(new URL('./fake-core.js', import.meta.url));
 const FIXTURE_UI = fileURLToPath(new URL('./fixtures/link-ui', import.meta.url));
 const A = `mvs://join/${'a'.repeat(64)}/${'b'.repeat(64)}/${'e'.repeat(64)}`;
 const B = `mvs://join/${'c'.repeat(64)}/${'d'.repeat(64)}/${'f'.repeat(64)}`;
-const env = { ...process.env, MVS_CORE_PATH: FAKE_CORE };
+// A throwaway profile, shared by the second launches (same single-instance
+// lock), never the real app's.
+const PROFILE = mkdtempSync(join(tmpdir(), 'mvs-e2e-link-'));
+const env = { ...process.env, MVS_CORE_PATH: FAKE_CORE, MVS_TEST_USER_DATA: PROFILE };
 
 let app;
 let page;
@@ -52,6 +56,7 @@ before(async () => {
 
 after(async () => {
   await app?.close();
+  rmSync(PROFILE, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 });
 
 test('a link on the first command line reaches the page, canonical', async () => {
