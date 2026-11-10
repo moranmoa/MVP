@@ -3245,3 +3245,134 @@ fn a_leave_waits_in_the_outbox_until_the_gate_opens() {
     drop(guest);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Records of `kind` that `who` (a user ID) wrote in `server`.
+fn records_by(world: &World, server: &str, who: &str, kind: Kind) -> usize {
+    let server = ServerId::from_bytes(hex::decode(server).unwrap().try_into().unwrap());
+    let who = PublicKey::from_bytes(hex::decode(who).unwrap().try_into().unwrap());
+    world.network.fetch(server).iter().filter(|r| r.kind() == kind && r.author() == who).count()
+}
+
+/// Owner bug (0.3.1): an owner restores their words on a new computer and
+/// rejoins their 18+ server by its invite link. They come back as the same
+/// member (no new join), still the owner, and nothing they post overwrites
+/// what the server holds: no empty name, no "not adult" claim from a
+/// birth date this device doesn't have. A member who restored and set a
+/// name posts the name, still with no claim.
+#[test]
+fn a_restored_member_rejoins_without_blanking_their_name_or_age() {
+    let world = World::new();
+    let owner = world.peer();
+    let created = owner.core.create_identity(adult()).unwrap();
+    assert!(answer(&owner, &created.words, &[]).1.unwrap().ok);
+    let owner_id = owner
+        .core
+        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None })
+        .unwrap()
+        .id;
+    let server = owner.core.create_server("Night", AgeRestriction::Eighteen).unwrap();
+    let bob = world.peer();
+    sign_up(&bob, "Bob");
+    assert!(matches!(
+        bob.core.join_server(&server.invite_link).unwrap(),
+        JoinStatus::Searching { .. }
+    ));
+    owner.core.sync_now().unwrap();
+    bob.core.sync_now().unwrap();
+    let joins = records_by(&world, &server.id, &owner_id, Kind::Join);
+    let posts = records_by(&world, &server.id, &owner_id, Kind::Post);
+    let claims = records_by(&world, &server.id, &owner_id, Kind::AgeClaim);
+
+    // A new computer: the same words, no name, no birth date.
+    let laptop = world.peer();
+    let restored = laptop.core.restore_identity(created.words.clone()).unwrap();
+    assert_eq!(restored.id, owner_id);
+    // Someone who isn't a member yet, with no birth date, is still blocked.
+    let stranger = world.peer();
+    stranger.core.restore_identity(stranger_words()).unwrap();
+    stranger.core.join_server(&server.invite_link).unwrap();
+    assert!(stranger.core.list_servers().unwrap().is_empty(), "joined an 18+ server with no birth date");
+
+    laptop.core.join_server(&server.invite_link).unwrap();
+    let listed = laptop.core.list_servers().unwrap();
+    assert_eq!(listed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), [server.id.as_str()]);
+    assert_eq!(listed[0].owner_id, owner_id);
+    // Nothing new from me: no join, no profile post, no age claim.
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::Join), joins);
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::Post), posts);
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::AgeClaim), claims);
+    // Bob still sees MoA, the owner.
+    bob.core.sync_now().unwrap();
+    let me = bob
+        .core
+        .list_members(&server.id)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.id == owner_id)
+        .unwrap();
+    assert_eq!((me.display_name.as_str(), me.is_owner), ("MoA", true));
+
+    // A second restore that sets a name first posts it, but still no claim.
+    let other = world.peer();
+    other.core.restore_identity(created.words.clone()).unwrap();
+    other
+        .core
+        .update_profile(ProfileInput { display_name: "MoA 2".into(), bio: None, avatar_data_url: None })
+        .unwrap();
+    other.core.join_server(&server.invite_link).unwrap();
+    assert_eq!(other.core.list_servers().unwrap().len(), 1);
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::Post), posts + 1);
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::AgeClaim), claims);
+    bob.core.sync_now().unwrap();
+    let names: Vec<String> =
+        bob.core.list_members(&server.id).unwrap().into_iter().map(|m| m.display_name).collect();
+    assert!(names.contains(&"MoA 2".to_owned()), "{names:?}");
+}
+
+/// Words for an identity nobody else in the test uses.
+fn stranger_words() -> Vec<String> {
+    let world = World::new();
+    let peer = world.peer();
+    peer.core.create_identity(adult()).unwrap().words
+}
+
+/// Fix 1's api: `restoreIdentity(words, input)` takes the country and birth
+/// date asked again; a rejoin then posts a claim from that date.
+#[test]
+fn a_restore_takes_the_birth_date_asked_again() {
+    let world = World::new();
+    let owner = world.peer();
+    let created = owner.core.create_identity(adult()).unwrap();
+    assert!(answer(&owner, &created.words, &[]).1.unwrap().ok);
+    let owner_id = owner
+        .core
+        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None })
+        .unwrap()
+        .id;
+    let server = owner.core.create_server("Night", AgeRestriction::Eighteen).unwrap();
+    owner.core.sync_now().unwrap();
+    let claims = records_by(&world, &server.id, &owner_id, Kind::AgeClaim);
+
+    let laptop = world.peer();
+    let request = serde_json::json!({
+        "cmd": "restoreIdentity",
+        "args": {
+            "words": created.words,
+            "input": { "locale": "he", "country": "IL", "birthDate": "1990-05-01" }
+        }
+    });
+    let answer: serde_json::Value =
+        serde_json::from_str(&laptop.core.handle(&request.to_string())).unwrap();
+    assert_eq!(answer["ok"]["id"], serde_json::json!(owner_id));
+    assert_eq!(answer["ok"]["birthDate"], serde_json::json!("1990-05-01"));
+    // Without input, the words alone still restore (as before).
+    let bare = world.peer();
+    let request = serde_json::json!({ "cmd": "restoreIdentity", "args": { "words": created.words } });
+    let answer: serde_json::Value =
+        serde_json::from_str(&bare.core.handle(&request.to_string())).unwrap();
+    assert_eq!(answer["ok"]["birthDate"], serde_json::json!(""));
+
+    laptop.core.join_server(&server.invite_link).unwrap();
+    assert_eq!(laptop.core.list_servers().unwrap().len(), 1);
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::AgeClaim), claims + 1);
+}

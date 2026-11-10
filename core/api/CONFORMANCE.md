@@ -85,6 +85,10 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 
 ## Proposed contract additions (Rust has them; `api.ts` doesn't yet)
 
+- Restore on a new computer:
+  - `restoreIdentity(words, input?: { locale, country, birthDate })`. The words don't carry the country or birth date, so the UI asks them again (with the agreement) before the words and passes them here, as `createIdentity` takes them. The name follows with `updateProfile`.
+  - Rejoining a server I'm still a member of (its invite link, after a restore) signs no new join. It never posts an empty display name or an age claim without a birth date: the server keeps the profile and claim it holds. With no birth date it isn't age-blocked either: my earlier claim stands. A known age below the server's minimum still blocks.
+
 - `grantRole(serverId, userId, role: 'admin' | 'moderator' | 'member')` and
   `revokeRole(serverId, userId)`.
 - `Member.role: 'owner' | 'admin' | 'moderator' | 'member'`.
