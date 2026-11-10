@@ -3928,6 +3928,7 @@ name = "sync"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "blake3",
  "chacha20poly1305",
  "ed25519-dalek",

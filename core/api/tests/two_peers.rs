@@ -4,6 +4,9 @@
 //! `bash core/api/tests/two_peers.sh`, which starts a throwaway relay on its
 //! own Docker network (as `infra/test/relay-catchup.sh` does) and runs this
 //! test next to it. Never point it at the live relay or its network.
+//!
+//! The voice test (`two_members_join_a_call_and_signal_over_sync`) runs its
+//! own in-process relay instead, so it runs with the other tests.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -344,4 +347,158 @@ fn a_joiner_writes_first_through_a_relay() {
         guest.net.wake();
     });
     eprintln!("smoke: B wrote first, A read it");
+}
+
+// ---- voice over sync (voice v1, piece A) -----------------------------------
+
+const SDP: &str = "v=0\r\na=fingerprint:sha-256 AB:CD:EF\r\na=setup:actpass\r\n";
+
+#[derive(libp2p::swarm::NetworkBehaviour)]
+struct RelayBehaviour {
+    relay: libp2p::relay::Behaviour,
+    identify: libp2p::identify::Behaviour,
+    ping: libp2p::ping::Behaviour,
+    kad: libp2p::kad::Behaviour<libp2p::kad::store::MemoryStore>,
+}
+
+/// A relay like `infra/relay` on loopback (as `core/sync/tests/relay.rs`
+/// starts), with only circuit addresses in its DHT: peers meet through it.
+fn start_relay(runtime: &tokio::runtime::Runtime) -> String {
+    use libp2p::futures::StreamExt;
+    use libp2p::swarm::SwarmEvent;
+    use libp2p::{identify, kad, noise, ping, relay, tcp, yamux, Multiaddr, StreamProtocol, SwarmBuilder};
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let _guard = runtime.enter();
+    let mut swarm = SwarmBuilder::with_new_identity()
+        .with_tokio()
+        .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)
+        .unwrap()
+        .with_behaviour(|key| {
+            let peer_id = key.public().to_peer_id();
+            let mut kad = kad::Behaviour::with_config(
+                peer_id,
+                kad::store::MemoryStore::new(peer_id),
+                kad::Config::new(StreamProtocol::new("/mvs/kad/1.0.0")),
+            );
+            kad.set_mode(Some(kad::Mode::Server));
+            RelayBehaviour {
+                relay: relay::Behaviour::new(peer_id, relay::Config::default()),
+                identify: identify::Behaviour::new(identify::Config::new(
+                    "/mvs/0.1.0".into(),
+                    key.public(),
+                )),
+                ping: ping::Behaviour::new(ping::Config::new()),
+                kad,
+            }
+        })
+        .unwrap()
+        .build();
+    let addr: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}").parse().unwrap();
+    swarm.listen_on(addr.clone()).unwrap();
+    swarm.add_external_address(addr.clone());
+    let me = *swarm.local_peer_id();
+    runtime.spawn(async move {
+        loop {
+            if let SwarmEvent::Behaviour(RelayBehaviourEvent::Identify(identify::Event::Received {
+                peer_id,
+                info,
+                ..
+            })) = swarm.select_next_some().await
+            {
+                for addr in info.listen_addrs {
+                    if addr.iter().any(|p| p == libp2p::multiaddr::Protocol::P2pCircuit) {
+                        swarm.behaviour_mut().kad.add_address(&peer_id, addr);
+                    }
+                }
+            }
+        }
+    });
+    format!("{addr}/p2p/{me}")
+}
+
+fn call_states(events: &[Event]) -> Vec<&CallState> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::CallState(state) => Some(state),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Voice A end to end: two members on `SyncNetwork` (the real node, a
+/// relay between them) join a call, see each other, and an offer goes from
+/// one to the other through sync's member-only `/mvs/voice/1`, verified.
+#[test]
+fn two_members_join_a_call_and_signal_over_sync() {
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+    let relay = start_relay(&runtime);
+    let owner = peer("VoiceOwner", OWNER, &relay);
+    let guest = peer("VoiceGuest", GUEST, &relay);
+    let owner_id = owner.core.get_identity().unwrap().unwrap().id;
+    let guest_id = guest.core.get_identity().unwrap().unwrap().id;
+
+    let server = owner.core.create_server("Voice", AgeRestriction::None).unwrap();
+    eventually("the guest to join", || {
+        let _ = guest.core.join_server(&server.invite_link);
+        guest.core.list_servers().unwrap().iter().any(|s| s.id == server.id)
+    });
+    eventually("the owner to see two members", || {
+        owner.core.sync_now().unwrap();
+        owner.core.list_members(&server.id).unwrap().len() == 2
+    });
+    let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+
+    for p in [&owner, &guest] {
+        p.core.set_voice(p.net.clone());
+    }
+    let inboxes = [owner.net.take_voice().expect("signals"), guest.net.take_voice().expect("signals")];
+    // What `deliver_voice` does on its own thread in mvs-core, by hand here.
+    let deliver = || {
+        for (inbox, p) in inboxes.iter().zip([&owner, &guest]) {
+            while let Ok((from, blob)) = inbox.try_recv() {
+                p.core.voice_received(Some(from), &blob);
+            }
+        }
+    };
+    // Each has the other bound as a member: online on the server.
+    let server_key =
+        records::ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    eventually("both online to each other", || {
+        let o = owner.net.online(server_key).unwrap_or_default();
+        let g = guest.net.online(server_key).unwrap_or_default();
+        !o.is_empty() && !g.is_empty()
+    });
+
+    owner.core.join_call(&channel).unwrap();
+    guest.core.join_call(&channel).unwrap();
+    let mut seen = Vec::new();
+    eventually("the owner to see the guest in the call", || {
+        deliver();
+        owner.core.voice_tick();
+        guest.core.voice_tick();
+        seen.extend(owner.events.take());
+        call_states(&seen).last().is_some_and(|s| s.participants.len() == 2)
+    });
+    let last = call_states(&seen).last().copied().unwrap().clone();
+    assert!(last.participants.iter().any(|p| p.identity == guest_id), "{last:?}");
+
+    guest.core.send_signal(&owner_id, SignalKind::Offer, SDP.into()).unwrap();
+    let mut signals = Vec::new();
+    eventually("the offer to reach the owner", || {
+        deliver();
+        signals.extend(owner.events.take().into_iter().filter(|e| matches!(e, Event::CallSignal { .. })));
+        !signals.is_empty()
+    });
+    assert_eq!(
+        signals,
+        [Event::CallSignal {
+            from: guest_id.clone(),
+            kind: SignalKind::Offer,
+            payload: SDP.into(),
+            fingerprint_verified: true,
+        }]
+    );
+    owner.core.leave_call().unwrap();
+    guest.core.leave_call().unwrap();
 }
