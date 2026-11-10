@@ -10,6 +10,7 @@
 //! crates are merged.
 
 mod access;
+pub mod backup;
 mod chat;
 pub mod crypto;
 mod datadir;

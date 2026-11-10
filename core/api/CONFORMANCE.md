@@ -85,6 +85,18 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 
 ## Proposed contract additions (Rust has them; `api.ts` doesn't yet)
 
+- Restore servers, phase A (#291, `src/backup.rs`). No new command or event.
+  - **Each sync round:** my server list (server IDs and sync secrets) is merged into the newest backup the holders keep, sealed, and handed to them (`Network::put_backup`) when it changed.
+    - Servers this device listed and no longer has get a tombstone.
+    - Merging keeps what my other devices wrote.
+  - **The blob:** `mvsb1 ‖ tag ‖ w_pub ‖ version ‖ nonce ‖ XChaCha20-Poly1305(padded JSON) ‖ Ed25519 sig by w`.
+    - The keys come from the words (#292). There's no identity key in it.
+    - It's padded to 4 KiB steps, at most 64 KiB.
+  - **On `restoreIdentity`:** the core fetches the backup (`Network::fetch_backup`), keeps the newest valid one, and rejoins each live server as the same member (#290). It posts no new join, profile or age claim.
+    - A server whose log no longer lists me isn't entered.
+    - Servers nobody could be reached for are retried each sync round.
+  - **Holders:** the ports are no-ops until dev-sync's `/mvs/backup/1` and devops' mailbox exist. `LoopbackNetwork` holds them for tests.
+
 - `signOut({ words: string[] } | { withoutWords: true })` returns `null` (both read at the top level of `args`). It removes this identity from this computer.
   - `words` must be this identity's 12 words: `invalid-words` (with `positions`) for unknown words, `not-allowed` for another identity's. `withoutWords: true` is the explicit "I accept losing this account" path. Neither: `bad-request`. No identity: `not-found`.
   - In order, fail safe:

@@ -15,6 +15,7 @@ use records::{ChannelId, Draft, Kind, PublicKey, Record, RecordId, Scope, Server
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+use crate::backup;
 use crate::chat;
 use crate::db::Db;
 use crate::model::{self, GenesisBody, Log, ServerView};
@@ -54,6 +55,11 @@ pub fn stored_relay_only(db_path: &Path) -> bool {
     }
 }
 const KV_RECOVERY_CHALLENGE: &str = "recovery-challenge";
+/// Restore servers (#291): my servers as the backup last saw them, server
+/// ID (hex) to when this device first listed it. Not secret.
+const KV_BACKUP_KNOWN: &str = "backup-known";
+/// Restore servers: a restore still has servers to rejoin from the backup.
+const KV_BACKUP_PENDING: &str = "backup-pending";
 
 pub struct Config {
     /// `None` keeps everything in memory (tests).
@@ -669,7 +675,7 @@ impl Core {
         words: Vec<String>,
         input: Option<NewIdentityInput>,
     ) -> CoreResult<Identity> {
-        self.run(|inner, ports, _| {
+        let identity = self.run(|inner, ports, _| {
             if inner.me.is_some() {
                 return Err(ErrorCode::NotAllowed.into());
             }
@@ -693,7 +699,56 @@ impl Core {
             inner.me = Some(me);
             unlock_cipher(ports, inner.me.as_ref());
             Ok(identity)
-        })
+        })?;
+        // Restore servers (#291 phase A): my backup on the network brings
+        // my servers back, rejoined as the same member (the #290 path).
+        self.lock().db.set(KV_BACKUP_PENDING, b"1")?;
+        self.restore_from_backup();
+        Ok(identity)
+    }
+
+    /// Restore servers (#291 phase A): fetches my backup from the holders,
+    /// keeps the newest valid one, and rejoins each live server I don't have
+    /// yet as the same member (`Inner::join`: no new join, nothing posted
+    /// over what the server holds). A server it lists that no longer has
+    /// me as a member isn't entered (a stale backup can't undo a leave or a
+    /// kick). Servers nobody can be reached for are tried again each sync
+    /// round until all are in.
+    fn restore_from_backup(&self) {
+        let Some(keys) = self.lock().me.as_ref().map(|me| me.identity.backup_keys()) else {
+            return;
+        };
+        let answers = self.ports.network.fetch_backup(keys.tag());
+        let Some(plain) = backup::newest(&keys, &answers) else { return };
+        let mut waiting = false;
+        for (id, entry) in plain.servers.iter().filter(|(_, e)| e.live()) {
+            let (Some(server), Some(secret)) = (
+                model::parse_hex32(id).map(ServerId::from_bytes),
+                model::parse_hex32(&entry.secret).map(Zeroizing::new),
+            ) else {
+                continue;
+            };
+            if self.lock().db.has_server(server).unwrap_or(true) {
+                continue;
+            }
+            let fetched = self.open_and_fetch(server, &secret);
+            let status = self.run(|inner, ports, events| {
+                // No invite: a member I still am needs none; anyone else is
+                // refused by authority and nothing is stored or sent.
+                let none = RecordId::from_bytes([0; 32]);
+                inner.join(ports, server, none, &secret, "", fetched, events)
+            });
+            match status {
+                Ok(JoinStatus::NobodyOnline { .. }) => waiting = true,
+                Ok(JoinStatus::Joined { .. }) => {}
+                _ => {
+                    let _ = self.close_candidate(server);
+                }
+            }
+        }
+        if !waiting {
+            let _ = self.lock().db.delete(KV_BACKUP_PENDING);
+        }
     }
 
     pub fn update_profile(&self, input: ProfileInput) -> CoreResult<Identity> {
@@ -1702,6 +1757,10 @@ impl Core {
     pub fn sync_now(&self) -> CoreResult<()> {
         self.retry_joins();
         self.flush_leaves();
+        // A restore still waiting on servers nobody could be reached for.
+        if self.lock().db.get(KV_BACKUP_PENDING).ok().flatten().is_some() {
+            self.restore_from_backup();
+        }
         let servers = {
             let mut inner = self.lock();
             if inner.me.is_none() {
@@ -1736,6 +1795,10 @@ impl Core {
             inner.expire_closed(ports, events)?;
             // Decision 18: a raise whose 30 days are up takes effect.
             inner.apply_due_birth_date(ports, events)?;
+            // Restore servers (#291 phase A): my server list, backed up.
+            if let Err(e) = inner.write_backup(ports) {
+                eprintln!("mvs-core: the server backup wasn't written: {:?}", e.code);
+            }
             for (server, records) in fetched {
                 if !inner.db.has_server(server)? {
                     continue;
@@ -2159,6 +2222,61 @@ impl Inner {
             })?;
         }
         Ok(due)
+    }
+
+    /// Each sync round (restore servers, #291 phase A): my server list,
+    /// merged into the newest backup the holders keep, sealed and handed to
+    /// them when it changed. Servers I'm in are live; servers this device
+    /// listed before and no longer has (left, kicked, closed, purged) get a
+    /// tombstone. Merging keeps what my other devices wrote.
+    fn write_backup(&mut self, ports: &Ports) -> CoreResult<()> {
+        let Some(keys) = self.me.as_ref().map(|me| me.identity.backup_keys()) else {
+            return Ok(());
+        };
+        let now = ports.clock.now_ms();
+        let mut known: BTreeMap<String, u64> = self
+            .db
+            .get(KV_BACKUP_KNOWN)?
+            .and_then(|json| serde_json::from_slice(&json).ok())
+            .unwrap_or_default();
+        let mut current = BTreeMap::new();
+        for server in self.db.servers()? {
+            if self.db.closed_at(server)?.is_some() {
+                continue;
+            }
+            if let Some(secret) = self.secret(server)? {
+                current.insert(model::hex_id(server.as_bytes()), hex::encode(*secret));
+            }
+        }
+        let remote = backup::newest(&keys, &ports.network.fetch_backup(keys.tag()));
+        if remote.is_none() && current.is_empty() && known.is_empty() {
+            return Ok(());
+        }
+        let remote = remote.unwrap_or_default();
+        let mut plain = remote.clone();
+        for (id, secret) in &current {
+            let joined_at = *known.entry(id.clone()).or_insert(now);
+            let mine = backup::Entry { secret: secret.clone(), joined_at, gone_at: None };
+            let mut ours = backup::Plain::default();
+            ours.servers.insert(id.clone(), mine);
+            plain.merge(&ours);
+        }
+        for id in known.keys().filter(|id| !current.contains_key(*id)) {
+            if let Some(entry) = plain.servers.get_mut(id) {
+                if entry.live() {
+                    entry.gone_at = Some(now.max(entry.joined_at + 1));
+                }
+            }
+        }
+        known.retain(|id, _| current.contains_key(id));
+        self.db.set(KV_BACKUP_KNOWN, &serde_json::to_vec(&known).expect("plain map"))?;
+        if plain.servers == remote.servers && remote.version > 0 {
+            return Ok(());
+        }
+        plain.version = remote.version + 1;
+        let blob = backup::seal(&keys, &plain).map_err(|_| ErrorCode::Internal)?;
+        ports.network.put_backup(keys.tag(), &blob);
+        Ok(())
     }
 
     /// Each sync round: a raise whose 30 days are up takes effect, and its
