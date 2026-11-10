@@ -23,6 +23,7 @@ pub mod sidecar;
 pub mod syncnet;
 pub mod types;
 pub mod update;
+mod voice;
 
 pub use access::{KeyBinder, MemberReadGate, MemberStubGate, BINDING_PREFIX};
 pub use dispatch::NOT_YET;
@@ -36,3 +37,7 @@ pub use service::{
     JOIN_RETRY_MAX, MAX_CHECK_FAILURES, SYNC_EVERY,
 };
 pub use types::*;
+pub use voice::{
+    VoiceNet, CLOCK_WINDOW_MS, HELLO_EVERY_MS, HELLO_TIMEOUT_MS, MAX_PARTICIPANTS, MAX_PAYLOAD,
+    SIGNAL_PREFIX,
+};
