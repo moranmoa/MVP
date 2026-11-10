@@ -18,6 +18,8 @@ bip39 = { version = "3", features = ["zeroize"] }
 ed25519-dalek = "2"
 # MIT OR Apache-2.0 (RustCrypto)
 hkdf = "0.12"
+# CC0-1.0 OR Apache-2.0. The backup tag (already in the tree via records).
+blake3 = "1"
 sha2 = "0.10"
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "zeroize"] }
 chacha20poly1305 = "0.10"
