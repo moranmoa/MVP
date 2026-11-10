@@ -427,6 +427,30 @@ from view rather than voided.
   relay address always carries `/p2p/<relay peer id>` so Noise pins the
   relay and the proxy can't stand in for it. Diversity fix: a second
   bootstrap at another provider (GAP-9).
+- **The relay's direct address in the app (#236, owner decision 2026-11-10).**
+  For hole punching, the release `mvs-config.json` will carry `bootstrap`,
+  the relay's plain-TCP address, but only from #220 on (the relay on a Linux
+  host); until then the repository variable is unset and no release carries
+  it. From then on:
+  - the origin is reachable directly, past Cloudflare, by anyone with the app,
+    and it can't be withdrawn from old installs, so the R11 limits and the
+    host firewall must hold on their own;
+  - the relay sees every non-relay-only user's real IP next to their peer ID.
+  
+  Conditions:
+  - the relay keeps no who-talks-to-whom logs;
+  - relay-only users never dial it (enforced in sync);
+  - hosts and IPs never reach `mvs.log` (`logHost`, #236);
+  - the alpha privacy note says the helper server sees your IP unless
+    relay-only is on.
+- **Third-party licence: `webpki-roots` (CDLA-Permissive-2.0), owner-approved
+  (#256).** It's the Mozilla root store, used only to verify the relay's
+  `wss` TLS, so no new trust is added. The licence notice goes into the
+  third-party notices.
+- **No firewall rules from the installer (owner decision).** Windows' own
+  prompt decides whether inbound direct connections are allowed, and the app
+  shows a tip. Saying no there only costs direct connections, since the
+  relay still works. The installer never changes system firewall settings.
 - One update key in the closed alpha.
 - A window between a kick and its arrival during which messages are still
   readable by the kicked member (groupkeys README).
