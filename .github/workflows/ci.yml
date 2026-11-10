@@ -158,8 +158,7 @@ jobs:
 
   # CI-D1: the real app (Electron + a fresh ui/dist + test/fake-core.js) with
   # the in-app security checks, incl. the mic permission one. Windows: it has
-  # a display, and Linux runners' AppArmor blocks Electron's sandbox (the
-  # local route is desktop/compose.yaml). Non-blocking until its first green run.
+  # a display. Non-blocking until its first green run.
   desktop-e2e-windows:
     name: desktop e2e (Windows)
     runs-on: windows-latest
@@ -193,6 +192,41 @@ jobs:
       - name: Electron e2e
         working-directory: desktop
         run: node --test --test-concurrency=1 test/e2e.test.mjs
+
+  # The same e2e on Linux under Xvfb. ubuntu-22.04 on purpose: 24.04 runners
+  # restrict unprivileged user namespaces, which Electron's sandbox needs, and
+  # we don't relax the sandbox to get around it.
+  desktop-e2e-linux:
+    name: desktop e2e (Linux, xvfb)
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    timeout-minutes: 20
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            ui/package-lock.json
+            desktop/package-lock.json
+      - name: Build the UI
+        working-directory: ui
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+      - name: Licence policy (desktop lockfile, before installing anything)
+        run: node .github/scripts/npm-licenses.mjs desktop/package-lock.json
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci --no-audit --no-fund
+      - name: Electron e2e
+        working-directory: desktop
+        run: xvfb-run -a node --test --test-concurrency=1 test/e2e.test.mjs
 
   # B10: the qa/ smoke suite (onboarding -> send -> join by link) against a
   # production build of the UI with the mock core, as qa/compose.yaml runs it.
