@@ -7,6 +7,7 @@
 // look-alike names), values that reach CSS or <img>, and sizes that freeze the
 // renderer.
 
+import { cleanStunUrl } from '../voice/sdp';
 import type { CoreApi, CoreEventName, CoreEvents } from './api';
 import type {
   AgeRestriction,
@@ -334,10 +335,15 @@ const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[
     if (kind !== 'ice' && s.fingerprintVerified !== true) return null;
     return { from: s.from, kind, payload: s.payload, fingerprintVerified: s.fingerprintVerified === true };
   },
-  'core.status': (s) => ({
-    state: s?.state === 'up' || s?.state === 'down' ? s.state : 'starting',
-    detail: (['missing', 'start-failed', 'crashed', 'crash-loop', 'keyring'] as const).find((d) => d === s?.detail),
-  }),
+  'core.status': (s) => {
+    // The STUN URL only if it is a plain stun:/stuns: one (TURN, credentials: dropped).
+    const stunUrl = cleanStunUrl(s?.stunUrl);
+    return {
+      state: s?.state === 'up' || s?.state === 'down' ? s.state : 'starting',
+      detail: (['missing', 'start-failed', 'crashed', 'crash-loop', 'keyring'] as const).find((d) => d === s?.detail),
+      ...(stunUrl ? { stunUrl } : {}),
+    };
+  },
   'update.ready': (u) => ({ version: cleanName(u.version, 32), waitingForCall: u.waitingForCall === true }),
   // Release notes come from the signed manifest, but they are still shown as
   // plain text only, clipped like a message.

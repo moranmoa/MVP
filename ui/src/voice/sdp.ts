@@ -41,8 +41,17 @@ export function soleFingerprint(sdp: string): string | null {
  * candidates are gathered and calls work on the same network.
  */
 export function iceServersFor(stunUrl: string | null | undefined): RTCIceServer[] {
-  if (typeof stunUrl !== 'string') return [];
+  const url = cleanStunUrl(stunUrl);
+  return url ? [{ urls: url }] : [];
+}
+
+/**
+ * The STUN URL if it is a plain `stun:`/`stuns:` one (trimmed, at most 256
+ * characters), else null. The desktop shell checks the config with the same
+ * rule (desktop/src/config.js validStun).
+ */
+export function cleanStunUrl(stunUrl: unknown): string | null {
+  if (typeof stunUrl !== 'string') return null;
   const url = stunUrl.trim();
-  if (!/^stuns?:[^\s@/?#]+$/i.test(url)) return [];
-  return [{ urls: url }];
+  return url.length <= 256 && /^stuns?:[^\s@/?#]+$/i.test(url) ? url : null;
 }

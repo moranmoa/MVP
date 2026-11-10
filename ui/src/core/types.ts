@@ -93,6 +93,8 @@ export type CoreDownDetail = 'missing' | 'start-failed' | 'crashed' | 'crash-loo
 export interface CoreStatus {
   state: 'starting' | 'up' | 'down';
   detail?: CoreDownDetail;
+  /** Our STUN server for voice (#222), from the shell's config; absent without one. */
+  stunUrl?: string;
 }
 
 /** Commands reject with this shape; `code` maps to a translated message. */
