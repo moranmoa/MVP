@@ -7,7 +7,7 @@ publish = false
 [dependencies]
 anyhow = "1"
 futures = "0.3"
-libp2p = { version = "0.54", features = [
+libp2p = { version = "0.57", features = [
     "tokio",
     "tcp",
     "quic",

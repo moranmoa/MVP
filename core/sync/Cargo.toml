@@ -21,7 +21,7 @@ chacha20poly1305 = "0.10"
 # Test and harness keys only (the app gets keys from core/identity).
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures = "0.3"
-libp2p = { version = "0.54", features = [
+libp2p = { version = "0.57", features = [
     "tokio",
     "tcp",
     # /wss to the relay behind Cloudflare: TLS by rustls with webpki roots
