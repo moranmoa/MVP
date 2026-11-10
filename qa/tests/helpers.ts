@@ -104,7 +104,8 @@ export async function createServer(page: Page, name: string, age: '16 ומעלה
 }
 
 export function composer(page: Page) {
-  return page.getByRole('textbox', { name: /^כתיבה ב-#/ });
+  // The channel's "#" sits inside the bidi isolate (U+2068) since #235.
+  return page.getByRole('textbox', { name: /^כתיבה ב-\u2068?#/ });
 }
 
 /** The last message row in the virtualised list. */

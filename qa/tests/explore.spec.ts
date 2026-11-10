@@ -451,7 +451,7 @@ test.describe('layout', () => {
       await page.waitForTimeout(500);
       await shot(page, `scale-200-${lang}`);
       expect(await pageOverflow(page)).toBeLessThanOrEqual(0);
-      await expect(composer(page).or(page.getByRole('textbox', { name: /^Message #/ }))).toBeInViewport();
+      await expect(composer(page).or(page.getByRole('textbox', { name: /^Message \u2068?#/ }))).toBeInViewport();
     });
   }
 
@@ -665,7 +665,7 @@ test.describe('phone layout', () => {
     await page.goto('/?demo=1&still=1&update=600000&lang=en');
     await expect(page.locator('html')).toHaveAttribute('dir', 'ltr');
     await page.getByRole('button', { name: /^כללי/ }).first().click();
-    await expect(composer(page).or(page.getByRole('textbox', { name: /^Message #/ }))).toBeInViewport();
+    await expect(composer(page).or(page.getByRole('textbox', { name: /^Message \u2068?#/ }))).toBeInViewport();
     expect(await pageOverflow(page)).toBeLessThanOrEqual(0);
   });
 });
