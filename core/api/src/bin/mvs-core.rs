@@ -86,13 +86,14 @@ fn parse(mut args: impl Iterator<Item = std::ffi::OsString>) -> Option<Args> {
 }
 
 /// What is logged without RUST_LOG (see `init_logging`).
-const DEFAULT_LOG: &str = "off,mvs=info";
+const DEFAULT_LOG: &str = "off,mvs::join=info";
 
 /// Logs to stderr, which the desktop captures and redacts into mvs.log:
 /// RUST_LOG if set, else [`DEFAULT_LOG`] (the join steps). A bad filter is
 /// reported and ignored. Our own lines never hold IPs or IDs below debug.
 fn init_logging() {
-    // Without RUST_LOG: the `mvs` targets only, at info. These are the join
+    // Without RUST_LOG: the `mvs::join` target only, at info (EnvFilter matches
+    // by prefix, so not all of `mvs`). These are the join
     // steps (`api::service`, target `mvs::join`), written for a user's
     // mvs.log: counts and outcomes, never IDs, links, addresses or text.
     let from_env = std::env::var("RUST_LOG").ok();
