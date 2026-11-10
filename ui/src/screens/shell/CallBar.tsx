@@ -13,8 +13,22 @@ import { useCore, type CallState, type Id, type Member } from '../../core';
  * Until piece D (ui/src/voice, dev-voice-shell) lands: the engine interface the
  * call bar uses, as agreed. Replace with `useVoiceEngine(call)` from '../../voice'.
  */
-function useVoiceEngine(_call: CallState | null): { speaking: Record<Id, boolean>; setMicMuted: (muted: boolean) => void } {
-  return { speaking: {}, setMicMuted: () => {} };
+type AudioDevice = { deviceId: string; label: string };
+interface VoiceEngine {
+  ready: boolean;
+  error?: 'mic-denied' | 'no-device' | 'failed';
+  speaking: Record<Id, boolean>;
+  setMicMuted: (muted: boolean) => void;
+  // Device choice: a settings surface, later.
+  inputs: AudioDevice[];
+  outputs: AudioDevice[];
+  inputId?: string;
+  outputId?: string;
+  setInput: (id: string) => void;
+  setOutput: (id: string) => void;
+}
+function useVoiceEngine(_call: CallState | null): VoiceEngine {
+  return { ready: true, speaking: {}, setMicMuted: () => {}, inputs: [], outputs: [], setInput: () => {}, setOutput: () => {} };
 }
 
 /** The short code the app shows for someone not (yet) in the member list. */
