@@ -1743,6 +1743,19 @@ fn a_message_held_without_a_key_fails_after_two_minutes() {
         guest.core.send_message(&channel, "one too many", None).unwrap_err().code,
         ErrorCode::NotAllowed
     );
+
+    // Failed ones are bounded too: they all fail; one more fails after
+    // them; only the newest MAX_KEY_PENDING failed stay.
+    *world.clock.0.lock().unwrap() += api::KEY_PENDING_FOR.as_millis() as u64 + 1;
+    guest.core.sync_now().unwrap();
+    let last = guest.core.send_message(&channel, "the newest", None).unwrap();
+    *world.clock.0.lock().unwrap() += api::KEY_PENDING_FOR.as_millis() as u64 + 1;
+    guest.core.sync_now().unwrap();
+    let listed = guest.core.get_messages(&channel, 0, 999).unwrap().messages;
+    assert_eq!(listed.len(), api::MAX_KEY_PENDING);
+    assert!(listed.iter().all(|m| m.send_state == Some(SendState::Failed)));
+    assert_eq!(listed.last().unwrap().id, last.id, "the newest kept");
+    assert!(!listed.iter().any(|m| m.body == "held 0"), "the oldest dropped");
 }
 
 /// v0.2.0 smoke: a member who joins writes first, and the owner never

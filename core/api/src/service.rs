@@ -2093,6 +2093,18 @@ impl Inner {
             }
             i += 1;
         }
+        // Failed ones are bounded too (sec-lead): beyond MAX_KEY_PENDING in
+        // a channel, the oldest are dropped, their text with them.
+        let channels: BTreeSet<ChannelId> = self.key_pending.iter().map(|p| p.channel).collect();
+        for channel in channels {
+            let failed = self.key_pending.iter().filter(|p| p.channel == channel && p.failed).count();
+            let mut extra = failed.saturating_sub(MAX_KEY_PENDING);
+            self.key_pending.retain(|p| {
+                let drop = extra > 0 && p.channel == channel && p.failed;
+                extra -= usize::from(drop);
+                !drop
+            });
+        }
         Ok(())
     }
 
