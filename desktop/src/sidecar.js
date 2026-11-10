@@ -103,12 +103,24 @@ class Sidecar {
       ...(this.relay ? ['--relay', this.relay, ...this.bootstrap.flatMap((b) => ['--bootstrap', b])] : []),
       ...this.extraArgs,
     ];
-    const child = this.spawnImpl(this.exe, args, {
-      shell: false,
-      windowsHide: true,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: minimalEnv(),
-    });
+    let child;
+    try {
+      child = this.spawnImpl(this.exe, args, {
+        shell: false,
+        windowsHide: true,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: minimalEnv(),
+      });
+    } catch (e) {
+      // Some failures throw instead of emitting "error" (on Windows, EFTYPE for
+      // a file it cannot execute). Same path as a failed start: down, retry
+      // with backoff, and never take the caller (app start-up) down with it.
+      this.log(`core failed to start: ${e.code || e.message}`);
+      const none = {};
+      this.child = none;
+      this.lost(none, 'start-failed');
+      return this;
+    }
     this.child = child;
     let buf = Buffer.alloc(0);
     child.stdout.on('data', (chunk) => {

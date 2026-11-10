@@ -145,6 +145,17 @@ function failing(how) {
   };
 }
 
+test('a spawn that throws (Windows EFTYPE): down, start-failed, no exception to the caller', async () => {
+  const statuses = [];
+  const thrower = () => {
+    throw Object.assign(new Error('spawn EFTYPE'), { code: 'EFTYPE' });
+  };
+  const core = new Sidecar({ exe: FAKE, dataDir: DATA, onEvent() {}, onStatus: (s) => statuses.push(s), backoffBase: 60_000, spawnImpl: thrower }).start();
+  assert.deepEqual(statuses[0], { state: 'down', detail: 'start-failed' });
+  assert.deepEqual(await core.request('getIdentity', {}), { error: { code: 'core-unavailable', detail: 'start-failed' } });
+  core.stop();
+});
+
 test('status goes up once the core answers, or says it is ready', async () => {
   const statuses = [];
   const { core } = start({ onStatus: (s) => statuses.push(s) });
