@@ -92,6 +92,8 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
   - When `effectiveAt` passes, the next sync round posts "adult" to every server I'm still in, clears `pendingBirthDate`, and emits `identity.changed`.
   - A lowering is posted at once. A claim equal to the one the server holds isn't posted again.
   - So a restore (`restoreIdentity(words, input)`) can't skip the 30 days: the rejoin compares against the claim the server already holds.
+  - A raise means a *changed* date. A date entered at sign-up on this computer, or one a server's claim already agrees with, is the one my claims come from. Turning 18 with it is a birthday, with no wait.
+  - **Known limit,** until the encrypted backup (#291) brings the old birth date back: after a restore with a new adult date, a server I join for the first time has no earlier claim to compare, so it gets "adult" at once. Joining a fresh server first doesn't lift the wait on the old ones: only an agreeing claim or the 30 days do. The client clock, or a modified client, can also skip the wait (Security Lead, GAP-22).
 
 - Restore on a new computer:
   - `restoreIdentity(words, input?: { locale, country, birthDate })`. The words don't carry the country or birth date, so the UI asks them again (with the agreement) before the words and passes them here, as `createIdentity` takes them. The name follows with `updateProfile`.

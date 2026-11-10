@@ -3684,3 +3684,35 @@ fn a_restore_that_lowers_the_age_counts_at_once() {
     assert_eq!(claims_by(&world, &open.id, &ana_id), [true, false], "a lowering waits for nothing");
     assert_eq!(laptop.core.get_identity().unwrap().unwrap().pending_birth_date, None);
 }
+
+/// Tech Lead (#306): turning 18 with the birth date given at sign-up is a
+/// birthday, not a correction: no 30 days. Kim signs up at 17, a day before
+/// her 18th birthday, and claims "not adult" in Open. After her birthday she
+/// leaves and rejoins Open: "adult" goes out at once, nothing is pending, and
+/// an 18+ server lets her in.
+#[test]
+fn turning_eighteen_with_the_same_birth_date_does_not_wait() {
+    let world = World::new();
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let open = owner.core.create_server("Open", AgeRestriction::None).unwrap();
+    let night = owner.core.create_server("Night", AgeRestriction::Eighteen).unwrap();
+    owner.core.sync_now().unwrap();
+    // NOW is 2026-11-03: born 2008-11-04, Kim is 18 tomorrow.
+    let kim = world.peer();
+    let kim_id = kim.core.create_identity(born("2008-11-04")).unwrap().identity.id;
+    kim.core.join_server(&open.invite_link).unwrap();
+    assert_eq!(claims_by(&world, &open.id, &kim_id), [false]);
+    kim.core.join_server(&night.invite_link).unwrap();
+    assert_eq!(kim.core.list_servers().unwrap().len(), 1, "joined 18+ at 17");
+
+    advance(&world, 2 * 86_400_000);
+    kim.core.leave_server(&open.id).unwrap();
+    kim.core.sync_now().unwrap();
+    assert!(kim.core.list_servers().unwrap().is_empty());
+    kim.core.join_server(&open.invite_link).unwrap();
+    assert_eq!(claims_by(&world, &open.id, &kim_id), [false, true], "a birthday waited");
+    assert_eq!(kim.core.get_identity().unwrap().unwrap().pending_birth_date, None);
+    kim.core.join_server(&night.invite_link).unwrap();
+    assert_eq!(kim.core.list_servers().unwrap().len(), 2);
+}

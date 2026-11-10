@@ -79,10 +79,17 @@ struct Profile {
     /// then I count as under 18. `None`: nothing pending.
     #[serde(default)]
     pending_birth_date: Option<PendingBirth>,
-    /// The birth date whose raise took effect (the 30 days passed): its
-    /// "adult" claim is posted without a new wait.
-    #[serde(default)]
-    adult_confirmed: Option<String>,
+    /// The birth date is the one my claims were made from: set at sign-up
+    /// here, agreeing with a claim a server already holds, or past its 30
+    /// days. Turning 18 with a trusted date is just a birthday: no wait.
+    /// False after a restore (the date was entered again) until one of
+    /// those happens. Profiles saved before this field: trusted.
+    #[serde(default = "trusted")]
+    birth_date_trusted: bool,
+}
+
+fn trusted() -> bool {
+    true
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -112,7 +119,7 @@ impl Profile {
     fn settle(&mut self, now: u64) -> bool {
         match &self.pending_birth_date {
             Some(p) if now >= p.effective_at => {
-                self.adult_confirmed = Some(p.date.clone());
+                self.birth_date_trusted = true;
                 self.pending_birth_date = None;
                 true
             }
@@ -399,6 +406,8 @@ impl Core {
                 country: input.country,
                 birth_date: input.birth_date,
                 locale: Some(input.locale),
+                // Entered at sign-up here: my claims come from it.
+                birth_date_trusted: true,
                 ..Profile::default()
             };
             let me = inner.new_me(phrase, profile)?;
@@ -1916,10 +1925,13 @@ impl Inner {
     /// - a lowering, or a first claim, is posted at once;
     /// - the same as my current claim: nothing.
     ///
-    /// So a restore (a birth date entered again) can't skip the 30 days.
+    /// So a restore (a birth date entered again) can't skip the 30 days, while
+    /// turning 18 with the date my claims came from (`birth_date_trusted`:
+    /// set at sign-up here) is just a birthday, with no wait.
     fn age_claim(&mut self, ports: &Ports, server: ServerId) -> CoreResult<Option<Record>> {
         let now = ports.clock.now_ms();
         self.settle_birth_date(now)?;
+        let mut trust = false;
         let (prior, adult, raise, pending) = {
             let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?;
             let key = me.key();
@@ -1930,12 +1942,24 @@ impl Inner {
             let profile = &me.profile;
             let by_date = model::age_on(&profile.birth_date, now).is_some_and(|age| age >= 18);
             let pending = profile.raise_pending(now);
-            let raise = prior == Some(false)
-                && by_date
+            // A raise is a *changed* date (a restore entered it again): with
+            // the date my claims came from, turning 18 is just a birthday.
+            let raise = prior == Some(false) && by_date && !pending && !profile.birth_date_trusted;
+            // A server's claim that agrees with the date (or a lowering from
+            // it) makes the date the one my claims come from. A server with
+            // no claim proves nothing.
+            let agrees = !profile.birth_date_trusted
                 && !pending
-                && profile.adult_confirmed.as_deref() != Some(profile.birth_date.as_str());
+                && prior.is_some()
+                && (prior == Some(by_date) || !by_date);
+            if agrees {
+                trust = true;
+            }
             (prior, profile.effective_age(now).is_some_and(|age| age >= 18), raise, pending)
         };
+        if trust {
+            self.update_profile_with(|p| p.birth_date_trusted = true)?;
+        }
         if raise {
             let date = self.me.as_ref().expect("checked above").profile.birth_date.clone();
             self.update_profile_with(|p| {
