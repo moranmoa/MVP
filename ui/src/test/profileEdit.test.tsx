@@ -31,7 +31,7 @@ describe('edit profile (B11e)', () => {
     expect(within(dialog).getByRole('heading', { name: 'Account' })).toBeTruthy();
     expect(name.value).toBe('מורן');
     expect(save().disabled).toBe(true);
-    expect(within(dialog).getByText('Members of all your servers see your name. Your picture and bio stay on this computer for now.')).toBeTruthy();
+    expect(within(dialog).getByText('Everyone in your servers sees your name. For now, your picture and bio are seen only on this computer.')).toBeTruthy();
   });
 
   it('saves name and bio: my panel and the member list follow', async () => {

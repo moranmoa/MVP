@@ -343,7 +343,7 @@
   "profile.edit.save": "Save",
   "profile.edit.saving": "Saving…",
   "profile.edit.discard": "Discard changes",
-  "profile.edit.publishHint": "Members of all your servers see your name. Your picture and bio stay on this computer for now.",
+  "profile.edit.publishHint": "Everyone in your servers sees your name. For now, your picture and bio are seen only on this computer.",
   "profile.edit.saved": "Profile saved",
   "profile.edit.saveError": "Couldn't save your profile. Try again.",
   "profile.edit.nameEmpty": "Enter a name.",

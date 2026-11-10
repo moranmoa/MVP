@@ -343,7 +343,7 @@
   "profile.edit.save": "שמירה",
   "profile.edit.saving": "שומרים…",
   "profile.edit.discard": "ביטול שינויים",
-  "profile.edit.publishHint": "השם שלך מוצג לחברי כל השרתים שלך. התמונה והביו נשמרים בינתיים רק במחשב הזה.",
+  "profile.edit.publishHint": "השם שלך מוצג לכל מי שנמצא איתך בשרתים. את התמונה והביו רואים בינתיים רק במחשב הזה.",
   "profile.edit.saved": "הפרופיל נשמר",
   "profile.edit.saveError": "לא הצלחנו לשמור את הפרופיל. אפשר לנסות שוב.",
   "profile.edit.nameEmpty": "צריך לתת שם.",

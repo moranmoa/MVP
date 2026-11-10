@@ -12,6 +12,12 @@ import { Avatar, Code, Name } from '../../components/common';
 import { isCoreError, useCore } from '../../core';
 import { cleanName } from '../../core/sanitize';
 
+/** Scrolls a field into view, clear of the sticky save bar (partly visible counts as hidden). */
+function keepClear(el: HTMLElement): void {
+  el.scrollIntoView?.({ block: 'nearest' });
+}
+const onFieldFocus = (e: { currentTarget: HTMLElement }) => keepClear(e.currentTarget);
+
 const NAME_MAX = 32;
 const NAME_COUNT_FROM = 24;
 const BIO_MAX = 190;
@@ -72,6 +78,13 @@ export const ProfileEditor = forwardRef<ProfileEditorHandle, { onDirtyChange: (d
 
   const dirty = draft.name !== saved.name || draft.bio !== saved.bio || draft.avatar !== saved.avatar;
   useEffect(() => onDirtyChange(dirty), [dirty, onDirtyChange]);
+  // The save bar turns sticky with the first change: keep the field being edited
+  // clear of it (the panel's scroll-padding sets how far).
+  const root = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = document.activeElement;
+    if (dirty && el instanceof HTMLElement && root.current?.contains(el)) keepClear(el);
+  }, [dirty]);
 
   const edit = (patch: Partial<Draft>) => {
     setDraft((d) => ({ ...d, ...patch }));
@@ -118,7 +131,7 @@ export const ProfileEditor = forwardRef<ProfileEditorHandle, { onDirtyChange: (d
   const readOnly = busy === 'saving';
 
   return (
-    <div className="profile-editor">
+    <div className="profile-editor" ref={root}>
       <div className="profile-preview" aria-hidden="true">
         <div className="profile-preview-banner" style={{ background: identity.avatarColor }} />
         <div className="profile-preview-body">
@@ -175,6 +188,7 @@ export const ProfileEditor = forwardRef<ProfileEditorHandle, { onDirtyChange: (d
         <input
           {...nameProps}
           ref={nameRef}
+          onFocus={onFieldFocus}
           value={draft.name}
           maxLength={NAME_MAX}
           readOnly={readOnly}
@@ -197,7 +211,7 @@ export const ProfileEditor = forwardRef<ProfileEditorHandle, { onDirtyChange: (d
         <span>
           <FormattedMessage id="onb.profile.bio" />
         </span>
-        <textarea {...bioProps} value={draft.bio} maxLength={BIO_MAX} rows={4} readOnly={readOnly} onChange={(e) => edit({ bio: e.target.value })} />
+        <textarea {...bioProps} onFocus={onFieldFocus} value={draft.bio} maxLength={BIO_MAX} rows={4} readOnly={readOnly} onChange={(e) => edit({ bio: e.target.value })} />
         <Counter value={draft.bio} max={BIO_MAX} from={BIO_COUNT_FROM} />
       </label>
 
