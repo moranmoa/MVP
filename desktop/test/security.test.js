@@ -34,70 +34,161 @@ test('no permission is granted', () => {
 // Voice v1 (piece C): the microphone for app://mvs only; nothing else.
 const PAGE = 'app://mvs/index.html';
 const micReq = (over = {}) => ({ mediaTypes: ['audio'], requestingUrl: PAGE, securityOrigin: 'app://mvs/', isMainFrame: true, ...over });
+// The rules below are checked during a call (the strictest case for a
+// denial); V-C2's tests check the out-of-call side.
+const allowReq = (page, perm, details, inCall = true) => sec.allowPermissionRequest(page, perm, details, inCall);
+const allowCheck = (page, perm, origin, details, inCall = true) => sec.allowPermissionCheck(page, perm, origin, details, inCall);
 const micCheck = (over = {}) => ({ mediaType: 'audio', requestingUrl: PAGE, securityOrigin: 'app://mvs/', isMainFrame: true, ...over });
 
 test('the microphone is granted to the internal origin', () => {
-  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq()), true);
-  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ securityOrigin: undefined })), true);
-  assert.equal(sec.allowPermissionCheck(PAGE, 'media', 'app://mvs', micCheck()), true);
+  assert.equal(allowReq(PAGE, 'media', micReq()), true);
+  assert.equal(allowReq(PAGE, 'media', micReq({ securityOrigin: undefined })), true);
+  assert.equal(allowCheck(PAGE, 'media', 'app://mvs', micCheck()), true);
   // Electron may run a check with no webContents.
-  assert.equal(sec.allowPermissionCheck(undefined, 'media', 'app://mvs', micCheck()), true);
+  assert.equal(allowCheck(undefined, 'media', 'app://mvs', micCheck()), true);
 });
 
 test('the microphone is denied to any other origin', () => {
   for (const other of ['https://evil.example/', 'http://localhost:5173/', 'app://evil/index.html', 'file:///C:/x.html', 'mvs://join/x', 'devtools://devtools/', 'data:text/html,x', '', 'not a url']) {
     // Request: the page, the requesting URL or the origin is somewhere else.
-    assert.equal(sec.allowPermissionRequest(other, 'media', micReq()), false, 'page ' + other);
-    assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ requestingUrl: other })), false, 'url ' + other);
-    assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ securityOrigin: other })), false, 'origin ' + other);
+    assert.equal(allowReq(other, 'media', micReq()), false, 'page ' + other);
+    assert.equal(allowReq(PAGE, 'media', micReq({ requestingUrl: other })), false, 'url ' + other);
+    assert.equal(allowReq(PAGE, 'media', micReq({ securityOrigin: other })), false, 'origin ' + other);
     // Check: the same, plus the requesting origin.
-    assert.equal(sec.allowPermissionCheck(other, 'media', 'app://mvs', micCheck()), false, 'check page ' + other);
-    assert.equal(sec.allowPermissionCheck(PAGE, 'media', other, micCheck()), false, 'check origin ' + other);
-    assert.equal(sec.allowPermissionCheck(PAGE, 'media', 'app://mvs', micCheck({ securityOrigin: other })), false, 'check sec ' + other);
-    assert.equal(sec.allowPermissionCheck(PAGE, 'media', 'app://mvs', micCheck({ requestingUrl: other })), false, 'check url ' + other);
+    assert.equal(allowCheck(other, 'media', 'app://mvs', micCheck()), false, 'check page ' + other);
+    assert.equal(allowCheck(PAGE, 'media', other, micCheck()), false, 'check origin ' + other);
+    assert.equal(allowCheck(PAGE, 'media', 'app://mvs', micCheck({ securityOrigin: other })), false, 'check sec ' + other);
+    assert.equal(allowCheck(PAGE, 'media', 'app://mvs', micCheck({ requestingUrl: other })), false, 'check url ' + other);
   }
   // A missing requesting URL or origin is not ours either.
-  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ requestingUrl: undefined })), false);
-  assert.equal(sec.allowPermissionCheck(PAGE, 'media', undefined, micCheck()), false);
+  assert.equal(allowReq(PAGE, 'media', micReq({ requestingUrl: undefined })), false);
+  assert.equal(allowCheck(PAGE, 'media', undefined, micCheck()), false);
   // Subframes, even ours, never get it.
-  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ isMainFrame: false })), false);
-  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ isMainFrame: undefined })), false);
-  assert.equal(sec.allowPermissionCheck(PAGE, 'media', 'app://mvs', micCheck({ isMainFrame: false })), false);
+  assert.equal(allowReq(PAGE, 'media', micReq({ isMainFrame: false })), false);
+  assert.equal(allowReq(PAGE, 'media', micReq({ isMainFrame: undefined })), false);
+  assert.equal(allowCheck(PAGE, 'media', 'app://mvs', micCheck({ isMainFrame: false })), false);
 });
 
 test('the camera is denied, also next to the microphone', () => {
-  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ mediaTypes: ['video'] })), false);
-  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ mediaTypes: ['audio', 'video'] })), false);
-  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ mediaTypes: ['video', 'audio'] })), false);
-  assert.equal(sec.allowPermissionCheck(PAGE, 'media', 'app://mvs', micCheck({ mediaType: 'video' })), false);
+  assert.equal(allowReq(PAGE, 'media', micReq({ mediaTypes: ['video'] })), false);
+  assert.equal(allowReq(PAGE, 'media', micReq({ mediaTypes: ['audio', 'video'] })), false);
+  assert.equal(allowReq(PAGE, 'media', micReq({ mediaTypes: ['video', 'audio'] })), false);
+  assert.equal(allowCheck(PAGE, 'media', 'app://mvs', micCheck({ mediaType: 'video' })), false);
   // An empty, missing or odd media list is not "audio only".
   for (const mediaTypes of [[], undefined, null, 'audio', ['audio', 'unknown'], [{}]]) {
-    assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ mediaTypes })), false, JSON.stringify(mediaTypes));
+    assert.equal(allowReq(PAGE, 'media', micReq({ mediaTypes })), false, JSON.stringify(mediaTypes));
   }
   for (const mediaType of ['unknown', undefined, '', 'AUDIO']) {
-    assert.equal(sec.allowPermissionCheck(PAGE, 'media', 'app://mvs', micCheck({ mediaType })), false, String(mediaType));
+    assert.equal(allowCheck(PAGE, 'media', 'app://mvs', micCheck({ mediaType })), false, String(mediaType));
   }
-  assert.equal(sec.allowPermissionRequest(PAGE, 'media', undefined), false);
-  assert.equal(sec.allowPermissionCheck(PAGE, 'media', 'app://mvs', undefined), false);
+  assert.equal(allowReq(PAGE, 'media', undefined), false);
+  assert.equal(allowCheck(PAGE, 'media', 'app://mvs', undefined), false);
 });
 
 test('WebRTC uses only the default route interface', () => {
   assert.equal(sec.WEBRTC_IP_POLICY, 'default_public_and_private_interfaces');
 });
 
+// V-C2: the microphone only during a call.
+test('the microphone is denied outside a call', () => {
+  for (const inCall of [false, undefined, null, 1, 'true', {}]) {
+    assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq(), inCall), false, String(inCall));
+    assert.equal(sec.allowPermissionCheck(PAGE, 'media', 'app://mvs', micCheck(), inCall), false, String(inCall));
+  }
+  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq()), false, 'no flag given');
+  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq(), true), true);
+  assert.equal(sec.allowPermissionCheck(PAGE, 'media', 'app://mvs', micCheck(), true), true);
+});
+
+const CALL = { channelId: 'c'.repeat(64), participants: [{ identity: 'a'.repeat(64), muted: false }], full: false };
+const LEFT = { ...CALL, participants: [] };
+const joined = (gate) => {
+  const t = gate.beforeCommand('joinCall');
+  gate.afterCommand('joinCall', t, { ok: CALL });
+};
+
+test('call gate: shut at start, open after a successful joinCall', () => {
+  const gate = sec.createCallGate();
+  assert.equal(gate.inCall, false);
+  joined(gate);
+  assert.equal(gate.inCall, true);
+  // Other commands and events leave it as it is.
+  gate.afterCommand('setMuted', gate.beforeCommand('setMuted'), { ok: null });
+  gate.onEvent('call.state', CALL);
+  gate.onEvent('call.signal', { from: 'x' });
+  gate.onCoreStatus({ state: 'up' });
+  assert.equal(gate.inCall, true);
+});
+
+test('call gate: a failed or empty joinCall never opens it, and shuts an open one', () => {
+  for (const res of [{ error: { code: 'call-full' } }, { error: { code: 'not-implemented' } }, { ok: LEFT }, { ok: null }, { ok: {} }, { ok: { participants: 'x' } }, null, undefined]) {
+    const gate = sec.createCallGate();
+    gate.afterCommand('joinCall', gate.beforeCommand('joinCall'), res);
+    assert.equal(gate.inCall, false, JSON.stringify(res));
+    joined(gate);
+    // joinCall leaves the current call first, so a failed one leaves us out.
+    gate.afterCommand('joinCall', gate.beforeCommand('joinCall'), res);
+    assert.equal(gate.inCall, false, 'after an open gate: ' + JSON.stringify(res));
+  }
+});
+
+test('call gate: leave, end, core down and quit shut it', () => {
+  const cases = {
+    leaveCall: (g) => g.beforeCommand('leaveCall'),
+    'call.state with no participants': (g) => g.onEvent('call.state', LEFT),
+    'call.state with no payload': (g) => g.onEvent('call.state', null),
+    'core down': (g) => g.onCoreStatus({ state: 'down', detail: 'crash' }),
+    'core restarting': (g) => g.onCoreStatus({ state: 'starting' }),
+    'core status missing': (g) => g.onCoreStatus(undefined),
+    quit: (g) => g.end(),
+  };
+  for (const [label, act] of Object.entries(cases)) {
+    const gate = sec.createCallGate();
+    joined(gate);
+    act(gate);
+    assert.equal(gate.inCall, false, label);
+  }
+});
+
+test('call gate: a late joinCall answer after a leave, a core restart or quit stays shut', () => {
+  for (const [label, act] of [
+    ['leaveCall', (g) => g.beforeCommand('leaveCall')],
+    ['core restart', (g) => g.onCoreStatus({ state: 'starting' })],
+    ['quit', (g) => g.end()],
+  ]) {
+    const gate = sec.createCallGate();
+    const t = gate.beforeCommand('joinCall');
+    act(gate);
+    gate.afterCommand('joinCall', t, { ok: CALL });
+    assert.equal(gate.inCall, false, label);
+  }
+});
+
+test('call gate: switching calls (the old call.state [] comes first) ends in the new call', () => {
+  const gate = sec.createCallGate();
+  joined(gate);
+  const t = gate.beforeCommand('joinCall');
+  // The core leaves the old call first; its event comes before the answer.
+  gate.onEvent('call.state', LEFT);
+  assert.equal(gate.inCall, false);
+  gate.onEvent('call.state', CALL);
+  gate.afterCommand('joinCall', t, { ok: CALL });
+  assert.equal(gate.inCall, true);
+});
+
 test('screen capture is denied', () => {
   for (const perm of ['display-capture', 'screen', 'desktop', 'window-management', 'window-placement']) {
-    assert.equal(sec.allowPermissionRequest(PAGE, perm, micReq()), false, perm);
-    assert.equal(sec.allowPermissionCheck(PAGE, perm, 'app://mvs', micCheck()), false, perm);
+    assert.equal(allowReq(PAGE, perm, micReq()), false, perm);
+    assert.equal(allowCheck(PAGE, perm, 'app://mvs', micCheck()), false, perm);
   }
   // Desktop capture surfaces as 'media' with a video type; also refused.
-  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq({ mediaTypes: ['video'] })), false);
+  assert.equal(allowReq(PAGE, 'media', micReq({ mediaTypes: ['video'] })), false);
 });
 
 test('unknown and other permissions are denied, even for our own page', () => {
   for (const perm of ['geolocation', 'notifications', 'clipboard-read', 'clipboard-sanitized-write', 'openExternal', 'fullscreen', 'pointerLock', 'midi', 'midiSysex', 'hid', 'serial', 'usb', 'idle-detection', 'speaker-selection', 'storage-access', 'mediaKeySystem', 'unknown', 'microphone', 'audioCapture', 'Media', '', undefined]) {
-    assert.equal(sec.allowPermissionRequest(PAGE, perm, micReq()), false, String(perm));
-    assert.equal(sec.allowPermissionCheck(PAGE, perm, 'app://mvs', micCheck()), false, String(perm));
+    assert.equal(allowReq(PAGE, perm, micReq()), false, String(perm));
+    assert.equal(allowCheck(PAGE, perm, 'app://mvs', micCheck()), false, String(perm));
   }
 });
 
