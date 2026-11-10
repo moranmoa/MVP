@@ -128,6 +128,10 @@ pub struct Message {
     /// Only on messages written on this device.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub send_state: Option<SendState>,
+    /// On the `message.updated` that sends a message held for its key: the
+    /// provisional ID (`pending-…`) it replaces in the list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<Id>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

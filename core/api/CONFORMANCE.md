@@ -81,7 +81,7 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 | The mock's `getRecoveryWords` answers at any time | The Rust core answers only until the check passes, then `not-allowed` (until the app lock, #31); the mock should too |
 | The mock accepts any `updateProfile` input | The Rust core refuses oversize fields and any avatar other than a base64 PNG, JPEG, WebP or GIF `data:` URL (`bad-request`) |
 | The mock has no `grantRole` / `revokeRole` | Add them to `CoreCommands` (proposed below) |
-| The mock's `sendMessage` resolves at once | The Rust core: a plain member who just joined has no channel key until a moderator's re-key reaches them. `sendMessage` then waits for it, up to 2 s (only re-trying the seal; the background sync brings the key), before `not-allowed`. The UI keeps the message in its "sending" state meanwhile. A send blocks the core for that long, so the UI sends one message at a time, never a burst |
+| The mock never holds a message for its key | The Rust core (see "Messages held for their key" below): a plain member without the channel key yet gets the message back at once as `pending`, with a provisional ID, instead of `not-allowed`. The mock should do the same when it simulates a fresh join |
 
 ## Proposed contract additions (Rust has them; `api.ts` doesn't yet)
 
@@ -161,6 +161,20 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
     - A short link stops working when its invite is revoked, expires or is
       used up, and when the server is closed, left or purged.
 - `Member.connection: 'direct' | 'relay' | null` (#187): how we reach an online member, a direct connection (LAN) or through the relay; `null` for us and for members who are offline. A change fires `members.changed`.
+- Messages held for their key (#285 follow-up). A plain member who just joined has no channel key until a moderator's re-key reaches them (usually well under a second).
+  - `sendMessage` then resolves at once with `{ ..., id: 'pending-<16 hex>', sendState: 'pending' }`, and fires `message.added` with it. Nothing is sealed or sent yet.
+    - The message is listed after the channel's stored messages (`getMessages`, `getMessageCount`).
+    - It lives in memory only: a restart drops it.
+    - At most 50 are held per channel at once; past that, `not-allowed`. Failed ones are bounded too: beyond 50 failed in a channel the oldest are dropped (the UI may still show them until it re-reads the channel).
+  - When the key comes, the core's background sync seals and sends it, and fires `message.updated` with the real message: its record `id`, `sendState: 'sent'`, and **`replaces: 'pending-…'`**. From then on it is an ordinary message (`sent`, then `received`).
+    - **Its `index` may differ from the pending entry's.** The same round can bring in other messages first: the key can make earlier messages readable, and others may have written meanwhile. These come as their own `message.added` events, before the replacement. The real message is placed after them, and any other held messages after it.
+    - So on `replaces`, the UI drops the entry with that `pending-…` ID (wherever it sits) before applying the message at its `index`. It should also re-read `getMessageCount` (or the visible window) rather than keep its own count.
+  - With no key after **2 minutes**, or if I can no longer send there (kicked, left, closed), it turns failed:
+    - `message.updated` with the same `pending-…` ID and `sendState: 'failed'`;
+    - and `notice: rekey-waiting` for the server.
+    - It stays listed, failed, until a restart or `discardMessage(messageId)`, which drops a held or failed `pending-…` message and wipes its text (`not-found` for any other ID). "Send again" is `discardMessage` plus a new `sendMessage`.
+  - `Message.replaces?: string` is new, and appears only on that one `message.updated`.
+  - A moderator or above never gets a pending message: they make the key on the way. A non-member, or someone kicked, still gets `not-allowed` at once.
 - `CoreError.code`: `'bad-request' | 'not-implemented' | 'internal'`, and `'keyring-unavailable'` (QA-20): the OS keychain (Secret Service on Linux) is missing or unusable. The core still starts; `getIdentity` and anything needing the identity reject with it, and the UI shows the keyring cause.
 - `NoticeKind`: `'rekey-waiting'`, sent when removed members still hold a channel key and only a moderator can renew it. Until a moderator does, sending there answers `not-allowed`.
 - Server lifecycle (#229 design, #251 authority; `docs/design/server-rename-leave-delete.md`):
