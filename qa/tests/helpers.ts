@@ -38,6 +38,22 @@ export interface OnboardOptions {
 }
 
 /** Fresh account through the whole onboarding. Returns the 12 words. */
+/**
+ * From a fresh start to the recovery-word boxes of a restore. Since #290 a
+ * restore asks the agreement, country and birth date again, as a new account does.
+ */
+export async function toRestoreWords(page: Page, birthDate = '2001-04-12'): Promise<void> {
+  await page.getByRole('button', { name: 'כבר יש לי חשבון' }).click();
+  await page.getByRole('checkbox').check();
+  await page.getByRole('button', { name: he.next }).click();
+  await page.getByRole('button', { name: he.next }).click(); // country is prefilled
+  const [y, m, d] = birthDate.split('-');
+  await page.getByLabel('יום').fill(String(Number(d)));
+  await page.getByLabel('חודש').fill(String(Number(m)));
+  await page.getByLabel('שנה').fill(y);
+  await page.getByRole('button', { name: he.next }).click();
+}
+
 export async function onboard(page: Page, opts: OnboardOptions = {}): Promise<string[]> {
   const { birthDate = '2001-04-12', displayName = 'בודקת QA', checkWords = true } = opts;
   await page.goto('/?fresh=1&still=1&update=600000');

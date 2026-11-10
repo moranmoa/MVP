@@ -1,8 +1,9 @@
 import { useRef, useState, type ClipboardEvent, type FormEvent } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
-import { isCoreError, useCore, type Identity } from '../../core';
+import { isCoreError, useCore, type Identity, type NewIdentityInput } from '../../core';
 
-export function RestoreScreen({ onRestored }: { onRestored: (identity: Identity) => void }) {
+/** `input`: what the restore asked again (country, birth date), sent with the words (#290). */
+export function RestoreScreen({ onRestored, input }: { onRestored: (identity: Identity) => void; input?: NewIdentityInput }) {
   const core = useCore();
   const intl = useIntl();
   const [words, setWords] = useState<string[]>(() => Array(12).fill(''));
@@ -38,7 +39,7 @@ export function RestoreScreen({ onRestored }: { onRestored: (identity: Identity)
     }
     setBusy(true);
     try {
-      onRestored(await core.restoreIdentity(words));
+      onRestored(await core.restoreIdentity(words, input));
     } catch (err) {
       if (isCoreError(err) && err.code === 'invalid-words') {
         setBadPositions(err.positions ?? []);
