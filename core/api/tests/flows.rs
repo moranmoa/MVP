@@ -4092,3 +4092,186 @@ fn unchanged_rounds_neither_fetch_nor_put_the_backup() {
     me.core.sync_now().unwrap();
     assert_eq!(net.counts(), (3, 3));
 }
+
+/// A channel-order post signed by `key` directly (as a client that skips
+/// the core's own role check would), on every control record so far.
+fn raw_order_post(world: &World, server: &str, key: &SigningKey, channel: &str, position: &str) {
+    let server_key = ServerId::from_bytes(hex::decode(server).unwrap().try_into().unwrap());
+    let text = format!(r#"{{"mvs":"mvs/channel-order/v1","v":1,"pos":{{"{channel}":"{position}"}}}}"#);
+    let heads =
+        world.network.fetch(server_key).iter().filter(|r| r.scope() == Scope::Control).map(|r| r.id()).collect();
+    let post = authority::sign_control(key, server_key, 900, heads, 3, &authority::Action::Post { text }).unwrap();
+    world.network.publish(&post);
+}
+
+fn channel_names(channels: &[Channel]) -> Vec<String> {
+    channels.iter().map(|c| c.name.clone()).collect()
+}
+
+/// G-11 (Tech Lead's design): the owner moves a channel and every member
+/// sees the same order; a plain member can't, and their raw post doesn't
+/// count; an admin's post counts, but not one they sign after a demotion;
+/// unplaced channels keep today's order.
+#[test]
+fn channel_order_is_shared_and_only_admins_count() {
+    let world = World::new();
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let server = owner.core.create_server("Order", AgeRestriction::None).unwrap();
+    for name in ["alpha", "beta", "gamma"] {
+        owner.core.create_channel(&server.id, name, false).unwrap();
+    }
+    let bob = world.peer();
+    bob.core.restore_identity(LEGAL.split(' ').map(String::from).collect()).unwrap();
+    let bob_key = identity::RecoveryPhrase::parse(LEGAL).unwrap().identity().signing_key().clone();
+    let bob_id = bob.core.get_identity().unwrap().unwrap().id;
+    bob.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    bob.core.sync_now().unwrap();
+
+    // Unplaced: today's order, no positions.
+    let today = owner.core.list_channels(&server.id).unwrap();
+    assert!(today.iter().all(|c| c.position.is_none()));
+    let id = |name: &str| today.iter().find(|c| c.name == name).unwrap().id.clone();
+    assert_eq!(channel_names(&bob.core.list_channels(&server.id).unwrap()), channel_names(&today));
+
+    // The owner moves gamma first: the same order everywhere, with positions.
+    owner.events.take();
+    // Before the first other channel (IDs, so today's order, are random).
+    let first = today.iter().find(|c| c.name != "gamma").unwrap().id.clone();
+    let moved = owner.core.move_channel(&server.id, &id("gamma"), Some(&first), None).unwrap();
+    assert_eq!(moved[0].name, "gamma");
+    assert!(moved.iter().all(|c| c.position.is_some()), "the first move places every channel");
+    assert_eq!(channel_names(&owner.core.list_channels(&server.id).unwrap()), channel_names(&moved));
+    assert!(owner.events.take().iter().any(|e| matches!(e, Event::ChannelUpdated(c) if c.name == "gamma")));
+    bob.core.sync_now().unwrap();
+    assert_eq!(channel_names(&bob.core.list_channels(&server.id).unwrap()), channel_names(&moved));
+    // Then alpha after gamma: one key between its neighbours.
+    let order = owner.core.move_channel(&server.id, &id("alpha"), None, Some(&id("gamma"))).unwrap();
+    assert_eq!(&channel_names(&order)[..2], ["gamma", "alpha"]);
+
+    // Errors.
+    let err = |r: CoreResult<Vec<Channel>>| r.unwrap_err().code;
+    assert_eq!(err(bob.core.move_channel(&server.id, &id("beta"), None, None)), ErrorCode::NotAllowed);
+    assert_eq!(err(owner.core.move_channel(&server.id, &"ab".repeat(32), None, None)), ErrorCode::NotFound);
+    assert_eq!(err(owner.core.move_channel(&server.id, &id("beta"), Some(&"ab".repeat(32)), None)), ErrorCode::BadRequest);
+    assert_eq!(
+        err(owner.core.move_channel(&server.id, &id("beta"), Some(&id("gamma")), Some(&id("alpha")))),
+        ErrorCode::BadRequest,
+        "before and after aren't one gap"
+    );
+
+    // Bob, a plain member, signs a post himself: it doesn't count.
+    raw_order_post(&world, &server.id, &bob_key, &id("beta"), "1");
+    owner.core.sync_now().unwrap();
+    assert_eq!(channel_names(&owner.core.list_channels(&server.id).unwrap()), channel_names(&order));
+
+    // Promoted to admin, his post counts; demoted, his later one doesn't.
+    owner.core.grant_role(&server.id, &bob_id, Role::Admin).unwrap();
+    raw_order_post(&world, &server.id, &bob_key, &id("beta"), "1");
+    owner.core.sync_now().unwrap();
+    let as_admin = owner.core.list_channels(&server.id).unwrap();
+    assert_eq!(as_admin[0].name, "beta", "an admin's post didn't count");
+    owner.core.revoke_role(&server.id, &bob_id).unwrap();
+    raw_order_post(&world, &server.id, &bob_key, &id("beta"), "zz");
+    owner.core.sync_now().unwrap();
+    bob.core.sync_now().unwrap();
+    let after = owner.core.list_channels(&server.id).unwrap();
+    assert_eq!(channel_names(&after), channel_names(&as_admin), "a demoted admin's post counted");
+    assert_eq!(channel_names(&bob.core.list_channels(&server.id).unwrap()), channel_names(&after));
+}
+
+/// G-11: two admins move channels at the same time, neither seeing the
+/// other's move; once they meet, all three peers agree on one order.
+#[test]
+fn concurrent_channel_moves_converge() {
+    let world = World::new();
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let server = owner.core.create_server("Race", AgeRestriction::None).unwrap();
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    for name in ["alpha", "beta", "gamma", "delta"] {
+        owner.core.create_channel(&server.id, name, false).unwrap();
+    }
+    let partition = Partition::new(&world.network);
+    let dan = world.peer_on(partition.clone(), Arc::new(MemoryStore::new()), None, Arc::new(PendingGroupKeys));
+    let dan_id = sign_up(&dan, "Dan").id;
+    dan.core.join_server(&server.invite_link).unwrap();
+    let carol = world.peer();
+    sign_up(&carol, "Carol");
+    carol.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    owner.core.grant_role(&server.id, &dan_id, Role::Admin).unwrap();
+    // Everyone placed once, so the next moves are single keys.
+    let list = owner.core.list_channels(&server.id).unwrap();
+    owner.core.move_channel(&server.id, &list[0].id, None, None).unwrap();
+    dan.core.sync_now().unwrap();
+    carol.core.sync_now().unwrap();
+    let id = |name: &str| list.iter().find(|c| c.name == name).unwrap().id.clone();
+
+    partition.cut(server_key);
+    // An anchor that is neither moved channel (IDs, so today's order, are random).
+    let anchor = owner.core.list_channels(&server.id).unwrap().into_iter().find(|c| c.name != "delta" && c.name != "gamma").unwrap();
+    let (first, anchor_name) = (anchor.id.clone(), anchor.name.clone());
+    owner.core.move_channel(&server.id, &id("delta"), Some(&first), None).unwrap();
+    dan.core.move_channel(&server.id, &id("gamma"), Some(&first), None).unwrap();
+    partition.heal();
+    for peer in [&owner, &dan, &carol, &owner, &dan] {
+        peer.core.sync_now().unwrap();
+    }
+    let seen: Vec<Vec<String>> =
+        [&owner, &dan, &carol].iter().map(|p| channel_names(&p.core.list_channels(&server.id).unwrap())).collect();
+    assert_eq!(seen[0], seen[1]);
+    assert_eq!(seen[0], seen[2]);
+    // Both moved channels sit right before the anchor, in one agreed order.
+    let at = seen[0].iter().position(|n| *n == anchor_name).unwrap();
+    assert!(at >= 2);
+    assert_eq!(seen[0][at - 2..at].iter().map(String::as_str).collect::<BTreeSet<_>>(), BTreeSet::from(["delta", "gamma"]));
+}
+
+/// Security Lead (#323): a plain member's channel-order spam costs nothing
+/// and changes nothing. 500 posts from someone who was never owner or admin
+/// are skipped before any resolving: listing channels stays fast and the
+/// order stays the owner's.
+#[test]
+fn channel_order_spam_from_a_member_is_cheap_and_ignored() {
+    let world = World::new();
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let server = owner.core.create_server("Spam", AgeRestriction::None).unwrap();
+    for name in ["alpha", "beta", "gamma"] {
+        owner.core.create_channel(&server.id, name, false).unwrap();
+    }
+    let bob = world.peer();
+    bob.core.restore_identity(LEGAL.split(' ').map(String::from).collect()).unwrap();
+    let bob_key = identity::RecoveryPhrase::parse(LEGAL).unwrap().identity().signing_key().clone();
+    bob.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    let list = owner.core.list_channels(&server.id).unwrap();
+    let last = list.last().unwrap().id.clone();
+    let order = owner.core.move_channel(&server.id, &last, Some(&list[0].id), None).unwrap();
+
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let heads: Vec<records::RecordId> =
+        world.network.fetch(server_key).iter().filter(|r| r.scope() == Scope::Control).map(|r| r.id()).collect();
+    for i in 0..500u64 {
+        let text = format!(r#"{{"mvs":"mvs/channel-order/v1","v":1,"pos":{{"{last}":"{}"}}}}"#, i + 1);
+        let post = authority::sign_control(
+            &bob_key,
+            server_key,
+            1_000 + i,
+            heads.clone(),
+            4 + i,
+            &authority::Action::Post { text },
+        )
+        .unwrap();
+        world.network.publish(&post);
+    }
+    owner.core.sync_now().unwrap();
+    let start = std::time::Instant::now();
+    for _ in 0..10 {
+        assert_eq!(channel_names(&owner.core.list_channels(&server.id).unwrap()), channel_names(&order));
+    }
+    // Resolving each post's past would take tens of seconds here.
+    assert!(start.elapsed() < std::time::Duration::from_secs(3), "{:?}", start.elapsed());
+}

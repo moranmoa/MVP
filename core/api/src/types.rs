@@ -112,6 +112,11 @@ pub struct Channel {
     pub mentions: u32,
     /// #general, the first channel (#150): it can't be deleted.
     pub is_default: bool,
+    /// G-11: the channel's order key (base-62, at most 32 characters), when
+    /// an owner or admin placed it. The order is `listChannels`' order; the
+    /// key is informational only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

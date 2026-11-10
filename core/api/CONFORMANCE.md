@@ -85,6 +85,16 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 
 ## Proposed contract additions (Rust has them; `api.ts` doesn't yet)
 
+- Channel order (G-11, Tech Lead's design):
+  - `moveChannel(serverId, channelId, before?, after?)` returns `Channel[]` in the new order. It puts the channel right before `before`, or right after `after`, or last with neither; both given must be one gap.
+    - Errors: `not-allowed` below admin, `not-found` for an unknown channel, `bad-request` for a neighbour that isn't a live channel of the server, or two that aren't one gap.
+  - It signs one control-log `Post` tagged `mvs/channel-order/v1`, `{"mvs":"mvs/channel-order/v1","v":1,"pos":{channelHex: key}}`, with no new record kind or channel field, so 0.3.x peers ignore it.
+    - Keys are base-62 (`0-9A-Za-z`), compared as strings, 1–32 characters, never ending in `0`.
+    - A move normally sends one key between its neighbours'. When a neighbour has no key yet, or the key would pass 32 characters, it sends keys for every channel (a rebalance).
+  - **Who counts:** a post counts only if its author was owner or admin at that record, in the state of the post's causal past. Per channel, the last counting post in authority's order wins. Bad keys, deleted channels and unknown channels are ignored.
+  - **Order:** `listChannels` returns channels in order. Placed ones come first by key (then by ID); the rest keep today's order.
+  - `Channel.position` (additive, the key) appears on placed channels, in `listChannels` and in `channel.updated`. The core emits `channel.updated` for each channel a local move repositioned. The UI uses the list order and never re-sorts by the key.
+
 - Restore servers, phase A (#291, `src/backup.rs`). No new command or event.
   - **When the backup is written:** only when my server set changed since the last write, on the first sync round after start (login), or every 24 h (`BACKUP_REPUBLISH_MS`). Then my server list (server IDs and sync secrets) is merged into the newest backup the holders keep (`Network::fetch_backup`), sealed as the next version and handed to them (`Network::put_backup`). Rounds with nothing due fetch and put nothing. The fetch and the put run outside the core lock.
     - Servers this device listed and no longer has get a tombstone.
