@@ -125,6 +125,7 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
       - `not-allowed`: a text channel's ID, not a member, or kicked.
       - `call-full`: 5 are already in.
       - `relay-only`: relay-only is on, so calls are off.
+      - `in-call-elsewhere`: my own identity is already in this room from another computer. One computer per call until linked devices (phase 3).
       - `not-implemented`: no voice transport (sync's piece A).
   - `leaveCall()` returns `null` and is idempotent. The app lock and quitting leave too.
   - `setMuted(muted: boolean)` returns `null`. `not-allowed` outside a call.
@@ -145,6 +146,7 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
     - an offer or answer without a fingerprint.
   - Presence: a hello every 10 s, a bye on leaving, and a participant dropped after 30 s of silence.
     - Hellos and byes go only to members who could join that call themselves, so a call in an 18+ channel isn't shown to anyone else.
+    - They also go to my own identity, which reaches only my other computers (same recovery words). A hello or bye signed by me counts only when sync bound its sender to me and it has no `to`. It marks the room "in a call elsewhere" until its bye or 30 s without a hello, and never appears in the roster. My own envelopes echoed back are replays.
     - A full call's refusal counts only if it comes from someone already in that call, within 10 s of joining.
   - `applyUpdate` answers `not-allowed` during a call.
 - Relay-only (GAP-6r), per device:
@@ -158,7 +160,7 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
     - `VoiceRoom.relayOnly`, so the UI can disable "Join" before trying;
     - `CallState.relayOnly`.
   - After a change, one `voice.room` per server at the next sync round carries the new value.
-- `CoreError.code`, voice: `'call-full' | 'relay-only'`.
+- `CoreError.code`, voice: `'call-full' | 'relay-only' | 'in-call-elsewhere'`.
 - Invites (#208), all moderator and up (`not-allowed` below that):
   - `createInvite(serverId, input?: { expiresMs?: number, maxUses?: number })`
     returns `{ id, link, expiresAt?, maxUses? }`. `expiresMs` is the last time a

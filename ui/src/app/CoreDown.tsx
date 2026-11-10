@@ -66,7 +66,9 @@ export function watchUnavailable(core: CoreApi, onDown: (detail: CoreDownDetail 
         if (result instanceof Promise) {
           result.catch((e: unknown) => {
             if (isCoreError(e) && e.code === 'core-unavailable') onDown(e.detail);
-            else if (isCoreError(e) && e.code === 'keyring-unavailable') onDown('keyring');
+            // signOut's keyring-unavailable means the keychain refused and nothing
+            // changed (#304): the dialog says so, the app is fine.
+            else if (isCoreError(e) && e.code === 'keyring-unavailable' && prop !== 'signOut') onDown('keyring');
           });
         }
         return result;

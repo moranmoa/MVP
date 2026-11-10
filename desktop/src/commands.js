@@ -17,6 +17,7 @@ const COMMANDS = Object.freeze({
   getRecoveryWords: [],
   restoreIdentity: ['words', 'input'],
   updateProfile: ['input'],
+  signOut: ['words', 'withoutWords'],
   // Servers and channels
   listServers: [],
   listChannels: ['serverId'],

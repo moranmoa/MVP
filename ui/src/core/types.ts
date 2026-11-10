@@ -114,6 +114,8 @@ export interface CoreError {
     | 'timeout'
     | 'core-unavailable'
     | 'core-restarted'
+    /** #304, desktop: the native "sign out without the words" dialog was declined. */
+    | 'cancelled'
     | 'too-large'
     | 'keyring-unavailable'
     // Voice v1 (#223)
