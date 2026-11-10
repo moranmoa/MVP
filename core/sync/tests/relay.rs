@@ -696,3 +696,80 @@ async fn the_voice_rate_cap_holds() {
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
 }
+
+/// T8-02 piece 3: a member's invite publication reaches the other members
+/// (`/mvs/invite-pub/1`), also one that binds later; anyone, a stranger
+/// with no server secret included, can ask for its envelope handle
+/// (`/mvs/invite/1`) and gets it, or the same empty answer for a handle
+/// nobody serves or one that was dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn invite_publications_reach_members_and_answer_anyone() {
+    let relay_key = identity::Keypair::generate_ed25519();
+    let port = free_port();
+    let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::from(relay_key.public())).parse().unwrap();
+    let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _relay = start_relay_counting(relay_key, port, circuits, true);
+    let server = test_server().0;
+    let id = |n: u8| records::PublicKey::from_bytes(SigningKey::from_bytes(&[n; 32]).verifying_key().to_bytes());
+
+    let (a, _a_events) = bound_node_events("invite-a", &relay, 21, false, Arc::new(AcceptAll)).await;
+    let (b, mut b_events) = bound_node_events("invite-b", &relay, 22, false, Arc::new(AcceptAll)).await;
+    let start = Instant::now();
+    while !a.presence(server).await.unwrap().online.contains(&id(22)) {
+        assert!(start.elapsed() < Duration::from_secs(60), "the members never bound");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Served and announced: B, a member, gets it as an event.
+    let (handle, publication) = ([0xab; 32], vec![0x5a; 300]);
+    assert!(a.serve_invite(server, handle, publication.clone(), true).await.unwrap());
+    let got = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(NodeEvent::InvitePublication { server: s, from, bytes }) = b_events.recv().await {
+                return (s, from, bytes);
+            }
+        }
+    })
+    .await
+    .expect("B never got the publication");
+    assert_eq!(got, (server, id(21), publication.clone()));
+    // First wins; over the size cap, empty, or a server we don't hold: refused.
+    assert!(!a.serve_invite(server, handle, vec![1; 10], false).await.unwrap());
+    assert!(!a.serve_invite(server, [1; 32], vec![1; sync::MAX_INVITE_PUBLICATION + 1], false).await.unwrap());
+    assert!(!a.serve_invite(server, [1; 32], vec![], false).await.unwrap());
+    assert!(!a.serve_invite(ServerId::from_bytes([3; 32]), [1; 32], vec![1; 10], false).await.unwrap());
+
+    // A member that binds later catches up, unannounced.
+    let (c, mut c_events) = bound_node_events("invite-c", &relay, 23, false, Arc::new(AcceptAll)).await;
+    let got = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if let Some(NodeEvent::InvitePublication { bytes, .. }) = c_events.recv().await {
+                return bytes;
+            }
+        }
+    })
+    .await
+    .expect("a late member never caught up");
+    assert_eq!(got, publication);
+
+    // A stranger (no secret, not bound) asks by handle.
+    let (stranger, _) = node_lan("invite-stranger", &relay, false).await;
+    let start = Instant::now();
+    loop {
+        let answers = stranger.fetch_invite(handle).await.unwrap();
+        if answers.contains(&publication) {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(60), "the stranger never got the envelope");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(stranger.fetch_invite([0xcd; 32]).await.unwrap().is_empty(), "nobody serves that handle");
+    a.drop_invite(handle).unwrap();
+    b.drop_invite(handle).unwrap();
+    c.drop_invite(handle).unwrap();
+    assert!(!stranger.fetch_invite(handle).await.unwrap().contains(&publication), "served after it was dropped");
+
+    for node in [a, b, c, stranger] {
+        node.shutdown().await.unwrap();
+    }
+}
