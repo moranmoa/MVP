@@ -6,6 +6,44 @@ fails if its version has no section here. Write a section before tagging:
 `## [X.Y.Z] - YYYY-MM-DD`, then Hebrew and English (Fixed / New / Known).
 Never put the relay domain or any IP address here.
 
+## [0.3.0] - 2026-11-10
+
+### מה חדש
+- **שיחות קול:** בכל שרת יש חדר קולי "הצטרפות לשיחה" עם סמל רמקול. כל מי שבשרת יכולים להיכנס, עד 5 אנשים, ורואים מי בפנים עוד לפני שנכנסים. יש השתקה, יציאה, וסימון מי מדבר.
+- **פרטיות בשיחות:** לפני השיחה הראשונה מופיעה הודעה שבשיחה המחשבים מתחברים ישירות, ולכן כתובת ה-IP גלויה למשתתפים. במצב "ממסר בלבד" אין שיחות.
+- **מיקרופון רק בזמן שיחה:** האפליקציה מקבלת גישה למיקרופון רק אחרי הצטרפות לשיחה. בגרסה הזו האפליקציה לא ניגשת למצלמה, למסך או לשמע של המחשב.
+- **שינוי שם, יציאה וסגירה של שרת:** הבעלים יכולים לשנות לו שם ולסגור אותו (השרת נשאר לקריאה בלבד 30 יום, ואחר כך הוא כבר לא מופיע באפליקציה). אפשר לצאת משרת.
+- **תפריטים בטלפון:** בטלפון התפריטים נפתחים כגיליון מלמטה.
+- **רישיונות:** כל התקנה כוללת קובץ רישיונות של רכיבי הקוד הפתוח.
+
+### מה תוקן
+- **ההודעה הראשונה אחרי הצטרפות** נשלחת מהר יותר, גם כשכמה אנשים מצטרפים בבת אחת.
+- **עדכון ספריית הרשת** (libp2p 0.56): הוסרו רכיבי הצפנה ישנים עם 7 התראות אבטחה.
+- **Windows:** אם רכיב הליבה חסר, מוצג מסך "חסר" במקום קריסות חוזרות.
+
+### ידוע
+- **שיחות קול עובדות כרגע רק כשכל המשתתפים באותה רשת** (למשל אותו Wi-Fi). אנחנו עובדים על שיחות בין רשתות שונות.
+- בפעם הראשונה Windows עשוי לשאול אם לאפשר ל-MVS גישה לרשת. מומלץ לאשר (גם ברשתות פרטיות); בלי זה החיבור עובר רק דרך הממסר, ושיחות קול לא יתחברו. אפשר לשנות את זה אחר כך בהגדרות חומת האש של Windows.
+
+---
+
+### New
+- **Voice calls:** every server has a "Join chat" voice room with a speaker icon. Anyone in the server can join, up to 5 people, and you can see who is inside before joining. Mute, leave, and who's speaking.
+- **Privacy in calls:** before your first call, a notice explains that in a call computers connect directly, so your IP address is visible to the other participants. No calls in relay-only mode.
+- **Microphone only during a call:** the app gets the microphone only after you join a call. In this version the app doesn't access the camera, the screen or the computer's sound.
+- **Rename, leave and close a server:** owners can rename a server and close it (it stays read-only for 30 days, then no longer shows in the app). You can leave a server.
+- **Phone menus:** on a phone, menus open as a sheet from the bottom.
+- **Licences:** every install includes the open-source licence notices.
+
+### Fixed
+- **Your first message after joining** goes through faster, also when several people join at once.
+- **Network library upgrade** (libp2p 0.56): old crypto components with 7 security advisories are gone.
+- **Windows:** if the core component is missing, the app shows a "missing" screen instead of crash-looping.
+
+### Known
+- **Voice calls currently work only when everyone is on the same network** (for example the same Wi-Fi). Calls across networks are in progress.
+- On first run, Windows may ask whether to allow MVS on the network. Please allow it (also on private networks); otherwise connections go through the relay only, and voice calls won't connect. You can change this later in Windows Firewall settings.
+
 ## [0.2.5] - 2026-11-06
 
 גרסה 0.2.4 לא פורסמה, ולכן 0.2.5 כוללת גם את כל מה שבה.
