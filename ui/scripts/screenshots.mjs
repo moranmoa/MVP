@@ -381,6 +381,29 @@ for (const [detail, name] of [
   await p.close();
 }
 
+// ---- voice v1, piece E: calls (240-249) -------------------------------------------
+{
+  const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999', 'x');
+  await p.getByRole('button', { name: 'הצטרפות לשיחה' }).click();
+  const bar = p.getByRole('region', { name: 'שיחה קולית' });
+  await bar.waitFor();
+  await bar.getByRole('button', { name: 'השתקה' }).click();
+  await bar.getByRole('button', { name: 'ביטול השתקה' }).waitFor();
+  await shot(p, '240-call-bar-he');
+  await p.close();
+}
+
+for (const [code, name] of [
+  ['relay-only', '241-call-relay-only-he'],
+  ['call-full', '242-call-full-he'],
+]) {
+  const p = await chat(`?demo=1&still=1&lang=he&theme=light&update=999999&callError=${code}`, 'x');
+  await p.getByRole('button', { name: 'הצטרפות לשיחה' }).click();
+  await p.locator('.call-error').waitFor();
+  await shot(p, name);
+  await p.close();
+}
+
 // ---- security demo: what other people could send ---------------------------
 {
   const p = await chat('?demo=1&hostile=1&still=1&lang=he&theme=light&update=999999', 'x');

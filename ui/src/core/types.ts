@@ -112,6 +112,9 @@ export interface CoreError {
     | 'core-restarted'
     | 'too-large'
     | 'keyring-unavailable'
+    // Voice v1 (#223)
+    | 'call-full'
+    | 'relay-only'
     // In-app update (core/api CONFORMANCE "Updates")
     | 'offline'
     | 'invalid-update'
@@ -206,4 +209,25 @@ export interface CreatedInvite {
   link: string;
   expiresAt?: number;
   maxUses?: number;
+}
+
+/** Voice v1 (#223). `identity` is a member id (64 hex). */
+export interface CallParticipant {
+  identity: Id;
+  muted: boolean;
+}
+
+/** My current call. After leaveCall, `participants` is empty. `full` = 5 in. */
+export interface CallState {
+  channelId: Id;
+  participants: CallParticipant[];
+  full: boolean;
+}
+
+/** WebRTC signalling between call members; for the voice engine (ui/src/voice). */
+export interface CallSignal {
+  from: Id;
+  kind: 'offer' | 'answer' | 'ice';
+  payload: string;
+  fingerprintVerified: boolean;
 }

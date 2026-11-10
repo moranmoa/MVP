@@ -2368,3 +2368,68 @@ kbd {
   display: inline-flex;
   gap: 0.375rem;
 }
+
+/* Voice v1, piece E: the call bar, Join call, and the call's channel. */
+.call-bar {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.625rem 0.75rem;
+  border-block-start: 1px solid var(--border);
+  background: var(--bg-hover);
+}
+
+.call-where {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  margin: 0;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--success);
+}
+
+.call-people {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.call-people li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  font-size: 0.875rem;
+}
+
+.call-people li.speaking .avatar {
+  box-shadow: 0 0 0 2px var(--success);
+}
+
+.call-muted {
+  display: inline-flex;
+  color: var(--text-muted);
+}
+
+.call-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.call-here {
+  display: inline-flex;
+  color: var(--success);
+}
+
+.call-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 1rem;
+  background: var(--bg-hover);
+  color: var(--danger, var(--text));
+  font-size: 0.875rem;
+}
