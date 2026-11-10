@@ -2692,8 +2692,8 @@ fn relay_only_is_stored_applied_and_turns_calls_off() {
     assert!(!owner.core.join_call(&room.room_id).unwrap().relay_only);
     owner.core.leave_call().unwrap();
 
-    // No database yet (or an unreadable one): off.
-    assert!(!api::stored_relay_only(&dir.join("missing").join("core.db")));
+    // A database that can't be opened: on (fails closed, see the unit test).
+    assert!(api::stored_relay_only(&dir.join("missing").join("core.db")));
     drop(owner);
     let _ = std::fs::remove_dir_all(&dir);
 }

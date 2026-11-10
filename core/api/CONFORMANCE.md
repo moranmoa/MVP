@@ -125,7 +125,7 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
     - the network keeps no direct listener, makes no direct dials, and reaches peers only through relay circuits. Closing direct connections that are already open is sync's GAP-6r blocker 1;
     - my call ends at once (a bye to the others, then a `call.state` with `participants: []` and `relayOnly: true`);
     - `joinCall` answers `relay-only` until it's off.
-  - At start, `mvs-core` reads the stored value before the network starts and the node starts with it.
+  - At start, `mvs-core` reads the stored value before the network starts and the node starts with it. It fails closed: a database that can't be opened or read, or a value other than off, means on.
   - Shown up front:
     - `AppInfo.relayOnly` from `getAppInfo`;
     - `VoiceRoom.relayOnly`, so the UI can disable "Join" before trying;
