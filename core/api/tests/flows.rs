@@ -67,6 +67,7 @@ fn names(events: &[Event]) -> Vec<&'static str> {
             Event::MessageUpdated(_) => "message.updated",
             Event::CallState(_) => "call.state",
             Event::CallSignal { .. } => "call.signal",
+            Event::VoiceRoom(_) => "voice.room",
         })
         .collect()
 }
@@ -1681,111 +1682,196 @@ fn a_failed_join_re_key_fails_closed() {
     );
 }
 
-/// The security lead's rules for the join re-key: batched (one per channel
-/// per 10-30 s window, covering everyone who joined meanwhile), and the
-/// new key only, so a joiner can't open what was written before the join.
-#[test]
-fn join_re_keys_are_batched_and_cover_only_new_messages() {
+/// A server, its owner (real cipher), and a counter of rotations (one
+/// rotation's parts share their deps).
+fn keyed_server(world: &World, name: &str) -> (Peer, ServerSummary, String) {
     use api::crypto::GroupKeysCipher;
-
-    let world = World::new();
-    let open = |words: &str, name: &str| {
-        let cipher = Arc::new(GroupKeysCipher::locked());
-        let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
-        peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
-        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
-        peer.core.update_profile(profile).unwrap();
-        peer
-    };
-    let owner = open(OWNER_WORDS, "Owner");
-    let server = owner.core.create_server("Batch", AgeRestriction::None).unwrap();
-    let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
-    owner.core.send_message(&channel, "before anyone joined", None).unwrap();
-    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
-    let rotations =
-        || world.network.fetch(server_key).iter().filter(|r| r.kind() == Kind::KeyRotation).count();
-
-    // The first joiner: keyed at once; the message from before doesn't open.
-    let b = open(LEGAL, "B");
-    b.core.join_server(&server.invite_link).unwrap();
-    owner.core.sync_now().unwrap();
-    b.core.sync_now().unwrap();
-    assert_eq!(b.core.get_message_count(&channel).unwrap(), 0, "a pre-join message opened");
-    b.core.send_message(&channel, "B here", None).unwrap();
-
-    // A second joiner inside the window: no new rotation yet, C waits.
-    let after_b = rotations();
-    let c = open(
-        "letter advice cage absurd amount doctor acoustic avoid letter advice cage above",
-        "C",
-    );
-    c.core.join_server(&server.invite_link).unwrap();
-    owner.core.sync_now().unwrap();
-    assert_eq!(rotations(), after_b, "a second re-key inside the window");
-    c.core.sync_now().unwrap();
-    assert_eq!(
-        c.core.send_message(&channel, "too soon", None).unwrap_err().code,
-        ErrorCode::NotAllowed
-    );
-
-    // Past the window, one round keys C (no new records needed).
-    *world.clock.0.lock().unwrap() += 31_000;
-    owner.core.sync_now().unwrap();
-    assert!(rotations() > after_b);
-    c.core.sync_now().unwrap();
-    c.core.send_message(&channel, "C here", None).unwrap();
-    owner.core.sync_now().unwrap();
-    assert_eq!(owner.core.get_message_count(&channel).unwrap(), 3);
-}
-
-/// GAP-8 amplification: 10 joins in 5 s, with the owner syncing every
-/// 500 ms, give at most one rotation; once the window has passed, one more
-/// round keys everyone, and all 10 can write.
-#[test]
-fn ten_joins_in_five_seconds_make_at_most_one_rotation() {
-    use api::crypto::GroupKeysCipher;
-
-    let world = World::new();
     let owner =
         world.peer_with(Arc::new(MemoryStore::new()), None, Arc::new(GroupKeysCipher::locked()));
     owner.core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
     let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None };
     owner.core.update_profile(profile).unwrap();
-    let server = owner.core.create_server("Flood", AgeRestriction::None).unwrap();
+    let server = owner.core.create_server(name, AgeRestriction::None).unwrap();
     let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
-    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
-    // One rotation's parts share their deps; count rotations, not parts.
-    let rotations = || {
-        let mut seen = BTreeSet::new();
-        for r in world.network.fetch(server_key).iter().filter(|r| r.kind() == Kind::KeyRotation) {
-            seen.insert(r.deps().to_vec());
-        }
-        seen.len()
-    };
+    (owner, server, channel)
+}
+
+fn rotations(world: &World, server: &ServerSummary) -> usize {
+    let key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let mut seen = BTreeSet::new();
+    for r in world.network.fetch(key).iter().filter(|r| r.kind() == Kind::KeyRotation) {
+        seen.insert(r.deps().to_vec());
+    }
+    seen.len()
+}
+
+/// A member with the real cipher who joined `server` (the owner hasn't
+/// synced yet).
+fn joiner(world: &World, server: &ServerSummary, name: &str) -> Peer {
+    use api::crypto::GroupKeysCipher;
+    let peer =
+        world.peer_with(Arc::new(MemoryStore::new()), None, Arc::new(GroupKeysCipher::locked()));
+    sign_up(&peer, name);
+    peer.core.join_server(&server.invite_link).unwrap();
+    peer
+}
+
+fn advance(world: &World, ms: u64) {
+    *world.clock.0.lock().unwrap() += ms;
+}
+
+/// The security lead's token bucket for join re-keys (GAP-8): a burst of 3
+/// re-keys at once; a 4th waits for the next token (due 15 s after the
+/// first was spent) and shares that re-key with everyone who joined
+/// meanwhile. The new key only: a joiner can't open what came before.
+#[test]
+fn join_re_keys_spend_a_token_bucket() {
+    let world = World::new();
+    let (owner, server, channel) = keyed_server(&world, "Bucket");
+    owner.core.send_message(&channel, "before anyone joined", None).unwrap();
+
+    // A burst of 3: each re-keyed at once, each can write at once.
+    let mut first = Vec::new();
+    for i in 0..3 {
+        let before = rotations(&world, &server);
+        let peer = joiner(&world, &server, &format!("J{i}"));
+        advance(&world, 100);
+        owner.core.sync_now().unwrap();
+        assert_eq!(rotations(&world, &server), before + 1, "join {i} waited");
+        peer.core.sync_now().unwrap();
+        peer.core.send_message(&channel, &format!("J{i} here"), None).unwrap();
+        first.push(peer);
+    }
+    assert!(owner.core.next_rekey_in().is_none());
+
+    // The 4th and 5th: the bucket is empty, so they wait, together.
+    let after_burst = rotations(&world, &server);
+    let fourth = joiner(&world, &server, "J3");
+    let fifth = joiner(&world, &server, "J4");
+    owner.core.sync_now().unwrap();
+    assert_eq!(rotations(&world, &server), after_burst, "a 4th re-key without a token");
+    for peer in [&fourth, &fifth] {
+        peer.core.sync_now().unwrap();
+        assert_eq!(
+            peer.core.send_message(&channel, "too soon", None).unwrap_err().code,
+            ErrorCode::NotAllowed
+        );
+    }
+    // Due one refill after the first token was spent (a few hundred ms of
+    // test clock ago); the loop wakes exactly then.
+    let due = owner.core.next_rekey_in().expect("a waiting re-key");
+    let refill = std::time::Duration::from_millis(JOIN_REKEY_REFILL_MS);
+    assert!(due < refill && due > refill - std::time::Duration::from_secs(1), "{due:?}");
+    // The test clock moves 1 ms per read, so check within 50 ms either way.
+    advance(&world, due.as_millis() as u64 - 50);
+    owner.core.sync_now().unwrap();
+    assert_eq!(rotations(&world, &server), after_burst, "re-keyed before the token");
+    advance(&world, 100);
+    owner.core.sync_now().unwrap();
+    assert_eq!(rotations(&world, &server), after_burst + 1, "one shared re-key");
+    assert!(owner.core.next_rekey_in().is_none());
+    for peer in [&fourth, &fifth] {
+        peer.core.sync_now().unwrap();
+        peer.core.send_message(&channel, "now", None).unwrap();
+    }
+    owner.core.sync_now().unwrap();
+    // 1 from before, 3 from the burst, 2 shared.
+    assert_eq!(owner.core.get_message_count(&channel).unwrap(), 6);
+    // Nobody who joined opens the message from before they joined.
+    first[0].core.sync_now().unwrap();
+    let bodies: Vec<String> = first[0]
+        .core
+        .get_messages(&channel, 0, 9)
+        .unwrap()
+        .messages
+        .into_iter()
+        .map(|m| m.body)
+        .collect();
+    assert!(!bodies.iter().any(|b| b == "before anyone joined"), "{bodies:?}");
+}
+
+/// GAP-8 amplification: 10 joins in 5 s, with the owner syncing every
+/// 500 ms, give at most 3 rotations (the burst); the next token keys
+/// everyone else at once, and all 10 can write.
+#[test]
+fn ten_joins_in_five_seconds_make_at_most_three_rotations() {
+    let world = World::new();
+    let (owner, server, channel) = keyed_server(&world, "Flood");
     let joiners: Vec<Peer> = (0..10)
         .map(|i| {
-            let peer = world.peer_with(
-                Arc::new(MemoryStore::new()),
-                None,
-                Arc::new(GroupKeysCipher::locked()),
-            );
-            sign_up(&peer, &format!("J{i}"));
-            peer.core.join_server(&server.invite_link).unwrap();
-            *world.clock.0.lock().unwrap() += 500;
+            let peer = joiner(&world, &server, &format!("J{i}"));
+            advance(&world, 500);
             owner.core.sync_now().unwrap();
             peer
         })
         .collect();
-    assert!(rotations() <= 1, "{} rotations for 10 joins in 5 s", rotations());
+    let n = rotations(&world, &server);
+    assert!(n <= JOIN_REKEY_BURST as usize, "{n} rotations for 10 joins in 5 s");
 
-    *world.clock.0.lock().unwrap() += 20_000;
+    advance(&world, JOIN_REKEY_REFILL_MS);
     owner.core.sync_now().unwrap();
+    assert!(rotations(&world, &server) <= n + 1);
     for (i, joiner) in joiners.iter().enumerate() {
         joiner.core.sync_now().unwrap();
         joiner.core.send_message(&channel, &format!("hi {i}"), None).unwrap();
     }
     owner.core.sync_now().unwrap();
     assert_eq!(owner.core.get_message_count(&channel).unwrap(), 10);
+}
+
+/// The Tech Lead's hot-loop fix: the wait for a due re-key never drops
+/// below 250 ms, and a rotator who is demoted stops waiting at once (no
+/// due re-key left to spin the sync loop on).
+#[test]
+fn a_waiting_re_key_never_spins_and_a_demoted_rotator_stops_waiting() {
+    let world = World::new();
+    let (owner, server, _) = keyed_server(&world, "Spin");
+    let moderator = joiner(&world, &server, "Mod");
+    let mod_id = moderator.core.get_identity().unwrap().unwrap().id;
+    owner.core.sync_now().unwrap();
+    owner.core.grant_role(&server.id, &mod_id, Role::Moderator).unwrap();
+    moderator.core.sync_now().unwrap();
+
+    // Only the moderator syncs: it spends its 3 tokens, then waits.
+    for i in 0..4 {
+        joiner(&world, &server, &format!("J{i}"));
+        moderator.core.sync_now().unwrap();
+    }
+    assert!(moderator.core.next_rekey_in().is_some(), "the moderator isn't waiting");
+
+    // Past due, and the re-key hasn't happened yet: still at least 250 ms.
+    advance(&world, 2 * JOIN_REKEY_REFILL_MS);
+    assert_eq!(moderator.core.next_rekey_in(), Some(REKEY_WAKE_FLOOR));
+
+    // Demoted: the next round clears the wait.
+    owner.core.revoke_role(&server.id, &mod_id).unwrap();
+    moderator.core.sync_now().unwrap();
+    assert_eq!(moderator.core.next_rekey_in(), None, "a demoted rotator still waits");
+    moderator.core.sync_now().unwrap();
+    assert_eq!(moderator.core.next_rekey_in(), None);
+}
+
+/// A kick never waits for a token: with the bucket empty, it re-keys at
+/// once, and that re-key covers a joiner who was waiting too.
+#[test]
+fn a_kick_with_an_empty_bucket_re_keys_at_once() {
+    let world = World::new();
+    let (owner, server, channel) = keyed_server(&world, "Kick");
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let peer = joiner(&world, &server, &format!("J{i}"));
+        owner.core.sync_now().unwrap();
+        ids.push(peer.core.get_identity().unwrap().unwrap().id);
+    }
+    let waiting = joiner(&world, &server, "J3");
+    owner.core.sync_now().unwrap();
+    assert!(owner.core.next_rekey_in().is_some(), "the bucket isn't empty");
+    let before = rotations(&world, &server);
+    owner.core.kick_member(&server.id, &ids[0]).unwrap();
+    assert_eq!(rotations(&world, &server), before + 1, "the kick waited for a token");
+    assert!(owner.core.next_rekey_in().is_none());
+    waiting.core.sync_now().unwrap();
+    waiting.core.send_message(&channel, "covered by the kick's re-key", None).unwrap();
 }
 
 /// B11: the owner's channel commands, with names normalised and checked,
@@ -2173,30 +2259,64 @@ fn a_call_between_members() {
     for peer in [&owner, &alice, &bob] {
         peer.core.sync_now().unwrap();
     }
-    let general = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    let room = owner.core.get_voice_room(&server.id).unwrap().room_id;
     let peers = [(owner_id.as_str(), &owner), (alice_id.as_str(), &alice), (bob_id.as_str(), &bob)];
 
     // No transport yet: not-implemented. Then relay-only: calls are off.
-    assert_eq!(owner.core.join_call(&general).unwrap_err().code, ErrorCode::NotImplemented);
+    assert_eq!(owner.core.join_call(&room).unwrap_err().code, ErrorCode::NotImplemented);
     for (id, peer) in peers {
         hub.connect(peer, id);
     }
     hub.relay_only.store(true, std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(owner.core.join_call(&general).unwrap_err().code, ErrorCode::RelayOnly);
+    assert_eq!(owner.core.join_call(&room).unwrap_err().code, ErrorCode::RelayOnly);
     hub.relay_only.store(false, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(owner.core.join_call(&"ab".repeat(32)).unwrap_err().code, ErrorCode::NotFound);
+    // Calls happen only in the room: a text channel is not-allowed.
+    let general = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    assert_ne!(general, room);
+    assert_eq!(owner.core.join_call(&general).unwrap_err().code, ErrorCode::NotAllowed);
+    // Every member derives the same room; an unknown server is not-found.
+    assert_eq!(bob.core.get_voice_room(&server.id).unwrap().room_id, room);
+    assert_eq!(bob.core.get_voice_room(&"ab".repeat(32)).unwrap_err().code, ErrorCode::NotFound);
 
     // The owner, then Alice, join; each sees both.
-    let state = owner.core.join_call(&general).unwrap();
+    let state = owner.core.join_call(&room).unwrap();
     assert_eq!((who(&state), state.full), (vec![owner_id.as_str()], false));
     assert!(owner.core.in_call());
     hub.pump(&peers);
-    let state = alice.core.join_call(&general).unwrap();
+    let state = alice.core.join_call(&room).unwrap();
     assert_eq!(who(&state), [alice_id.as_str(), owner_id.as_str()]);
     owner.events.take();
     hub.pump(&peers);
     let seen = call_states(owner.events.take());
     assert_eq!(who(seen.last().unwrap()), [owner_id.as_str(), alice_id.as_str()]);
+
+    // Bob isn't in the call but sees who is: one voice.room at his tick,
+    // and the same from getVoiceRoom. Identity and muted only.
+    bob.events.take();
+    bob.core.voice_tick();
+    let rooms: Vec<VoiceRoom> = bob
+        .events
+        .take()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::VoiceRoom(room) => Some(room),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rooms.len(), 1);
+    let mut inside: Vec<&str> = rooms[0].participants.iter().map(|p| p.user_id.as_str()).collect();
+    inside.sort();
+    let mut want = [owner_id.as_str(), alice_id.as_str()];
+    want.sort();
+    assert_eq!(inside, want);
+    assert_eq!(
+        (rooms[0].server_id.as_str(), rooms[0].room_id.as_str()),
+        (server.id.as_str(), room.as_str())
+    );
+    assert_eq!(bob.core.get_voice_room(&server.id).unwrap(), rooms[0]);
+    let json = serde_json::to_value(&rooms[0]).unwrap();
+    assert_eq!(json["participants"][0].as_object().unwrap().len(), 2, "more than id and muted");
 
     // Signalling: only to a participant, offers and answers with a fingerprint.
     assert_eq!(
@@ -2252,13 +2372,36 @@ fn a_call_between_members() {
     let seen = call_states(owner.events.take());
     assert_eq!(who(seen.last().unwrap()), [owner_id.as_str()]);
 
-    bob.core.join_call(&general).unwrap();
+    bob.core.join_call(&room).unwrap();
     hub.pump(&peers);
     *world.clock.0.lock().unwrap() += 31_000;
     owner.events.take();
     owner.core.voice_tick();
     let seen = call_states(owner.events.take());
     assert_eq!(who(seen.last().unwrap()), [owner_id.as_str()], "Bob didn't time out");
+
+    // Relay-only turns on mid-call: the owner leaves at the next tick, says
+    // bye, and call.state keeps its shape.
+    hub.pump(&peers);
+    hub.relay_only.store(true, std::sync::atomic::Ordering::SeqCst);
+    owner.events.take();
+    owner.core.voice_tick();
+    assert!(!owner.core.in_call());
+    let seen = call_states(owner.events.take());
+    let last = seen.last().unwrap();
+    assert_eq!(
+        (last.channel_id.as_str(), last.participants.len(), last.full),
+        (room.as_str(), 0, false)
+    );
+    let sent = hub.pump(&peers);
+    assert!(
+        !sent.is_empty()
+            && sent.iter().all(|(from, _, blob)| {
+                *from == user_key(&owner_id)
+                    && String::from_utf8_lossy(blob).contains(r#"\"kind\":\"bye\""#)
+            })
+    );
+    hub.relay_only.store(false, std::sync::atomic::Ordering::SeqCst);
     owner.core.leave_call().unwrap();
     assert!(!owner.core.in_call());
 }
@@ -2282,7 +2425,7 @@ fn a_call_holds_five_and_kicked_members_are_ignored() {
     for (_, peer) in &others {
         peer.core.sync_now().unwrap();
     }
-    let general = owner.core.list_channels(&server.id).unwrap().remove(0).id;
+    let room = owner.core.get_voice_room(&server.id).unwrap().room_id;
     hub.connect(&owner, &owner_id);
     for (id, peer) in &others {
         hub.connect(peer, id);
@@ -2290,16 +2433,16 @@ fn a_call_holds_five_and_kicked_members_are_ignored() {
     let mut peers: Vec<(&str, &Peer)> = vec![(owner_id.as_str(), &owner)];
     peers.extend(others.iter().map(|(id, peer)| (id.as_str(), peer)));
 
-    owner.core.join_call(&general).unwrap();
+    owner.core.join_call(&room).unwrap();
     hub.pump(&peers);
     for (_, peer) in &others[..4] {
-        peer.core.join_call(&general).unwrap();
+        peer.core.join_call(&room).unwrap();
         hub.pump(&peers);
     }
-    let state = owner.core.join_call(&general).unwrap();
+    let state = owner.core.join_call(&room).unwrap();
     assert_eq!((state.participants.len(), state.full), (5, true));
     let (_, sixth) = &others[4];
-    assert_eq!(sixth.core.join_call(&general).unwrap_err().code, ErrorCode::CallFull);
+    assert_eq!(sixth.core.join_call(&room).unwrap_err().code, ErrorCode::CallFull);
     assert!(!sixth.core.in_call());
 
     // P0 is kicked; before it learns, its hellos go out and are ignored.
@@ -2312,6 +2455,17 @@ fn a_call_holds_five_and_kicked_members_are_ignored() {
     *world.clock.0.lock().unwrap() += 11_000;
     kicked.core.voice_tick();
     hub.pump(&peers);
-    let state = owner.core.join_call(&general).unwrap();
+    let state = owner.core.join_call(&room).unwrap();
     assert!(!who(&state).contains(&kicked_id.as_str()));
+    let roster = owner.core.get_voice_room(&server.id).unwrap();
+    assert!(!roster.participants.iter().any(|p| &p.user_id == kicked_id));
+    assert!(roster.participants.len() <= 5);
+
+    // Once P0 reads its kick: no roster for it, by command or event.
+    kicked.core.sync_now().unwrap();
+    kicked.events.take();
+    kicked.core.voice_tick();
+    assert!(!kicked.events.take().iter().any(|e| matches!(e, Event::VoiceRoom(_))));
+    let code = kicked.core.get_voice_room(&server.id).unwrap_err().code;
+    assert!(matches!(code, ErrorCode::NotFound | ErrorCode::NotAllowed), "{code:?}");
 }

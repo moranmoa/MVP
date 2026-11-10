@@ -33,6 +33,9 @@ const V1_LEN: usize = 1 + KEY_LEN + SERVER_PREFIX_LEN + CHECKSUM_LEN;
 /// quadratic).
 const MAX_V1_CHARS: usize = 60;
 const CHECKSUM_CONTEXT: &str = "mvs/invite-link-checksum/v1";
+/// Leading bytes reported as a newer version; anything else is malformed.
+const FIRST_UNKNOWN_VERSION: u8 = 0x02;
+const LAST_UNKNOWN_VERSION: u8 = 0x0f;
 
 /// A parsed invite link.
 pub enum InviteLink {
@@ -62,7 +65,8 @@ pub enum LinkError {
 }
 
 /// v1 link for invite key `key` on `server`.
-pub fn encode_v1(key: &[u8; KEY_LEN], server: &ServerId) -> String {
+/// Built in place in a zeroized buffer: the link is a bearer credential.
+pub fn encode_v1(key: &[u8; KEY_LEN], server: &ServerId) -> Zeroizing<String> {
     let mut bytes = Zeroizing::new([0u8; V1_LEN]);
     bytes[0] = V1;
     bytes[1..1 + KEY_LEN].copy_from_slice(key);
@@ -70,17 +74,27 @@ pub fn encode_v1(key: &[u8; KEY_LEN], server: &ServerId) -> String {
         .copy_from_slice(&server.as_bytes()[..SERVER_PREFIX_LEN]);
     let sum = checksum(&bytes[..V1_LEN - CHECKSUM_LEN]);
     bytes[V1_LEN - CHECKSUM_LEN..].copy_from_slice(&sum);
-    format!("{PREFIX}{}", bs58::encode(&bytes[..]).into_string())
+    // Room for the longest encoding, so `onto` never reallocates (which
+    // would leave an unzeroized copy behind).
+    let mut link = Zeroizing::new(String::with_capacity(PREFIX.len() + MAX_V1_CHARS));
+    link.push_str(PREFIX);
+    bs58::encode(&bytes[..]).onto(&mut *link).expect("base58 into a String never fails");
+    link
 }
 
 /// v0 link, as created today.
-pub fn encode_v0(server: &ServerId, invite: &RecordId, secret: &[u8; 32]) -> String {
-    format!(
-        "{PREFIX}{}/{}/{}",
-        hex::encode(server.as_bytes()),
-        hex::encode(invite.as_bytes()),
-        hex::encode(secret)
-    )
+pub fn encode_v0(server: &ServerId, invite: &RecordId, secret: &[u8; 32]) -> Zeroizing<String> {
+    let mut link = Zeroizing::new(String::with_capacity(PREFIX.len() + 3 * 65));
+    link.push_str(PREFIX);
+    for (i, part) in [server.as_bytes(), invite.as_bytes(), secret].into_iter().enumerate() {
+        if i > 0 {
+            link.push('/');
+        }
+        let mut hex = Zeroizing::new([0u8; 64]);
+        hex::encode_to_slice(part, &mut hex[..]).expect("32 bytes are 64 hex digits");
+        link.push_str(std::str::from_utf8(&hex[..]).expect("hex is ASCII"));
+    }
+    link
 }
 
 /// Either layout. Surrounding whitespace is ignored; nothing else is
@@ -105,17 +119,20 @@ fn parse_v0(rest: &str) -> Result<InviteLink, LinkError> {
         return Err(LinkError::Malformed);
     }
     Ok(InviteLink::V0 {
-        server: ServerId::from_bytes(hex32(server)?),
-        invite: RecordId::from_bytes(hex32(invite)?),
-        secret: Zeroizing::new(hex32(secret)?),
+        server: ServerId::from_bytes(*hex32(server)?),
+        invite: RecordId::from_bytes(*hex32(invite)?),
+        secret: hex32(secret)?,
     })
 }
 
-fn hex32(part: &str) -> Result<[u8; 32], LinkError> {
+/// Decoded straight into a zeroized array (the secret goes through here).
+fn hex32(part: &str) -> Result<Zeroizing<[u8; 32]>, LinkError> {
     if part.len() != 64 || part.bytes().any(|b| b.is_ascii_uppercase()) {
         return Err(LinkError::Malformed);
     }
-    hex::decode(part).ok().and_then(|b| b.try_into().ok()).ok_or(LinkError::Malformed)
+    let mut out = Zeroizing::new([0u8; 32]);
+    hex::decode_to_slice(part, &mut out[..]).map_err(|_| LinkError::Malformed)?;
+    Ok(out)
 }
 
 fn parse_v1(rest: &str) -> Result<InviteLink, LinkError> {
@@ -123,14 +140,23 @@ fn parse_v1(rest: &str) -> Result<InviteLink, LinkError> {
         return Err(LinkError::Malformed);
     }
     let bytes = Zeroizing::new(bs58::decode(rest).into_vec().map_err(|_| LinkError::Malformed)?);
-    // Version first: a later layout may be longer.
+    // Version first: a later layout may be longer. A newer version is only
+    // named when it is plausible (0x02..=0x0f, at least v1's length) *and*
+    // its trailing checksum holds: every version ends with this checksum
+    // over the rest. A typo in the first character changes the leading
+    // byte but breaks the checksum, so it reads as "copy the link exactly",
+    // never as "update needed".
     match bytes.first() {
-        Some(&V1) => {}
-        Some(&v) if v > V1 => return Err(LinkError::UnknownVersion(v)),
+        Some(&V1) if bytes.len() == V1_LEN => {}
+        Some(&v @ FIRST_UNKNOWN_VERSION..=LAST_UNKNOWN_VERSION) if bytes.len() >= V1_LEN => {
+            let (body, sum) = bytes.split_at(bytes.len() - CHECKSUM_LEN);
+            return Err(if checksum(body) == sum {
+                LinkError::UnknownVersion(v)
+            } else {
+                LinkError::Checksum
+            });
+        }
         _ => return Err(LinkError::Malformed),
-    }
-    if bytes.len() != V1_LEN {
-        return Err(LinkError::Malformed);
     }
     let (body, sum) = bytes.split_at(V1_LEN - CHECKSUM_LEN);
     if checksum(body) != sum {
@@ -177,7 +203,7 @@ mod tests {
 
     #[test]
     fn v1_is_pinned_and_round_trips() {
-        let link = encode_v1(&KEY, &server());
+        let link = encode_v1(&KEY, &server()).as_str().to_owned();
         assert_eq!(link, PINNED_V1);
         let mut body = vec![V1];
         body.extend_from_slice(&KEY);
@@ -206,7 +232,7 @@ mod tests {
     #[test]
     fn v0_still_parses_and_round_trips() {
         let (invite, secret) = (RecordId::from_bytes([7; 32]), [9u8; 32]);
-        let link = encode_v0(&server(), &invite, &secret);
+        let link = encode_v0(&server(), &invite, &secret).as_str().to_owned();
         let InviteLink::V0 { server: s, invite: i, secret: k } =
             parse(&format!("  {link}\n")).unwrap()
         else {
@@ -232,7 +258,7 @@ mod tests {
 
     #[test]
     fn hostile_v1_links_are_refused() {
-        let link = encode_v1(&KEY, &server());
+        let link = encode_v1(&KEY, &server()).as_str().to_owned();
         let payload = link.strip_prefix(PREFIX).unwrap().to_owned();
 
         // One character changed: the checksum catches it (or it no longer
@@ -298,6 +324,26 @@ mod tests {
         bytes[n - CHECKSUM_LEN..].copy_from_slice(&sum);
         let link = format!("{PREFIX}{}", bs58::encode(&bytes).into_string());
         assert_eq!(parse(&link).unwrap_err(), LinkError::UnknownVersion(2));
+        // Out of the plausible range, or shorter than v1: malformed.
+        for (v, len) in [(0x10u8, V1_LEN), (0xff, V1_LEN), (0x02, V1_LEN - 1)] {
+            let mut bytes = vec![v; len];
+            let sum = checksum(&bytes[..len - CHECKSUM_LEN]);
+            bytes[len - CHECKSUM_LEN..].copy_from_slice(&sum);
+            let link = format!("{PREFIX}{}", bs58::encode(&bytes).into_string());
+            assert_eq!(parse(&link).unwrap_err(), LinkError::Malformed, "{v:#x}, {len} bytes");
+        }
+    }
+
+    #[test]
+    fn a_typo_in_the_first_character_never_says_update() {
+        let link = encode_v1(&KEY, &server()).as_str().to_owned();
+        let payload = link.strip_prefix(PREFIX).unwrap();
+        let alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        for c in alphabet.chars().filter(|c| !payload.starts_with(*c)) {
+            let typo = format!("{PREFIX}{c}{}", &payload[1..]);
+            let err = parse(&typo).unwrap_err();
+            assert!(matches!(err, LinkError::Checksum | LinkError::Malformed), "{c}: {err:?}");
+        }
     }
 
     #[test]

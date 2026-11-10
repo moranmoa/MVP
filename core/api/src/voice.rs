@@ -15,11 +15,19 @@
 //!   dropped after [`HELLO_TIMEOUT_MS`]. At most [`MAX_PARTICIPANTS`]: a
 //!   full call answers a newcomer's hello with `full`.
 //!
+//! - Rooms (the voice-room amendment): calls happen only in each server's
+//!   one voice room, whose ID is derived ([`room_id`]), never in a text
+//!   channel. Every member sees who is in it (`voice.room`), built only
+//!   from verified hellos: identity and muted, at most
+//!   [`MAX_PARTICIPANTS`] (the first to arrive), expiring
+//!   [`HELLO_TIMEOUT_MS`] after we received the last one, and sent at most
+//!   once per room per tick.
+//!
 //! The blobs travel over sync's voice transport (piece A,
 //! `Node::voice_send`), behind the [`VoiceNet`] port. They aren't stored,
 //! synced or retried.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use ed25519_dalek::{Signature, Signer, VerifyingKey};
@@ -50,6 +58,14 @@ pub const HELLO_TIMEOUT_MS: u64 = 30_000;
 const MAX_NONCES: usize = 4096;
 /// How long after joining a `full` may still turn us away.
 const JOINING_MS: u64 = HELLO_EVERY_MS;
+/// The voice room's `derive_key` context. Frozen.
+const ROOM_CTX: &str = "mvs/voice-room/v1";
+
+/// `server`'s one voice room. Every member derives the same ID, and it
+/// can't be a record-made channel's.
+pub fn room_id(server: ServerId) -> ChannelId {
+    ChannelId::from_bytes(blake3::derive_key(ROOM_CTX, server.as_bytes()))
+}
 
 /// Sync's voice transport (piece A). Received blobs come back through
 /// `Core::voice_received`.
@@ -66,8 +82,8 @@ pub trait VoiceNet: Send + Sync {
 
 /// Who may be in which call, and whom to tell: the core's member state.
 pub(crate) trait Members {
-    /// `who` is a member of `server`, not kicked, and may read `channel`
-    /// (18+ needs their 18+ claim).
+    /// `channel` is `server`'s voice room ([`room_id`]), `server` is one of
+    /// mine with an accepted genesis, and `who` is a member, not kicked.
     fn may_call(&mut self, who: PublicKey, server: ServerId, channel: ChannelId) -> bool;
     /// The server's members we can reach now, us excluded.
     fn audience(&mut self, server: ServerId) -> Vec<PublicKey>;
@@ -214,8 +230,9 @@ struct Peer {
     seen: u64,
 }
 
-/// Who else is in a channel's call, from their hellos (calls I'm not in
-/// too, so a 6th learns it's full before joining).
+/// Who else is in a room, from their verified hellos (rooms I'm not in
+/// too: every member sees the roster, and a 6th learns it's full before
+/// joining). At most [`MAX_PARTICIPANTS`] peers, the first to arrive.
 struct Room {
     server: ServerId,
     peers: BTreeMap<PublicKey, Peer>,
@@ -229,6 +246,9 @@ pub(crate) struct Calls {
     nonces: VecDeque<(u64, [u8; 16])>,
     seen: HashSet<[u8; 16]>,
     last_hello: u64,
+    /// Servers whose room roster changed since the last tick: one
+    /// `voice.room` each, at the next tick (coalesced).
+    dirty: BTreeSet<ServerId>,
 }
 
 impl Calls {
@@ -273,6 +293,7 @@ impl Calls {
             return Err(ErrorCode::CallFull.into());
         }
         self.mine = Some(Mine { server, channel, muted: false, joined_at: ctx.now });
+        self.dirty.insert(server);
         self.hello(ctx, members, None);
         let state = self.state(ctx.me()).expect("in a call");
         ctx.events.push(Event::CallState(state.clone()));
@@ -281,6 +302,7 @@ impl Calls {
 
     pub fn leave(&mut self, ctx: &mut Ctx, members: &mut dyn Members) {
         let Some(mine) = self.mine.take() else { return };
+        self.dirty.insert(mine.server);
         let body = self.body(ctx, WireKind::Bye, mine.server, mine.channel, None);
         self.broadcast(ctx, members, mine.server, mine.channel, body);
         ctx.events.push(Event::CallState(CallState {
@@ -299,6 +321,7 @@ impl Calls {
         let mine = self.mine.as_mut().ok_or(ErrorCode::NotAllowed)?;
         if mine.muted != muted {
             mine.muted = muted;
+            self.dirty.insert(mine.server);
             self.hello(ctx, members, None);
             ctx.events.push(Event::CallState(self.state(ctx.me()).expect("in a call")));
         }
@@ -328,11 +351,25 @@ impl Calls {
     }
 
     /// Every [`crate::SYNC_EVERY`]: drops peers gone quiet or no longer
-    /// allowed, and says hello again when due.
+    /// allowed (a kick within one tick), says hello again when due, then
+    /// sends one `voice.room` per room whose roster changed, only for
+    /// servers I'm still a member of.
     pub fn tick(&mut self, ctx: &mut Ctx, members: &mut dyn Members) {
+        self.tick_calls(ctx, members);
+        let me = ctx.me();
+        for server in std::mem::take(&mut self.dirty) {
+            if members.may_call(me, server, room_id(server)) {
+                ctx.events.push(Event::VoiceRoom(self.room(me, server)));
+            }
+        }
+    }
+
+    fn tick_calls(&mut self, ctx: &mut Ctx, members: &mut dyn Members) {
         if let Some((server, channel)) = self.mine.as_ref().map(|m| (m.server, m.channel)) {
-            // Kicked, or the channel is gone: leave.
-            if !members.may_call(ctx.me(), server, channel) {
+            // Kicked, or relay-only turned on mid-call (the media would go
+            // direct): leave, with a bye.
+            let relay_only = self.net.as_ref().is_some_and(|net| net.relay_only());
+            if relay_only || !members.may_call(ctx.me(), server, channel) {
                 self.leave(ctx, members);
             }
         }
@@ -365,6 +402,10 @@ impl Calls {
         {
             return tracing::debug!("voice: dropped a misaddressed envelope");
         }
+        // Bound to its server's room: any other channel ID is dropped.
+        if signal.channel != room_id(signal.server) {
+            return tracing::debug!("voice: dropped an envelope for no room");
+        }
         if !self.fresh(signal.nonce, ctx.now) {
             return tracing::debug!("voice: dropped a replayed envelope");
         }
@@ -382,6 +423,9 @@ impl Calls {
                     .rooms
                     .get_mut(&signal.channel)
                     .is_some_and(|room| room.peers.remove(&signal.from).is_some());
+                if gone {
+                    self.dirty.insert(signal.server);
+                }
                 if gone && in_this_call {
                     ctx.events.push(Event::CallState(self.state(me).expect("in a call")));
                 }
@@ -400,6 +444,7 @@ impl Calls {
                     return tracing::debug!("voice: ignored a full from outside the call");
                 }
                 self.mine = None;
+                self.dirty.insert(signal.server);
                 ctx.events.push(Event::CallState(CallState {
                     channel_id: model::hex_id(signal.channel.as_bytes()),
                     participants: Vec::new(),
@@ -447,6 +492,11 @@ impl Calls {
             .entry(signal.channel)
             .or_insert_with(|| Room { server: signal.server, peers: BTreeMap::new() });
         let before = room.peers.get(&signal.from).copied();
+        // A room I'm not in keeps the first 5 to arrive; later ones are
+        // ignored until a slot frees up.
+        if before.is_none() && !in_this_call && room.peers.len() >= MAX_PARTICIPANTS {
+            return tracing::debug!("voice: ignored a hello for a full room");
+        }
         // Me and 4 others: full. (Calls I'm not in only count.)
         let present = room.peers.len() + usize::from(in_this_call);
         if before.is_none() && in_this_call && present >= MAX_PARTICIPANTS {
@@ -456,7 +506,11 @@ impl Calls {
         }
         let new = before.is_none();
         let changed = before.is_none_or(|p| p.muted != signal.muted);
+        // Expiry runs from when we received it, never the sender's `ts`.
         room.peers.insert(signal.from, Peer { muted: signal.muted, seen: ctx.now });
+        if changed {
+            self.dirty.insert(signal.server);
+        }
         if in_this_call {
             if new {
                 // So the newcomer learns of us now, not at our next hello.
@@ -561,6 +615,9 @@ impl Calls {
                 now.saturating_sub(peer.seen) <= HELLO_TIMEOUT_MS
                     && members.may_call(*key, server, *channel)
             });
+            if room.peers.len() != before {
+                self.dirty.insert(server);
+            }
             changed |= Some(*channel) == mine && room.peers.len() != before;
         }
         self.rooms.retain(|_, room| !room.peers.is_empty());
@@ -581,6 +638,47 @@ impl Calls {
         let full = participants.len() >= MAX_PARTICIPANTS;
         Some(CallState { channel_id: model::hex_id(mine.channel.as_bytes()), participants, full })
     }
+
+    /// `getVoiceRoom`: drops who went quiet or was kicked, then the roster
+    /// (whether I may see it is the caller's check).
+    pub fn voice_room(
+        &mut self,
+        ctx: &mut Ctx,
+        members: &mut dyn Members,
+        server: ServerId,
+    ) -> VoiceRoom {
+        if self.expire(ctx.now, members) {
+            if let Some(state) = self.state(ctx.me()) {
+                ctx.events.push(Event::CallState(state));
+            }
+        }
+        self.room(ctx.me(), server)
+    }
+
+    /// `server`'s room: me first when I'm in it, then the others by key; at
+    /// most [`MAX_PARTICIPANTS`]. Identity and muted only.
+    fn room(&self, me: PublicKey, server: ServerId) -> VoiceRoom {
+        let room = room_id(server);
+        let mut participants = Vec::new();
+        if let Some(mine) = self.mine.as_ref().filter(|m| m.server == server) {
+            participants.push(VoiceParticipant {
+                user_id: model::hex_id(me.as_bytes()),
+                muted: mine.muted,
+            });
+        }
+        if let Some(peers) = self.rooms.get(&room) {
+            participants.extend(peers.peers.iter().map(|(key, peer)| VoiceParticipant {
+                user_id: model::hex_id(key.as_bytes()),
+                muted: peer.muted,
+            }));
+        }
+        participants.truncate(MAX_PARTICIPANTS);
+        VoiceRoom {
+            server_id: model::hex_id(server.as_bytes()),
+            room_id: model::hex_id(room.as_bytes()),
+            participants,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -598,7 +696,7 @@ mod tests {
             v: 1,
             kind: WireKind::Offer,
             server: hex::encode([1; 32]),
-            channel: hex::encode([2; 32]),
+            channel: hex::encode(room_id(SERVER).as_bytes()),
             from: hex::encode(from.verifying_key().to_bytes()),
             to: Some(hex::encode([3; 32])),
             ts,
@@ -704,7 +802,9 @@ mod tests {
     }
 
     const SERVER: ServerId = ServerId::from_bytes([1; 32]);
-    const CHANNEL: ChannelId = ChannelId::from_bytes([2; 32]);
+    fn room() -> ChannelId {
+        room_id(SERVER)
+    }
 
     #[test]
     fn hello_and_bye_reach_only_those_who_may_call() {
@@ -714,7 +814,7 @@ mod tests {
         let mut club = Club { all: vec![pk(2), pk(3)], barred: vec![pk(3)] };
         let mut events = Vec::new();
         let mut ctx = Ctx { key: &key(1), now: NOW, events: &mut events };
-        calls.join(&mut ctx, &mut club, SERVER, CHANNEL).unwrap();
+        calls.join(&mut ctx, &mut club, SERVER, room()).unwrap();
         calls.leave(&mut ctx, &mut club);
         assert_eq!(*net.0.lock().unwrap(), [pk(2), pk(2)], "an 18+ call shown to a minor");
     }
@@ -729,7 +829,7 @@ mod tests {
             let mut ctx = Ctx { key: &key(1), now: NOW, events: &mut events };
             // Peer 2 is in the call; peer 4 isn't.
             calls.received(&mut ctx, &mut club, None, &signal(2, WireKind::Hello, None, NOW, 1));
-            calls.join(&mut ctx, &mut club, SERVER, CHANNEL).unwrap();
+            calls.join(&mut ctx, &mut club, SERVER, room()).unwrap();
             (calls, club)
         };
         let full = |calls: &mut Calls, club: &mut Club, from, at, nonce| {
@@ -744,6 +844,118 @@ mod tests {
         assert!(full(&mut calls, &mut club, 2, NOW + JOINING_MS + 1, 3), "a late full counted");
         let (mut calls, mut club) = joined();
         assert!(!full(&mut calls, &mut club, 2, NOW + 1, 4), "a joining full was ignored");
+    }
+
+    fn rooms(events: &[Event]) -> Vec<VoiceRoom> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::VoiceRoom(room) => Some(room.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn user(n: u8) -> String {
+        hex::encode(pk(n).as_bytes())
+    }
+
+    fn users(room: &VoiceRoom) -> Vec<String> {
+        room.participants.iter().map(|p| p.user_id.clone()).collect()
+    }
+
+    #[test]
+    fn the_room_id_is_derived_per_server() {
+        assert_eq!(room_id(SERVER), room_id(ServerId::from_bytes([1; 32])));
+        assert_ne!(room_id(SERVER), room_id(ServerId::from_bytes([9; 32])));
+        assert_ne!(room_id(SERVER), model::default_channel(SERVER));
+    }
+
+    #[test]
+    fn a_hello_bound_to_another_channel_is_dropped() {
+        let mut calls = Calls::default();
+        calls.set_net(Arc::new(Net::default()));
+        let mut club = Club { all: vec![], barred: vec![] };
+        let mut events = Vec::new();
+        let mut ctx = Ctx { key: &key(1), now: NOW, events: &mut events };
+        let mut hello = body(&key(2), NOW);
+        (hello.kind, hello.to, hello.channel) = (WireKind::Hello, None, hex::encode([2; 32]));
+        hello.payload.clear();
+        calls.received(&mut ctx, &mut club, None, &seal(&key(2), &hello));
+        calls.tick(&mut ctx, &mut club);
+        assert!(calls.room(pk(1), SERVER).participants.is_empty());
+        assert!(rooms(&events).is_empty());
+    }
+
+    #[test]
+    fn the_roster_keeps_the_first_five_and_expires_from_receipt() {
+        let mut calls = Calls::default();
+        calls.set_net(Arc::new(Net::default()));
+        let mut club = Club { all: vec![], barred: vec![] };
+        let mut events = Vec::new();
+        let mut ctx = Ctx { key: &key(1), now: NOW, events: &mut events };
+        // Six hellos, 7 last. Their `ts` is 100 s old, inside the window.
+        for n in 2..8 {
+            let hello = signal(n, WireKind::Hello, None, NOW - 100_000, n);
+            calls.received(&mut ctx, &mut club, None, &hello);
+        }
+        let first_five: Vec<String> = (2..7).map(user).collect();
+        let roster = |calls: &Calls| {
+            let mut ids = users(&calls.room(pk(1), SERVER));
+            ids.sort();
+            ids
+        };
+        let mut want = first_five.clone();
+        want.sort();
+        assert_eq!(roster(&calls), want, "the 6th to arrive was kept");
+        // Expiry runs from receipt: 30 s after it, not after the old `ts`.
+        ctx.now = NOW + HELLO_TIMEOUT_MS;
+        calls.tick(&mut ctx, &mut club);
+        assert_eq!(roster(&calls).len(), MAX_PARTICIPANTS);
+        // 2 leaves: a slot frees up, and 7 gets in.
+        let at = ctx.now;
+        calls.received(&mut ctx, &mut club, None, &signal(2, WireKind::Bye, None, at, 20));
+        calls.received(&mut ctx, &mut club, None, &signal(7, WireKind::Hello, None, at, 21));
+        assert!(roster(&calls).contains(&user(7)));
+        assert!(!roster(&calls).contains(&user(2)));
+        // The others' hellos were received at NOW: gone a tick later.
+        ctx.now = NOW + HELLO_TIMEOUT_MS + 1;
+        calls.tick(&mut ctx, &mut club);
+        assert_eq!(roster(&calls), [user(7)]);
+    }
+
+    #[test]
+    fn one_room_event_per_tick_and_only_while_a_member() {
+        let mut calls = Calls::default();
+        calls.set_net(Arc::new(Net::default()));
+        let mut club = Club { all: vec![pk(2)], barred: vec![] };
+        let mut events = Vec::new();
+        let mut ctx = Ctx { key: &key(1), now: NOW, events: &mut events };
+        calls.join(&mut ctx, &mut club, SERVER, room()).unwrap();
+        // Flipping mute and a peer arriving: one event, at the tick.
+        for n in 0..10 {
+            calls.set_muted(&mut ctx, &mut club, n % 2 == 0).unwrap();
+        }
+        calls.received(&mut ctx, &mut club, None, &signal(2, WireKind::Hello, None, NOW, 1));
+        assert!(rooms(ctx.events).is_empty(), "sent before the tick");
+        calls.tick(&mut ctx, &mut club);
+        calls.tick(&mut ctx, &mut club);
+        let seen = rooms(ctx.events);
+        assert_eq!(seen.len(), 1);
+        assert_eq!(users(&seen[0]), [user(1), user(2)], "me first");
+        assert_eq!(seen[0].room_id, hex::encode(room().as_bytes()));
+        assert!(!seen[0].participants[0].muted);
+        // 2 is kicked: gone at the next tick, not after the timeout.
+        ctx.events.clear();
+        club.barred.push(pk(2));
+        calls.tick(&mut ctx, &mut club);
+        assert_eq!(users(&rooms(ctx.events)[0]), [user(1)]);
+        // I'm kicked: I leave, and no roster is sent to me.
+        ctx.events.clear();
+        club.barred.push(pk(1));
+        calls.tick(&mut ctx, &mut club);
+        assert!(!calls.in_call());
+        assert!(rooms(ctx.events).is_empty());
     }
 
     #[test]
