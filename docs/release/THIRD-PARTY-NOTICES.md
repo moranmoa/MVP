@@ -32,8 +32,10 @@ Clauses we must reproduce are checked, and the build fails without them:
 
 - **ring 0.16:** its LICENSE, including the OpenSSL and SSLeay licences.
   This goes away when #256 (libp2p 0.56) drops ring 0.16.
-- **webpki-roots under CDLA-Permissive-2.0** (1.x, if the owner approves
-  #256): the CDLA text.
+- **webpki-roots under CDLA-Permissive-2.0** (1.x, from #256; the owner
+  approved the exception): the CDLA text. webpki-roots 1.0.11 ships it as its
+  own LICENSE, so it comes through like any other licence file. The check
+  makes sure it never goes missing.
 
 The licence *policy* (what may be used at all) stays in `npm-licenses.mjs`
 and `core/deny.toml`; this file is only about attribution.
