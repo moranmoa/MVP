@@ -6,6 +6,18 @@ fails if its version has no section here. Write a section before tagging:
 `## [X.Y.Z] - YYYY-MM-DD`, then Hebrew and English (Fixed / New / Known).
 Never put the relay domain or any IP address here.
 
+## [0.3.1] - 2026-11-10
+
+### מה תוקן
+- **התקנה ב-Windows:** האפליקציה נפתחת גם במחשב שאין בו את רכיב ה-Visual C++ של Microsoft. ב-0.3.0 הופיעה במחשבים כאלה השגיאה "VCRUNTIME140.dll was not found".
+- **ההודעה הראשונה אחרי הצטרפות:** לא נדחית יותר בחצי השנייה הראשונה אחרי ההצטרפות לשרת.
+
+---
+
+### Fixed
+- **Installing on Windows:** the app now opens on computers without Microsoft's Visual C++ runtime. In 0.3.0 such computers showed "VCRUNTIME140.dll was not found".
+- **Your first message after joining** is no longer refused in the first half-second after joining a server.
+
 ## [0.3.0] - 2026-11-10
 
 ### מה חדש
