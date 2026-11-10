@@ -120,6 +120,19 @@ describe('voice room', () => {
     }
   });
 
+  it('a mic picked after joining without one: still listen-only, "leave and join again"', async () => {
+    window.history.pushState({}, '', '/?voiceSim=rejoin');
+    try {
+      const { join } = await setup();
+      await join();
+      const bar = screen.getByRole('region', { name: 'Voice call' });
+      expect(within(bar).getByRole('status').textContent).toBe('To talk, leave and join again.');
+      await waitFor(() => expect(within(bar).getByRole('button', { name: 'Mute' }).getAttribute('aria-pressed')).toBe('true'));
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
+
   it("someone the engine can't reach shows \"couldn't connect directly\" and stays in the call", async () => {
     window.history.pushState({}, '', '/?voiceSim=peerFailed');
     try {

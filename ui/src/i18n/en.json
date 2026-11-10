@@ -216,6 +216,7 @@
   "call.inCall": "In the voice chat · \u2068{server}\u2069",
   "call.micOff": "Microphone off",
   "call.noMic": "No microphone: you can listen, and others see you as muted.",
+  "call.rejoinToTalk": "To talk, leave and join again.",
   "call.peerFailed": "couldn't connect directly",
   "call.error.full": "The call is full: up to 5 people.",
   "call.error.relayOnly": "Calls are off in relay-only mode: in a call, computers connect directly and participants can see your IP address.",

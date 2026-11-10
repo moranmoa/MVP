@@ -18,7 +18,8 @@ import { useCore, type CallState, type Id, type Member } from '../../core';
 type AudioDevice = { deviceId: string; label: string };
 interface VoiceEngine {
   ready: boolean;
-  error?: 'mic-denied' | 'no-device' | 'failed';
+  /** `rejoin-to-talk`: the call started without a mic; a newly picked one needs a rejoin (#231). */
+  error?: 'mic-denied' | 'no-device' | 'failed' | 'rejoin-to-talk';
   speaking: Record<Id, boolean>;
   setMicMuted: (muted: boolean) => void;
   // Device choice: a settings surface, later.
@@ -33,15 +34,16 @@ interface VoiceEngine {
 }
 /**
  * The stub has no audio. For demos and QA it can act out the engine's failure
- * states: `?voiceSim=noMic` (no microphone) or `?voiceSim=peerFailed` (the
- * first other person can't be reached directly).
+ * states: `?voiceSim=noMic` (no microphone), `?voiceSim=rejoin` (a mic picked
+ * after joining without one) or `?voiceSim=peerFailed` (the first other person
+ * can't be reached directly).
  */
 function useVoiceEngine(call: CallState | null, myId: Id): VoiceEngine {
   const sim = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('voiceSim') : null;
   const other = call?.participants.find((p) => p.identity !== myId)?.identity;
   return {
     ready: true,
-    error: call && sim === 'noMic' ? 'no-device' : undefined,
+    error: call && sim === 'noMic' ? 'no-device' : call && sim === 'rejoin' ? 'rejoin-to-talk' : undefined,
     speaking: {},
     setMicMuted: () => {},
     inputs: [],
@@ -181,7 +183,8 @@ export function CallBar({ myId }: { myId: Id }) {
   const engine = useVoiceEngine(call, myId);
   // No microphone (none, permission denied, or unplugged mid-call): stay in the
   // call to listen, and show the others I'm muted (#232 V5.7/V5.8).
-  const noMic = !!call && (engine.error === 'no-device' || engine.error === 'mic-denied');
+  // rejoin-to-talk is still listen-only: the new mic only works after a rejoin.
+  const noMic = !!call && (engine.error === 'no-device' || engine.error === 'mic-denied' || engine.error === 'rejoin-to-talk');
   const meMuted = !!call?.participants.find((p) => p.identity === myId)?.muted;
   useEffect(() => {
     if (noMic && !meMuted) void core.setMuted(true).catch(() => {});
@@ -230,7 +233,7 @@ export function CallBar({ myId }: { myId: Id }) {
       {noMic && (
         <p id="call-no-mic" className="call-no-mic" role="status">
           <MicOffIcon />
-          <FormattedMessage id="call.noMic" />
+          <FormattedMessage id={engine.error === 'rejoin-to-talk' ? 'call.rejoinToTalk' : 'call.noMic'} />
         </p>
       )}
       <div className="call-actions">
