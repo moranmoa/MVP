@@ -28,6 +28,8 @@ export type Step =
 
 /** Numbered steps shown as "step x of y"; blocked/preparing/restore are not counted. */
 const NUMBERED: Step[] = ['language', 'agreement', 'country', 'dob', 'words', 'check', 'profile'];
+/** A restore has its own count (B13 §3): no new words to write down or check. */
+const NUMBERED_RESTORE: Step[] = ['language', 'agreement', 'country', 'dob', 'restore', 'profile'];
 
 // Where onboarding resumes after a reload or a crash (QA-01, B19 spec §3).
 // Only the step name is stored, never the words.
@@ -100,7 +102,8 @@ export function Onboarding({ onFinished: finish, initialStep }: { onFinished: ()
     setStep('profile');
   };
 
-  const stepNo = NUMBERED.indexOf(step);
+  const numbered = restoring ? NUMBERED_RESTORE : NUMBERED;
+  const stepNo = numbered.indexOf(step);
 
   return (
     <main className="onboarding">
@@ -116,7 +119,7 @@ export function Onboarding({ onFinished: finish, initialStep }: { onFinished: ()
             )}
             {stepNo >= 0 && (
               <span className="muted small">
-                <FormattedMessage id="onb.progress" values={{ step: stepNo + 1, total: NUMBERED.length }} />
+                <FormattedMessage id="onb.progress" values={{ step: stepNo + 1, total: numbered.length }} />
               </span>
             )}
           </div>

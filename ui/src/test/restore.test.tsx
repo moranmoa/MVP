@@ -14,7 +14,8 @@ const he: Settings = { locale: 'he', theme: 'light', uiScale: 1, fontSize: 15 };
 
 async function toDob(year: string) {
   fireEvent.click(await screen.findByRole('button', { name: 'כבר יש לי חשבון' }));
-  // The agreement, as for a new account.
+  // The agreement, as for a new account, but counted as a restore (6 steps, B13 §3).
+  expect(screen.getByText('שלב 2 מתוך 6')).toBeTruthy();
   fireEvent.click(screen.getByRole('checkbox'));
   fireEvent.click(screen.getByRole('button', { name: 'המשך' }));
   fireEvent.click(screen.getByRole('button', { name: 'המשך' })); // country is prefilled
@@ -47,7 +48,7 @@ describe('restore', () => {
 
     // Servers don't come back by themselves yet: say so, and how to return.
     expect(await screen.findByRole('heading', { name: 'החשבון שוחזר' })).toBeTruthy();
-    expect(screen.getByText(/לינק הזמנה/).textContent).toContain('כאותו חבר, עם אותו תפקיד');
+    expect(screen.getByText(/לינק הזמנה/).textContent).toContain('כאותו חשבון, עם אותו תפקיד');
     fireEvent.click(screen.getByRole('button', { name: 'המשך' }));
     expect(await screen.findByRole('navigation', { name: 'שרתים' })).toBeTruthy();
   });
