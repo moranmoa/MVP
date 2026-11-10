@@ -281,6 +281,7 @@ export function cleanCall(c: CallState): CallState {
       .map((p) => ({ identity: cleanHexId(p?.identity), muted: p?.muted === true }))
       .filter((p) => p.identity),
     full: c?.full === true,
+    ...(c?.relayOnly === true ? { relayOnly: true } : {}),
   };
 }
 
@@ -297,9 +298,10 @@ const onlyKeys = (o: object, keys: string[]) => Object.keys(o).every((k) => keys
  * a person twice, a non-boolean `muted` or any unknown field (voice-room contract).
  */
 export function cleanVoiceRoom(r: unknown): VoiceRoom | null {
-  if (!r || typeof r !== 'object' || !onlyKeys(r, ['serverId', 'roomId', 'participants'])) return null;
-  const { serverId, roomId, participants } = r as Record<string, unknown>;
+  if (!r || typeof r !== 'object' || !onlyKeys(r, ['serverId', 'roomId', 'participants', 'relayOnly'])) return null;
+  const { serverId, roomId, participants, relayOnly } = r as Record<string, unknown>;
   if (!isRoomId(serverId) || !isRoomId(roomId) || !Array.isArray(participants) || participants.length > 5) return null;
+  if (relayOnly !== undefined && typeof relayOnly !== 'boolean') return null;
   const out: VoiceRoom['participants'] = [];
   for (const p of participants as unknown[]) {
     if (!p || typeof p !== 'object' || !onlyKeys(p, ['userId', 'muted'])) return null;
@@ -307,7 +309,7 @@ export function cleanVoiceRoom(r: unknown): VoiceRoom | null {
     if (!isRoomId(userId) || typeof muted !== 'boolean' || out.some((x) => x.userId === userId)) return null;
     out.push({ userId, muted });
   }
-  return { serverId, roomId, participants: out };
+  return { serverId, roomId, participants: out, ...(relayOnly === true ? { relayOnly: true } : {}) };
 }
 
 /** A cleaner may return null to drop the event altogether. */
