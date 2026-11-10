@@ -141,6 +141,12 @@ pub trait Network: Send + Sync {
     ) {
         let _ = (server, secret, channels);
     }
+
+    /// Server lifecycle: stop syncing `server` (left, deleted). Its secret
+    /// is forgotten by the caller.
+    fn close_server(&self, server: ServerId) {
+        let _ = server;
+    }
 }
 
 /// All cores sharing one instance see each other's records instantly.
@@ -274,6 +280,12 @@ pub trait GroupCipher: Send + Sync {
 
     /// At app lock and sign-out: drops the secret and every channel's keys.
     fn lock(&self) {}
+
+    /// Server lifecycle: drops everything held for `server` (its channels'
+    /// keys, members, accepted rotations, channel list).
+    fn forget(&self, server: ServerId) {
+        let _ = server;
+    }
 
     /// The unsigned `KeyRotation` part bodies (at most 32) of a fresh key for
     /// `members`, built on the channel's current key. Service signs every

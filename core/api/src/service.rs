@@ -7,7 +7,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use authority::Action;
+use authority::{Action, Cut};
 use groupkeys::MemberSecret;
 use identity::{PhraseError, RecoveryPhrase, Vault, VaultError, VaultState};
 use rand_core::{OsRng, RngCore};
@@ -19,6 +19,7 @@ use crate::chat;
 use crate::db::Db;
 use crate::model::{self, GenesisBody, Log, ServerView};
 use crate::ports::{CipherError, GroupCipher, Network, Ports, Reach, SharedSecrets};
+use crate::rekey::JoinBucket;
 use crate::types::*;
 use crate::update::Updates;
 use crate::voice::{self, VoiceNet};
@@ -70,10 +71,11 @@ pub const SYNC_EVERY: Duration = Duration::from_secs(2);
 pub const JOIN_RETRY_FIRST: Duration = Duration::from_secs(2);
 pub const JOIN_RETRY_MAX: Duration = Duration::from_secs(30);
 pub const JOIN_RETRY_FOR: Duration = Duration::from_secs(10 * 60);
-/// Join re-keys are batched: at least this long apart per channel, plus
-/// up to `JOIN_REKEY_JITTER_MS`: 15 s ± 20% (12-18 s). Kicks stay immediate.
-pub const JOIN_REKEY_MIN_MS: u64 = 12_000;
-const JOIN_REKEY_JITTER_MS: u64 = 6_001;
+/// Server lifecycle: how long a closed server stays listed, read-only,
+/// after its close was received (the Tech Lead's #229 answer).
+pub const CLOSED_RETENTION_MS: u64 = 30 * 24 * 3600 * 1000;
+/// The shortest wait the sync loop takes for a due join re-key.
+pub const REKEY_WAKE_FLOOR: Duration = Duration::from_millis(250);
 
 struct Me {
     /// Held only until the recovery check passes, so the UI can show and
@@ -108,8 +110,10 @@ struct Inner {
     /// Who each channel was last keyed for by our own rotation, so a
     /// moderator re-keys when members join (in memory: once after a restart).
     keyed_for: HashMap<(ServerId, ChannelId), BTreeSet<PublicKey>>,
-    /// The earliest next join re-key per channel (batching, GAP-8).
-    rekey_after: HashMap<(ServerId, ChannelId), u64>,
+    /// Join re-key tokens per server (GAP-8, `rekey`), and the servers
+    /// whose joiners wait for the next token.
+    join_buckets: HashMap<ServerId, JoinBucket>,
+    join_waiting: BTreeSet<ServerId>,
     /// Voice calls: mine, and who is in which call.
     calls: voice::Calls,
 }
@@ -159,6 +163,18 @@ fn parse_server(id: &str) -> CoreResult<ServerId> {
     model::parse_hex32(id).map(ServerId::from_bytes).ok_or_else(|| ErrorCode::NotFound.into())
 }
 
+/// Server lifecycle's rollout gate (#229): every current, non-kicked member
+/// but `me` has `server-lifecycle-v1` in their latest profile post (none
+/// counts as needing an update).
+fn gate_open(view: &ServerView, me: PublicKey) -> bool {
+    let caps = view.lifecycle_caps();
+    view.state
+        .members
+        .iter()
+        .filter(|m| **m != me && !view.state.kicked.contains(m))
+        .all(|m| caps.get(m) == Some(&true))
+}
+
 impl Core {
     pub fn open(config: Config, ports: Ports) -> CoreResult<Core> {
         let db = Db::open(config.db_path.as_deref())?;
@@ -173,7 +189,8 @@ impl Core {
             net: ports.network.clone(),
             presence_seen: HashMap::new(),
             keyed_for: HashMap::new(),
-            rekey_after: HashMap::new(),
+            join_buckets: HashMap::new(),
+            join_waiting: BTreeSet::new(),
             calls: voice::Calls::default(),
         };
         // QA-20: without a usable keychain the core still starts, and says so
@@ -521,6 +538,10 @@ impl Core {
         let Some((server, invite, secret)) = model::parse_invite_link(link) else {
             return Ok(JoinStatus::Invalid { link: link.to_owned() });
         };
+        // A server closed while we were in it: never opened again.
+        if self.lock().db.closed_at(server)?.is_some() {
+            return Ok(JoinStatus::Closed { link: link.to_owned() });
+        }
         // GAP-4: only the secret lets us ask for the server's logs.
         let general = BTreeSet::from([model::default_channel(server)]);
         self.ports.network.open_server(server, &secret, &general);
@@ -588,6 +609,129 @@ impl Core {
     /// (`authority`'s rule; the mock only lets the owner kick).
     pub fn kick_member(&self, server_id: &str, user_id: &str) -> CoreResult<()> {
         self.control_action(server_id, Action::kick(parse_user(user_id)?))
+    }
+
+    // ---- server lifecycle (#229, #251) -----------------------------------
+    //
+    // Every command checks the rollout gate (`update-needed`) before it
+    // signs: an older member would refuse the record and stall on every
+    // control record after it. Each syncs first, so the gate (and a
+    // close's causal past) is as current as the network allows.
+
+    /// `renameServer`: the owner or an admin. The name is trimmed, then must
+    /// pass the strict server-name rule (`bad-request`).
+    pub fn rename_server(&self, server_id: &str, name: &str) -> CoreResult<ServerSummary> {
+        let name = name.trim();
+        if !authority::server_name_ok(name) {
+            return Err(ErrorCode::BadRequest.into());
+        }
+        let server = parse_server(server_id)?;
+        let _ = self.sync_now();
+        self.run(|inner, ports, events| {
+            inner.load_mine(server)?;
+            inner.lifecycle_role(server, authority::Role::Admin)?;
+            inner.lifecycle_gate(server)?;
+            inner.publish_control(ports, server, &Action::ServerEdit { name: name.to_owned() })?;
+            let summary = inner.summary(server)?;
+            events.push(Event::ServerUpdated(summary.clone()));
+            Ok(summary)
+        })
+    }
+
+    /// `leaveServer`: any member but the owner (`not-allowed`; the owner
+    /// deletes instead). The `Leave` goes out, so the others re-key; then
+    /// the server leaves this device (`server.removed`, `left`). A leaver
+    /// isn't banned: a new invite lets them back, as a plain member.
+    pub fn leave_server(&self, server_id: &str) -> CoreResult<()> {
+        let server = parse_server(server_id)?;
+        let _ = self.sync_now();
+        self.run(|inner, ports, events| {
+            inner.load_mine(server)?;
+            let me = inner.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+            if inner.view(server)?.state.role(me) == authority::Role::Owner {
+                return Err(ErrorCode::NotAllowed.into());
+            }
+            // Never blocked by the rollout gate (both leads, #261): the
+            // signed `Leave` waits in a durable outbox and goes out once the
+            // gate opens (`flush_leaves`), retried until a member has it.
+            let leave =
+                inner.publish_control(ports, server, &Action::Leave { cut: Cut::default() })?;
+            inner.db.set_leave(server, &leave)?;
+            if inner.lifecycle_gate(server).is_ok() {
+                ports.network.publish(&leave);
+            }
+            // Gone from the UI at once; only the sync secret and the control
+            // subscription stay, to deliver the `Leave`.
+            inner.purge_server(ports, server, RemovedReason::Left, &[], true, events)
+        })?;
+        self.flush_leaves();
+        Ok(())
+    }
+
+    /// The leave outbox, once per sync round: each `Leave` not yet
+    /// delivered is checked against what reachable peers hold (without the
+    /// lock), then dropped, kept, or (re)published (`Inner::flush_leave`).
+    fn flush_leaves(&self) {
+        let pending = {
+            let inner = self.lock();
+            let Ok(leaves) = inner.db.leaves() else { return };
+            leaves
+                .into_iter()
+                .filter_map(|(server, leave)| {
+                    let secret = inner.secret(server).ok()??;
+                    Some((server, leave, secret))
+                })
+                .collect::<Vec<_>>()
+        };
+        for (server, leave, secret) in pending {
+            self.ports.network.open_server(server, &secret, &BTreeSet::new());
+            let fetched: Vec<Record> = self
+                .ports
+                .network
+                .fetch(server)
+                .into_iter()
+                .filter(|r| r.server() == server && r.scope() == Scope::Control)
+                .collect();
+            let _ = self.run(|inner, ports, _| inner.flush_leave(ports, server, &leave, fetched));
+        }
+    }
+
+    /// `getUpdateNeeded`: the members whose latest profile post lacks
+    /// `server-lifecycle-v1` (or who have none), so the UI can say who
+    /// blocks a rename or a delete (`update-needed`). Empty: the gate is
+    /// open.
+    pub fn get_update_needed(&self, server_id: &str) -> CoreResult<Vec<Id>> {
+        let server = parse_server(server_id)?;
+        self.run(|inner, _, _| {
+            inner.load_mine(server)?;
+            let me = inner.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+            let view = inner.view(server)?;
+            let caps = view.lifecycle_caps();
+            Ok(view
+                .state
+                .members
+                .iter()
+                .filter(|m| **m != me && !view.state.kicked.contains(m))
+                .filter(|m| caps.get(m) != Some(&true))
+                .map(|m| model::hex_id(m.as_bytes()))
+                .collect())
+        })
+    }
+
+    /// `closeServer`: the owner deletes the server for good. Syncs first,
+    /// so recent records are in the close's past (only those stay); then
+    /// the close goes out and the server is closed here (`server.closed`,
+    /// see `close_locally`), as it is for every member when they read it.
+    pub fn close_server(&self, server_id: &str) -> CoreResult<()> {
+        let server = parse_server(server_id)?;
+        let _ = self.sync_now();
+        self.run(|inner, ports, events| {
+            inner.load_mine(server)?;
+            inner.lifecycle_role(server, authority::Role::Owner)?;
+            inner.lifecycle_gate(server)?;
+            inner.publish_control(ports, server, &Action::ServerClose)?;
+            inner.close_locally(ports, server, events)
+        })
     }
 
     /// B11: the owner creates a channel. `name-taken` if another channel of
@@ -751,36 +895,7 @@ impl Core {
             if matches!(&action, Action::Kick { target, .. } if *target == me.key()) {
                 return Err(ErrorCode::NotAllowed.into());
             }
-            let view = inner.view(server)?;
-            // A revoke-invite lists its invite in its deps.
-            let extra = match &action {
-                Action::RevokeInvite { invite } => Some(*invite),
-                _ => None,
-            };
-            let record = authority::sign_control(
-                me.identity.signing_key(),
-                server,
-                view.next_seq(&me.key()),
-                view.deps(extra),
-                ports.clock.now_ms(),
-                &action,
-            )
-            .map_err(|_| ErrorCode::BadRequest)?;
-            // Dry run on the live resolver. Its deps are our heads, so it
-            // joins at once; if `authority` doesn't accept it, it was never
-            // stored or sent, and the log is rebuilt from the store so it
-            // leaves no trace.
-            // TODO(records B4): `Resolver::would_accept` instead.
-            let log = inner.logs.get_mut(&server).expect("loaded above");
-            let joined = log.add(record.clone());
-            if !log.accepted(&record.id()) {
-                inner.logs.remove(&server);
-                return Err(ErrorCode::NotAllowed.into());
-            }
-            for record in &joined {
-                inner.db.put_record(record)?;
-            }
-            ports.network.publish(&record);
+            let record = inner.publish_control(ports, server, &action)?;
             if matches!(action, Action::Invite { .. } | Action::RevokeInvite { .. }) {
                 // The server's link may name another invite now.
                 events.push(Event::ServerUpdated(inner.summary(server)?));
@@ -1101,7 +1216,9 @@ impl Core {
                 eprintln!("mvs-core: sync round failed: {:?}", e.code);
             }
             self.voice_tick();
-            match hints.recv_timeout(SYNC_EVERY) {
+            // A waiting join re-key fires exactly when its token is due.
+            let wait = self.next_rekey_in().map_or(SYNC_EVERY, |due| due.min(SYNC_EVERY));
+            match hints.recv_timeout(wait) {
                 // Several hints at once are one round.
                 Ok(()) => while hints.try_recv().is_ok() {},
                 Err(RecvTimeoutError::Timeout) => {}
@@ -1110,17 +1227,37 @@ impl Core {
         }
     }
 
+    /// How long until the next join re-key token is due on a server whose
+    /// joiners wait for one (GAP-8); `None` when nobody waits. The sync loop
+    /// wakes then, so the shared re-key fires on time. Never below
+    /// [`REKEY_WAKE_FLOOR`], so a re-key that keeps not happening can't spin
+    /// the loop into back-to-back syncs.
+    pub fn next_rekey_in(&self) -> Option<Duration> {
+        let now = self.ports.clock.now_ms();
+        let inner = self.lock();
+        inner
+            .join_waiting
+            .iter()
+            .filter_map(|server| inner.join_buckets.get(server))
+            .map(|bucket| Duration::from_millis(bucket.due().saturating_sub(now)))
+            .min()
+            .map(|due| due.max(REKEY_WAKE_FLOOR))
+    }
+
     /// Rust addition (`syncNow`): pulls every server's records from the
     /// network and reports what changed. TODO(sync): driven by the sync
     /// crate's push and pull instead of a command.
     pub fn sync_now(&self) -> CoreResult<()> {
         self.retry_joins();
+        self.flush_leaves();
         let servers = {
             let mut inner = self.lock();
             if inner.me.is_none() {
                 return Ok(());
             }
-            let servers = inner.db.servers()?;
+            // A closed server is no longer synced.
+            let mut servers = inner.db.servers()?;
+            servers.retain(|s| inner.db.closed_at(*s).ok().flatten().is_none());
             // GAP-4: (re)open each server with its secret and channels first.
             for server in &servers {
                 inner.load(*server)?;
@@ -1134,23 +1271,41 @@ impl Core {
         self.run(|inner, ports, events| {
             let Some(me) = inner.me.as_ref() else { return Ok(()) };
             let me = me.key();
+            // Closed servers past their 30 days: purged but for their
+            // genesis and close.
+            inner.expire_closed(ports, events)?;
             for (server, records) in fetched {
                 if !inner.db.has_server(server)? {
                     continue;
                 }
                 inner.load(server)?;
                 inner.seed_announced(&*ports.cipher, server)?;
+                let name_before = inner.view(server)?.state.server_name.clone();
                 let mut changed = false;
                 for record in records {
                     if record.server() == server {
                         changed |= inner.store(server, record)?;
                     }
                 }
+                // Server lifecycle: the owner deleted it; it leaves this device.
+                if inner.view(server)?.state.closed.is_some() {
+                    inner.close_locally(ports, server, events)?;
+                    continue;
+                }
+                if inner.view(server)?.state.server_name != name_before {
+                    events.push(Event::ServerUpdated(inner.summary(server)?));
+                }
+                // Release N: say this version reads lifecycle records. Never
+                // aborts the other servers; the next round retries.
+                let _ = inner.post_caps(ports, server);
                 let after = inner.view(server)?;
                 if after.is_kicked(&me) {
+                    inner.join_waiting.remove(&server);
                     inner.db.remove_server(server)?;
-                    events
-                        .push(Event::ServerRemoved { server_id: model::hex_id(server.as_bytes()) });
+                    events.push(Event::ServerRemoved {
+                        server_id: model::hex_id(server.as_bytes()),
+                        reason: None,
+                    });
                 } else if changed {
                     events.push(Event::MembersChanged {
                         server_id: model::hex_id(server.as_bytes()),
@@ -1167,8 +1322,11 @@ impl Core {
                     inner.announce(&*ports.cipher, server, events)?;
                     inner.prune(ports, server)?;
                 } else if inner.may_rotate(server)? {
-                    // A join re-key a batch window deferred: retried each round.
+                    // A join re-key the token bucket deferred: retried each round.
                     let _ = inner.rekey(ports, server, events);
+                } else {
+                    // No longer a rotator (demoted): nothing of ours waits.
+                    inner.join_waiting.remove(&server);
                 }
                 // M2: someone came online or went offline (members only).
                 if inner.db.has_server(server)? && inner.presence_changed(server)? && !changed {
@@ -1725,8 +1883,13 @@ impl Inner {
     /// After members were removed (a kick or revoke, ours or read): every
     /// known channel whose key removed members still hold gets a fresh one
     /// if we may rotate (`notice: encryption-renewed`); otherwise the UI
-    /// learns it waits for a moderator (`notice: rekey-waiting`).
+    /// learns it waits for a moderator (`notice: rekey-waiting`). After
+    /// joins: re-keyed for the new members as the server's token bucket
+    /// allows (`crate::rekey`).
     fn rekey(&mut self, ports: &Ports, server: ServerId, events: &mut Events) -> CoreResult<()> {
+        // Waiting only if this round says so: an early return or error (no
+        // longer a member, may no longer rotate) never leaves it waiting.
+        self.join_waiting.remove(&server);
         let Some(me) = self.me.as_ref().map(Me::key) else { return Ok(()) };
         let view = self.view(server)?;
         if !view.state.is_member(me) {
@@ -1740,6 +1903,8 @@ impl Inner {
         let log = self.logs.get(&server).ok_or(ErrorCode::Internal)?;
         chat::sync_cipher(cipher, server, log);
         let server_id = model::hex_id(server.as_bytes());
+        // Channels a join left stale: re-keyed together, for one token.
+        let mut joined = Vec::new();
         for channel in self.known(server)? {
             // A probe: an empty plaintext, never sent.
             let probe = cipher.encrypt(server, channel, b"");
@@ -1752,25 +1917,7 @@ impl Inner {
                 let stale = self.keyed_for.get(&(server, channel)) != Some(&members);
                 let no_key = probe == Err(CipherError::NoKey);
                 if may_rotate && (no_key || (probe.is_ok() && stale)) && members.len() > 1 {
-                    // Batched (GAP-8): at most one join re-key per channel every
-                    // 12-18 s (jitter), covering everyone who joined meanwhile;
-                    // later rounds pick up what this one defers.
-                    let now = ports.clock.now_ms();
-                    let due = self.rekey_after.get(&(server, channel)).is_none_or(|t| now >= *t);
-                    if due {
-                        let jitter =
-                            JOIN_REKEY_MIN_MS + u64::from(OsRng.next_u32()) % JOIN_REKEY_JITTER_MS;
-                        self.rekey_after.insert((server, channel), now + jitter);
-                        // Fail closed, as for a kick: a failed rotation is never
-                        // announced as one, and the UI learns the channel waits.
-                        if self
-                            .rotate_channel(ports, server, channel, &members, &auth_deps)
-                            .is_err()
-                        {
-                            let kind = NoticeKind::RekeyWaiting;
-                            events.push(Event::Notice { kind, server_id: server_id.clone() });
-                        }
-                    }
+                    joined.push(channel);
                 } else if !may_rotate && no_key {
                     // A joiner without a key yet: waiting for a moderator, not ready.
                     let kind = NoticeKind::RekeyWaiting;
@@ -1778,6 +1925,7 @@ impl Inner {
                 }
                 continue;
             }
+            // A kick, leave or revoke: never waits, spends no token.
             // Fail closed: a rotation that didn't happen is never announced as
             // one, and the channel stays blocked by `RotationRequired` until the
             // next sync or send retries.
@@ -1786,6 +1934,25 @@ impl Inner {
             let kind =
                 if renewed { NoticeKind::EncryptionRenewed } else { NoticeKind::RekeyWaiting };
             events.push(Event::Notice { kind, server_id: server_id.clone() });
+        }
+        if joined.is_empty() {
+            return Ok(());
+        }
+        // GAP-8 (`rekey`): a token re-keys now; without one, everyone who
+        // joined meanwhile shares the re-key fired when the next is due.
+        let now = ports.clock.now_ms();
+        let bucket = self.join_buckets.entry(server).or_insert_with(|| JoinBucket::new(now));
+        if !bucket.take(now) {
+            self.join_waiting.insert(server);
+            return Ok(());
+        }
+        for channel in joined {
+            // Fail closed, as for a kick: a failed rotation is never announced
+            // as one, and the UI learns the channel waits.
+            if self.rotate_channel(ports, server, channel, &members, &auth_deps).is_err() {
+                let kind = NoticeKind::RekeyWaiting;
+                events.push(Event::Notice { kind, server_id: server_id.clone() });
+            }
         }
         Ok(())
     }
@@ -1917,6 +2084,225 @@ impl Inner {
         })
     }
 
+    /// Signs `action` on our heads in loaded `server`, dry-runs it on the
+    /// live resolver, then stores and publishes it. Its deps are our heads,
+    /// so it joins at once; if `authority` doesn't accept it, it was never
+    /// stored or sent (`not-allowed`), and the log is rebuilt from the store
+    /// so it leaves no trace.
+    // TODO(records B4): `Resolver::would_accept` instead.
+    fn publish_control(
+        &mut self,
+        ports: &Ports,
+        server: ServerId,
+        action: &Action,
+    ) -> CoreResult<Record> {
+        let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?;
+        let view = self.view(server)?;
+        // A revoke-invite lists its invite in its deps.
+        let extra = match action {
+            Action::RevokeInvite { invite } => Some(*invite),
+            _ => None,
+        };
+        let record = authority::sign_control(
+            me.identity.signing_key(),
+            server,
+            view.next_seq(&me.key()),
+            view.deps(extra),
+            ports.clock.now_ms(),
+            action,
+        )
+        .map_err(|_| ErrorCode::BadRequest)?;
+        let log = self.logs.get_mut(&server).ok_or(ErrorCode::Internal)?;
+        let joined = log.add(record.clone());
+        if !log.accepted(&record.id()) {
+            self.logs.remove(&server);
+            return Err(ErrorCode::NotAllowed.into());
+        }
+        if matches!(action, Action::Leave { .. }) {
+            // Never stored: it goes to the leave outbox (`leave_server`).
+            return Ok(record);
+        }
+        for record in &joined {
+            self.db.put_record(record)?;
+        }
+        ports.network.publish(&record);
+        Ok(record)
+    }
+
+    /// One round of the leave outbox for `server` (#261, both leads), on
+    /// what reachable peers hold (`fetched`; nothing of it is stored):
+    /// - kicked first, or the server closed: the `Leave` is dropped;
+    /// - a member has it (B6 `sent` or `received`; on a transport that
+    ///   doesn't track that, it took it): done, the entry and the sync
+    ///   secret go, and the subscription closes;
+    /// - otherwise, once the gate is open, it is (re)published.
+    fn flush_leave(
+        &mut self,
+        ports: &Ports,
+        server: ServerId,
+        leave: &Record,
+        fetched: Vec<Record>,
+    ) -> CoreResult<()> {
+        let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+        let finish = |db: &Db| -> CoreResult<()> {
+            db.drop_leave(server)?;
+            ports.network.close_server(server);
+            Ok(())
+        };
+        let log = Log::new(server, fetched);
+        let Some(view) = ServerView::build(server, &log) else { return Ok(()) };
+        if view.is_kicked(&me) || view.state.closed.is_some() {
+            return finish(&self.db);
+        }
+        let state = ports.network.send_state(leave.id());
+        if matches!(state, Some(SendState::Sent | SendState::Received)) {
+            return finish(&self.db);
+        }
+        if !gate_open(&view, me) || state == Some(SendState::Pending) {
+            return Ok(());
+        }
+        ports.network.publish(leave);
+        let took = ports.network.send_state(leave.id()).is_none()
+            && ports.network.fetch(server).iter().any(|r| r.id() == leave.id());
+        if took {
+            return finish(&self.db);
+        }
+        Ok(())
+    }
+
+    /// `not-allowed` below `role` in loaded `server` (before the gate, so a
+    /// member learns they can't, not that others must update).
+    fn lifecycle_role(&self, server: ServerId, role: authority::Role) -> CoreResult<()> {
+        let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+        if self.view(server)?.state.role(me) < role {
+            return Err(ErrorCode::NotAllowed.into());
+        }
+        Ok(())
+    }
+
+    /// Server lifecycle's rollout gate (#229): `update-needed` unless every
+    /// other current member's latest profile post carries
+    /// `server-lifecycle-v1` (no profile post counts as needing an update).
+    /// This version reads them itself. Checked before anything is signed.
+    fn lifecycle_gate(&self, server: ServerId) -> CoreResult<()> {
+        let me = self.me.as_ref().ok_or(ErrorCode::NotFound)?.key();
+        if !gate_open(&self.view(server)?, me) {
+            return Err(ErrorCode::UpdateNeeded.into());
+        }
+        Ok(())
+    }
+
+    /// Release N of server lifecycle: my latest profile post in `server`
+    /// lacks the cap (posted by an older version), so post it again, once.
+    fn post_caps(&mut self, ports: &Ports, server: ServerId) -> CoreResult<()> {
+        let Some(me) = self.me.as_ref() else { return Ok(()) };
+        let (key, name) = (me.key(), me.profile.display_name.clone());
+        let view = self.view(server)?;
+        let member = view.state.is_member(key) && !view.state.kicked.contains(&key);
+        if !member || view.state.closed.is_some() || view.lifecycle_caps().get(&key) == Some(&true)
+        {
+            return Ok(());
+        }
+        self.publish_control(ports, server, &model::profile_action(&name)).map(drop)
+    }
+
+    /// Server lifecycle (#229, the security lead's rule 5): after I leave,
+    /// or the server is deleted, removes it from this device. My call there
+    /// ends first (with a bye); then its records, sync secret, channel keys
+    /// and sync subscription go, and every per-server loop forgets it.
+    /// `server.removed` follows. Not erasure: other members keep copies.
+    ///
+    /// `keep`: for a closed server's last purge, its genesis and close.
+    /// `leaving`: my `Leave` is in the outbox, so the sync secret and
+    /// subscription stay until it is delivered (`flush_leave`).
+    #[allow(clippy::too_many_arguments)]
+    fn purge_server(
+        &mut self,
+        ports: &Ports,
+        server: ServerId,
+        reason: RemovedReason,
+        keep: &[RecordId],
+        leaving: bool,
+        events: &mut Events,
+    ) -> CoreResult<()> {
+        self.stop_using(ports, server, !leaving, events);
+        self.db.purge_server(server, keep, leaving)?;
+        self.logs.remove(&server);
+        self.announced.remove(&server);
+        events.push(Event::ServerRemoved {
+            server_id: model::hex_id(server.as_bytes()),
+            reason: Some(reason),
+        });
+        Ok(())
+    }
+
+    /// Server lifecycle: the owner closed `server` (read, or my own close).
+    /// It isn't purged at once (the Tech Lead's #229 answer): any call there
+    /// ends, its keys and sync subscription go, and it's no longer synced;
+    /// it stays listed, read-only (`closed`), for [`CLOSED_RETENTION_MS`]
+    /// after we received the close. Then the rest goes, and its genesis and
+    /// close stay forever, so it reads as closed, never unknown.
+    fn close_locally(
+        &mut self,
+        ports: &Ports,
+        server: ServerId,
+        events: &mut Events,
+    ) -> CoreResult<()> {
+        self.stop_using(ports, server, true, events);
+        self.db.mark_closed(server, ports.clock.now_ms())?;
+        events.push(Event::ServerClosed { server_id: model::hex_id(server.as_bytes()) });
+        Ok(())
+    }
+
+    /// Closed servers whose 30 days are up: purged but for their genesis
+    /// and close (`server.removed`, `closed`).
+    fn expire_closed(&mut self, ports: &Ports, events: &mut Events) -> CoreResult<()> {
+        let now = ports.clock.now_ms();
+        for (server, at) in self.db.closed_servers()? {
+            if now.saturating_sub(at) < CLOSED_RETENTION_MS {
+                continue;
+            }
+            self.load(server)?;
+            let log = self.logs.get(&server).ok_or(ErrorCode::Internal)?;
+            let genesis = log.records.iter().find(|r| r.kind() == Kind::Genesis).map(Record::id);
+            let close = log.resolver.state().closed;
+            let keep: Vec<RecordId> = genesis.into_iter().chain(close).collect();
+            self.purge_server(ports, server, RemovedReason::Closed, &keep, false, events)?;
+        }
+        Ok(())
+    }
+
+    /// What every way out of a server shares: my call there ends (with a
+    /// bye), and its keys, sync subscription (unless `close_sync` is false:
+    /// a `Leave` still to deliver) and per-server state go.
+    // TODO(#255): drop_server_invites here once invite publications land.
+    fn stop_using(
+        &mut self,
+        ports: &Ports,
+        server: ServerId,
+        close_sync: bool,
+        events: &mut Events,
+    ) {
+        if self.calls.in_server(server) {
+            if let Some(key) = self.me.as_ref().map(|me| me.identity.signing_key().clone()) {
+                let mut calls = std::mem::take(&mut self.calls);
+                let mut ctx = voice::Ctx { key: &key, now: ports.clock.now_ms(), events };
+                calls.leave(&mut ctx, self);
+                self.calls = calls;
+            }
+        }
+        self.calls.forget_server(server);
+        ports.cipher.forget(server);
+        if close_sync {
+            ports.network.close_server(server);
+        }
+        self.presence_seen.remove(&server);
+        self.keyed_for.retain(|(s, _), _| *s != server);
+        // Its join re-key tokens and any re-key waiting on them (#250).
+        self.join_buckets.remove(&server);
+        self.join_waiting.remove(&server);
+    }
+
     /// Loads `server`'s log from the store unless it is already in memory.
     fn load(&mut self, server: ServerId) -> CoreResult<()> {
         if !self.logs.contains_key(&server) {
@@ -2015,6 +2401,11 @@ impl Inner {
         let Some(view) = ServerView::build(server, &log) else {
             return Ok(JoinStatus::Invalid { link });
         };
+        // Server lifecycle: an old invite (or a stale peer) for a server its
+        // owner closed. Its genesis and close say so: closed, not unknown.
+        if view.state.closed.is_some() {
+            return Ok(JoinStatus::Closed { link });
+        }
         let required = view.genesis.age_restriction;
         let age = model::age_on(&me.profile.birth_date, ports.clock.now_ms());
         if required.min_age() > 0 && age.is_none_or(|age| age < required.min_age()) {
@@ -2081,15 +2472,18 @@ impl ServerView<'_> {
             (Some(invite), Some(secret)) => model::invite_link(self.id, invite, secret),
             _ => String::new(),
         };
+        // The latest accepted rename, else the genesis name.
+        let name = self.state.server_name.clone().unwrap_or_else(|| self.genesis.name.clone());
         ServerSummary {
-            name: self.genesis.name.clone(),
-            initials: model::initials(&self.genesis.name),
+            initials: model::initials(&name),
+            name,
             color: model::color_for(self.id.as_bytes()),
             age_restriction: self.genesis.age_restriction,
             owner_id: model::hex_id(self.owner.as_bytes()),
             invite_link,
             unread: false,
             mentions: 0,
+            closed: self.state.closed.is_some(),
             id,
         }
     }
