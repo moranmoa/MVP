@@ -23,6 +23,7 @@ export * from './types';
  *   ?coreDown=<detail> the desktop shell reports the core down (missing, start-failed, crashed, crash-loop)
  *   ?callError=<code> joinCall fails with call-full, relay-only, in-call-elsewhere or not-implemented
  *   ?keyPending=arrive|fail|wait  sends wait for the channel key, then go out, fail or keep waiting (#288)
+ *   ?pendingDob=1    a birth-date correction waits its 30 days (B7, #306)
  *   ?signOutKeyring=1 signOut fails with keyring-unavailable (#304)
  *   ?profileError=1  updateProfile fails (B11e)
  *   ?roomFull=1      every demo voice room already has 5 people
@@ -56,6 +57,7 @@ export function createCore(search = typeof location !== 'undefined' ? location.s
     roomFull: params.has('roomFull'),
     profileError: params.has('profileError'),
     signOutKeyring: params.has('signOutKeyring'),
+    pendingDob: params.has('pendingDob'),
     keyPending: (params.get('keyPending') as MockOptions['keyPending']) ?? undefined,
     relayOnly: params.has('relayOnly'),
     outdatedMembers: params.has('outdated'),

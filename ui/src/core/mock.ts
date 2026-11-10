@@ -66,6 +66,8 @@ export interface MockOptions {
    * stay held (`wait`, for screenshots).
    */
   keyPending?: 'arrive' | 'fail' | 'wait';
+  /** B7: the identity has a correction raising its age, waiting its 30 days (#306). */
+  pendingDob?: boolean;
   /** signOut is refused by the OS keychain (#304: nothing changes). */
   signOutKeyring?: boolean;
   /** updateProfile fails (B11e: the save error state). */
@@ -184,6 +186,10 @@ export class MockCore implements CoreApi {
   constructor(private options: MockOptions = {}) {
     this.speed = options.speed ?? 1;
     this.load();
+    if (options.pendingDob && this.identity) {
+      // A correction to an earlier date (a higher age), 9 days into its 30.
+      this.identity = { ...this.identity, pendingBirthDate: { date: '1996-04-12', effectiveAt: Date.now() + 21 * 86_400_000 } };
+    }
     if (options.simulateActivity) {
       this.timers.push(setInterval(() => this.simulateIncoming(), 4500));
       this.timers.push(setInterval(() => this.simulatePresence(), 9000));

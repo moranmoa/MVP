@@ -132,6 +132,7 @@ function AccountSection({
   return (
     <div className="stack">
       <ProfileEditor ref={editor} onDirtyChange={onDirtyChange} />
+      <BirthDateSection />
       <h4>
         <FormattedMessage id="settings.account.words" />
       </h4>
@@ -527,5 +528,45 @@ function AboutSection() {
         <FormattedMessage id="settings.about.licenses" />
       </p>
     </div>
+  );
+}
+
+/** A calendar date (YYYY-MM-DD) as the person reads it, without a time-zone shift. */
+function formatBirthDate(intl: ReturnType<typeof useIntl>, date: string): string {
+  const [y, m, d] = date.split('-').map(Number);
+  return intl.formatDate(new Date(y, m - 1, d), { dateStyle: 'long' });
+}
+
+/**
+ * B7 §2: my date of birth, and a correction that raises my age while it waits
+ * its 30 days. Correcting it ("תיקון", and cancelling a pending correction)
+ * waits for the core's correction commands.
+ */
+function BirthDateSection() {
+  const store = useAppStore();
+  const intl = useIntl();
+  const identity = useStore(store, (s) => s.identity)!;
+  const pending = identity.pendingBirthDate;
+  return (
+    <section className="dob-section" aria-labelledby="dob-heading">
+      <h4 id="dob-heading">
+        <FormattedMessage id="age.dob.section" />
+      </h4>
+      {identity.birthDate && <p className="dob-current">{formatBirthDate(intl, identity.birthDate)}</p>}
+      {pending && (
+        <p className="dob-pending" role="status">
+          <FormattedMessage
+            id="age.dob.pending"
+            values={{
+              newDate: formatBirthDate(intl, pending.date),
+              date: intl.formatDate(pending.effectiveAt, { dateStyle: 'long' }),
+            }}
+          />
+        </p>
+      )}
+      <p className="muted small">
+        <FormattedMessage id="age.dob.privacy" />
+      </p>
+    </section>
   );
 }

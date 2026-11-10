@@ -2800,3 +2800,21 @@ input.switch:disabled {
 .sign-out-dialog .warning {
   margin-block-end: 0.75rem;
 }
+
+/* B7 §2: date of birth in Settings → Account. */
+.dob-section {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.dob-section p {
+  margin: 0;
+}
+
+.dob-pending {
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius-s);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  color: var(--warning-text);
+}
