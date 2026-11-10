@@ -4,9 +4,9 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { _electron as electron } from 'playwright-core';
 
 const FAKE_CORE = fileURLToPath(new URL('./fake-core.js', import.meta.url));
@@ -28,7 +28,11 @@ after(async () => {
 });
 
 test('the app runs in the throwaway test profile', async () => {
-  assert.equal(await app.evaluate(({ app: a }) => a.getPath('userData')), PROFILE);
+  const userData = await app.evaluate(({ app: a }) => a.getPath('userData'));
+  assert.equal(userData, PROFILE);
+  // Under the OS temp dir, never the installed app's profile.
+  const rel = relative(realpathSync(tmpdir()), realpathSync(userData));
+  assert.ok(rel && !rel.startsWith('..') && !isAbsolute(rel), `${userData} is not under ${tmpdir()}`);
 });
 
 test('the UI renders from app://mvs', async () => {
