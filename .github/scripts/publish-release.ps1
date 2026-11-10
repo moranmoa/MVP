@@ -201,15 +201,15 @@ if ($keyPath.StartsWith($repoRoot + $sep, [StringComparison]::OrdinalIgnoreCase)
   Fail 'the signing key is inside the repository checkout; keep it on an encrypted removable drive'
 }
 # Synced folders upload the key: OneDrive (any of its variables), Dropbox,
-# Google Drive.
+# Google Drive, iCloud Drive.
 $synced = @($env:OneDrive, $env:OneDriveConsumer, $env:OneDriveCommercial) | Where-Object { $_ }
 foreach ($s in $synced) {
   if ($keyPath.StartsWith([IO.Path]::GetFullPath($s).TrimEnd($sep) + $sep, [StringComparison]::OrdinalIgnoreCase)) {
     Fail 'the signing key is in a OneDrive folder; keep it on an encrypted removable drive'
   }
 }
-if ($keyPath -match '(?i)[\\/](OneDrive[^\\/]*|Dropbox|Google Drive|GoogleDrive|My Drive)[\\/]') {
-  Fail 'the signing key is in a synced folder (OneDrive, Dropbox or Google Drive); keep it on an encrypted removable drive'
+if ($keyPath -match '(?i)[\\/](OneDrive[^\\/]*|Dropbox|Google Drive|GoogleDrive|My Drive|iCloudDrive|iCloud Drive)[\\/]') {
+  Fail 'the signing key is in a cloud-synced folder (OneDrive, Dropbox, Google Drive or iCloud): it would be uploaded. Keep it on an encrypted removable drive'
 }
 $keyRoot = [IO.Path]::GetPathRoot($keyPath)
 $driveType = $null

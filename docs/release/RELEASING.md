@@ -220,11 +220,15 @@ PowerShell on your normal (online) PC, in the repo:
    never prints, copies or uploads it. It reads `MVS_ROOT_KEY` once and
    clears it from the session before running anything else, so git, gh,
    cargo build scripts and node never see it. It refuses to run in CI. It
-   also refuses a key inside the repository or in a OneDrive, Dropbox or
-   Google Drive folder, and warns when the drive isn't removable. With this
+   also refuses a key inside the repository or in a cloud-synced folder
+   (OneDrive, Dropbox, Google Drive, iCloud), and warns when the drive isn't
+   removable. The key path goes only to `updater sign-manifest`. With this
    script the key is used on the online PC, which is fine for the closed
-   alpha (SECURITY.md): keep it on an **encrypted removable drive**,
-   connected only when the script asks. Never put the path in the repo, a
+   alpha (SECURITY.md): keep it on an **encrypted removable drive** (for
+   example a USB stick with BitLocker To Go), plugged in and unlocked only
+   when the script asks, and removed when it says so. `updater` is already
+   built by then, so the key is never present while cargo or a `build.rs`
+   runs. Never put the path in the repo, a
    script or `$PROFILE`. If you would rather keep the key on an offline machine, do
    steps 3–6 by hand as below.
 
