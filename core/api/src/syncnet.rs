@@ -104,15 +104,18 @@ impl SyncNetwork {
     /// Starts a node in `data_dir` (its `store.db` and `node.key`) that
     /// reaches peers through `relay`.
     pub fn start(relay: Multiaddr, data_dir: &Path, gate: Arc<MemberGate>) -> anyhow::Result<Self> {
-        Self::start_with_bootstrap(relay, Vec::new(), data_dir, gate)
+        Self::start_with_bootstrap(relay, Vec::new(), false, data_dir, gate)
     }
 
     /// Like [`SyncNetwork::start`], also dialling `bootstrap` directly (each
     /// checked by [`relay_addr`]): the relay's plain TCP address, so that
     /// identify observes our public address for hole punching (#219).
+    /// `relay_only`: the stored setting ([`crate::stored_relay_only`]),
+    /// applied as the node starts.
     pub fn start_with_bootstrap(
         relay: Multiaddr,
         bootstrap: Vec<Multiaddr>,
+        relay_only: bool,
         data_dir: &Path,
         gate: Arc<MemberGate>,
     ) -> anyhow::Result<Self> {
@@ -140,6 +143,14 @@ impl SyncNetwork {
             stub_gate: Some(Arc::new(MemberStubGate)),
         };
         let (node, mut events) = runtime.block_on(Node::start_with(config, access))?;
+        // GAP-6r: the stored relay-only setting. The node's first command,
+        // so it runs before any later dial, but the listener and the
+        // bootstrap dial were already started.
+        // TODO(dev-sync NodeConfig.relay_only): pass it in `config` instead,
+        // so the node never listens or dials directly.
+        if relay_only {
+            node.set_relay_only(true)?;
+        }
         // Events are only hints: a stored record wakes the core's sync loop
         // (`Core::run_sync_loop`), which re-reads the store. Coalesced (one
         // pending hint is enough) and drained, so the node never blocks.
@@ -261,6 +272,12 @@ impl VoiceNet for SyncNetwork {
 }
 
 impl Network for SyncNetwork {
+    fn set_relay_only(&self, on: bool) {
+        if let Err(e) = self.node.set_relay_only(on) {
+            tracing::warn!(%e, "relay-only not applied");
+        }
+    }
+
     /// The server must have been opened (`open_server`): logs are never
     /// opened by their plain names, which anyone could ask for (GAP-4).
     fn publish(&self, record: &Record) {

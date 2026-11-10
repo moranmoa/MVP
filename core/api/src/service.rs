@@ -1,7 +1,7 @@
 //! The core: `CoreCommands` from `ui/src/core/api.ts`, one method each.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -28,6 +28,21 @@ use updater::client::UpdateEvent;
 const DEFAULT_STORAGE_LIMIT: u64 = 5 * 1024 * 1024 * 1024;
 const KV_STORAGE_LIMIT: &str = "storage-limit";
 const KV_UPDATE_CHANNEL: &str = "update-channel";
+/// GAP-6r: `[1]` while relay-only is on. Per device, not per identity: it's
+/// about this computer's network.
+const KV_RELAY_ONLY: &str = "relay-only";
+
+fn relay_only_in(db: &Db) -> CoreResult<bool> {
+    Ok(db.get(KV_RELAY_ONLY)?.as_deref() == Some(&[1]))
+}
+
+/// GAP-6r: the stored relay-only setting in the core database at
+/// `db_path`, read before the network starts so the node starts with it.
+/// Off when unreadable: the core applies the stored value again once it
+/// opens (`Core::open`), so a failed read here only delays it.
+pub fn stored_relay_only(db_path: &Path) -> bool {
+    Db::open(Some(db_path)).and_then(|db| relay_only_in(&db)).unwrap_or(false)
+}
 const KV_RECOVERY_CHALLENGE: &str = "recovery-challenge";
 
 pub struct Config {
@@ -193,6 +208,11 @@ impl Core {
             join_waiting: BTreeSet::new(),
             calls: voice::Calls::default(),
         };
+        // GAP-6r: the stored relay-only setting, applied before anything
+        // else reaches the network.
+        let relay_only = relay_only_in(&inner.db)?;
+        inner.calls.set_relay_only(relay_only);
+        ports.network.set_relay_only(relay_only);
         // QA-20: without a usable keychain the core still starts, and says so
         // (`keyring-unavailable`) instead of crashing or looking empty.
         let state = match inner.vault.state() {
@@ -1500,7 +1520,28 @@ impl Core {
             Some(b"beta") => UpdateChannel::Beta,
             _ => UpdateChannel::Stable,
         };
-        Ok(AppInfo { version: self.app_version.clone(), update_channel: channel })
+        let relay_only = relay_only_in(&self.lock().db)?;
+        Ok(AppInfo { version: self.app_version.clone(), update_channel: channel, relay_only })
+    }
+
+    /// `setRelayOnly(on)` (GAP-6r): stored, then applied to the network. On
+    /// ends my call first (its media would go direct) and refuses calls
+    /// until it's off. Each of my servers gets a `voice.room` with the new
+    /// `relayOnly` at the next tick. Needs no identity.
+    pub fn set_relay_only(&self, on: bool) -> CoreResult<()> {
+        if on {
+            self.lock().calls.set_relay_only(true);
+            self.leave_call()?;
+        }
+        self.run(|inner, ports, _| {
+            inner.db.set(KV_RELAY_ONLY, &[u8::from(on)])?;
+            inner.calls.set_relay_only(on);
+            for server in inner.db.servers()? {
+                inner.calls.mark_dirty(server);
+            }
+            ports.network.set_relay_only(on);
+            Ok(())
+        })
     }
 
     pub fn set_update_channel(&self, channel: UpdateChannel) -> CoreResult<()> {

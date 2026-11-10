@@ -139,7 +139,15 @@ fn main() -> ExitCode {
             }
             // TODO(#64): a start failure (the node.key ACL) as a notice
             // the UI shows, not only this log line and an exit.
-            match SyncNetwork::start_with_bootstrap(relay, bootstrap, &dir.join("sync"), Arc::new(MemberGate::new())) {
+            // GAP-6r: the node starts with the stored relay-only setting.
+            let relay_only = api::stored_relay_only(&dir.join("core.db"));
+            match SyncNetwork::start_with_bootstrap(
+                relay,
+                bootstrap,
+                relay_only,
+                &dir.join("sync"),
+                Arc::new(MemberGate::new()),
+            ) {
                 Ok(net) => Some(Arc::new(net)),
                 Err(e) => {
                     eprintln!("mvs-core: sync didn't start: {e}");

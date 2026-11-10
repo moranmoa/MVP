@@ -195,6 +195,11 @@ struct ChannelArg {
     channel: UpdateChannel,
 }
 
+#[derive(Deserialize)]
+struct RelayOnlyArg {
+    on: bool,
+}
+
 fn args<T: DeserializeOwned>(value: Value) -> CoreResult<T> {
     serde_json::from_value(value).map_err(|_| ErrorCode::BadRequest.into())
 }
@@ -316,6 +321,7 @@ impl Core {
             "exportDiagnostics" => ok(self.export_diagnostics()),
             "getAppInfo" => ok(self.get_app_info()),
             "setUpdateChannel" => ok(self.set_update_channel(args::<ChannelArg>(raw)?.channel)),
+            "setRelayOnly" => ok(self.set_relay_only(args::<RelayOnlyArg>(raw)?.on)),
             // The shell restarts; nothing for the core to do.
             "restartToUpdate" => Ok(Value::Null),
 
