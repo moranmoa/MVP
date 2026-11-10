@@ -91,7 +91,14 @@ pub struct SyncNetwork {
     hints: Mutex<Option<Receiver<()>>>,
     waker: SyncSender<()>,
     voice: Mutex<Option<Receiver<VoiceSignal>>>,
+    /// T8-02: invite publications members pushed, until the core takes them.
+    invite_pushes: InvitePushes,
 }
+
+type InvitePushes = Arc<Mutex<Vec<(ServerId, Vec<u8>)>>>;
+/// Pushed publications kept between two sync rounds; more are dropped (a
+/// member re-announces when it binds again).
+const INVITE_PUSH_QUEUE: usize = 1024;
 
 impl SyncNetwork {
     /// Starts a node in `data_dir` (its `store.db` and `node.key`) that
@@ -141,9 +148,20 @@ impl SyncNetwork {
         let (hint, hints) = std::sync::mpsc::sync_channel(1);
         let waker = hint.clone();
         let (voice_tx, voice) = std::sync::mpsc::sync_channel(VOICE_QUEUE);
+        let invite_pushes: InvitePushes = Arc::default();
+        let pushes = invite_pushes.clone();
         runtime.spawn(async move {
             while let Some(event) = events.recv().await {
                 let wake = match event {
+                    // T8-02: from a verified current member (sync checked);
+                    // the core verifies the publication (C1) at its next round.
+                    NodeEvent::InvitePublication { server, bytes, .. } => {
+                        let mut queue = pushes.lock().expect("not poisoned");
+                        if queue.len() < INVITE_PUSH_QUEUE {
+                            queue.push((server, bytes));
+                        }
+                        true
+                    }
                     // Voice: from a verified current member (sync checked);
                     // the core checks the envelope.
                     NodeEvent::VoiceSignal { from, bytes } => {
@@ -175,6 +193,7 @@ impl SyncNetwork {
             hints: Mutex::new(Some(hints)),
             waker,
             voice: Mutex::new(Some(voice)),
+            invite_pushes,
         })
     }
 
@@ -308,6 +327,28 @@ impl Network for SyncNetwork {
         if let Err(e) = self.runtime.block_on(self.node.prune(id)) {
             eprintln!("mvs-core: sync can't prune a record: {e}");
         }
+    }
+
+    fn serve_invite(&self, server: ServerId, handle: [u8; 32], publication: &[u8], announce: bool) -> bool {
+        self.runtime
+            .block_on(self.node.serve_invite(server, handle, publication.to_vec(), announce))
+            .unwrap_or(false)
+    }
+
+    fn drop_invite(&self, handle: [u8; 32]) {
+        let _ = self.node.drop_invite(handle);
+    }
+
+    fn drop_server_invites(&self, server: ServerId) {
+        let _ = self.node.drop_server_invites(server);
+    }
+
+    fn fetch_invite(&self, handle: [u8; 32]) -> Vec<Vec<u8>> {
+        self.runtime.block_on(self.node.fetch_invite(handle)).unwrap_or_default()
+    }
+
+    fn take_invite_publications(&self) -> Vec<(ServerId, Vec<u8>)> {
+        std::mem::take(&mut *self.invite_pushes.lock().expect("not poisoned"))
     }
 
     fn open_server(&self, server: ServerId, secret: &[u8; 32], channels: &BTreeSet<ChannelId>) {

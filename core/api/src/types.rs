@@ -461,6 +461,11 @@ pub struct RemovedMember {
 pub struct CreatedInvite {
     pub id: Id,
     pub link: String,
+    /// T8-02: the short v1 link (`mvs://join/` + at most 51 base58
+    /// characters). Additive: `link` stays v0 until release N+1 switches
+    /// creation to v1 (design §7).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub short_link: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<Timestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -481,6 +486,10 @@ pub struct InviteInfo {
     pub max_uses: u32,
     pub uses: u32,
     pub revoked: bool,
+    /// T8-02: its short v1 link, for an invite I made here that is still
+    /// live (its key is kept only on the inviter's device); absent otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub short_link: String,
 }
 
 /// Voice: a call, me first.

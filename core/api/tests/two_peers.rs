@@ -67,6 +67,32 @@ fn eventually(what: &str, mut ok: impl FnMut() -> bool) {
     }
 }
 
+/// T8-02: a short link joins over real sync: the guest, a stranger with no
+/// secret, asks for the envelope (`/mvs/invite/1`), gets the owner's
+/// publication, opens and checks it, and joins.
+#[test]
+#[ignore = "needs a relay: set RELAY and run with --ignored"]
+fn a_short_link_joins_through_a_relay() {
+    let Ok(relay) = std::env::var("RELAY") else {
+        eprintln!("RELAY not set; skipped");
+        return;
+    };
+    let owner = peer("ShortOwner", OWNER, &relay);
+    let guest = peer("ShortGuest", GUEST, &relay);
+    let server = owner.core.create_server("Short", AgeRestriction::None).unwrap();
+    let made = owner.core.create_invite(&server.id, None, None).unwrap();
+    assert!(made.short_link.len() <= "mvs://join/".len() + 51);
+    eventually("the guest to join by the short link", || {
+        guest.core.join_server(&made.short_link).unwrap();
+        guest.core.list_servers().unwrap().iter().any(|s| s.id == server.id)
+    });
+    eventually("the owner to see two members", || {
+        owner.core.sync_now().unwrap();
+        owner.core.list_members(&server.id).unwrap().len() == 2
+    });
+    eprintln!("short link: done");
+}
+
 #[test]
 #[ignore = "needs a relay: set RELAY and run with --ignored"]
 fn two_users_chat_through_a_relay() {
