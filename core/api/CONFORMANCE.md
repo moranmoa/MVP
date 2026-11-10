@@ -88,10 +88,13 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 - `signOut({ words: string[] } | { withoutWords: true })` returns `null` (both read at the top level of `args`). It removes this identity from this computer.
   - `words` must be this identity's 12 words: `invalid-words` (with `positions`) for unknown words, `not-allowed` for another identity's. `withoutWords: true` is the explicit "I accept losing this account" path. Neither: `bad-request`. No identity: `not-found`.
   - In order, fail safe:
-    1. The keychain secret is deleted. If that fails: `keyring-unavailable`, and nothing changed.
-    2. Then the local database is emptied, a wipe marker is written beside it, and servers are closed.
-    3. The core answers and exits. The shell restarts it.
-  - At the next start, before anything opens, `core.db` and the sync folder (its `node.key` too, so a new identity here gets a new peer ID) are deleted. On failure the core exits and retries at the next start.
+    1. A wipe marker (the intent) is written beside `core.db`. If it can't be written: `internal`, and nothing changed.
+    2. The keychain secret is deleted. If that fails: `keyring-unavailable`, the marker is removed, and nothing changed. Once the secret is gone, a failure to delete the recovery-check entry doesn't stop the sign-out.
+    3. The local database is emptied and servers are closed. The core answers and exits, and the shell restarts it.
+  - At the next start, before anything opens, with the marker present:
+    - **The keychain says the secret is gone:** `core.db` and the sync folder are deleted, then the marker. That includes its `node.key`, so a new identity here gets a new peer ID. On failure the core exits and retries at the next start.
+    - **The secret is still there:** only the marker is cleared.
+    - **The keychain can't be read:** nothing is deleted, the marker stays, and the core starts offline, never with the old node key.
   - The app then starts at "create or restore". No new event: the UI goes back to onboarding on `ok` (pending requests fail with `core-restarted`).
 
 - `updateProfile` with a new display name (trimmed) posts a new profile post to every server I'm still a member of (not kicked, not left, not closed); the latest one wins for everyone. The same name, or a new bio or avatar only, posts nothing: bio and avatar stay on this device, since the profile post carries the name (and caps) only. A server that refuses the post is skipped; the call still succeeds. Errors as before: `bad-request` for a bad name, bio or avatar, `not-found` with no identity.

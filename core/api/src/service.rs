@@ -225,16 +225,43 @@ fn sign_out_marker(db_path: &Path) -> PathBuf {
     db_path.with_file_name("signed-out")
 }
 
-/// Sign-out, at the next start, before the database or the network opens:
-/// if the marker beside `db_path` is there, deletes `core.db` (and its
-/// `-wal`/`-shm`) and `sync_dir`, then the marker. An error leaves the
-/// marker, so the next start tries again; the caller must not start the
-/// network on an error (the old `node.key` would link the next identity
-/// here to the last one).
-pub fn finish_sign_out(db_path: &Path, sync_dir: &Path) -> std::io::Result<bool> {
+/// A sign-out's marker is still there after [`finish_sign_out`]: the
+/// keychain couldn't be read, so its files weren't deleted. The network
+/// must stay off (the old `node.key`).
+pub fn sign_out_pending(db_path: &Path) -> bool {
+    sign_out_marker(db_path).exists()
+}
+
+/// Sign-out, at the next start, before the database or the network opens.
+/// The marker beside `db_path` is an intent; `secret_present` is what the
+/// keychain says now (`None`: it can't be read).
+/// - No marker: nothing to do.
+/// - Marker, secret gone: the sign-out happened. Deletes `core.db` (and its
+///   `-wal`/`-shm`) and `sync_dir`, then the marker, and returns true.
+/// - Marker, secret still there: the sign-out never deleted it. The intent
+///   is cleared and nothing else is touched.
+/// - Marker, keychain unreadable: nothing is touched and the marker stays
+///   for the next start.
+///
+/// An error leaves the marker, so the next start tries again; the caller
+/// must not start the network on an error (the old `node.key` would link
+/// the next identity here to the last one).
+pub fn finish_sign_out(
+    db_path: &Path,
+    sync_dir: &Path,
+    secret_present: Option<bool>,
+) -> std::io::Result<bool> {
     let marker = sign_out_marker(db_path);
     if !marker.exists() {
         return Ok(false);
+    }
+    match secret_present {
+        None => return Ok(false),
+        Some(true) => {
+            std::fs::remove_file(marker)?;
+            return Ok(false);
+        }
+        Some(false) => {}
     }
     let gone = |r: std::io::Result<()>| match r {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
@@ -379,19 +406,36 @@ impl Core {
         let _ = self.leave_call();
         self.pending_joins.lock().expect("not poisoned").clear();
         let mut inner = self.lock();
-        // 1. The keychain: the identity is gone once its secret is.
-        inner.vault.forget().map_err(vault_error)?;
-        // 2. Nothing below may stop the sign-out: the identity is gone.
+        // 1. The intent: the marker, before anything is deleted. Without it
+        //    a crash could leave the files of a gone identity. It can't be
+        //    written: nothing changed.
+        let marker = self.db_path.as_deref().map(sign_out_marker);
+        if let Some(marker) = &marker {
+            if let Err(e) = std::fs::write(marker, b"") {
+                eprintln!("mvs-core: the sign-out marker wasn't written: {}", e.kind());
+                return Err(ErrorCode::Internal.into());
+            }
+        }
+        // 2. The keychain: the identity is gone once its secret is. If that
+        //    fails, the intent is withdrawn and nothing changed. (A marker
+        //    that can't be removed is cleared at the next start, since the
+        //    secret is still there: `finish_sign_out`.)
+        match inner.vault.forget() {
+            Ok(true) => {}
+            Ok(false) => eprintln!("mvs-core: signed out; the recovery-check marker stays"),
+            Err(e) => {
+                if let Some(marker) = &marker {
+                    let _ = std::fs::remove_file(marker);
+                }
+                return Err(vault_error(e));
+            }
+        }
+        // 3. Nothing below may stop the sign-out: the identity is gone.
         self.ports.cipher.lock();
         self.ports.network.lock();
         if let Ok(servers) = inner.db.servers() {
             for server in servers {
                 self.ports.network.close_server(server);
-            }
-        }
-        if let Some(path) = &self.db_path {
-            if let Err(e) = std::fs::write(sign_out_marker(path), b"") {
-                eprintln!("mvs-core: the sign-out marker wasn't written: {}", e.kind());
             }
         }
         if let Err(e) = inner.db.wipe() {

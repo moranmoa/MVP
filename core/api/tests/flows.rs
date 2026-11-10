@@ -3593,10 +3593,13 @@ fn a_new_name_reaches_every_server_i_am_in() {
     assert_eq!(name_seen_by(&bob, &one.id, &owner_id), "MoA");
 }
 
-/// A keychain whose deletes can be made to fail (a locked keychain).
+/// A keychain whose deletes can be made to fail (a locked keychain):
+/// `deletes_fail` all of them, `check_delete_fails` only the
+/// recovery-check marker's.
 struct Keychain {
     inner: MemoryStore,
     deletes_fail: std::sync::atomic::AtomicBool,
+    check_delete_fails: std::sync::atomic::AtomicBool,
 }
 
 impl identity::SecretStore for Keychain {
@@ -3607,7 +3610,9 @@ impl identity::SecretStore for Keychain {
         identity::SecretStore::save(&self.inner, name, secret)
     }
     fn delete(&self, name: &str) -> Result<(), identity::StoreError> {
-        if self.deletes_fail.load(std::sync::atomic::Ordering::SeqCst) {
+        let check = name == identity::ENTRY_RECOVERY_CHECK
+            && self.check_delete_fails.load(std::sync::atomic::Ordering::SeqCst);
+        if check || self.deletes_fail.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(identity::StoreError("locked".into()));
         }
         identity::SecretStore::delete(&self.inner, name)
@@ -3626,8 +3631,11 @@ fn sign_out_leaves_a_fresh_start() {
     std::fs::write(dir.join("sync").join("node.key"), b"old peer key").unwrap();
     let db = dir.join("core.db");
     let world = World::new();
-    let keychain =
-        Arc::new(Keychain { inner: MemoryStore::new(), deletes_fail: Default::default() });
+    let keychain = Arc::new(Keychain {
+        inner: MemoryStore::new(),
+        deletes_fail: Default::default(),
+        check_delete_fails: Default::default(),
+    });
     let open = || {
         Core::open(
             Config { db_path: Some(db.clone()), app_version: "test".into() },
@@ -3659,23 +3667,39 @@ fn sign_out_leaves_a_fresh_start() {
     assert_eq!(sign_out(serde_json::json!({ "words": wrong }))["error"]["code"], "invalid-words");
     let other: Vec<String> = LEGAL.split(' ').map(String::from).collect();
     assert_eq!(sign_out(serde_json::json!({ "words": other }))["error"]["code"], "not-allowed");
-    // A keychain that can't delete: reported, and nothing changed.
+    let marker = dir.join("signed-out");
+    let sync = dir.join("sync");
+    let unchanged = |core: &Core| {
+        assert!(!core.signed_out());
+        assert!(core.get_identity().unwrap().is_some());
+        assert_eq!(core.list_servers().unwrap().len(), 1);
+        assert!(!marker.exists(), "the intent stayed");
+    };
+    // The intent can't be written (a folder sits where the marker goes):
+    // refused before anything is deleted.
+    std::fs::create_dir(&marker).unwrap();
+    assert_eq!(sign_out(serde_json::json!({ "words": created.words }))["error"]["code"], "internal");
+    std::fs::remove_dir(&marker).unwrap();
+    unchanged(&core);
+    // A keychain that can't delete the secret: reported, the intent
+    // withdrawn, and nothing changed.
     keychain.deletes_fail.store(true, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         sign_out(serde_json::json!({ "words": created.words }))["error"]["code"],
         "keyring-unavailable"
     );
-    assert!(!core.signed_out());
-    assert!(core.get_identity().unwrap().is_some());
-    assert_eq!(core.list_servers().unwrap().len(), 1);
+    unchanged(&core);
     keychain.deletes_fail.store(false, std::sync::atomic::Ordering::SeqCst);
 
-    // Signed out with the words: the core stops serving (the shell restarts it).
+    // Signed out with the words, though the recovery-check marker can't be
+    // deleted: the secret is gone, so the sign-out carries on.
+    keychain.check_delete_fails.store(true, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(sign_out(serde_json::json!({ "words": created.words })), serde_json::json!({ "ok": null }));
+    keychain.check_delete_fails.store(false, std::sync::atomic::Ordering::SeqCst);
+    // The core stops serving (the shell restarts it).
     assert!(core.signed_out());
     assert!(identity::SecretStore::load(&keychain.inner, identity::ENTRY_SECRET).unwrap().is_none());
-    assert!(identity::SecretStore::load(&keychain.inner, identity::ENTRY_RECOVERY_CHECK).unwrap().is_none());
-    assert!(dir.join("signed-out").exists());
+    assert!(marker.exists());
     drop(core);
 
     // Even before the files go, a restart finds no identity and no servers.
@@ -3683,10 +3707,21 @@ fn sign_out_leaves_a_fresh_start() {
     assert_eq!(restarted.get_identity().unwrap(), None);
     assert!(restarted.list_servers().unwrap().is_empty());
     drop(restarted);
-    // The next start deletes the files, node key included, then the marker.
-    assert!(api::finish_sign_out(&db, &dir.join("sync")).unwrap());
-    assert!(!db.exists() && !dir.join("sync").exists() && !dir.join("signed-out").exists());
-    assert!(!api::finish_sign_out(&db, &dir.join("sync")).unwrap(), "nothing left to do");
+    // A keychain that can't be read at the next start: nothing deleted, the
+    // intent stays (and `mvs-core` starts offline).
+    assert!(!api::finish_sign_out(&db, &sync, None).unwrap());
+    assert!(api::sign_out_pending(&db) && sync.join("node.key").exists());
+    // Readable, secret gone: the files go, node key included, then the marker.
+    assert!(api::finish_sign_out(&db, &sync, Some(false)).unwrap());
+    assert!(!db.exists() && !sync.exists() && !marker.exists());
+    assert!(!api::sign_out_pending(&db));
+    assert!(!api::finish_sign_out(&db, &sync, Some(false)).unwrap(), "nothing left to do");
+    // A marker whose secret is still there (a sign-out that never deleted
+    // it): only the intent is cleared.
+    std::fs::create_dir_all(&sync).unwrap();
+    std::fs::write(&marker, b"").unwrap();
+    assert!(!api::finish_sign_out(&db, &sync, Some(true)).unwrap());
+    assert!(!marker.exists() && sync.exists());
     // A fresh start: create or restore.
     let fresh = open();
     assert_eq!(fresh.get_identity().unwrap(), None);
