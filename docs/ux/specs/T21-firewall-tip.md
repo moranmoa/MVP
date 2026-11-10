@@ -38,7 +38,7 @@
 
 | מפתח | עברית | English | שינוי |
 | --- | --- | --- | --- |
-| `tips.firewall.body` | `חבר שנמצא איתך באותה רשת מחובר דרך הממסר של MVS. ייתכן שחומת האש של Windows חוסמת חיבורים ישירים.` | `A member on your network is connected through the MVS relay. Windows Firewall may be blocking direct connections.` | חדש |
+| `tips.firewall.body` | `מישהו מהשרת שנמצא איתך באותה רשת מחובר דרך הממסר של MVS. ייתכן שחומת האש של Windows חוסמת חיבורים ישירים.` | `A member on your network is connected through the MVS relay. Windows Firewall may be blocking direct connections.` | חדש |
 | `tips.firewall.how` | `איך לאפשר` | `How to allow it` | חדש |
 | `tips.firewall.step1` | `פותחים את <b>אבטחת Windows</b> ← <b>חומת אש והגנה על הרשת</b>.` | `Open <b>Windows Security</b>, then <b>Firewall & network protection</b>.` | חדש |
 | `tips.firewall.step2` | `בוחרים <b>אפשר לאפליקציה לעבור דרך חומת האש</b> ← <b>שנה הגדרות</b>.` | `Choose <b>Allow an app through firewall</b>, then <b>Change settings</b>.` | חדש |
