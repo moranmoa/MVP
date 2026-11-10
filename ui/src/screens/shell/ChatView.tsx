@@ -11,6 +11,7 @@ import { BODY_MAX, BODY_MAX_BYTES } from '../../core/sanitize';
 /** The character counter shows from here on (B6/QA-17 acceptance: 3,800). */
 const COUNTER_FROM = 3800;
 const utf8 = new TextEncoder();
+import { CallError, JoinCallButton } from './CallBar';
 import { MessageList } from './MessageList';
 
 const NO_MEMBERS: Member[] = [];
@@ -96,6 +97,7 @@ export function ChatView({
           </span>
         )}
         <span className="spacer" />
+        <JoinCallButton channelId={channelId} />
         <button
           type="button"
           className={`icon-button members-button ${membersOpen ? 'pressed' : ''}`}
@@ -107,6 +109,7 @@ export function ChatView({
           <UsersIcon />
         </button>
       </header>
+      <CallError />
       {nobodyOnline && (
         <div className="offline-banner" role="status">
           <WifiOffIcon />

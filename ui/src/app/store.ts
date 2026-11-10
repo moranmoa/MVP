@@ -5,7 +5,7 @@
 
 import { useSyncExternalStore } from 'react';
 import type { CoreApi } from '../core/api';
-import type { Channel, Id, Identity, Member, Message, ServerSummary, UpdateInfo } from '../core/types';
+import type { Channel, Id, Identity, Member, Message, ServerSummary, UpdateInfo, CallState } from '../core/types';
 
 const PAGE = 100;
 
@@ -70,6 +70,10 @@ export interface StoreState {
   notice: { kind: 'encryption-renewed'; serverId: Id; at: number } | null;
   /** Shown once: a new version was installed, or the previous one is back. */
   updateNote: UpdateNote | null;
+  /** My current call (voice v1), or null. */
+  call: CallState | null;
+  /** Why the last joinCall failed, until the next try or dismissal. */
+  callError: string | null;
   /** A short confirmation toast (an i18n id), e.g. "Copied" after a menu copy. */
   flash: { id: string; at: number } | null;
   /** Bumped when any message window changes, so readers re-render. */
@@ -85,6 +89,8 @@ export class Store {
     update: null,
     notice: null,
     updateNote: null,
+    call: null,
+    callError: null,
     flash: null,
     messagesVersion: 0,
   };
@@ -137,6 +143,7 @@ export class Store {
       on('message.updated', (m) => this.windows.get(m.channelId)?.apply(m)),
       on('update.ready', (update) => this.set({ update })),
       on('update.installed', (u) => this.set({ updateNote: { kind: 'installed', ...u } })),
+      on('call.state', (c) => this.set({ call: c.participants.length ? c : null })),
       on('update.rolledBack', (u) => this.set({ updateNote: { kind: 'rolledBack', ...u } })),
       on('notice', (n) => this.set({ notice: { ...n, at: Date.now() } })),
     );
@@ -202,6 +209,25 @@ export class Store {
    * the call to end, and the core sends update.ready again then. With
    * nothing staged there is nothing to restart into.
    */
+  async joinCall(channelId: Id): Promise<void> {
+    this.set({ callError: null });
+    try {
+      const call = await this.core.joinCall(channelId);
+      this.set({ call: call.participants.length ? call : null });
+    } catch (e) {
+      this.set({ callError: (e as { code?: string })?.code ?? 'internal' });
+    }
+  }
+
+  async leaveCall(): Promise<void> {
+    await this.core.leaveCall().catch(() => null);
+    this.set({ call: null });
+  }
+
+  clearCallError(): void {
+    this.set({ callError: null });
+  }
+
   updateRefused(code: string): void {
     if (code === 'not-allowed' && this.state.update) this.set({ update: { ...this.state.update, waitingForCall: true } });
     else if (code === 'nothing-staged') this.set({ update: null });

@@ -26,6 +26,8 @@ import type {
   UpdateChannel,
   UpdateInfo,
   CoreStatus,
+  CallState,
+  CallSignal,
 } from './types';
 
 export interface CoreCommands {
@@ -93,6 +95,15 @@ export interface CoreCommands {
   // Safety
   blockUser(userId: Id): Promise<void>;
   kickMember(serverId: Id, userId: Id): Promise<void>;
+  // Voice v1 (#223)
+  /** Joins (leaving any other call first). Rejects not-found, not-allowed, call-full, relay-only, not-implemented. */
+  joinCall(channelId: Id): Promise<CallState>;
+  /** Idempotent. */
+  leaveCall(): Promise<null>;
+  /** `not-allowed` when not in a call. */
+  setMuted(muted: boolean): Promise<null>;
+  /** For the voice engine only (ui/src/voice). Payload at most 12 KiB. */
+  sendSignal(to: Id, kind: CallSignal['kind'], payload: string): Promise<null>;
 
   // App
   getStorageUsage(): Promise<StorageUsage>;
@@ -133,6 +144,9 @@ export interface CoreEvents {
   'link.open': { link: string };
   /** Desktop shell (T8-01): sent on every change and on every page load. */
   'core.status': CoreStatus;
+  /** Every change to my call; participants [] after leaving. */
+  'call.state': CallState;
+  'call.signal': CallSignal;
 }
 
 export type CoreEventName = keyof CoreEvents;

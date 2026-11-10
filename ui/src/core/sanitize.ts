@@ -18,6 +18,8 @@ import type {
   Message,
   MessageRange,
   ServerSummary,
+  CallState,
+  Id,
 } from './types';
 
 export const NAME_MAX = 32;
@@ -260,7 +262,27 @@ export function cleanInviteLink(raw: unknown): string {
   return m ? `mvs://join/${m[1]}/${m[2]}/${m[3]}` : '';
 }
 
-const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[E] } = {
+/** A member / identity id from the core: 64 lower-case hex, or '' (demo ids pass as cleaned names). */
+function cleanHexId(raw: unknown): Id {
+  if (typeof raw !== 'string') return '';
+  return /^[0-9a-f]{64}$/.test(raw) ? raw : cleanName(raw, 64);
+}
+
+/** At most 5 people in a call (#223); anything else is dropped. */
+export function cleanCall(c: CallState): CallState {
+  const participants = Array.isArray(c?.participants) ? c.participants : [];
+  return {
+    channelId: cleanHexId(c?.channelId),
+    participants: participants
+      .slice(0, 5)
+      .map((p) => ({ identity: cleanHexId(p?.identity), muted: p?.muted === true }))
+      .filter((p) => p.identity),
+    full: c?.full === true,
+  };
+}
+
+/** A cleaner may return null to drop the event altogether. */
+const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[E] | null } = {
   'identity.changed': cleanIdentity,
   'server.added': cleanServer,
   'server.updated': cleanServer,
@@ -272,6 +294,15 @@ const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[
   'message.updated': cleanMessage,
   'join.status': cleanJoin,
   'link.open': (p) => ({ link: cleanInviteLink(p?.link) }),
+  'call.state': (c) => cleanCall(c),
+  // For the voice engine: anything malformed is dropped, never coerced.
+  'call.signal': (s) => {
+    const kind = (['offer', 'answer', 'ice'] as const).find((k) => k === s?.kind);
+    if (!kind || typeof s?.from !== 'string' || !/^[0-9a-f]{64}$/.test(s.from)) return null;
+    if (typeof s.payload !== 'string' || s.payload.length > 12 * 1024) return null;
+    if (kind !== 'ice' && s.fingerprintVerified !== true) return null;
+    return { from: s.from, kind, payload: s.payload, fingerprintVerified: s.fingerprintVerified === true };
+  },
   'core.status': (s) => ({
     state: s?.state === 'up' || s?.state === 'down' ? s.state : 'starting',
     detail: (['missing', 'start-failed', 'crashed', 'crash-loop', 'keyring'] as const).find((d) => d === s?.detail),
@@ -308,11 +339,20 @@ export function guardCore(core: CoreApi): CoreApi {
     createInvite: wrap(core.createInvite, (r) => ({ ...r, id: id(r.id), link: cleanLink(r.link), expiresAt: when(r.expiresAt) })),
     listInvites: wrap(core.listInvites, (l) => l.map(cleanInvite)),
     joinServer: wrap(core.joinServer, cleanJoin),
+    joinCall: wrap(core.joinCall, cleanCall),
     getMessages: wrap(core.getMessages, cleanRange),
     sendMessage: wrap(core.sendMessage, cleanMessage),
     on: <E extends CoreEventName>(event: E, handler: (p: CoreEvents[E]) => void) => {
-      const clean = EVENT_CLEANERS[event] as ((p: CoreEvents[E]) => CoreEvents[E]) | undefined;
-      return core.on(event, clean ? (p) => handler(clean(p)) : handler);
+      const clean = EVENT_CLEANERS[event] as ((p: CoreEvents[E]) => CoreEvents[E] | null) | undefined;
+      return core.on(
+        event,
+        clean
+          ? (p) => {
+              const c = clean(p);
+              if (c !== null) handler(c);
+            }
+          : handler,
+      );
     },
   };
   // Everything else (commands that only send) goes straight to the core.

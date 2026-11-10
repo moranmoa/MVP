@@ -41,6 +41,11 @@ const COMMANDS = Object.freeze({
   // Safety
   blockUser: ['userId'],
   kickMember: ['serverId', 'userId'],
+  // Voice v1 (#223)
+  joinCall: ['channelId'],
+  leaveCall: [],
+  setMuted: ['muted'],
+  sendSignal: ['to', 'kind', 'payload'],
   // App
   getStorageUsage: [],
   setStorageLimit: ['bytes'],
