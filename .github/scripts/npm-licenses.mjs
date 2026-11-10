@@ -24,7 +24,10 @@ const DEV_ONLY = new Set(["BlueOak-1.0.0", "CC-BY-4.0", "Python-2.0"]);
 
 // Explicit, reviewed exceptions: "name@version": "why". Template:
 //   "some-lib@1.2.3": "LGPL-2.1, dynamically linked and unmodified; approved by <who>, <date>",
-const EXCEPTIONS = {};
+const EXCEPTIONS = {
+  "truncate-utf8-bytes@1.0.2":
+    "WTFPL, dev only (electron-builder -> sanitize-filename), never shipped; approved by the Tech Lead on #233, 2026-11-10",
+};
 
 /** True if a (simple) SPDX expression is satisfied by `allowed`. */
 function satisfies(expr, allowed) {
