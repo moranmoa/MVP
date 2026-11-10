@@ -251,6 +251,7 @@ describe('message menu (B25 §2)', () => {
     const { channels } = await setup();
     const myName = screen.getByRole('complementary', { name: 'Channels' }).querySelector('.me-name')!.textContent!;
     const others = () => screen.getAllByRole('article').filter((a) => a.getAttribute('aria-haspopup') && !a.textContent?.includes(myName));
+    await waitFor(() => expect(others().length).toBeGreaterThan(0));
     fireEvent.contextMenu(others()[0]);
     expect(menuItems()).toEqual(['Reply', 'Copy text', 'Copy message ID', 'Delete']);
     fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
