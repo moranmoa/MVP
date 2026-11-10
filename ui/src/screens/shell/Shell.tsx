@@ -356,8 +356,8 @@ export function Shell() {
         )}
         {notice && (
           <div className="toast" role="status">
-            {notice.kind === 'rekey-waiting' ? <AlertIcon /> : <ShieldIcon />}
-            <FormattedMessage id={notice.kind === 'rekey-waiting' ? 'notice.rekeyWaiting' : 'notice.encryptionRenewed'} />
+            <ShieldIcon />
+            <FormattedMessage id="notice.encryptionRenewed" />
           </div>
         )}
 

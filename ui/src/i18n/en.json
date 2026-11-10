@@ -292,8 +292,7 @@
   "chat.state.received": "Delivered to a member",
   "chat.state.failed": "Not sent",
   "chat.state.held": "Sending…",
-  "chat.state.heldFailed": "Not sent: you don't have access to this channel yet",
-  "chat.state.sendAgain": "Send again",
+  "chat.state.heldFailed": "Not sent: you don't have access to this channel yet – this usually happens just after joining",
   "chat.offline": "Nobody from the server is online right now. You can read what's already saved here and write – messages will send when someone connects.",
   "chat.jumpToLatest": "Jump to latest",
   "chat.blocked": "Message from a blocked user",
@@ -322,7 +321,6 @@
   "profile.kickConfirm": "Remove \u2068{name}\u2069 from the server? The server's encryption will be updated so they can't read new messages.",
   "profile.kickConfirmButton": "Remove",
   "notice.encryptionRenewed": "Encryption was updated. Whoever was removed can't read new messages.",
-  "notice.rekeyWaiting": "Messages can't be sent in this server until its encryption is updated.",
 
   "settings.title": "Settings",
   "settings.nav.account": "Account",

@@ -112,7 +112,7 @@ export interface StoreState {
   channels: Record<Id, Channel[]>;
   members: Record<Id, Member[]>;
   update: UpdateInfo | null;
-  notice: { kind: 'encryption-renewed' | 'rekey-waiting'; serverId: Id; at: number } | null;
+  notice: { kind: 'encryption-renewed'; serverId: Id; at: number } | null;
   /** Shown once: a new version was installed, or the previous one is back. */
   updateNote: UpdateNote | null;
   /** My current call (voice v1), or null. */
@@ -222,7 +222,8 @@ export class Store {
       }),
       on('voice.room', (r) => this.setRoom(r)),
       on('update.rolledBack', (u) => this.set({ updateNote: { kind: 'rolledBack', ...u } })),
-      on('notice', (n) => this.set({ notice: { ...n, at: Date.now() } })),
+      // rekey-waiting: the failed message's own line says why; no toast (UX, #289).
+      on('notice', (n) => n.kind !== 'rekey-waiting' && this.set({ notice: { ...n, kind: n.kind, at: Date.now() } })),
     );
     return () => {
       this.unsubs.forEach((u) => u());

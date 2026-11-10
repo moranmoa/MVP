@@ -1,6 +1,6 @@
 // #288: a member who just joined has no channel key yet. A message sent then is
 // held ("Sending…"), replaced by the real record when the key comes, or fails
-// after the wait, with "Send again".
+// after the wait, with "Try again" (discard, then send the text again).
 
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
@@ -138,18 +138,19 @@ describe('messages held for their key: in the chat', () => {
     expect(last.id).not.toMatch(/^pending-/);
   });
 
-  it('fails with no key: says why, offers Send again, and shows the rekey-waiting notice', async () => {
+  it('fails with no key: says why, offers Try again, and no toast on top of the composer', async () => {
     const core = shortChannel(new MockCore({ demo: true, speed: 0, simulateActivity: false, keyPending: 'fail' }));
     render(<App core={core} initialSettings={en} />);
     await send('no key yet');
-    await screen.findByText("Not sent: you don't have access to this channel yet");
-    expect(screen.getByRole('status').textContent).toContain("Messages can't be sent in this server until its encryption is updated.");
+    await screen.findByText("Not sent: you don't have access to this channel yet – this usually happens just after joining");
+    // No toast: the line on the message says why (UX).
+    expect(document.querySelector('.toast')).toBeNull();
     // No reply, edit or delete on a message that never reached the network.
     expect(document.querySelector('.msg.failed .msg-actions')).toBeNull();
     const before = await core.getMessageCount('c-general');
     const failedId = (await core.getMessages('c-general', before - 1, before)).messages[0].id;
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Send again' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     });
     // Discarded, then sent as a new message: still one copy, not two.
     expect(await core.getMessageCount('c-general')).toBe(before);

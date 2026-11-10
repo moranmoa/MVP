@@ -292,8 +292,7 @@
   "chat.state.received": "התקבלה אצל חבר",
   "chat.state.failed": "לא נשלחה",
   "chat.state.held": "נשלחת…",
-  "chat.state.heldFailed": "לא נשלחה: עדיין אין גישה לערוץ הזה",
-  "chat.state.sendAgain": "שליחה שוב",
+  "chat.state.heldFailed": "לא נשלחה: עדיין אין גישה לערוץ הזה – זה קורה בדרך כלל רגע אחרי הצטרפות",
   "chat.offline": "אף אחד מהשרת לא מחובר כרגע. אפשר לקרוא את מה שכבר שמור אצלך ולכתוב – ההודעות יישלחו כשמישהו יתחבר.",
   "chat.jumpToLatest": "קפיצה להודעות האחרונות",
   "chat.blocked": "הודעה ממשתמש חסום",
@@ -322,7 +321,6 @@
   "profile.kickConfirm": "להרחיק את \u2068{name}\u2069 מהשרת? ההצפנה של השרת תתעדכן, כך שלא תהיה גישה להודעות חדשות.",
   "profile.kickConfirmButton": "הרחקה",
   "notice.encryptionRenewed": "ההצפנה עודכנה. מי שהורחק לא יוכל לקרוא הודעות חדשות.",
-  "notice.rekeyWaiting": "אי אפשר לשלוח הודעות בשרת הזה עד שההצפנה שלו תתעדכן.",
 
   "settings.title": "הגדרות",
   "settings.nav.account": "חשבון",

@@ -494,7 +494,7 @@ function SendStateView({ message, onRetry, tab }: { message: Message; onRetry: (
 
 /**
  * A message held for its channel key (#288). Normally sent in under a second:
- * "Sending…". With no key after 2 minutes it fails; "Send again" discards it
+ * "Sending…". With no key after 2 minutes it fails; "Try again" discards it
  * and sends the text as a new message.
  */
 function HeldStateView({ message, onRetry, tab }: { message: Message; onRetry: (m: Message) => void; tab: number }) {
@@ -504,7 +504,7 @@ function HeldStateView({ message, onRetry, tab }: { message: Message; onRetry: (
         <AlertIcon />
         <FormattedMessage id="chat.state.heldFailed" />
         <button type="button" className="link small" tabIndex={tab} onClick={() => onRetry(message)}>
-          <FormattedMessage id="chat.state.sendAgain" />
+          <FormattedMessage id="common.retry" />
         </button>
       </span>
     );
