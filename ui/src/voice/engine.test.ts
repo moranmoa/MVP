@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CallSignal, CallState, Id } from '../core/types';
 import type { SignalKind, VoiceCore } from './adapter';
 import { createVoiceEngine, type VoiceEngineOptions, type VoiceEnv, type VoiceError, type VoiceParticipant } from './engine';
-import { fingerprints, iceServersFor, soleFingerprint } from './sdp';
+import { fingerprints, iceServersFor, normalizeFingerprint, soleFingerprint } from './sdp';
 
 const A: Id = 'a'.repeat(64);
 const B: Id = 'b'.repeat(64);
@@ -45,6 +45,8 @@ class FakePC {
   readonly fingerprint = newFingerprint();
   /** What getStats reports as the peer's certificate; by default, the real peer's. */
   presentedFingerprint: string | null = null;
+  /** 'none': no transport stats; 'throw': getStats rejects. */
+  statsMode: 'ok' | 'none' | 'throw' = 'ok';
   /** Rewrites what setRemoteDescription applies (a misbehaving stack). */
   rewriteRemote: ((sdp: string) => string) | null = null;
   localDescription: RTCSessionDescriptionInit | null = null;
@@ -100,6 +102,8 @@ class FakePC {
   addEventListener() {}
   removeEventListener() {}
   async getStats() {
+    if (this.statsMode === 'throw') throw new Error('stats unavailable');
+    if (this.statsMode === 'none') return new Map<string, Record<string, unknown>>([['X', { id: 'X', type: 'codec' }]]);
     const remote = this.presentedFingerprint ?? soleFingerprint(this.remoteDescription?.sdp ?? '')?.split(' ')[1];
     return new Map<string, Record<string, unknown>>([
       ['T1', { id: 'T1', type: 'transport', remoteCertificateId: 'CR' }],
@@ -265,11 +269,16 @@ afterEach(() => {
 
 describe('sdp helpers', () => {
   it('reads and normalises fingerprints, and wants exactly one', () => {
-    expect(fingerprints('a=fingerprint:SHA-256 AB:CD\r\nx\na=fingerprint:sha-1 0a:0b')).toEqual(['sha-256 ab:cd', 'sha-1 0a:0b']);
+    expect(fingerprints('a=fingerprint:SHA-256 AB:CD\r\nx\na=fingerprint:sha-512 0a:0b')).toEqual(['sha-256 ab:cd', 'sha-512 0a:0b']);
     expect(soleFingerprint('v=0\r\na=fingerprint:sha-256 AB:CD\r\n')).toBe('sha-256 ab:cd');
     expect(soleFingerprint('v=0\r\n')).toBeNull();
     expect(soleFingerprint('a=fingerprint:sha-256 AB:CD\na=fingerprint:sha-256 AB:CE')).toBeNull();
     expect(soleFingerprint('a=fingerprint:md5 AB:CD')).toBeNull();
+    // sha-256 or stronger only.
+    expect(normalizeFingerprint('sha-1', 'AB:CD')).toBeNull();
+    expect(normalizeFingerprint('sha-224', 'AB:CD')).toBeNull();
+    expect(normalizeFingerprint('sha-384', 'AB:CD')).toBe('sha-384 ab:cd');
+    expect(soleFingerprint('a=fingerprint:sha-1 AB:CD')).toBeNull();
     expect(soleFingerprint('a=fingerprint:sha-256 AB:CD extra')).toBeNull();
   });
 
@@ -427,6 +436,49 @@ describe('voice engine', () => {
     expect(hy.audios).toEqual([]); // nothing from that peer was ever played
     expect(errors).toEqual([{ code: 'fingerprint-mismatch', peer: A }]);
     expect(hx.audios).toHaveLength(1); // A's side checks on its own
+  });
+
+  for (const mode of ['none', 'throw'] as const) {
+    it(`fails closed when the certificate can't be read (getStats: ${mode})`, async () => {
+      const { hy, cx, cy, ex, ey } = pair();
+      const errors = record<VoiceError>((cb) => ey.on('error', cb));
+      const realCreate = hy.env.createPeerConnection;
+      hy.env.createPeerConnection = (c) => {
+        const pc = realCreate(c) as unknown as FakePC;
+        pc.statsMode = mode;
+        return pc as unknown as RTCPeerConnection;
+      };
+      await ex.attach(cx.state(), A);
+      await ey.attach(cy.state(), B);
+      await flush();
+      expect(hy.pcs[0]!.closed).toBe(true);
+      expect(hy.audios).toEqual([]);
+      expect(errors).toEqual([{ code: 'fingerprint-mismatch', peer: A }]);
+    });
+  }
+
+  it('caps the trickled ICE candidates a peer can send, in total', async () => {
+    const h = fakeEnv();
+    const core = new FakeCore(A, [A, B]);
+    const engine = createVoiceEngine(core, { env: h.env, answerTimeoutMs: 60_000 });
+    await engine.attach(core.state(), A);
+    await flush();
+    const pc = h.pcs[0]!;
+    const ice = (i: number) =>
+      core.emitSignal({
+        from: B,
+        kind: 'ice',
+        payload: JSON.stringify({ candidate: `candidate:${i} 1 udp 1 192.0.2.${i % 250} 9 typ host`, sdpMid: '0' }),
+        fingerprintVerified: true,
+      });
+    for (let i = 0; i < 20; i++) ice(i); // before the answer: queued
+    await flush();
+    core.emitSignal({ from: B, kind: 'answer', payload: `v=0\r\na=fingerprint:sha-256 ${newFingerprint()}\r\n`, fingerprintVerified: true });
+    await flush();
+    for (let i = 20; i < 100; i++) ice(i); // after: applied, up to the cap
+    await flush();
+    expect(pc.candidates).toHaveLength(32);
+    engine.dispose();
   });
 
   it('leave closes every connection, stops the mic and tells the core', async () => {

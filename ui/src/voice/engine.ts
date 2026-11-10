@@ -119,7 +119,8 @@ export interface VoiceEngine {
 }
 
 const MAX_PEERS = 4; // 5 in a call, me included
-const MAX_PENDING_ICE = 32;
+/** Trickled candidates accepted from one peer, in total. */
+const MAX_TRICKLED_ICE = 32;
 const OFFER_ATTEMPTS = 3;
 const SPEAKING_POLL_MS = 100;
 const SPEAKING_HOLD_MS = 300;
@@ -131,6 +132,7 @@ interface Peer {
   /** From the verified signal; null until one arrives. */
   fingerprint: string | null;
   pendingIce: RTCIceCandidateInit[];
+  iceReceived: number;
   stream: MediaStream | null;
   audio: HTMLAudioElement | null;
   meter: Meter | null;
@@ -318,6 +320,7 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
       offerer,
       fingerprint: null,
       pendingIce: [],
+      iceReceived: 0,
       stream: null,
       audio: null,
       meter: null,
@@ -403,27 +406,28 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
   }
 
   /** The certificate the peer presented must be the one its verified SDP named. */
+  // Fails closed: no stats, no certificate, or any certificate that differs
+  // drops the peer. (Chromium reports remoteCertificateId once DTLS is up.)
   async function checkCertificate(peer: Peer) {
+    const seen: string[] = [];
     try {
       const stats = await peer.pc.getStats();
       if (peer.closed) return;
       const byId = new Map<string, Record<string, unknown>>();
       stats.forEach((r: Record<string, unknown>) => byId.set(r.id as string, r));
-      const seen: string[] = [];
       for (const r of byId.values()) {
         if (r.type !== 'transport' || typeof r.remoteCertificateId !== 'string') continue;
         const cert = byId.get(r.remoteCertificateId);
-        if (cert && typeof cert.fingerprint === 'string' && typeof cert.fingerprintAlgorithm === 'string') {
-          seen.push(normalizeFingerprint(cert.fingerprintAlgorithm, cert.fingerprint) ?? '');
-        }
+        const ok = cert && typeof cert.fingerprint === 'string' && typeof cert.fingerprintAlgorithm === 'string';
+        seen.push(ok ? (normalizeFingerprint(cert.fingerprintAlgorithm as string, cert.fingerprint as string) ?? '') : '');
       }
-      // Without certificate stats, the DTLS stack itself enforces the SDP's
-      // fingerprint, which was checked against the verified one already.
-      if (seen.some((f) => f !== peer.fingerprint)) return dropPeer(peer, 'fingerprint-mismatch');
     } catch {
       if (peer.closed) return;
+      return dropPeer(peer, 'fingerprint-mismatch');
     }
-    if (!peer.fingerprint) return dropPeer(peer, 'fingerprint-mismatch');
+    if (!peer.fingerprint || !seen.length || seen.some((f) => f !== peer.fingerprint)) {
+      return dropPeer(peer, 'fingerprint-mismatch');
+    }
     peer.verified = true;
     peer.state = 'connected';
     if (peer.watchdog) clearTimeout(peer.watchdog);
@@ -543,8 +547,12 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
         } catch {
           return;
         }
+        // A cap on everything a peer trickles, so a member can't make us send
+        // checks to any number of addresses (we don't trickle; normally 0).
+        if (existing.iceReceived >= MAX_TRICKLED_ICE) return;
+        existing.iceReceived++;
         if (existing.pc.remoteDescription) await existing.pc.addIceCandidate(init).catch(() => {});
-        else if (existing.pendingIce.length < MAX_PENDING_ICE) existing.pendingIce.push(init);
+        else existing.pendingIce.push(init);
       }
     } catch {
       const peer = peers.get(signal.from);

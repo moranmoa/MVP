@@ -5,7 +5,8 @@
 export function normalizeFingerprint(algorithm: string, value: string): string | null {
   const alg = algorithm.trim().toLowerCase();
   const hex = value.trim().toLowerCase();
-  if (!/^sha-(1|224|256|384|512)$/.test(alg)) return null;
+  // sha-256 or stronger: the signed binding is only as strong as the hash.
+  if (!/^sha-(256|384|512)$/.test(alg)) return null;
   if (!/^[0-9a-f]{2}(:[0-9a-f]{2})+$/.test(hex)) return null;
   return `${alg} ${hex}`;
 }
