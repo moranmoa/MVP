@@ -3592,3 +3592,113 @@ fn a_new_name_reaches_every_server_i_am_in() {
     bob.core.sync_now().unwrap();
     assert_eq!(name_seen_by(&bob, &one.id, &owner_id), "MoA");
 }
+
+/// A keychain whose deletes can be made to fail (a locked keychain).
+struct Keychain {
+    inner: MemoryStore,
+    deletes_fail: std::sync::atomic::AtomicBool,
+}
+
+impl identity::SecretStore for Keychain {
+    fn load(&self, name: &str) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, identity::StoreError> {
+        identity::SecretStore::load(&self.inner, name)
+    }
+    fn save(&self, name: &str, secret: &[u8]) -> Result<(), identity::StoreError> {
+        identity::SecretStore::save(&self.inner, name, secret)
+    }
+    fn delete(&self, name: &str) -> Result<(), identity::StoreError> {
+        if self.deletes_fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(identity::StoreError("locked".into()));
+        }
+        identity::SecretStore::delete(&self.inner, name)
+    }
+}
+
+/// Owner task (0.3.3): `signOut` removes this identity from this computer.
+/// It asks for the words (or an explicit "without words"); a keychain that
+/// can't delete leaves everything as it was; afterwards a restart finds no
+/// identity and no servers, and the next start deletes the files.
+#[test]
+fn sign_out_leaves_a_fresh_start() {
+    let dir = std::env::temp_dir().join(format!("mvs-api-signout-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sync")).unwrap();
+    std::fs::write(dir.join("sync").join("node.key"), b"old peer key").unwrap();
+    let db = dir.join("core.db");
+    let world = World::new();
+    let keychain =
+        Arc::new(Keychain { inner: MemoryStore::new(), deletes_fail: Default::default() });
+    let open = || {
+        Core::open(
+            Config { db_path: Some(db.clone()), app_version: "test".into() },
+            Ports {
+                secrets: keychain.clone(),
+                network: world.network.clone(),
+                events: Arc::new(CollectingSink::new()),
+                clock: world.clock.clone(),
+                cipher: Arc::new(PendingGroupKeys),
+            },
+        )
+        .unwrap()
+    };
+    let core = open();
+    let created = core.create_identity(adult()).unwrap();
+    let positions = core.get_recovery_challenge().unwrap().positions;
+    let answers = positions.iter().map(|p| (*p, created.words[p - 1].clone())).collect();
+    assert!(core.check_recovery_words(answers).unwrap().ok);
+    core.create_server("Mine", AgeRestriction::None).unwrap();
+    let sign_out = |args: serde_json::Value| -> serde_json::Value {
+        let request = serde_json::json!({ "cmd": "signOut", "args": args });
+        serde_json::from_str(&core.handle(&request.to_string())).unwrap()
+    };
+
+    // The words are checked first; nothing happens without them or a confirm.
+    assert_eq!(sign_out(serde_json::json!({}))["error"]["code"], "bad-request");
+    let mut wrong = created.words.clone();
+    wrong[0] = "zzzz".into();
+    assert_eq!(sign_out(serde_json::json!({ "words": wrong }))["error"]["code"], "invalid-words");
+    let other: Vec<String> = LEGAL.split(' ').map(String::from).collect();
+    assert_eq!(sign_out(serde_json::json!({ "words": other }))["error"]["code"], "not-allowed");
+    // A keychain that can't delete: reported, and nothing changed.
+    keychain.deletes_fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        sign_out(serde_json::json!({ "words": created.words }))["error"]["code"],
+        "keyring-unavailable"
+    );
+    assert!(!core.signed_out());
+    assert!(core.get_identity().unwrap().is_some());
+    assert_eq!(core.list_servers().unwrap().len(), 1);
+    keychain.deletes_fail.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // Signed out with the words: the core stops serving (the shell restarts it).
+    assert_eq!(sign_out(serde_json::json!({ "words": created.words })), serde_json::json!({ "ok": null }));
+    assert!(core.signed_out());
+    assert!(identity::SecretStore::load(&keychain.inner, identity::ENTRY_SECRET).unwrap().is_none());
+    assert!(identity::SecretStore::load(&keychain.inner, identity::ENTRY_RECOVERY_CHECK).unwrap().is_none());
+    assert!(dir.join("signed-out").exists());
+    drop(core);
+
+    // Even before the files go, a restart finds no identity and no servers.
+    let restarted = open();
+    assert_eq!(restarted.get_identity().unwrap(), None);
+    assert!(restarted.list_servers().unwrap().is_empty());
+    drop(restarted);
+    // The next start deletes the files, node key included, then the marker.
+    assert!(api::finish_sign_out(&db, &dir.join("sync")).unwrap());
+    assert!(!db.exists() && !dir.join("sync").exists() && !dir.join("signed-out").exists());
+    assert!(!api::finish_sign_out(&db, &dir.join("sync")).unwrap(), "nothing left to do");
+    // A fresh start: create or restore.
+    let fresh = open();
+    assert_eq!(fresh.get_identity().unwrap(), None);
+    fresh.restore_identity(created.words.clone()).unwrap();
+    drop(fresh);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Without the words: allowed only as an explicit choice.
+    let peer = world.peer();
+    sign_up(&peer, "Gone");
+    let request = r#"{"cmd":"signOut","args":{"withoutWords":true}}"#;
+    assert_eq!(peer.core.handle(request), r#"{"ok":null}"#);
+    assert!(peer.core.signed_out());
+    assert_eq!(peer.core.get_identity().unwrap(), None);
+}

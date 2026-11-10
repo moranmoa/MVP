@@ -191,6 +191,11 @@ pub struct Core {
     updates: Option<Arc<Updates>>,
     /// Joins that found nobody online yet, by link: retried by `sync_now`.
     pending_joins: Mutex<HashMap<String, PendingJoin>>,
+    /// Where `core.db` lives (`None` in memory): sign-out leaves its wipe
+    /// marker beside it.
+    db_path: Option<PathBuf>,
+    /// Signed out: the shell restarts the core, which finishes the wipe.
+    signed_out: AtomicBool,
 }
 
 struct PendingJoin {
@@ -213,6 +218,36 @@ fn vault_error(e: VaultError) -> CoreError {
         VaultError::Locked | VaultError::WrongPassphrase => ErrorCode::NotAllowed.into(),
         _ => ErrorCode::Internal.into(),
     }
+}
+
+/// Beside `core.db`: present from a sign-out until its files are gone.
+fn sign_out_marker(db_path: &Path) -> PathBuf {
+    db_path.with_file_name("signed-out")
+}
+
+/// Sign-out, at the next start, before the database or the network opens:
+/// if the marker beside `db_path` is there, deletes `core.db` (and its
+/// `-wal`/`-shm`) and `sync_dir`, then the marker. An error leaves the
+/// marker, so the next start tries again; the caller must not start the
+/// network on an error (the old `node.key` would link the next identity
+/// here to the last one).
+pub fn finish_sign_out(db_path: &Path, sync_dir: &Path) -> std::io::Result<bool> {
+    let marker = sign_out_marker(db_path);
+    if !marker.exists() {
+        return Ok(false);
+    }
+    let gone = |r: std::io::Result<()>| match r {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    };
+    gone(std::fs::remove_dir_all(sync_dir))?;
+    for suffix in ["", "-wal", "-shm"] {
+        let mut name = db_path.as_os_str().to_owned();
+        name.push(suffix);
+        gone(std::fs::remove_file(PathBuf::from(name)))?;
+    }
+    std::fs::remove_file(marker)?;
+    Ok(true)
 }
 
 fn phrase_error(e: PhraseError) -> CoreError {
@@ -292,6 +327,8 @@ impl Core {
             app_version: config.app_version,
             updates: None,
             pending_joins: Mutex::default(),
+            db_path: config.db_path,
+            signed_out: AtomicBool::new(false),
         })
     }
 
@@ -302,6 +339,75 @@ impl Core {
         let _ = self.leave_call();
         self.ports.cipher.lock();
         self.ports.network.lock();
+    }
+
+    /// `signOut({ words } | { withoutWords: true })`: removes this identity
+    /// from this computer. The UI first makes sure the user has their
+    /// words: `words` must be this identity's 12 words (`invalid-words` for
+    /// unknown words, `not-allowed` for another identity's); `withoutWords`
+    /// is the explicit "I accept losing this account" path.
+    ///
+    /// Fail safe, in this order:
+    /// 1. the keychain secret is deleted; if that fails nothing changed
+    ///    (`keyring-unavailable`) and the identity still opens;
+    /// 2. once it's gone, the local database is emptied and a wipe marker
+    ///    is written beside it; the next start deletes `core.db` and the
+    ///    sync folder (its `node.key` too, so a new identity here gets a
+    ///    new peer ID) before opening anything ([`finish_sign_out`]);
+    /// 3. the core then exits, and the shell restarts it at "create or
+    ///    restore".
+    ///
+    /// With the secret gone the identity can't come back on its own; a
+    /// later failure only leaves data nobody can open, and the marker
+    /// retries its deletion at every start.
+    pub fn sign_out(&self, words: Option<Vec<String>>, without_words: bool) -> CoreResult<()> {
+        {
+            let inner = self.lock();
+            let me = inner.me.as_ref().ok_or(ErrorCode::NotFound)?;
+            match words {
+                Some(words) => {
+                    let phrase =
+                        RecoveryPhrase::parse(&words.join(" ")).map_err(phrase_error)?;
+                    if phrase.identity().public_key() != me.key() {
+                        return Err(ErrorCode::NotAllowed.into());
+                    }
+                }
+                None if without_words => {}
+                None => return Err(ErrorCode::BadRequest.into()),
+            }
+        }
+        let _ = self.leave_call();
+        self.pending_joins.lock().expect("not poisoned").clear();
+        let mut inner = self.lock();
+        // 1. The keychain: the identity is gone once its secret is.
+        inner.vault.forget().map_err(vault_error)?;
+        // 2. Nothing below may stop the sign-out: the identity is gone.
+        self.ports.cipher.lock();
+        self.ports.network.lock();
+        if let Ok(servers) = inner.db.servers() {
+            for server in servers {
+                self.ports.network.close_server(server);
+            }
+        }
+        if let Some(path) = &self.db_path {
+            if let Err(e) = std::fs::write(sign_out_marker(path), b"") {
+                eprintln!("mvs-core: the sign-out marker wasn't written: {}", e.kind());
+            }
+        }
+        if let Err(e) = inner.db.wipe() {
+            eprintln!("mvs-core: the database wasn't emptied: {:?}", e.code);
+        }
+        inner.me = None;
+        inner.logs.clear();
+        inner.calls = voice::Calls::default();
+        self.signed_out.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Signed out: the request loop answers this request, then stops, and
+    /// the shell restarts the core.
+    pub fn signed_out(&self) -> bool {
+        self.signed_out.load(Ordering::SeqCst)
     }
 
     /// After the app lock: the cipher gets our secret back. The next read or

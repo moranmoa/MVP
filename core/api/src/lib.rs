@@ -35,7 +35,7 @@ pub use ports::{
     LoopbackNetwork, Network, Opened, PendingGroupKeys, Ports, Reach, SharedSecrets, SystemClock,
 };
 pub use rekey::{JOIN_REKEY_BURST, JOIN_REKEY_REFILL_MS};
-pub use service::stored_relay_only;
+pub use service::{finish_sign_out, stored_relay_only};
 pub use service::{
     Config, Core, CHALLENGE_POSITIONS, CLOSED_RETENTION_MS, JOIN_RETRY_FIRST, JOIN_RETRY_FOR,
     JOIN_RETRY_MAX, KEY_PENDING_FOR, KEY_PENDING_PREFIX, MAX_CHECK_FAILURES, MAX_KEY_PENDING,

@@ -128,6 +128,16 @@ fn main() -> ExitCode {
         eprintln!("mvs-core: can't prepare the data dir: {e}");
         return ExitCode::FAILURE;
     }
+    // A sign-out: its files go before anything opens them. On failure stop
+    // (the shell retries): never start with the old node key.
+    match api::finish_sign_out(&dir.join("core.db"), &dir.join("sync")) {
+        Ok(true) => eprintln!("mvs-core: signed out; starting fresh"),
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("mvs-core: can't finish the sign-out: {}", e.kind());
+            return ExitCode::FAILURE;
+        }
+    }
     let sync: Option<Arc<SyncNetwork>> = match args.relay {
         None => None,
         Some(relay) => {

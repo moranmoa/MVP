@@ -85,6 +85,15 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 
 ## Proposed contract additions (Rust has them; `api.ts` doesn't yet)
 
+- `signOut(input: { words: string[] } | { withoutWords: true })` returns `null`. It removes this identity from this computer.
+  - `words` must be this identity's 12 words: `invalid-words` (with `positions`) for unknown words, `not-allowed` for another identity's. `withoutWords: true` is the explicit "I accept losing this account" path. Neither: `bad-request`. No identity: `not-found`.
+  - In order, fail safe:
+    1. The keychain secret is deleted. If that fails: `keyring-unavailable`, and nothing changed.
+    2. Then the local database is emptied, a wipe marker is written beside it, and servers are closed.
+    3. The core answers and exits. The shell restarts it.
+  - At the next start, before anything opens, `core.db` and the sync folder (its `node.key` too, so a new identity here gets a new peer ID) are deleted. On failure the core exits and retries at the next start.
+  - The app then starts at "create or restore". No new event: the UI goes back to onboarding on `ok` (pending requests fail with `core-restarted`).
+
 - `updateProfile` with a new display name (trimmed) posts a new profile post to every server I'm still a member of (not kicked, not left, not closed); the latest one wins for everyone. The same name, or a new bio or avatar only, posts nothing: bio and avatar stay on this device, since the profile post carries the name (and caps) only. A server that refuses the post is skipped; the call still succeeds. Errors as before: `bad-request` for a bad name, bio or avatar, `not-found` with no identity.
 
 - Restore on a new computer:
