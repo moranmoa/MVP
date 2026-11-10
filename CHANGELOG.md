@@ -6,6 +6,38 @@ fails if its version has no section here. Write a section before tagging:
 `## [X.Y.Z] - YYYY-MM-DD`, then Hebrew and English (Fixed / New / Known).
 Never put the relay domain or any IP address here.
 
+## [0.3.2] - 2026-11-10
+
+### מה חדש
+- **עריכת פרופיל:** בהגדרות → חשבון אפשר לשנות שם, תמונה וביו, עם כפתור "שמירה". שם חדש מתעדכן אצל כל מי שנמצא איתך בשרתים. את התמונה והביו רואים בינתיים רק במחשב הזה.
+- **שחזור חשבון:** בשחזור ממילות השחזור האפליקציה שואלת שוב את ההסכמה, המדינה ותאריך הלידה, ואז את השם. אחרי השחזור, החזרה לשרת שומרת את השם שלך.
+
+### מה תוקן
+- **הודעות שממתינות למפתח הערוץ:** הודעה שנשלחה רגע אחרי הצטרפות כבר לא נכשלת. היא מסומנת "נשלחת" ויוצאת כשמפתח הערוץ מגיע. אם היא לא יצאה, אפשר "לנסות שוב" או למחוק אותה.
+- **אבחון הצטרפות:** כל שלב בהצטרפות לשרת נרשם בקובץ היומן של האפליקציה (בלי תוכן הודעות), כדי שנוכל למצוא למה הצטרפות נתקעת.
+
+### ידוע
+- **הצטרפות לשרת שנוצר במחשב מסוים עלולה להיתקע** בחלק מהרשתות הביתיות. אנחנו בודקים את זה. בינתיים, אפשר ליצור את השרת במחשב השני.
+- **שיחות קול נתמכות רשמית רק כשכל המשתתפים באותה רשת** (למשל אותו Wi-Fi).
+- בפעם הראשונה Windows עשוי לשאול אם לאפשר ל-MVS גישה לרשת. מומלץ לאשר (גם ברשתות פרטיות); בלי זה שיחות קול לא יתחברו.
+- **אין עדיין יציאה מהחשבון במחשב.** הסרת האפליקציה לא מוחקת את החשבון, כי המפתחות שמורים במנהל האישורים של Windows.
+
+---
+
+### New
+- **Edit your profile:** in Settings → Account you can change your name, picture and bio, with a "Save" button. A new name updates for everyone in your servers. For now, the picture and bio show only on this computer.
+- **Restoring an account:** restoring from your recovery words asks for the agreement, country and birth date again, then your name. After a restore, rejoining a server keeps your name.
+
+### Fixed
+- **Messages waiting for the channel key:** a message sent right after joining no longer fails. It shows as "sending" and goes out when the channel key arrives. If it doesn't go out, you can "Try again" or delete it.
+- **Join diagnostics:** every step of joining a server is written to the app's log file (no message content), so we can find why a join gets stuck.
+
+### Known
+- **Joining a server created on a particular computer may get stuck** on some home networks. We're looking into it. Meanwhile, create the server on the other computer.
+- **Voice calls are officially supported only when everyone is on the same network** (for example the same Wi-Fi).
+- On first run, Windows may ask whether to allow MVS on the network. Please allow it (also on private networks); otherwise voice calls won't connect.
+- **There's no sign-out on a computer yet.** Uninstalling the app doesn't remove the account, because its keys are kept in Windows Credential Manager.
+
 ## [0.3.1] - 2026-11-10
 
 ### מה תוקן
