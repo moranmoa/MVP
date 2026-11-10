@@ -251,6 +251,9 @@ pub(crate) struct Calls {
     dirty: BTreeSet<ServerId>,
     /// The user's relay-only setting (`setRelayOnly`), kept by the core.
     relay_only: bool,
+    /// Rooms my own identity is in from another computer: when its last
+    /// hello reached us. `joinCall` there answers `in-call-elsewhere`.
+    elsewhere: HashMap<ChannelId, u64>,
 }
 
 impl Calls {
@@ -291,8 +294,56 @@ impl Calls {
             self.mine = None;
         }
         self.rooms.retain(|_, room| room.server != server);
+        self.elsewhere.remove(&room_id(server));
         // No `voice.room` for a server we're no longer in.
         self.dirty.remove(&server);
+    }
+
+    /// Remembers the nonce of a hello or bye I send, so an echo of my own
+    /// envelope is a replay and never counts as my other computer.
+    fn own(&mut self, body: &Body, now: u64) {
+        if let Ok(Ok(nonce)) = hex::decode(&body.nonce).map(<[u8; 16]>::try_from) {
+            let _ = self.fresh(nonce, now);
+        }
+    }
+
+    /// My identity is in `channel` from another computer: its hello came
+    /// within the last [`HELLO_TIMEOUT_MS`] and no bye since.
+    fn in_call_elsewhere(&mut self, channel: ChannelId, now: u64) -> bool {
+        self.elsewhere.retain(|_, seen| now.saturating_sub(*seen) < HELLO_TIMEOUT_MS);
+        self.elsewhere.contains_key(&channel)
+    }
+
+    /// A hello or bye signed by my own identity: only from my other
+    /// computer, which sync bound to my identity (`from`), to everyone (no
+    /// `to`), for a room I may call in. It's remembered, never added to the
+    /// room's roster. Anything else signed by me is dropped.
+    fn on_my_other_computer(
+        &mut self,
+        ctx: &mut Ctx,
+        members: &mut dyn Members,
+        from: Option<PublicKey>,
+        signal: &Opened,
+    ) {
+        let me = ctx.me();
+        let wanted = from == Some(me)
+            && signal.to.is_none()
+            && matches!(signal.kind, WireKind::Hello | WireKind::Bye)
+            && signal.channel == room_id(signal.server);
+        if !wanted {
+            return tracing::debug!("voice: dropped an envelope signed by me");
+        }
+        if !self.fresh(signal.nonce, ctx.now) {
+            return tracing::debug!("voice: dropped a replayed envelope");
+        }
+        if !members.may_call(me, signal.server, signal.channel) {
+            return tracing::debug!("voice: dropped my other computer's envelope for a room I can't call in");
+        }
+        if signal.kind == WireKind::Hello {
+            self.elsewhere.insert(signal.channel, ctx.now);
+        } else {
+            self.elsewhere.remove(&signal.channel);
+        }
     }
 
     fn net(&self) -> CoreResult<&Arc<dyn VoiceNet>> {
@@ -317,6 +368,12 @@ impl Calls {
         if !members.may_call(ctx.me(), server, channel) {
             return Err(ErrorCode::NotAllowed.into());
         }
+        // One computer per call: my identity twice in a room would get
+        // half the signals on each (sync routes them to one peer).
+        let here = self.mine.as_ref().is_some_and(|m| m.channel == channel);
+        if !here && self.in_call_elsewhere(channel, ctx.now) {
+            return Err(ErrorCode::InCallElsewhere.into());
+        }
         match self.mine.as_ref().map(|m| m.channel) {
             Some(current) if current == channel => {
                 return Ok(self.state(ctx.me()).expect("in a call"));
@@ -340,6 +397,7 @@ impl Calls {
         let Some(mine) = self.mine.take() else { return };
         self.dirty.insert(mine.server);
         let body = self.body(ctx, WireKind::Bye, mine.server, mine.channel, None);
+        self.own(&body, ctx.now);
         self.broadcast(ctx, members, mine.server, mine.channel, body);
         ctx.events.push(Event::CallState(CallState {
             channel_id: model::hex_id(mine.channel.as_bytes()),
@@ -432,10 +490,10 @@ impl Calls {
             return tracing::debug!("voice: dropped an envelope that doesn't verify");
         };
         let me = ctx.me();
-        if from.is_some_and(|from| from != signal.from)
-            || signal.from == me
-            || signal.to.is_some_and(|to| to != me)
-        {
+        if signal.from == me {
+            return self.on_my_other_computer(ctx, members, from, &signal);
+        }
+        if from.is_some_and(|from| from != signal.from) || signal.to.is_some_and(|to| to != me) {
             return tracing::debug!("voice: dropped a misaddressed envelope");
         }
         // Bound to its server's room: any other channel ID is dropped.
@@ -565,6 +623,7 @@ impl Calls {
         let Some(mine) = &self.mine else { return };
         let (server, channel, muted) = (mine.server, mine.channel, mine.muted);
         let mut body = self.body(ctx, WireKind::Hello, server, channel, to);
+        self.own(&body, ctx.now);
         body.muted = muted;
         match to {
             Some(to) => self.send(ctx, to, &body),
@@ -616,11 +675,18 @@ impl Calls {
         body: Body,
     ) {
         let Some(net) = &self.net else { return };
+        let kind = body.kind;
         let blob = seal(ctx.key, &body);
         for to in members.audience(server) {
             if members.may_call(to, server, channel) {
                 net.send(to, blob.clone());
             }
+        }
+        // My other computers (same identity): they learn I'm in this room,
+        // so they don't join it too. Sync delivers it only to peers bound
+        // to my identity; none is dropped quietly.
+        if matches!(kind, WireKind::Hello | WireKind::Bye) {
+            net.send(ctx.me(), blob);
         }
     }
 
@@ -859,7 +925,49 @@ mod tests {
         let mut ctx = Ctx { key: &key(1), now: NOW, events: &mut events };
         calls.join(&mut ctx, &mut club, SERVER, room()).unwrap();
         calls.leave(&mut ctx, &mut club);
-        assert_eq!(*net.0.lock().unwrap(), [pk(2), pk(2)], "an 18+ call shown to a minor");
+        // pk(1) is me: my other computers hear my hello and bye too.
+        assert_eq!(
+            *net.0.lock().unwrap(),
+            [pk(2), pk(1), pk(2), pk(1)],
+            "an 18+ call shown to a minor"
+        );
+    }
+
+    /// Security Lead (restore design): my identity on another computer is
+    /// in the room, so `joinCall` here answers `in-call-elsewhere`, until
+    /// its bye or until its hellos stop. Only my other computer counts
+    /// (sync bound it to me), only a hello to everyone, and it never shows
+    /// in the room's roster.
+    #[test]
+    fn a_call_on_my_other_computer_blocks_joining_here() {
+        let mut calls = Calls::default();
+        calls.set_net(Arc::new(Net::default()));
+        let mut club = Club { all: vec![pk(2)], barred: vec![] };
+        let mut events = Vec::new();
+        let mut ctx = Ctx { key: &key(1), now: NOW, events: &mut events };
+        let elsewhere = ErrorCode::InCallElsewhere;
+
+        // Not from my other computer: a hello signed by me that sync says
+        // came from someone else, or one addressed to someone.
+        calls.received(&mut ctx, &mut club, Some(pk(2)), &signal(1, WireKind::Hello, None, NOW, 1));
+        calls.received(&mut ctx, &mut club, Some(pk(1)), &signal(1, WireKind::Hello, Some(2), NOW, 2));
+        assert!(!calls.in_call_elsewhere(room(), NOW));
+
+        // My other computer says hello: refused here, and I'm not in the roster.
+        calls.received(&mut ctx, &mut club, Some(pk(1)), &signal(1, WireKind::Hello, None, NOW, 3));
+        assert_eq!(calls.join(&mut ctx, &mut club, SERVER, room()).unwrap_err().code, elsewhere);
+        assert!(calls.room(pk(1), SERVER).participants.is_empty());
+        // Replayed: no effect after its bye.
+        calls.received(&mut ctx, &mut club, Some(pk(1)), &signal(1, WireKind::Bye, None, NOW, 4));
+        calls.received(&mut ctx, &mut club, Some(pk(1)), &signal(1, WireKind::Hello, None, NOW, 3));
+        calls.join(&mut ctx, &mut club, SERVER, room()).unwrap();
+        calls.leave(&mut ctx, &mut club);
+
+        // Its hellos stop: after the timeout, joining here works.
+        calls.received(&mut ctx, &mut club, Some(pk(1)), &signal(1, WireKind::Hello, None, NOW, 5));
+        assert_eq!(calls.join(&mut ctx, &mut club, SERVER, room()).unwrap_err().code, elsewhere);
+        ctx.now = NOW + HELLO_TIMEOUT_MS;
+        calls.join(&mut ctx, &mut club, SERVER, room()).unwrap();
     }
 
     #[test]
