@@ -2910,13 +2910,17 @@ input.switch:disabled {
   position: relative;
 }
 
+/* A 24×24 hit area at least (UX on #325), half in the sidebar's gutter. */
 .channel-handle {
   position: absolute;
-  inset-inline-start: -0.5rem;
+  inset-inline-start: -0.75rem;
   inset-block-start: 50%;
   translate: 0 -50%;
-  width: 1rem;
-  text-align: center;
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: var(--radius-s);
   font-size: 0.875rem;
   color: var(--text-muted);
   cursor: grab;
@@ -2994,4 +2998,8 @@ input.switch:disabled {
 .channel-row:has(.channel-arrange) .channel {
   flex: 1;
   min-width: 0;
+}
+
+.channel-handle:hover {
+  background: var(--bg-hover);
 }
