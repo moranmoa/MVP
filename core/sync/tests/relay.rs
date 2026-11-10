@@ -77,9 +77,18 @@ fn start_relay_counting(
     // Reservations carry the relay's external addresses; a client refuses
     // one without (infra/relay sets them from EXTERNAL_ADDRS).
     swarm.add_external_address(addr);
-    // Reached over QUIC only as a bootstrap address (the punch test), so
-    // reservations keep the TCP address alone.
-    swarm.listen_on(format!("/ip4/127.0.0.1/udp/{port}/quic-v1").parse().unwrap()).unwrap();
+    // QUIC, reached only as a bootstrap address (the punch tests), so
+    // reservations keep the TCP address alone. On its own free UDP port, not
+    // the TCP port's number: on Windows runners that number can fall in a
+    // reserved UDP range (WSAEACCES, 10013). Not fatal: only the QUIC tests
+    // need it, and they read the port with `relay_quic_port`.
+    let udp = free_udp_port();
+    match swarm.listen_on(format!("/ip4/127.0.0.1/udp/{udp}/quic-v1").parse().unwrap()) {
+        Ok(_) => {
+            RELAY_QUIC_PORTS.lock().unwrap_or_else(|e| e.into_inner()).insert(port, udp);
+        }
+        Err(err) => eprintln!("test relay: no QUIC listener on udp/{udp}: {err}"),
+    }
     tokio::spawn(async move {
         loop {
             match swarm.select_next_some().await {
@@ -105,6 +114,20 @@ fn start_relay_counting(
 
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+
+/// A UDP port the OS hands out as free (so never one in a reserved range).
+fn free_udp_port() -> u16 {
+    std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+
+/// The UDP port of the QUIC listener of the test relay on TCP `port`.
+static RELAY_QUIC_PORTS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<u16, u16>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn relay_quic_port(port: u16) -> u16 {
+    let udp = RELAY_QUIC_PORTS.lock().unwrap_or_else(|e| e.into_inner()).get(&port).copied();
+    udp.expect("the test relay has no QUIC listener")
 }
 
 fn test_server() -> (ServerId, ChannelId) {
@@ -820,9 +843,10 @@ async fn members_hole_punch_over_quic_or_stay_relayed() {
     let relay_key = identity::Keypair::generate_ed25519();
     let relay_peer = PeerId::from(relay_key.public());
     let port = free_port();
-    let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{relay_peer}").parse().unwrap();
-    let relay_quic: Multiaddr = format!("/ip4/127.0.0.1/udp/{port}/quic-v1/p2p/{relay_peer}").parse().unwrap();
     let _relay = start_relay_counting(relay_key, port, Arc::default(), true);
+    let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{relay_peer}").parse().unwrap();
+    let relay_quic: Multiaddr =
+        format!("/ip4/127.0.0.1/udp/{}/quic-v1/p2p/{relay_peer}", relay_quic_port(port)).parse().unwrap();
     let quic = || "/ip4/127.0.0.1/udp/0/quic-v1".parse::<Multiaddr>().unwrap();
     let a = bound_node_on("quic-punch-a", &relay, 13, true, Arc::new(AcceptAll), quic(), vec![relay_quic.clone()]).await;
     let b = bound_node_on("quic-punch-b", &relay, 14, true, Arc::new(AcceptAll), quic(), vec![relay_quic]).await;
@@ -875,7 +899,7 @@ async fn quic_follows_tcp_and_punches_only_members_off_relay_only() {
         let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
         let handle = start_relay_counting(relay_key, port, circuits.clone(), true);
         let tcp: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{peer}").parse().unwrap();
-        let quic: Multiaddr = format!("/ip4/127.0.0.1/udp/{port}/quic-v1/p2p/{peer}").parse().unwrap();
+        let quic: Multiaddr = format!("/ip4/127.0.0.1/udp/{}/quic-v1/p2p/{peer}", relay_quic_port(port)).parse().unwrap();
         (handle, circuits, tcp, quic)
     };
     let ports = |addrs: &[Multiaddr]| {
