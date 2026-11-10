@@ -122,10 +122,10 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
   - `applyUpdate` answers `not-allowed` during a call.
 - Relay-only (GAP-6r), per device:
   - `setRelayOnly(on: boolean)` returns `null`. It's stored in the core database and needs no identity. On:
-    - the network keeps no direct listener, makes no direct dials, and reaches peers only through relay circuits. Closing direct connections that are already open is sync's GAP-6r blocker 1;
+    - the network keeps no direct listener, makes no direct dials, and reaches peers only through relay circuits, and direct connections already open are closed (#274);
     - my call ends at once (a bye to the others, then a `call.state` with `participants: []` and `relayOnly: true`);
     - `joinCall` answers `relay-only` until it's off.
-  - At start, `mvs-core` reads the stored value before the network starts and the node starts with it. It fails closed: a database that can't be opened or read, or a value other than off, means on.
+  - At start, `mvs-core` reads the stored value before the network starts, and the node starts relay-only from the first moment (`NodeConfig.relay_only`: no direct listener, no bootstrap dial, no punching). It fails closed: a database that can't be opened or read, or a value other than off, means on.
   - Shown up front:
     - `AppInfo.relayOnly` from `getAppInfo`;
     - `VoiceRoom.relayOnly`, so the UI can disable "Join" before trying;
