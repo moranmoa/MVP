@@ -281,14 +281,18 @@ jobs:
 
       # Every Windows binary we ship must start on a clean install, without the
       # VC++ Redistributable (v0.3.0: "VCRUNTIME140.dll was not found" from
-      # mvs-launcher). Fails on any vcruntime*/msvcp*/api-ms-win-crt-* import.
+      # mvs-launcher).
       # Our Rust binaries get +crt-static from core/.cargo/config.toml.
       - name: No VC++ runtime imports (Windows)
         if: startsWith(matrix.platform, 'windows-')
         run: |
           shopt -s nullglob
-          # Whole folders: every .exe and .dll in .core/ and in the app, plus the setup.
-          node .github/scripts/pe-imports.mjs desktop/.core desktop/dist/win-unpacked desktop/dist/*Setup*.exe
+          # Ours, strictly (no C runtime import at all): .core/ and the copies in the
+          # app. Then every .exe and .dll in the app and the setup: no VC++
+          # Redistributable import (Electron's dxil.dll uses the UCRT, which
+          # ships with Windows 10+).
+          node .github/scripts/pe-imports.mjs desktop/.core desktop/dist/win-unpacked/mvs-launcher.exe desktop/dist/win-unpacked/resources/mvs-core.exe \
+            --third-party desktop/dist/win-unpacked desktop/dist/*Setup*.exe
 
       # Release names. The updater payload is the unpacked app folder
       # (win-unpacked / linux-unpacked, contents at the archive root) with no
