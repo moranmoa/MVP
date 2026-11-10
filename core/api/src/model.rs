@@ -149,7 +149,7 @@ pub(crate) struct GenesisBody {
 // right after the join (posts need a member).
 // TODO(groupkeys): the display name is readable by anyone holding the
 // records (relays too) until control-log content is encrypted.
-// TODO(profiles): updateProfile re-posts it to every server.
+// `updateProfile` with a new name re-posts it to every server I'm in.
 
 /// A v0 link, `mvs://join/<server>/<invite>/<secret>`, all 64 hex
 /// (`crate::invite_link`, the one parser). The secret (GAP-4) is a bearer

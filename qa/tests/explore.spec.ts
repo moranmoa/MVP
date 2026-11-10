@@ -6,7 +6,7 @@
 // test-results/explore-shots/.
 
 import { expect, test, type Page } from '@playwright/test';
-import { composer, createServer, he, lastMessage, onboard, readWords, trackErrors } from './helpers';
+import { composer, createServer, he, lastMessage, onboard, readWords, toRestoreWords, trackErrors } from './helpers';
 
 const SHOTS = 'test-results/explore-shots';
 
@@ -162,7 +162,7 @@ test.describe('onboarding', () => {
 
   test('restore: pasting 12 words with commas and capitals fills every box', async ({ page }) => {
     await page.goto('/?fresh=1&still=1');
-    await page.getByRole('button', { name: 'כבר יש לי חשבון' }).click();
+    await toRestoreWords(page);
     const first = page.getByLabel('מילה 1', { exact: true });
     await first.focus();
     const twelve = 'Apple, river  STONE cloud,forest ember lantern orbit pepper quartz saddle timber';
@@ -178,7 +178,7 @@ test.describe('onboarding', () => {
   test('QA-05 restore: pasting 13 words warns instead of silently dropping one', async ({ page }) => {
     bug('QA-05');
     await page.goto('/?fresh=1&still=1');
-    await page.getByRole('button', { name: 'כבר יש לי חשבון' }).click();
+    await toRestoreWords(page);
     await page.getByLabel('מילה 1', { exact: true }).focus();
     await page.evaluate(() => {
       const dt = new DataTransfer();

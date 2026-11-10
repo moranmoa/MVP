@@ -191,6 +191,11 @@ pub struct Core {
     updates: Option<Arc<Updates>>,
     /// Joins that found nobody online yet, by link: retried by `sync_now`.
     pending_joins: Mutex<HashMap<String, PendingJoin>>,
+    /// Where `core.db` lives (`None` in memory): sign-out leaves its wipe
+    /// marker beside it.
+    db_path: Option<PathBuf>,
+    /// Signed out: the shell restarts the core, which finishes the wipe.
+    signed_out: AtomicBool,
 }
 
 struct PendingJoin {
@@ -213,6 +218,63 @@ fn vault_error(e: VaultError) -> CoreError {
         VaultError::Locked | VaultError::WrongPassphrase => ErrorCode::NotAllowed.into(),
         _ => ErrorCode::Internal.into(),
     }
+}
+
+/// Beside `core.db`: present from a sign-out until its files are gone.
+fn sign_out_marker(db_path: &Path) -> PathBuf {
+    db_path.with_file_name("signed-out")
+}
+
+/// A sign-out's marker is still there after [`finish_sign_out`]: the
+/// keychain couldn't be read, so its files weren't deleted. The network
+/// must stay off (the old `node.key`).
+pub fn sign_out_pending(db_path: &Path) -> bool {
+    sign_out_marker(db_path).exists()
+}
+
+/// Sign-out, at the next start, before the database or the network opens.
+/// The marker beside `db_path` is an intent; `secret_present` is what the
+/// keychain says now (`None`: it can't be read).
+/// - No marker: nothing to do.
+/// - Marker, secret gone: the sign-out happened. Deletes `core.db` (and its
+///   `-wal`/`-shm`) and `sync_dir`, then the marker, and returns true.
+/// - Marker, secret still there: the sign-out never deleted it. The intent
+///   is cleared and nothing else is touched.
+/// - Marker, keychain unreadable: nothing is touched and the marker stays
+///   for the next start.
+///
+/// An error leaves the marker, so the next start tries again; the caller
+/// must not start the network on an error (the old `node.key` would link
+/// the next identity here to the last one).
+pub fn finish_sign_out(
+    db_path: &Path,
+    sync_dir: &Path,
+    secret_present: Option<bool>,
+) -> std::io::Result<bool> {
+    let marker = sign_out_marker(db_path);
+    if !marker.exists() {
+        return Ok(false);
+    }
+    match secret_present {
+        None => return Ok(false),
+        Some(true) => {
+            std::fs::remove_file(marker)?;
+            return Ok(false);
+        }
+        Some(false) => {}
+    }
+    let gone = |r: std::io::Result<()>| match r {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    };
+    gone(std::fs::remove_dir_all(sync_dir))?;
+    for suffix in ["", "-wal", "-shm"] {
+        let mut name = db_path.as_os_str().to_owned();
+        name.push(suffix);
+        gone(std::fs::remove_file(PathBuf::from(name)))?;
+    }
+    std::fs::remove_file(marker)?;
+    Ok(true)
 }
 
 fn phrase_error(e: PhraseError) -> CoreError {
@@ -292,6 +354,8 @@ impl Core {
             app_version: config.app_version,
             updates: None,
             pending_joins: Mutex::default(),
+            db_path: config.db_path,
+            signed_out: AtomicBool::new(false),
         })
     }
 
@@ -302,6 +366,92 @@ impl Core {
         let _ = self.leave_call();
         self.ports.cipher.lock();
         self.ports.network.lock();
+    }
+
+    /// `signOut({ words } | { withoutWords: true })`: removes this identity
+    /// from this computer. The UI first makes sure the user has their
+    /// words: `words` must be this identity's 12 words (`invalid-words` for
+    /// unknown words, `not-allowed` for another identity's); `withoutWords`
+    /// is the explicit "I accept losing this account" path.
+    ///
+    /// Fail safe, in this order:
+    /// 1. the keychain secret is deleted; if that fails nothing changed
+    ///    (`keyring-unavailable`) and the identity still opens;
+    /// 2. once it's gone, the local database is emptied and a wipe marker
+    ///    is written beside it; the next start deletes `core.db` and the
+    ///    sync folder (its `node.key` too, so a new identity here gets a
+    ///    new peer ID) before opening anything ([`finish_sign_out`]);
+    /// 3. the core then exits, and the shell restarts it at "create or
+    ///    restore".
+    ///
+    /// With the secret gone the identity can't come back on its own; a
+    /// later failure only leaves data nobody can open, and the marker
+    /// retries its deletion at every start.
+    pub fn sign_out(&self, words: Option<Vec<String>>, without_words: bool) -> CoreResult<()> {
+        {
+            let inner = self.lock();
+            let me = inner.me.as_ref().ok_or(ErrorCode::NotFound)?;
+            match words {
+                Some(words) => {
+                    let phrase =
+                        RecoveryPhrase::parse(&words.join(" ")).map_err(phrase_error)?;
+                    if phrase.identity().public_key() != me.key() {
+                        return Err(ErrorCode::NotAllowed.into());
+                    }
+                }
+                None if without_words => {}
+                None => return Err(ErrorCode::BadRequest.into()),
+            }
+        }
+        let _ = self.leave_call();
+        self.pending_joins.lock().expect("not poisoned").clear();
+        let mut inner = self.lock();
+        // 1. The intent: the marker, before anything is deleted. Without it
+        //    a crash could leave the files of a gone identity. It can't be
+        //    written: nothing changed.
+        let marker = self.db_path.as_deref().map(sign_out_marker);
+        if let Some(marker) = &marker {
+            if let Err(e) = std::fs::write(marker, b"") {
+                eprintln!("mvs-core: the sign-out marker wasn't written: {}", e.kind());
+                return Err(ErrorCode::Internal.into());
+            }
+        }
+        // 2. The keychain: the identity is gone once its secret is. If that
+        //    fails, the intent is withdrawn and nothing changed. (A marker
+        //    that can't be removed is cleared at the next start, since the
+        //    secret is still there: `finish_sign_out`.)
+        match inner.vault.forget() {
+            Ok(true) => {}
+            Ok(false) => eprintln!("mvs-core: signed out; the recovery-check marker stays"),
+            Err(e) => {
+                if let Some(marker) = &marker {
+                    let _ = std::fs::remove_file(marker);
+                }
+                return Err(vault_error(e));
+            }
+        }
+        // 3. Nothing below may stop the sign-out: the identity is gone.
+        self.ports.cipher.lock();
+        self.ports.network.lock();
+        if let Ok(servers) = inner.db.servers() {
+            for server in servers {
+                self.ports.network.close_server(server);
+            }
+        }
+        if let Err(e) = inner.db.wipe() {
+            eprintln!("mvs-core: the database wasn't emptied: {:?}", e.code);
+        }
+        inner.me = None;
+        inner.logs.clear();
+        inner.calls = voice::Calls::default();
+        self.signed_out.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Signed out: the request loop answers this request, then stops, and
+    /// the shell restarts the core.
+    pub fn signed_out(&self) -> bool {
+        self.signed_out.load(Ordering::SeqCst)
     }
 
     /// After the app lock: the cipher gets our secret back. The next read or
@@ -452,6 +602,19 @@ impl Core {
     }
 
     pub fn restore_identity(&self, words: Vec<String>) -> CoreResult<Identity> {
+        self.restore_identity_with(words, None)
+    }
+
+    /// `restoreIdentity(words, input?)`: the words don't carry the country
+    /// or birth date (spec, age §), so the UI asks them again before the
+    /// words and passes them here, as `createIdentity` takes them. Without
+    /// `input` this device has neither, and a rejoin keeps what my servers
+    /// already hold (no age claim from no date).
+    pub fn restore_identity_with(
+        &self,
+        words: Vec<String>,
+        input: Option<NewIdentityInput>,
+    ) -> CoreResult<Identity> {
         self.run(|inner, ports, _| {
             if inner.me.is_some() {
                 return Err(ErrorCode::NotAllowed.into());
@@ -459,9 +622,19 @@ impl Core {
             let phrase = RecoveryPhrase::parse(&words.join(" ")).map_err(phrase_error)?;
             inner.vault.restore(&phrase).map_err(vault_error)?;
             inner.db.delete(KV_RECOVERY_CHALLENGE)?;
-            // TODO(backup): the spec restores the birth date from the
-            // encrypted identity backup; until then the UI asks again.
-            let me = inner.new_me(phrase, Profile::default())?;
+            // TODO(backup): the spec restores these from the encrypted
+            // identity backup (docs/design, restore servers); until then the
+            // UI asks again. The name comes after, from `updateProfile`.
+            let profile = match input {
+                Some(input) => Profile {
+                    country: input.country,
+                    birth_date: input.birth_date,
+                    locale: Some(input.locale),
+                    ..Profile::default()
+                },
+                None => Profile::default(),
+            };
+            let me = inner.new_me(phrase, profile)?;
             let identity = inner.identity_json(&me)?;
             inner.me = Some(me);
             unlock_cipher(ports, inner.me.as_ref());
@@ -470,17 +643,23 @@ impl Core {
     }
 
     pub fn update_profile(&self, input: ProfileInput) -> CoreResult<Identity> {
-        self.run(|inner, _, events| {
+        self.run(|inner, ports, events| {
             model::check_profile(&input)?;
             let me = inner.me.as_mut().ok_or(ErrorCode::NotFound)?;
-            me.profile.display_name = input.display_name.trim().to_owned();
+            let name = input.display_name.trim().to_owned();
+            let renamed = me.profile.display_name != name;
+            me.profile.display_name = name.clone();
             me.profile.bio = input.bio;
             me.profile.avatar_data_url = input.avatar_data_url;
-            // TODO(profiles): publish the new name to my servers; members
-            // see the name from my profile post until then.
             let profile = me.profile.clone();
             let key = *me.identity.storage_key().expose_secret();
             inner.db.save_profile(&key, &serde_json::to_vec(&profile).expect("plain struct"))?;
+            // A new name goes to every server I'm still in, as a new profile
+            // post (the latest wins). Bio and avatar stay on this device:
+            // the profile post carries the name (and caps) only.
+            if renamed {
+                inner.post_profile_everywhere(ports, &name);
+            }
             let identity = inner.identity_json(inner.me.as_ref().expect("checked above"))?;
             events.push(Event::IdentityChanged(identity.clone()));
             Ok(identity)
@@ -589,7 +768,11 @@ impl Core {
         }
         let searching = JoinStatus::Searching { link: link.clone() };
         self.ports.events.emit(&Event::JoinStatus(searching.clone()));
+        let short = matches!(crate::invite_link::parse(&link), Ok(crate::invite_link::InviteLink::V1 { .. }));
+        tracing::info!(target: "mvs::join", short_link = short, "join: started");
+        self.log_links("join: links at start");
         let status = self.try_join(&link)?;
+        tracing::info!(target: "mvs::join", outcome = join_status_name(&status), "join: first attempt done");
         if matches!(status, JoinStatus::NobodyOnline { .. }) {
             // The inviter may not be reachable yet: keep trying (`retry_joins`).
             let now = Instant::now();
@@ -614,6 +797,7 @@ impl Core {
                     return Ok(JoinStatus::Closed { link: link.to_owned() });
                 }
                 let fetched = self.open_and_fetch(server, &secret);
+                tracing::info!(target: "mvs::join", records = fetched.len(), "join: fetched the server's control log");
                 self.run(|inner, ports, events| {
                     inner.join(ports, server, invite, &secret, link, fetched, events)
                 })
@@ -643,13 +827,23 @@ impl Core {
         use crate::crypto::invite::{handle, open, InvitePublication};
         let h = handle(key);
         let mut status = JoinStatus::NobodyOnline { link: link.to_owned() };
-        for answer in self.ports.network.fetch_invite(h) {
-            let Some(publication) = InvitePublication::decode(&answer) else { continue };
+        let answers = self.ports.network.fetch_invite(h);
+        tracing::info!(target: "mvs::join", answers = answers.len(), "join: asked peers for the invite");
+        for answer in answers {
+            let Some(publication) = InvitePublication::decode(&answer) else {
+                tracing::info!(target: "mvs::join", "join: an answer didn't decode");
+                continue;
+            };
             if *publication.handle() != h {
+                tracing::info!(target: "mvs::join", "join: an answer named another invite");
                 continue;
             }
-            let Some(opened) = open(key, prefix, publication.envelope()) else { continue };
+            let Some(opened) = open(key, prefix, publication.envelope()) else {
+                tracing::info!(target: "mvs::join", "join: an answer didn't open with this link");
+                continue;
+            };
             if !publication.names(key, &opened) {
+                tracing::info!(target: "mvs::join", "join: an answer didn't name its invite");
                 continue;
             }
             let server = opened.server;
@@ -658,8 +852,12 @@ impl Core {
                 return Ok(JoinStatus::Closed { link: link.to_owned() });
             }
             let fetched = self.open_and_fetch(server, &opened.secret);
+            tracing::info!(target: "mvs::join", records = fetched.len(), "join: fetched the server's control log");
             let author = ServerView::build(server, &Log::new(server, fetched.clone()))
                 .and_then(|view| view.state.invites.get(&opened.invite).map(|invite| invite.author));
+            if !fetched.is_empty() && !author.is_some_and(|author| publication.verify(&author)) {
+                tracing::info!(target: "mvs::join", invite_known = author.is_some(), "join: the answer's signature didn't check");
+            }
             let joined = if fetched.is_empty() {
                 JoinStatus::NobodyOnline { link: link.to_owned() }
             } else if !author.is_some_and(|author| publication.verify(&author)) {
@@ -704,6 +902,7 @@ impl Core {
             pending.iter().filter(|(_, p)| now >= p.next).map(|(link, _)| link.clone()).collect()
         };
         for link in due {
+            self.log_links("join: retrying");
             let status = match self.try_join(&link) {
                 Ok(status) => status,
                 Err(e) => {
@@ -711,6 +910,7 @@ impl Core {
                     continue;
                 }
             };
+            tracing::info!(target: "mvs::join", outcome = join_status_name(&status), "join: retry done");
             let mut pending = self.pending_joins.lock().expect("not poisoned");
             if matches!(status, JoinStatus::NobodyOnline { .. }) {
                 if let Some(p) = pending.get_mut(&link) {
@@ -724,6 +924,15 @@ impl Core {
                 drop(pending);
                 self.ports.events.emit(&Event::JoinStatus(status));
             }
+        }
+    }
+
+    /// The join log's view of the network: how many peers we're connected to
+    /// (through the relay or directly). Counts only, never who.
+    fn log_links(&self, step: &str) {
+        match self.ports.network.link_counts() {
+            Some((peers, direct)) => tracing::info!(target: "mvs::join", peers, direct, "{step}"),
+            None => tracing::info!(target: "mvs::join", "{step}"),
         }
     }
 
@@ -2498,6 +2707,32 @@ impl Inner {
     /// stored or sent (`not-allowed`), and the log is rebuilt from the store
     /// so it leaves no trace.
     // TODO(records B4): `Resolver::would_accept` instead.
+    /// `updateProfile` with a new name: one profile post per server I'm
+    /// still a member of (not closed, not kicked, not left). A server that
+    /// refuses it is skipped and logged; the local save already stands.
+    fn post_profile_everywhere(&mut self, ports: &Ports, name: &str) {
+        let Ok(servers) = self.db.servers() else { return };
+        let Some(key) = self.me.as_ref().map(Me::key) else { return };
+        let action = model::profile_action(name);
+        for server in servers {
+            let posted = (|| -> CoreResult<bool> {
+                if self.db.closed_at(server)?.is_some() {
+                    return Ok(false);
+                }
+                self.load(server)?;
+                let view = self.view(server)?;
+                if view.state.closed.is_some() || !view.state.is_member(key) {
+                    return Ok(false);
+                }
+                self.publish_control(ports, server, &action)?;
+                Ok(true)
+            })();
+            if let Err(e) = posted {
+                eprintln!("mvs-core: a profile post wasn't published: {:?}", e.code);
+            }
+        }
+    }
+
     fn publish_control(
         &mut self,
         ports: &Ports,
@@ -2815,12 +3050,23 @@ impl Inner {
         if view.state.closed.is_some() {
             return Ok(JoinStatus::Closed { link });
         }
+        let key = me.key();
+        // Already a member (this device lost its copy, e.g. a restore on a
+        // new computer): no new join, and nothing that would overwrite what
+        // the server already holds about me.
+        let member = view.state.is_member(key);
         let required = view.genesis.age_restriction;
         let age = model::age_on(&me.profile.birth_date, ports.clock.now_ms());
-        if required.min_age() > 0 && age.is_none_or(|age| age < required.min_age()) {
+        // A member's earlier age claim stands while this device has no birth
+        // date (a restore doesn't carry it yet); a known age too low still
+        // blocks.
+        let age_unknown_member = member && age.is_none();
+        if required.min_age() > 0
+            && !age_unknown_member
+            && age.is_none_or(|age| age < required.min_age())
+        {
             return Ok(JoinStatus::AgeBlocked { link, required });
         }
-        let key = me.key();
         if view.is_kicked(&key) {
             // TODO(ui): a "you were removed from this server" phase.
             return Ok(JoinStatus::Invalid { link });
@@ -2836,9 +3082,8 @@ impl Inner {
             )
             .map_err(|_| CoreError::from(ErrorCode::BadRequest))
         };
-        // Already a member (this device lost its copy): no new join needed.
         let mut mine = Vec::new();
-        if !view.state.is_member(key) {
+        if !member {
             // An invite we don't hold, revoked or used up: `authority`
             // refuses the join, and nothing is stored or sent.
             // TODO(ui): phases for "invite expired" and "invite used up".
@@ -2850,17 +3095,27 @@ impl Inner {
             mine.push(join);
         }
         let view = ServerView::build(server, &log).ok_or(ErrorCode::Internal)?;
-        let profile =
-            sign(&view, view.deps(None), &model::profile_action(&me.profile.display_name))?;
+        // A member without a name here (a restore) keeps the profile the
+        // server holds: an empty one would replace my name for everyone.
+        let post_profile = !(member && me.profile.display_name.trim().is_empty());
+        let profile = post_profile
+            .then(|| sign(&view, view.deps(None), &model::profile_action(&me.profile.display_name)))
+            .transpose()?;
         for record in log.records.iter().chain(&log.channel) {
             self.db.put_record(record)?;
         }
         self.logs.insert(server, log);
-        mine.push(profile.clone());
-        self.store(server, profile)?;
-        let claim = self.sign_age_claim(ports, server)?;
-        mine.push(claim.clone());
-        self.store(server, claim)?;
+        if let Some(profile) = profile {
+            mine.push(profile.clone());
+            self.store(server, profile)?;
+        }
+        // Likewise a member without a birth date keeps its earlier claim:
+        // a claim from no date would say "not adult", which counts at once.
+        if !age_unknown_member {
+            let claim = self.sign_age_claim(ports, server)?;
+            mine.push(claim.clone());
+            self.store(server, claim)?;
+        }
         for record in &mine {
             ports.network.publish(record);
         }
@@ -3016,6 +3271,18 @@ fn unlock_cipher(ports: &Ports, me: Option<&Me>) {
         ports.cipher.unlock(Arc::new(MemberSecret::new(me.identity.signing_key())));
         // GAP-4: peer bindings with the identity key.
         ports.network.unlock(me.identity.signing_key());
+    }
+}
+
+/// A join status's name for the join log (no link, no IDs).
+fn join_status_name(status: &JoinStatus) -> &'static str {
+    match status {
+        JoinStatus::Searching { .. } => "searching",
+        JoinStatus::NobodyOnline { .. } => "nobody-online",
+        JoinStatus::Joined { .. } => "joined",
+        JoinStatus::Invalid { .. } => "invalid",
+        JoinStatus::AgeBlocked { .. } => "age-blocked",
+        JoinStatus::Closed { .. } => "closed",
     }
 }
 

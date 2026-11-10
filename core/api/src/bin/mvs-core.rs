@@ -85,11 +85,19 @@ fn parse(mut args: impl Iterator<Item = std::ffi::OsString>) -> Option<Args> {
     Some(Args { data_dir: data_dir?, relay, bootstrap, update_root })
 }
 
-/// Logs to stderr only when RUST_LOG is set (the desktop captures and
-/// redacts stderr); without it nothing is logged. A bad filter is reported
-/// and ignored. Our own lines never hold IPs or IDs below debug.
+/// What is logged without RUST_LOG (see `init_logging`).
+const DEFAULT_LOG: &str = "off,mvs::join=info";
+
+/// Logs to stderr, which the desktop captures and redacts into mvs.log:
+/// RUST_LOG if set, else [`DEFAULT_LOG`] (the join steps). A bad filter is
+/// reported and ignored. Our own lines never hold IPs or IDs below debug.
 fn init_logging() {
-    let Ok(spec) = std::env::var("RUST_LOG") else { return };
+    // Without RUST_LOG: the `mvs::join` target only, at info (EnvFilter matches
+    // by prefix, so not all of `mvs`). These are the join
+    // steps (`api::service`, target `mvs::join`), written for a user's
+    // mvs.log: counts and outcomes, never IDs, links, addresses or text.
+    let from_env = std::env::var("RUST_LOG").ok();
+    let spec = from_env.clone().unwrap_or_else(|| DEFAULT_LOG.to_owned());
     match tracing_subscriber::EnvFilter::try_new(&spec) {
         Ok(filter) => {
             tracing_subscriber::fmt()
@@ -97,7 +105,11 @@ fn init_logging() {
                 .with_writer(io::stderr)
                 .with_ansi(false)
                 .init();
-            tracing::info!(version = env!("CARGO_PKG_VERSION"), "mvs-core: logging on");
+            // Announced only for a RUST_LOG the user set; the default join
+            // log stays quiet until a join.
+            if from_env.is_some() {
+                tracing::info!(version = env!("CARGO_PKG_VERSION"), "mvs-core: logging on");
+            }
         }
         Err(_) => eprintln!("mvs-core: RUST_LOG isn't a valid filter; not logging"),
     }
@@ -117,7 +129,31 @@ fn main() -> ExitCode {
         eprintln!("mvs-core: can't prepare the data dir: {e}");
         return ExitCode::FAILURE;
     }
-    let sync: Option<Arc<SyncNetwork>> = match args.relay {
+    // A sign-out: its files go before anything opens them, only once the
+    // keychain says the secret is gone. On failure stop (the shell
+    // retries): never start with the old node key.
+    let secret_present = match identity::Vault::new(OsKeychain::new()).state() {
+        Ok(identity::VaultState::Empty) => Some(false),
+        Ok(_) => Some(true),
+        Err(_) => None,
+    };
+    match api::finish_sign_out(&dir.join("core.db"), &dir.join("sync"), secret_present) {
+        Ok(true) => eprintln!("mvs-core: signed out; starting fresh"),
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("mvs-core: can't finish the sign-out: {}", e.kind());
+            return ExitCode::FAILURE;
+        }
+    }
+    // A sign-out still pending (the keychain couldn't be read): offline, so
+    // the network never starts with the old node key.
+    let relay = if api::sign_out_pending(&dir.join("core.db")) {
+        eprintln!("mvs-core: a sign-out is pending; starting offline");
+        None
+    } else {
+        args.relay
+    };
+    let sync: Option<Arc<SyncNetwork>> = match relay {
         None => None,
         Some(relay) => {
             let relay = match api::syncnet::relay_addr(&relay) {

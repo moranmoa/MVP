@@ -3245,3 +3245,501 @@ fn a_leave_waits_in_the_outbox_until_the_gate_opens() {
     drop(guest);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Records of `kind` that `who` (a user ID) wrote in `server`.
+fn records_by(world: &World, server: &str, who: &str, kind: Kind) -> usize {
+    let server = ServerId::from_bytes(hex::decode(server).unwrap().try_into().unwrap());
+    let who = PublicKey::from_bytes(hex::decode(who).unwrap().try_into().unwrap());
+    world.network.fetch(server).iter().filter(|r| r.kind() == kind && r.author() == who).count()
+}
+
+/// Owner bug (0.3.1): an owner restores their words on a new computer and
+/// rejoins their 18+ server by its invite link. They come back as the same
+/// member (no new join), still the owner, and nothing they post overwrites
+/// what the server holds: no empty name, no "not adult" claim from a
+/// birth date this device doesn't have. A member who restored and set a
+/// name posts the name, still with no claim.
+#[test]
+fn a_restored_member_rejoins_without_blanking_their_name_or_age() {
+    let world = World::new();
+    let owner = world.peer();
+    let created = owner.core.create_identity(adult()).unwrap();
+    assert!(answer(&owner, &created.words, &[]).1.unwrap().ok);
+    let owner_id = owner
+        .core
+        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None })
+        .unwrap()
+        .id;
+    let server = owner.core.create_server("Night", AgeRestriction::Eighteen).unwrap();
+    let bob = world.peer();
+    sign_up(&bob, "Bob");
+    assert!(matches!(
+        bob.core.join_server(&server.invite_link).unwrap(),
+        JoinStatus::Searching { .. }
+    ));
+    owner.core.sync_now().unwrap();
+    bob.core.sync_now().unwrap();
+    let joins = records_by(&world, &server.id, &owner_id, Kind::Join);
+    let posts = records_by(&world, &server.id, &owner_id, Kind::Post);
+    let claims = records_by(&world, &server.id, &owner_id, Kind::AgeClaim);
+
+    // A new computer: the same words, no name, no birth date.
+    let laptop = world.peer();
+    let restored = laptop.core.restore_identity(created.words.clone()).unwrap();
+    assert_eq!(restored.id, owner_id);
+    // Someone who isn't a member yet, with no birth date, is still blocked.
+    let stranger = world.peer();
+    stranger.core.restore_identity(stranger_words()).unwrap();
+    stranger.core.join_server(&server.invite_link).unwrap();
+    assert!(stranger.core.list_servers().unwrap().is_empty(), "joined an 18+ server with no birth date");
+
+    laptop.core.join_server(&server.invite_link).unwrap();
+    let listed = laptop.core.list_servers().unwrap();
+    assert_eq!(listed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), [server.id.as_str()]);
+    assert_eq!(listed[0].owner_id, owner_id);
+    // Nothing new from me: no join, no profile post, no age claim.
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::Join), joins);
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::Post), posts);
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::AgeClaim), claims);
+    // Bob still sees MoA, the owner.
+    bob.core.sync_now().unwrap();
+    let me = bob
+        .core
+        .list_members(&server.id)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.id == owner_id)
+        .unwrap();
+    assert_eq!((me.display_name.as_str(), me.is_owner), ("MoA", true));
+
+    // A second restore that sets a name first posts it, but still no claim.
+    let other = world.peer();
+    other.core.restore_identity(created.words.clone()).unwrap();
+    other
+        .core
+        .update_profile(ProfileInput { display_name: "MoA 2".into(), bio: None, avatar_data_url: None })
+        .unwrap();
+    other.core.join_server(&server.invite_link).unwrap();
+    assert_eq!(other.core.list_servers().unwrap().len(), 1);
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::Post), posts + 1);
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::AgeClaim), claims);
+    bob.core.sync_now().unwrap();
+    let names: Vec<String> =
+        bob.core.list_members(&server.id).unwrap().into_iter().map(|m| m.display_name).collect();
+    assert!(names.contains(&"MoA 2".to_owned()), "{names:?}");
+}
+
+/// Words for an identity nobody else in the test uses.
+fn stranger_words() -> Vec<String> {
+    let world = World::new();
+    let peer = world.peer();
+    peer.core.create_identity(adult()).unwrap().words
+}
+
+/// Fix 1's api: `restoreIdentity(words, input)` takes the country and birth
+/// date asked again; a rejoin then posts a claim from that date.
+#[test]
+fn a_restore_takes_the_birth_date_asked_again() {
+    let world = World::new();
+    let owner = world.peer();
+    let created = owner.core.create_identity(adult()).unwrap();
+    assert!(answer(&owner, &created.words, &[]).1.unwrap().ok);
+    let owner_id = owner
+        .core
+        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None })
+        .unwrap()
+        .id;
+    let server = owner.core.create_server("Night", AgeRestriction::Eighteen).unwrap();
+    owner.core.sync_now().unwrap();
+    let claims = records_by(&world, &server.id, &owner_id, Kind::AgeClaim);
+
+    let laptop = world.peer();
+    let request = serde_json::json!({
+        "cmd": "restoreIdentity",
+        "args": {
+            "words": created.words,
+            "input": { "locale": "he", "country": "IL", "birthDate": "1990-05-01" }
+        }
+    });
+    let answer: serde_json::Value =
+        serde_json::from_str(&laptop.core.handle(&request.to_string())).unwrap();
+    assert_eq!(answer["ok"]["id"], serde_json::json!(owner_id));
+    assert_eq!(answer["ok"]["birthDate"], serde_json::json!("1990-05-01"));
+    // Without input, the words alone still restore (as before).
+    let bare = world.peer();
+    let request = serde_json::json!({ "cmd": "restoreIdentity", "args": { "words": created.words } });
+    let answer: serde_json::Value =
+        serde_json::from_str(&bare.core.handle(&request.to_string())).unwrap();
+    assert_eq!(answer["ok"]["birthDate"], serde_json::json!(""));
+
+    laptop.core.join_server(&server.invite_link).unwrap();
+    assert_eq!(laptop.core.list_servers().unwrap().len(), 1);
+    assert_eq!(records_by(&world, &server.id, &owner_id, Kind::AgeClaim), claims + 1);
+}
+
+/// One side of a network partition: while cut, it sees only what the world
+/// held when it was cut, and what it publishes waits until it heals.
+struct Partition {
+    world: Arc<LoopbackNetwork>,
+    cut: std::sync::Mutex<Option<BTreeSet<records::RecordId>>>,
+    held: std::sync::Mutex<Vec<records::Record>>,
+}
+
+impl Partition {
+    fn new(world: &Arc<LoopbackNetwork>) -> Arc<Partition> {
+        Arc::new(Partition { world: world.clone(), cut: Default::default(), held: Default::default() })
+    }
+
+    fn cut(&self, server: ServerId) {
+        *self.cut.lock().unwrap() = Some(self.world.fetch(server).iter().map(|r| r.id()).collect());
+    }
+
+    fn heal(&self) {
+        *self.cut.lock().unwrap() = None;
+        for record in std::mem::take(&mut *self.held.lock().unwrap()) {
+            self.world.publish(&record);
+        }
+    }
+}
+
+impl Network for Partition {
+    fn publish(&self, record: &records::Record) {
+        if self.cut.lock().unwrap().is_some() {
+            self.held.lock().unwrap().push(record.clone());
+        } else {
+            self.world.publish(record);
+        }
+    }
+
+    fn fetch(&self, server: ServerId) -> Vec<records::Record> {
+        let all = self.world.fetch(server);
+        match &*self.cut.lock().unwrap() {
+            Some(seen) => all.into_iter().filter(|r| seen.contains(&r.id())).collect(),
+            None => all,
+        }
+    }
+
+    fn fetch_invite(&self, handle: [u8; 32]) -> Vec<Vec<u8>> {
+        self.world.fetch_invite(handle)
+    }
+}
+
+/// Tech Lead and Security Lead (restore design): one owner identity on two
+/// computers re-keys the same join concurrently, neither seeing the other's
+/// rotation. Both rotations are valid; a third member reads what each
+/// computer sealed; a later kick shuts the kicked member out of what both
+/// seal next.
+#[test]
+fn one_identity_on_two_cores_re_keys_concurrently_and_converges() {
+    use api::crypto::GroupKeysCipher;
+
+    let world = World::new();
+    let (owner, server, channel) = keyed_server(&world, "Twins");
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let carol = joiner(&world, &server, "Carol");
+    owner.core.sync_now().unwrap();
+    // The same owner on a second computer: restored, rejoined by the link.
+    let partition = Partition::new(&world.network);
+    let laptop = world.peer_on(
+        partition.clone(),
+        Arc::new(MemoryStore::new()),
+        None,
+        Arc::new(GroupKeysCipher::locked()),
+    );
+    laptop.core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
+    laptop.core.join_server(&server.invite_link).unwrap();
+    advance(&world, JOIN_REKEY_REFILL_MS * 4);
+    for peer in [&owner, &laptop, &carol] {
+        peer.core.sync_now().unwrap();
+    }
+    assert_eq!(laptop.core.list_servers().unwrap().len(), 1);
+
+    // Dan joins; both owner cores re-key for it without seeing each other.
+    let dan_cipher = Arc::new(GroupKeysCipher::locked());
+    let dan = world.peer_with(Arc::new(MemoryStore::new()), None, dan_cipher.clone());
+    sign_up(&dan, "Dan");
+    dan.core.join_server(&server.invite_link).unwrap();
+    advance(&world, JOIN_REKEY_REFILL_MS * 4);
+    let rotation_ids = |records: &[records::Record]| -> BTreeSet<records::RecordId> {
+        records.iter().filter(|r| r.kind() == Kind::KeyRotation).map(|r| r.id()).collect()
+    };
+    let before = rotation_ids(&world.network.fetch(server_key));
+    partition.cut(server_key);
+    owner.core.sync_now().unwrap();
+    laptop.core.sync_now().unwrap();
+    owner.core.send_message(&channel, "from the PC", None).unwrap();
+    laptop.core.send_message(&channel, "from the laptop", None).unwrap();
+    // Each side rotated, neither seeing the other's rotation.
+    let from_pc: BTreeSet<_> =
+        rotation_ids(&world.network.fetch(server_key)).difference(&before).copied().collect();
+    let from_laptop = rotation_ids(&partition.held.lock().unwrap());
+    assert!(!from_pc.is_empty(), "the PC didn't re-key for the join");
+    assert!(!from_laptop.is_empty(), "the laptop didn't re-key for the join");
+    assert!(from_pc.is_disjoint(&from_laptop));
+    partition.heal();
+
+    // Everyone, Dan included, reads both.
+    for peer in [&owner, &laptop, &carol, &dan] {
+        peer.core.sync_now().unwrap();
+    }
+    let bodies = |peer: &Peer| -> Vec<String> {
+        let mut bodies: Vec<String> = peer
+            .core
+            .get_messages(&channel, 0, 50)
+            .unwrap()
+            .messages
+            .into_iter()
+            .map(|m| m.body)
+            .collect();
+        bodies.sort();
+        bodies
+    };
+    for peer in [&owner, &laptop, &carol, &dan] {
+        assert_eq!(bodies(peer), ["from the PC", "from the laptop"]);
+    }
+
+    // A kick from the PC: what either computer seals next is shut to Dan.
+    let dan_id = dan.core.get_identity().unwrap().unwrap().id;
+    owner.core.kick_member(&server.id, &dan_id).unwrap();
+    let after_pc = owner.core.send_message(&channel, "PC after", None).unwrap();
+    laptop.core.sync_now().unwrap();
+    let after_laptop = laptop.core.send_message(&channel, "laptop after", None).unwrap();
+    carol.core.sync_now().unwrap();
+    let carol_bodies = bodies(&carol);
+    for body in ["PC after", "laptop after"] {
+        assert!(carol_bodies.contains(&body.to_owned()), "Carol can't read {body:?}: {carol_bodies:?}");
+    }
+    let held = world.network.fetch(server_key);
+    for record in held.iter().filter(|r| r.kind() == Kind::KeyRotation) {
+        let _ = dan_cipher.apply_rotation(record);
+    }
+    let accepted = held.iter().filter(|r| r.kind() == Kind::KeyRotation).map(|r| r.id()).collect();
+    dan_cipher.set_accepted(server_key, &accepted);
+    for sent in [&after_pc, &after_laptop] {
+        let record =
+            held.iter().find(|r| hex::encode(r.id().as_bytes()) == sent.id).expect("published");
+        let Scope::Channel(ch) = record.scope() else { panic!("a channel record") };
+        assert!(
+            dan_cipher.decrypt(server_key, ch, record.author(), record.body()).is_err(),
+            "the kicked member read {:?}",
+            sent.body
+        );
+    }
+}
+
+/// Profile posts by `who` (a user ID) in `server`.
+fn profile_posts(world: &World, server: &str, who: &str) -> usize {
+    let server = ServerId::from_bytes(hex::decode(server).unwrap().try_into().unwrap());
+    let who = PublicKey::from_bytes(hex::decode(who).unwrap().try_into().unwrap());
+    world.network.fetch(server).iter().filter(|r| r.kind() == Kind::Post && r.author() == who).count()
+}
+
+fn name_seen_by(peer: &Peer, server: &str, who: &str) -> String {
+    peer.core.list_members(server).unwrap().into_iter().find(|m| m.id == who).unwrap().display_name
+}
+
+/// TODO(profiles), done (B11e's edit-profile screen): a new name in
+/// `updateProfile` reaches every server I'm still in as a new profile post;
+/// the same name, or only a new bio or avatar, posts nothing; a server I was
+/// kicked from or one that was closed gets nothing, and neither fails the
+/// call.
+#[test]
+fn a_new_name_reaches_every_server_i_am_in() {
+    let world = World::new();
+    let owner = world.peer();
+    let owner_id = sign_up(&owner, "Owner").id;
+    let bob = world.peer();
+    let bob_id = sign_up(&bob, "Bob").id;
+    let one = owner.core.create_server("One", AgeRestriction::None).unwrap();
+    let two = owner.core.create_server("Two", AgeRestriction::None).unwrap();
+    let three = owner.core.create_server("Three", AgeRestriction::None).unwrap();
+    for server in [&one, &two, &three] {
+        bob.core.join_server(&server.invite_link).unwrap();
+    }
+    owner.core.sync_now().unwrap();
+    bob.core.sync_now().unwrap();
+    // Bob is kicked from Two; Three is closed.
+    owner.core.kick_member(&two.id, &bob_id).unwrap();
+    owner.core.close_server(&three.id).unwrap();
+    bob.core.sync_now().unwrap();
+    let before: Vec<usize> =
+        [&one, &two, &three].iter().map(|s| profile_posts(&world, &s.id, &bob_id)).collect();
+
+    let rename = |name: &str, bio: Option<&str>| {
+        bob.core
+            .update_profile(ProfileInput {
+                display_name: name.into(),
+                bio: bio.map(String::from),
+                avatar_data_url: None,
+            })
+            .unwrap()
+    };
+    assert_eq!(rename("Bobby", None).display_name, "Bobby");
+    let after: Vec<usize> =
+        [&one, &two, &three].iter().map(|s| profile_posts(&world, &s.id, &bob_id)).collect();
+    assert_eq!(after, [before[0] + 1, before[1], before[2]], "only the server Bob is still in");
+    owner.core.sync_now().unwrap();
+    assert_eq!(name_seen_by(&owner, &one.id, &bob_id), "Bobby");
+
+    // The same name (spaces trimmed), or a new bio only: nothing posted.
+    rename(" Bobby ", Some("hi"));
+    assert_eq!(profile_posts(&world, &one.id, &bob_id), after[0]);
+    // The owner renames too: seen by Bob.
+    owner
+        .core
+        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None })
+        .unwrap();
+    bob.core.sync_now().unwrap();
+    assert_eq!(name_seen_by(&bob, &one.id, &owner_id), "MoA");
+}
+
+/// A keychain whose deletes can be made to fail (a locked keychain):
+/// `deletes_fail` all of them, `check_delete_fails` only the
+/// recovery-check marker's.
+struct Keychain {
+    inner: MemoryStore,
+    deletes_fail: std::sync::atomic::AtomicBool,
+    check_delete_fails: std::sync::atomic::AtomicBool,
+}
+
+impl identity::SecretStore for Keychain {
+    fn load(&self, name: &str) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, identity::StoreError> {
+        identity::SecretStore::load(&self.inner, name)
+    }
+    fn save(&self, name: &str, secret: &[u8]) -> Result<(), identity::StoreError> {
+        identity::SecretStore::save(&self.inner, name, secret)
+    }
+    fn delete(&self, name: &str) -> Result<(), identity::StoreError> {
+        let check = name == identity::ENTRY_RECOVERY_CHECK
+            && self.check_delete_fails.load(std::sync::atomic::Ordering::SeqCst);
+        if check || self.deletes_fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(identity::StoreError("locked".into()));
+        }
+        identity::SecretStore::delete(&self.inner, name)
+    }
+}
+
+/// Owner task (0.3.3): `signOut` removes this identity from this computer.
+/// It asks for the words (or an explicit "without words"); a keychain that
+/// can't delete leaves everything as it was; afterwards a restart finds no
+/// identity and no servers, and the next start deletes the files.
+#[test]
+fn sign_out_leaves_a_fresh_start() {
+    let dir = std::env::temp_dir().join(format!("mvs-api-signout-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sync")).unwrap();
+    std::fs::write(dir.join("sync").join("node.key"), b"old peer key").unwrap();
+    let db = dir.join("core.db");
+    let world = World::new();
+    let keychain = Arc::new(Keychain {
+        inner: MemoryStore::new(),
+        deletes_fail: Default::default(),
+        check_delete_fails: Default::default(),
+    });
+    let open = || {
+        Core::open(
+            Config { db_path: Some(db.clone()), app_version: "test".into() },
+            Ports {
+                secrets: keychain.clone(),
+                network: world.network.clone(),
+                events: Arc::new(CollectingSink::new()),
+                clock: world.clock.clone(),
+                cipher: Arc::new(PendingGroupKeys),
+            },
+        )
+        .unwrap()
+    };
+    let core = open();
+    let created = core.create_identity(adult()).unwrap();
+    let positions = core.get_recovery_challenge().unwrap().positions;
+    let answers = positions.iter().map(|p| (*p, created.words[p - 1].clone())).collect();
+    assert!(core.check_recovery_words(answers).unwrap().ok);
+    core.create_server("Mine", AgeRestriction::None).unwrap();
+    let sign_out = |args: serde_json::Value| -> serde_json::Value {
+        let request = serde_json::json!({ "cmd": "signOut", "args": args });
+        serde_json::from_str(&core.handle(&request.to_string())).unwrap()
+    };
+
+    // The words are checked first; nothing happens without them or a confirm.
+    assert_eq!(sign_out(serde_json::json!({}))["error"]["code"], "bad-request");
+    let mut wrong = created.words.clone();
+    wrong[0] = "zzzz".into();
+    assert_eq!(sign_out(serde_json::json!({ "words": wrong }))["error"]["code"], "invalid-words");
+    let other: Vec<String> = LEGAL.split(' ').map(String::from).collect();
+    assert_eq!(sign_out(serde_json::json!({ "words": other }))["error"]["code"], "not-allowed");
+    let marker = dir.join("signed-out");
+    let sync = dir.join("sync");
+    let unchanged = |core: &Core| {
+        assert!(!core.signed_out());
+        assert!(core.get_identity().unwrap().is_some());
+        assert_eq!(core.list_servers().unwrap().len(), 1);
+        assert!(!marker.exists(), "the intent stayed");
+    };
+    // The intent can't be written (a folder sits where the marker goes):
+    // refused before anything is deleted.
+    std::fs::create_dir(&marker).unwrap();
+    assert_eq!(sign_out(serde_json::json!({ "words": created.words }))["error"]["code"], "internal");
+    std::fs::remove_dir(&marker).unwrap();
+    unchanged(&core);
+    // A keychain that can't delete the secret: reported, the intent
+    // withdrawn, and nothing changed.
+    keychain.deletes_fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        sign_out(serde_json::json!({ "words": created.words }))["error"]["code"],
+        "keyring-unavailable"
+    );
+    unchanged(&core);
+    keychain.deletes_fail.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // Signed out with the words, though the recovery-check marker can't be
+    // deleted: the secret is gone, so the sign-out carries on.
+    keychain.check_delete_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(sign_out(serde_json::json!({ "words": created.words })), serde_json::json!({ "ok": null }));
+    keychain.check_delete_fails.store(false, std::sync::atomic::Ordering::SeqCst);
+    // The core stops serving (the shell restarts it).
+    assert!(core.signed_out());
+    assert!(identity::SecretStore::load(&keychain.inner, identity::ENTRY_SECRET).unwrap().is_none());
+    assert!(marker.exists());
+    drop(core);
+
+    // Even before the files go, a restart finds no identity and no servers.
+    let restarted = open();
+    assert_eq!(restarted.get_identity().unwrap(), None);
+    assert!(restarted.list_servers().unwrap().is_empty());
+    drop(restarted);
+    // A keychain that can't be read at the next start: nothing deleted, the
+    // intent stays (and `mvs-core` starts offline).
+    assert!(!api::finish_sign_out(&db, &sync, None).unwrap());
+    assert!(api::sign_out_pending(&db) && sync.join("node.key").exists());
+    // Readable, secret gone: the files go (SQLite's -wal and -shm too, node
+    // key included), then the marker.
+    let wal = dir.join("core.db-wal");
+    let shm = dir.join("core.db-shm");
+    std::fs::write(&wal, b"wal").unwrap();
+    std::fs::write(&shm, b"shm").unwrap();
+    assert!(api::finish_sign_out(&db, &sync, Some(false)).unwrap());
+    assert!(!db.exists() && !sync.exists() && !marker.exists());
+    assert!(!wal.exists() && !shm.exists(), "SQLite's side files stayed");
+    assert!(!api::sign_out_pending(&db));
+    assert!(!api::finish_sign_out(&db, &sync, Some(false)).unwrap(), "nothing left to do");
+    // A marker whose secret is still there (a sign-out that never deleted
+    // it): only the intent is cleared.
+    std::fs::create_dir_all(&sync).unwrap();
+    std::fs::write(&marker, b"").unwrap();
+    assert!(!api::finish_sign_out(&db, &sync, Some(true)).unwrap());
+    assert!(!marker.exists() && sync.exists());
+    // A fresh start: create or restore.
+    let fresh = open();
+    assert_eq!(fresh.get_identity().unwrap(), None);
+    fresh.restore_identity(created.words.clone()).unwrap();
+    drop(fresh);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Without the words: allowed only as an explicit choice.
+    let peer = world.peer();
+    sign_up(&peer, "Gone");
+    let request = r#"{"cmd":"signOut","args":{"withoutWords":true}}"#;
+    assert_eq!(peer.core.handle(request), r#"{"ok":null}"#);
+    assert!(peer.core.signed_out());
+    assert_eq!(peer.core.get_identity().unwrap(), None);
+}

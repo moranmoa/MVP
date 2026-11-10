@@ -13,15 +13,31 @@ import { LOCALES } from '../../i18n';
 import { RecoveryCheck, RecoveryWordsPanel } from './RecoveryWords';
 import { RestoreScreen } from './Restore';
 
-export type Step = 'language' | 'agreement' | 'country' | 'dob' | 'blocked' | 'preparing' | 'words' | 'check' | 'profile' | 'restore';
+export type Step =
+  | 'language'
+  | 'agreement'
+  | 'country'
+  | 'dob'
+  | 'blocked'
+  | 'preparing'
+  | 'words'
+  | 'check'
+  | 'profile'
+  | 'restore'
+  | 'restored';
 
 /** Numbered steps shown as "step x of y"; blocked/preparing/restore are not counted. */
 const NUMBERED: Step[] = ['language', 'agreement', 'country', 'dob', 'words', 'check', 'profile'];
+/** A restore has its own count (B13 §3): no new words to write down or check. */
+const NUMBERED_RESTORE: Step[] = ['language', 'agreement', 'country', 'dob', 'restore', 'profile'];
 
 // Where onboarding resumes after a reload or a crash (QA-01, B19 spec §3).
 // Only the step name is stored, never the words.
 const RESUME_KEY = 'mvs.onboarding.v1';
-const RESUMABLE: Step[] = ['words', 'check', 'profile'];
+const RESUMABLE: Step[] = ['words', 'check', 'profile', 'restored'];
+// Set while a restore is under way (#290), so a reload after the words still
+// ends on the "servers don't come back" notice.
+const RESTORING_KEY = 'mvs.onboarding.restoring.v1';
 
 function storage(): Storage | null {
   try {
@@ -35,6 +51,7 @@ function storage(): Storage | null {
 export function resumeStep(identity: Identity | null): Step | null {
   const saved = storage()?.getItem(RESUME_KEY) as Step | null;
   if (!identity || !saved || !RESUMABLE.includes(saved)) return null;
+  if (saved === 'restored') return saved;
   return identity.recoveryChecked && saved !== 'profile' ? 'profile' : saved;
 }
 
@@ -42,7 +59,16 @@ export function Onboarding({ onFinished: finish, initialStep }: { onFinished: ()
   const [step, setStep] = useState<Step>(initialStep ?? 'language');
   const onFinished = () => {
     storage()?.removeItem(RESUME_KEY);
+    storage()?.removeItem(RESTORING_KEY);
     finish();
+  };
+  // Restore asks the agreement, country and birth date again, as for a new
+  // account (spec, age: restore asks again), then the words, then the profile.
+  const [restoring, setRestoringState] = useState(() => storage()?.getItem(RESTORING_KEY) === '1');
+  const setRestoring = (on: boolean) => {
+    setRestoringState(on);
+    if (on) storage()?.setItem(RESTORING_KEY, '1');
+    else storage()?.removeItem(RESTORING_KEY);
   };
   useEffect(() => {
     if (RESUMABLE.includes(step)) storage()?.setItem(RESUME_KEY, step);
@@ -59,7 +85,7 @@ export function Onboarding({ onFinished: finish, initialStep }: { onFinished: ()
     country: 'agreement',
     dob: 'country',
     check: 'words',
-    restore: 'language',
+    restore: 'dob',
   };
 
   const createAccount = async (dob: string) => {
@@ -76,7 +102,8 @@ export function Onboarding({ onFinished: finish, initialStep }: { onFinished: ()
     setStep('profile');
   };
 
-  const stepNo = NUMBERED.indexOf(step);
+  const numbered = restoring ? NUMBERED_RESTORE : NUMBERED;
+  const stepNo = numbered.indexOf(step);
 
   return (
     <main className="onboarding">
@@ -92,13 +119,24 @@ export function Onboarding({ onFinished: finish, initialStep }: { onFinished: ()
             )}
             {stepNo >= 0 && (
               <span className="muted small">
-                <FormattedMessage id="onb.progress" values={{ step: stepNo + 1, total: NUMBERED.length }} />
+                <FormattedMessage id="onb.progress" values={{ step: stepNo + 1, total: numbered.length }} />
               </span>
             )}
           </div>
         )}
         <StepBody key={step}>
-          {step === 'language' && <LanguageStep onNext={() => setStep('agreement')} onRestore={() => setStep('restore')} />}
+          {step === 'language' && (
+            <LanguageStep
+              onNext={() => {
+                setRestoring(false);
+                setStep('agreement');
+              }}
+              onRestore={() => {
+                setRestoring(true);
+                setStep('agreement');
+              }}
+            />
+          )}
           {step === 'agreement' && <AgreementStep onNext={() => setStep('country')} />}
           {step === 'country' && <CountryStep value={country} onChange={setCountry} onNext={() => setStep('dob')} />}
           {step === 'dob' && (
@@ -107,6 +145,7 @@ export function Onboarding({ onFinished: finish, initialStep }: { onFinished: ()
               onNext={(dob) => {
                 setBirthDate(dob);
                 if (ageOn(dob) < MIN_AGE) setStep('blocked');
+                else if (restoring) setStep('restore');
                 else void createAccount(dob);
               }}
             />
@@ -133,18 +172,39 @@ export function Onboarding({ onFinished: finish, initialStep }: { onFinished: ()
               />
             </>
           )}
-          {step === 'profile' && <ProfileStep onDone={onFinished} />}
+          {step === 'profile' && <ProfileStep onDone={restoring ? () => setStep('restored') : onFinished} />}
           {step === 'restore' && (
             <RestoreScreen
+              input={birthDate ? { locale: settings.locale, country, birthDate } : undefined}
               onRestored={(identity: Identity) => {
                 store.setIdentity(identity);
-                onFinished();
+                setStep('profile');
               }}
             />
           )}
+          {step === 'restored' && <RestoredStep onDone={onFinished} />}
         </StepBody>
       </div>
     </main>
+  );
+}
+
+/** After a restore (#290): servers don't come back by themselves yet; an invite link brings you back as the same member. */
+function RestoredStep({ onDone }: { onDone: () => void }) {
+  return (
+    <div className="stack">
+      <h1>
+        <FormattedMessage id="onb.restored.title" />
+      </h1>
+      <p>
+        <FormattedMessage id="onb.restored.servers" />
+      </p>
+      <div className="actions">
+        <button type="button" className="primary" autoFocus onClick={onDone}>
+          <FormattedMessage id="common.next" />
+        </button>
+      </div>
+    </div>
   );
 }
 
