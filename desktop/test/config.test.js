@@ -7,7 +7,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
-const { relayFor, bootstrapFor, validRelay, MAX_RELAY, MAX_BOOTSTRAP } = require('../src/config');
+const { relayFor, bootstrapFor, validRelay, logHost, MAX_RELAY, MAX_BOOTSTRAP } = require('../src/config');
+const { createLog } = require('../src/logfile');
 const { Sidecar } = require('../src/sidecar');
 
 const ID = '12D3KooW' + 'A'.repeat(44);
@@ -127,4 +128,26 @@ test('mvs-core gets --bootstrap after --relay, and only with a relay', () => {
   assert.deepEqual(spawnedArgs({ relay: null, bootstrap: [TCP] }), ['--data-dir', data]);
   assert.throws(() => spawnedArgs({ bootstrap: [42] }), /strings/);
   assert.throws(() => spawnedArgs({ bootstrap: TCP }), /strings/);
+});
+
+test('relay and bootstrap hosts, DNS or IP, never reach the file log', () => {
+  const peer = '12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc';
+  assert.equal(logHost(`/dns4/relay.example.org/tcp/443/wss/p2p/${peer}`), 'relay.example.org');
+  assert.equal(logHost(`/ip4/198.51.100.7/tcp/4001/p2p/${peer}`), '198.51.100.7');
+  assert.equal(logHost(`/ip6/2001:db8::7/udp/4001/quic-v1/p2p/${peer}`), '2001:db8::7');
+  assert.equal(logHost(`/p2p/${peer}`), null);
+  assert.equal(logHost(null), null);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mvs-loghost-'));
+  try {
+    const log = createLog(dir);
+    for (const addr of [`/ip4/198.51.100.7/tcp/4001/p2p/${peer}`, `/ip6/2001:db8::7/udp/4001/quic-v1/p2p/${peer}`]) {
+      log.hide(logHost(addr));
+    }
+    // Glued to other text, past the generic IP redaction's word boundaries.
+    log('core: dial failed to v198.51.100.7x and [2001:db8::7]:4001');
+    const text = fs.readFileSync(path.join(dir, 'mvs.log'), 'utf8');
+    assert.ok(!text.includes('198.51.100.7') && !text.includes('2001:db8::7'), text);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

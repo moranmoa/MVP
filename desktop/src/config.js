@@ -92,4 +92,14 @@ function bootstrapFor({ packaged, resourcesPath, env = process.env, warn = (m) =
   return ok.slice(0, MAX_BOOTSTRAP);
 }
 
-module.exports = { MAX_RELAY, MAX_BOOTSTRAP, validRelay, relayFor, bootstrapFor };
+/**
+ * The host of a relay or bootstrap multiaddr (`/dns4/<name>` and the other
+ * DNS forms, `/ip4/<addr>` or `/ip6/<addr>`), to hide from the file log;
+ * null for anything else.
+ */
+function logHost(addr) {
+  const m = typeof addr === 'string' && /^\/(?:dns(?:4|6|addr)?|ip4|ip6)\/([^/]+)/.exec(addr);
+  return m ? m[1] : null;
+}
+
+module.exports = { MAX_RELAY, MAX_BOOTSTRAP, validRelay, relayFor, bootstrapFor, logHost };

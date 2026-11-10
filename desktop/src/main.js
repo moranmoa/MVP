@@ -17,7 +17,7 @@ const sec = require('./security');
 const { toRequest } = require('./commands');
 const { Sidecar } = require('./sidecar');
 const deeplink = require('./deeplink');
-const { relayFor, bootstrapFor } = require('./config');
+const { relayFor, bootstrapFor, logHost } = require('./config');
 const update = require('./update');
 const { createLog } = require('./logfile');
 
@@ -82,14 +82,12 @@ function startCore() {
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   if (process.platform !== 'win32') fs.chmodSync(dataDir, 0o700);
   const relay = relayFor({ packaged: app.isPackaged, resourcesPath: process.resourcesPath });
-  // The relay's host must never reach the log, not even as a bare name.
-  const host = relay && /^\/dns(?:4|6|addr)?\/([^/]+)/.exec(relay);
-  if (host) fileLog.hide(host[1]);
-  // Its direct addresses (#219), hidden from the log the same way.
+  // The relay's host (DNS name or IP) must never reach the log, not even
+  // bare; nor its direct addresses (#219).
   const bootstrap = bootstrapFor({ packaged: app.isPackaged, resourcesPath: process.resourcesPath });
-  for (const addr of bootstrap) {
-    const name = /^\/dns(?:4|6|addr)?\/([^/]+)/.exec(addr);
-    if (name) fileLog.hide(name[1]);
+  for (const addr of [relay, ...bootstrap]) {
+    const host = logHost(addr);
+    if (host) fileLog.hide(host);
   }
   core = new Sidecar({
     exe: CORE_EXE,
