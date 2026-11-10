@@ -82,9 +82,16 @@ test('navigation away is blocked', async () => {
   assert.equal(await page.evaluate(() => location.origin), 'app://mvs');
 });
 
-test('permissions are refused', async () => {
-  const mic = await page.evaluate(() => navigator.mediaDevices?.getUserMedia({ audio: true }).then(() => 'granted', (e) => e.name) ?? 'no-api');
-  assert.notEqual(mic, 'granted');
+test('permissions are refused, except the microphone', async () => {
+  // Voice v1: our page may use the microphone (whether a device exists is up
+  // to the machine); the camera and screen capture stay refused.
+  const state = (name) => page.evaluate((n) => navigator.permissions.query({ name: n }).then((s) => s.state, (e) => e.name), name);
+  assert.equal(await state('microphone'), 'granted');
+  assert.notEqual(await state('camera'), 'granted');
+  const cam = await page.evaluate(() => navigator.mediaDevices?.getUserMedia({ video: true }).then(() => 'granted', (e) => e.name) ?? 'no-api');
+  assert.notEqual(cam, 'granted');
+  const screen = await page.evaluate(() => navigator.mediaDevices?.getDisplayMedia({ video: true }).then(() => 'granted', (e) => e.name) ?? 'no-api');
+  assert.notEqual(screen, 'granted');
   const notif = await page.evaluate(() => Notification.requestPermission());
   assert.notEqual(notif, 'granted');
 });

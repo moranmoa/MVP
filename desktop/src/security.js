@@ -122,10 +122,47 @@ function isExternalWebUrl(url) {
 }
 
 /**
- * Permissions the renderer may get. None for now: the mock UI needs none.
- * The microphone comes with voice (phase 2) and is decided then.
+ * Permissions the renderer may get without conditions. None: everything else
+ * is refused, and the one exception is the microphone below.
  */
 const ALLOWED_PERMISSIONS = Object.freeze(new Set());
+
+/** True only for a non-empty list that holds 'audio' and nothing else. */
+function isAudioOnly(mediaTypes) {
+  return Array.isArray(mediaTypes) && mediaTypes.length > 0 && mediaTypes.every((t) => t === 'audio');
+}
+
+/**
+ * Voice v1: the microphone, and only that. A request (Electron's
+ * setPermissionRequestHandler) passes only for permission 'media' asking for
+ * audio alone, from our own page's top frame: the asking page, the requesting
+ * URL and (when given) the security origin must all be app://mvs. Camera,
+ * screen/display capture, a remote origin, a subframe or any other
+ * permission: refused. `pageUrl` is the URL of the asking webContents.
+ */
+function allowPermissionRequest(pageUrl, permission, details) {
+  if (ALLOWED_PERMISSIONS.has(permission)) return true;
+  if (permission !== 'media' || !details) return false;
+  if (!isInternalUrl(pageUrl) || details.isMainFrame !== true) return false;
+  if (!isInternalUrl(details.requestingUrl)) return false;
+  if (details.securityOrigin !== undefined && !isInternalUrl(details.securityOrigin)) return false;
+  return isAudioOnly(details.mediaTypes);
+}
+
+/**
+ * The matching check (setPermissionCheckHandler): 'media' with mediaType
+ * 'audio', from our own origin, top frame. Anything else: false. `pageUrl`
+ * is the URL of the asking webContents, or undefined when Electron gives none.
+ */
+function allowPermissionCheck(pageUrl, permission, requestingOrigin, details) {
+  if (ALLOWED_PERMISSIONS.has(permission)) return true;
+  if (permission !== 'media' || !details) return false;
+  if (pageUrl !== undefined && !isInternalUrl(pageUrl)) return false;
+  if (!isInternalUrl(requestingOrigin) || details.isMainFrame !== true) return false;
+  if (details.securityOrigin !== undefined && !isInternalUrl(details.securityOrigin)) return false;
+  if (details.requestingUrl !== undefined && !isInternalUrl(details.requestingUrl)) return false;
+  return details.mediaType === 'audio';
+}
 
 module.exports = {
   SCHEME,
@@ -133,6 +170,8 @@ module.exports = {
   ORIGIN,
   WEB_PREFERENCES,
   ALLOWED_PERMISSIONS,
+  allowPermissionRequest,
+  allowPermissionCheck,
   cspFromIndexHtml,
   responseHeaders,
   mimeOf,
