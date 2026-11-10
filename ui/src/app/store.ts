@@ -83,6 +83,8 @@ export interface StoreState {
    * voice room, and also learned from a call ended or a join refused for it.
    */
   relayOnly: boolean;
+  /** Something asked for Settings at a section (e.g. "Change in Settings" under the voice room). */
+  settingsRequest: { section: string; at: number } | null;
   /** A short confirmation toast (an i18n id), e.g. "Copied" after a menu copy. */
   flash: { id: string; at: number } | null;
   /** Bumped when any message window changes, so readers re-render. */
@@ -103,6 +105,7 @@ export class Store {
     voiceRooms: {},
     relayOnly: false,
     flash: null,
+    settingsRequest: null,
     serverGone: null,
     messagesVersion: 0,
   };
@@ -240,6 +243,10 @@ export class Store {
 
   showFlash(id: string): void {
     this.set({ flash: { id, at: Date.now() } });
+  }
+
+  openSettings(section: string): void {
+    this.set({ settingsRequest: { section, at: Date.now() } });
   }
 
   clearFlash(): void {

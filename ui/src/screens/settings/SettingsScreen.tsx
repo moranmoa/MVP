@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { FormattedMessage, FormattedNumber, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { FONT_MAX, FONT_MIN, SCALE_MAX, SCALE_MIN, useSettings, type Theme } from '../../app/settings';
@@ -15,12 +15,26 @@ const SECTIONS: Section[] = ['account', 'privacy', 'language', 'appearance', 'st
 const GB = 1024 ** 3;
 const LIMIT_STEPS = [1, 2, 5, 10, 20, 50].map((g) => g * GB);
 
-export function SettingsScreen({ open, onClose, onCheckWords }: { open: boolean; onClose: () => void; onCheckWords: () => void }) {
+export function SettingsScreen({
+  open,
+  request,
+  onClose,
+  onCheckWords,
+}: {
+  open: boolean;
+  /** Open at this section, e.g. Privacy from the voice room's "Change in Settings". */
+  request?: { section: string; at: number } | null;
+  onClose: () => void;
+  onCheckWords: () => void;
+}) {
   const intl = useIntl();
   const [section, setSection] = useState<Section>(() => {
     const s = new URLSearchParams(location.search).get('settings');
     return SECTIONS.includes(s as Section) ? (s as Section) : 'appearance';
   });
+  useEffect(() => {
+    if (request && SECTIONS.includes(request.section as Section)) setSection(request.section as Section);
+  }, [request]);
 
   return (
     <Dialog open={open} onClose={onClose} title={intl.formatMessage({ id: 'settings.title' })} className="settings-dialog">
@@ -51,7 +65,7 @@ export function SettingsScreen({ open, onClose, onCheckWords }: { open: boolean;
           {section === 'storage' && <StorageSection />}
           {section === 'diagnostics' && <DiagnosticsSection />}
           {section === 'about' && <AboutSection />}
-          {section === 'privacy' && <PrivacySection />}
+          {section === 'privacy' && <PrivacySection focus={request?.section === 'privacy' ? request.at : undefined} />}
         </section>
       </div>
     </Dialog>
@@ -344,12 +358,25 @@ function DiagnosticsSection() {
 
 // Relay-only (GAP-6r, #272), per device: nobody connects to me directly, so
 // members never see my IP address; calls are off while it is on.
-function PrivacySection() {
+function PrivacySection({ focus }: { focus?: number }) {
   const store = useAppStore();
+  const intl = useIntl();
   const relayOnly = useStore(store, (s) => s.relayOnly);
+  const inCall = useStore(store, (s) => !!s.call);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
-  const toggle = async (on: boolean) => {
+  // Turning it on ends a call in progress: ask first, in the row.
+  const [confirm, setConfirm] = useState(false);
+  const switchRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!focus) return;
+    // After the dialog opens (showModal moves focus first).
+    const t = setTimeout(() => switchRef.current?.focus());
+    return () => clearTimeout(t);
+  }, [focus]);
+
+  const apply = async (on: boolean) => {
+    setConfirm(false);
     setBusy(true);
     setFailed(false);
     try {
@@ -362,24 +389,45 @@ function PrivacySection() {
   };
   return (
     <div className="stack">
-      <label className="check">
-        <input
-          type="checkbox"
-          role="switch"
-          checked={relayOnly}
-          disabled={busy}
-          aria-describedby="relay-only-hint relay-only-calls"
-          onChange={(e) => void toggle(e.target.checked)}
-        />
+      <label className="switch-row">
         <span>
           <FormattedMessage id="privacy.relayOnly.label" />
         </span>
+        <input
+          ref={switchRef}
+          type="checkbox"
+          role="switch"
+          className="switch"
+          checked={relayOnly}
+          disabled={busy}
+          aria-describedby="relay-only-hint relay-only-calls relay-only-restart"
+          onChange={(e) => (e.target.checked && inCall ? setConfirm(true) : void apply(e.target.checked))}
+        />
       </label>
+      {confirm && (
+        <div className="confirm" role="alertdialog" aria-label={intl.formatMessage({ id: 'privacy.relayOnly.confirm' })}>
+          <p>
+            <FormattedMessage id="privacy.relayOnly.confirm" />
+          </p>
+          <div className="actions">
+            <button type="button" className="danger small" autoFocus onClick={() => void apply(true)}>
+              <FormattedMessage id="privacy.relayOnly.turnOn" />
+            </button>
+            <button type="button" className="secondary small" onClick={() => setConfirm(false)}>
+              <FormattedMessage id="common.cancel" />
+            </button>
+          </div>
+        </div>
+      )}
       <p id="relay-only-hint" className="muted small">
         <FormattedMessage id="privacy.relayOnly.hint" />
       </p>
       <p id="relay-only-calls" className="muted small">
         <FormattedMessage id="privacy.relayOnly.calls" />
+      </p>
+      {/* Until the node starts relay-only and drops open direct connections (GAP-6r), a restart is what makes it complete. */}
+      <p id="relay-only-restart" className="muted small">
+        <FormattedMessage id="privacy.relayOnly.restart" />
       </p>
       {failed && (
         <p className="error small" role="alert">
