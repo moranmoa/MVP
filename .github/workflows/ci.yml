@@ -152,6 +152,13 @@ jobs:
           cache-dependency-path: desktop/package-lock.json
       - name: Licence policy (desktop lockfile, before installing anything)
         run: node ../.github/scripts/npm-licenses.mjs package-lock.json
+      # test/fake-core.js starts via #!/usr/bin/env node with the sidecar's
+      # minimal env (no PATH), so env looks only in /bin:/usr/bin. The runner
+      # keeps node elsewhere; the Docker image desktop/compose.yaml uses has it
+      # in /usr/bin. Without this the fake core never starts and the tests that
+      # wait for it hang until the job times out.
+      - name: node in /usr/bin for the fake core
+        run: sudo ln -sf "$(command -v node)" /usr/bin/node
       # Install scripts stay off: the unit tests never start Electron.
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: node --test test/*.test.js
@@ -189,12 +196,38 @@ jobs:
       - name: Install desktop dependencies
         working-directory: desktop
         run: npm ci --no-audit --no-fund
-      # Skips the three tests that spawn the core (names matching "the core|core events"):
+      # Skips the three tests that need a running core (names matching "the core|core events"):
       # test/fake-core.js is spawned directly, and Windows cannot execute a .js
-      # file (EFTYPE). Linux runs them. The permission (mic) test still runs here.
+      # file (EFTYPE; the shell now survives that, the core just stays down).
+      # Linux runs them. The permission (mic) tests still run here.
+      # DEBUG=pw:browser* puts Electron's own stdout/stderr (main's log lines,
+      # the sidecar's "core:" lines) into the output, which is kept below.
       - name: Electron e2e (without the core-spawning tests)
         working-directory: desktop
-        run: node --test --test-concurrency=1 --test-skip-pattern="the core|core events" test/e2e.test.mjs
+        shell: bash
+        env:
+          DEBUG: "pw:browser*"
+          ELECTRON_ENABLE_LOGGING: "1"
+        run: |
+          set -o pipefail
+          node --test --test-concurrency=1 --test-skip-pattern="the core|core events" test/e2e.test.mjs 2>&1 | tee "$RUNNER_TEMP/e2e-output.log"
+      - name: Collect e2e logs
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/e2e-logs"
+          cp "$RUNNER_TEMP/e2e-output.log" "$RUNNER_TEMP/e2e-logs/" 2>/dev/null || true
+          # mvs.log (T8-01): the default profile, and temp --user-data-dir ones.
+          find "$APPDATA" "$LOCALAPPDATA/Temp" "$RUNNER_TEMP" -name mvs.log -size -5M 2>/dev/null |
+            while read -r f; do cp "$f" "$RUNNER_TEMP/e2e-logs/$(echo "$f" | tr -c 'A-Za-z0-9.\n' _)"; done
+          ls -la "$RUNNER_TEMP/e2e-logs"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: desktop-e2e-windows-logs
+          path: ${{ runner.temp }}/e2e-logs
+          retention-days: 7
+          if-no-files-found: warn
 
   # The same e2e on Linux under Xvfb. ubuntu-22.04 on purpose: 24.04 runners
   # restrict unprivileged user namespaces, which Electron's sandbox needs, and
@@ -224,6 +257,13 @@ jobs:
           npm run build
       - name: Licence policy (desktop lockfile, before installing anything)
         run: node .github/scripts/npm-licenses.mjs desktop/package-lock.json
+      # test/fake-core.js starts via #!/usr/bin/env node with the sidecar's
+      # minimal env (no PATH), so env looks only in /bin:/usr/bin. The runner
+      # keeps node elsewhere; the Docker image desktop/compose.yaml uses has it
+      # in /usr/bin. Without this the fake core never starts and the tests that
+      # wait for it hang until the job times out.
+      - name: node in /usr/bin for the fake core
+        run: sudo ln -sf "$(command -v node)" /usr/bin/node
       - name: Install desktop dependencies
         working-directory: desktop
         run: npm ci --no-audit --no-fund

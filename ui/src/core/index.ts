@@ -22,6 +22,7 @@ export * from './types';
  *   ?rolledBack=1    the last update failed and the previous version is back
  *   ?coreDown=<detail> the desktop shell reports the core down (missing, start-failed, crashed, crash-loop)
  *   ?callError=<code> joinCall fails with call-full, relay-only or not-implemented
+ *   ?roomFull=1      every demo voice room already has 5 people
  *   ?inCall=1        restartToUpdate is refused as during a call (not-allowed)
  *   ?fresh=1         forget the stored mock account
  *   ?hostile=1       add attacker-style names and messages (security demo)
@@ -48,6 +49,7 @@ export function createCore(search = typeof location !== 'undefined' ? location.s
     inCall: params.has('inCall'),
     coreDown: (params.get('coreDown') as MockOptions['coreDown']) ?? undefined,
     callError: (params.get('callError') as MockOptions['callError']) ?? undefined,
+    roomFull: params.has('roomFull'),
     storage,
   });
 }

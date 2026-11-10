@@ -23,6 +23,8 @@
 //! 4. TODO(GAP-10): switch to a separate, published X25519 key derived with
 //!    its own context string when device keys arrive.
 
+pub mod invite;
+
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 

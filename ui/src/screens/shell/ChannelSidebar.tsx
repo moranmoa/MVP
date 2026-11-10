@@ -4,8 +4,8 @@ import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import type { Channel, Id, ServerSummary } from '../../core';
 import { Avatar, Badge, Code, InviteBox, Name } from '../../components/common';
-import { GearIcon, HashIcon, LinkIcon, PlusIcon, SpeakerIcon } from '../../components/icons';
-import { CallBar } from './CallBar';
+import { GearIcon, HashIcon, LinkIcon, PlusIcon } from '../../components/icons';
+import { CallBar, VoiceRoomEntry, useCallEngine } from './CallBar';
 import { useContextMenu, type MenuItem } from '../../components/ContextMenu';
 import { copyText } from '../../app/clipboard';
 import { useCore } from '../../core';
@@ -42,8 +42,9 @@ export function ChannelSidebar({
   // desktop page can't write the clipboard by itself, see app/clipboard.ts).
   const [showInvite, setShowInvite] = useState(false);
   const owner = server.ownerId === identity.id;
-  const callChannel = useStore(store, (s) => s.call?.channelId);
   const core = useCore();
+  // The one voice engine for my call, shared by the room entry and the call bar.
+  const engine = useCallEngine(identity.id);
   const { bind, menu } = useContextMenu();
   // B25 §3: the channel menu. Rename and delete are also behind the channel's gear.
   const channelItems = (c: Channel, active: boolean): MenuItem[] => [
@@ -137,11 +138,6 @@ export function ChannelSidebar({
                   <span className="channel-name">
                     <bdi>{c.name}</bdi>
                   </span>
-                  {c.id === callChannel && (
-                    <span className="call-here" role="img" aria-label={intl.formatMessage({ id: 'call.active' })} title={intl.formatMessage({ id: 'call.active' })}>
-                      <SpeakerIcon />
-                    </span>
-                  )}
                   {c.adult && (
                     <span className="adult-tag" aria-hidden="true">
                       18+
@@ -164,8 +160,9 @@ export function ChannelSidebar({
             );
           })}
         </ul>
+        <VoiceRoomEntry serverId={server.id} myId={identity.id} engine={engine} />
       </nav>
-      <CallBar myId={identity.id} />
+      <CallBar myId={identity.id} engine={engine} />
       <footer className="me-panel">
         <Avatar name={identity.displayName || identity.shortCode} color={identity.avatarColor} src={identity.avatarDataUrl} size={32} presence="online" />
         <div className="me-text">

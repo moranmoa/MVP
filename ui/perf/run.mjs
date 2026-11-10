@@ -12,11 +12,13 @@
 // Writes perf/out/results.json and prints the tables for RESULTS.md.
 //
 // Environment: PERF_SENDS (default 30), PERF_SWITCHES (default 20),
-// PERF_SCROLL_STEP (px per frame, default 400), PERF_THROTTLE (default "1,4").
+// PERF_SCROLL_STEP (px per frame, default 400), PERF_THROTTLE (default "1,4"),
+// PERF_ONLY (default "echo,switch,scroll"; e.g. "scroll" for a quick check),
+// PERF_DIST (serve this prebuilt dist directory instead of building).
 
 import { execSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { cpus } from 'node:os';
+import { cpus, loadavg } from 'node:os';
 import { chromium } from 'playwright';
 import { preview } from 'vite';
 
@@ -25,11 +27,13 @@ const BASE = `http://localhost:${PORT}/`;
 const SENDS = Number(process.env.PERF_SENDS ?? 30);
 const SWITCHES = Number(process.env.PERF_SWITCHES ?? 20);
 const SCROLL_STEP = Number(process.env.PERF_SCROLL_STEP ?? 400);
+const DIST = process.env.PERF_DIST;
+const ONLY = (process.env.PERF_ONLY ?? 'echo,switch,scroll').split(',');
 const THROTTLE = (process.env.PERF_THROTTLE ?? '1,4').split(',').map(Number);
 const ECHO_TARGET_MS = 50;
 
-if (!process.argv.includes('--no-build')) execSync('npx vite build', { stdio: 'inherit' });
-const server = await preview({ preview: { port: PORT, strictPort: true, host: '127.0.0.1' }, logLevel: 'warn' });
+if (!DIST && !process.argv.includes('--no-build')) execSync('npx vite build', { stdio: 'inherit' });
+const server = await preview({ build: { outDir: DIST ?? 'dist' }, preview: { port: PORT, strictPort: true, host: '127.0.0.1' }, logLevel: 'warn' });
 const browser = await chromium.launch();
 
 // ---- in-page helpers ---------------------------------------------------------
@@ -240,13 +244,21 @@ const results = {
 };
 for (const throttle of THROTTLE) {
   const { ctx, page, errors } = await openApp(throttle);
-  const run = { cpu_throttle: throttle };
-  run.echo = await measureEcho(page);
-  console.log(`[${throttle}x] echo`, JSON.stringify(run.echo));
-  run.channel_switch = await measureSwitch(page);
-  console.log(`[${throttle}x] switch`, JSON.stringify(run.channel_switch));
-  run.scroll_5000 = frameStats(await measureScroll(page));
-  console.log(`[${throttle}x] scroll`, JSON.stringify(run.scroll_5000));
+  // Load average of the (shared) Docker VM: the 4x numbers swing with it.
+  const run = { cpu_throttle: throttle, load_before: round(loadavg()[0]) };
+  if (ONLY.includes('echo')) {
+    run.echo = await measureEcho(page);
+    console.log(`[${throttle}x] echo`, JSON.stringify(run.echo));
+  }
+  if (ONLY.includes('switch')) {
+    run.channel_switch = await measureSwitch(page);
+    console.log(`[${throttle}x] switch`, JSON.stringify(run.channel_switch));
+  }
+  if (ONLY.includes('scroll')) {
+    run.scroll_5000 = frameStats(await measureScroll(page));
+    console.log(`[${throttle}x] scroll`, JSON.stringify(run.scroll_5000));
+  }
+  run.load_after = round(loadavg()[0]);
   run.page_errors = errors;
   results.runs.push(run);
   await ctx.close();
@@ -261,17 +273,28 @@ writeFileSync('perf/out/results.json', JSON.stringify(results, null, 2));
 const cols = results.runs.map((r) => `CPU ${r.cpu_throttle}×`);
 const row = (label, f) => console.log(`| ${label} | ${results.runs.map(f).join(' | ')} |`);
 const pq = (s) => `${s.p50} / ${s.p95} (max ${s.max})`;
-console.log(`\n${results.browser}, ${results.cpus} CPUs, ${results.date}. ms, p50 / p95.\n`);
+console.log(`\n${results.browser}, ${results.cpus} CPUs, ${results.date}. ms, p50 / p95.`);
+console.log(`Host load (1-min average, before / after): ${results.runs.map((r) => `${r.load_before} / ${r.load_after}`).join(', ')}\n`);
+// Other containers' builds take CPU from the browser, and the 4x runs show
+// it most (see RESULTS.md, "Host load"). Such runs aren't comparable.
+const busy = results.runs.some((r) => Math.max(r.load_before, r.load_after) > results.cpus / 2);
+if (busy) console.log(`WARNING: the host was busy (load above ${results.cpus / 2}); rerun before comparing numbers.\n`);
 console.log(`| Measure | ${cols.join(' | ')} |\n|---|${cols.map(() => '---').join('|')}|`);
-row(`pending echo, to DOM (n=${SENDS})`, (r) => pq(r.echo.dom));
-row(`pending echo, to screen (target < ${ECHO_TARGET_MS})`, (r) => pq(r.echo.paint));
-row('channel switch, to a small channel (300–500 msgs)', (r) => pq(r.channel_switch.to_small));
-row('channel switch, to a large channel (5,000–100,000 msgs)', (r) => pq(r.channel_switch.to_large));
-row('scroll 5,000 msgs: frame time', (r) => `${r.scroll_5000.p50} / ${r.scroll_5000.p95} (p99 ${r.scroll_5000.p99})`);
-row('scroll: frames over 20 / 34 ms (missed 1 / 2+ frames)', (r) => `${r.scroll_5000.missed_frame_pct}% / ${r.scroll_5000.missed_two_pct}%`);
-row('scroll: frames showing placeholders', (r) => `${r.scroll_5000.placeholder_frames_pct}%`);
-row('scroll: long tasks (count, total ms)', (r) => `${r.scroll_5000.long_tasks}, ${r.scroll_5000.long_task_ms}`);
-row('scroll: frames, reached the top', (r) => `${r.scroll_5000.frames}, ${r.scroll_5000.reached_top ? 'yes' : 'no'}`);
+if (ONLY.includes('echo')) {
+  row(`pending echo, to DOM (n=${SENDS})`, (r) => pq(r.echo.dom));
+  row(`pending echo, to screen (target < ${ECHO_TARGET_MS})`, (r) => pq(r.echo.paint));
+}
+if (ONLY.includes('switch')) {
+  row('channel switch, to a small channel (300–500 msgs)', (r) => pq(r.channel_switch.to_small));
+  row('channel switch, to a large channel (5,000–100,000 msgs)', (r) => pq(r.channel_switch.to_large));
+}
+if (ONLY.includes('scroll')) {
+  row('scroll 5,000 msgs: frame time', (r) => `${r.scroll_5000.p50} / ${r.scroll_5000.p95} (p99 ${r.scroll_5000.p99})`);
+  row('scroll: frames over 20 / 34 ms (missed 1 / 2+ frames)', (r) => `${r.scroll_5000.missed_frame_pct}% / ${r.scroll_5000.missed_two_pct}%`);
+  row('scroll: frames showing placeholders', (r) => `${r.scroll_5000.placeholder_frames_pct}%`);
+  row('scroll: long tasks (count, total ms)', (r) => `${r.scroll_5000.long_tasks}, ${r.scroll_5000.long_task_ms}`);
+  row('scroll: frames, reached the top', (r) => `${r.scroll_5000.frames}, ${r.scroll_5000.reached_top ? 'yes' : 'no'}`);
+}
 const failed = results.runs.some((r) => r.page_errors.length);
 if (failed) console.log('page errors:', results.runs.map((r) => r.page_errors));
 process.exit(failed ? 1 : 0);
