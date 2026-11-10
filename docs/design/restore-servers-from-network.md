@@ -28,7 +28,7 @@
 |---|---|---|
 | `k_enc` | `derive_key("mvs/backup-key/v1", seed)` | XChaCha20-Poly1305, random 24-byte nonce, AAD = `"mvs/backup/v1" ‖ tag ‖ version` |
 | `w` | Ed25519 from `derive_key("mvs/backup-write/v1", seed)` | a **separate write key**: it authorises every write |
-| `tag` | `BLAKE3(derive_key("mvs/backup-tag/v1", w_pub))` | where the backup lives |
+| `tag` | `derive_key("mvs/backup-tag/v1", w_pub)` | where the backup lives; no rotation in v1 |
 
 - **Unlinkable:** the tag isn't the identity key and isn't derived from it. Nobody can look up a named person's backup, or link a tag to an identity, from the tag alone.
 - **No identity signature outside:** holders never see one. Writes are authorised by `w` only: a holder accepts a blob for `tag` only if it's signed by the `w` whose hash gives `tag`.
@@ -54,14 +54,28 @@
 | # | Holder | Count | Kept for | Notes |
 |---|---|---|---|---|
 | 1 | each of my own devices | 1 per device | while installed | it is the writer |
-| 2 | relay / bootstrap mailbox | 1 per bootstrap (1 today) | 13 months since the last write | one opaque blob per `tag`, ≤ 64 KiB; writes rate-limited per tag; a constant "not found"; no tag-to-IP logs beyond counts (R11). The relay is the only rendezvous a clean machine has (Tech Lead). devops, `infra/**`; the live relay only from main, with the manager's OK |
-| 3 | DHT record under `tag` | the K closest DHT servers | republished every 24 h | today the DHT servers are the bootstraps (clients are in client mode, GAP-6), so this grows with GAP-9 |
-| 4 | "backup buddies": online co-members, picked at random across all my servers | 3 | 180 days since the last refresh | each node holds at most 8 others' blobs (64 KiB each), dropping the least recently refreshed; it announces itself as a DHT *provider* of `tag` (no blob in the DHT) |
+| 2 | relay / bootstrap mailbox (a `/mvs/backup/1` store) | 1 per bootstrap (1 today) | 13 months since the last write | quotas below. The relay is the only rendezvous a clean machine has (Tech Lead). devops, `infra/**`; the live relay only from main, with the manager's OK |
+| 3 | DHT **provider records** for `tag` (never the blob: a 64 KiB blob can't be a kad record, Tech Lead) | the K closest DHT servers; the bootstrap is a DHT server (yes, Tech Lead and Security Lead) | re-announced every 12 h by each holder | they point to the stores that hold the blob; today the DHT servers are the bootstraps, so this grows with GAP-9 |
+| 4 | **Phase B, after GAP-9:** "backup buddies", online co-members picked at random across all my servers | 3 | 180 days since the last refresh | each node holds at most 8 others' blobs (64 KiB each), dropping the least recently refreshed; **at most one tag per bound identity** (R1: `w` keys are free, so otherwise one co-member could evict everyone); each announces itself as a provider of `tag` |
 
-**Target:** at least 3 reachable holders besides my own devices.
+**Phases (Tech Lead):**
+- **Phase A:** my devices, the bootstrap mailbox, provider records, restore, and the merge.
+- **Phase B, after GAP-9:** buddies.
+- **Target:** 1 bootstrap in phase A; at least 3 reachable holders besides my own devices in phase B.
+
+**Mailbox quotas, for devops** (constants; R2):
+- **Per write:** validated *before* storing. The signature by `w`, `tag == derive_key("mvs/backup-tag/v1", w_pub)`, size ≤ 64 KiB and a multiple of 4 KiB, and a `version` above the stored one.
+- **Per tag:** one blob, at most 12 writes an hour.
+- **Per IP:** at most 30 writes an hour, 5 new tags a day, and 60 fetches an hour.
+- **Total:** at most 50,000 tags (about 3.2 GB at the cap). When full, refuse new tags; never evict live ones.
+- **Expiry:** 13 months after the last write.
+- **Answers:** fetch by exact tag only, and a constant "not found" (R3).
+- **Logs:** counts only; no tag-to-IP logs (R11).
+- The DHT provider records get the same per-IP limits.
 
 **The GAP-4 objection, answered.** I said earlier that members can't hold the backup, because a clean device can't reach a server's members without that server's secret. That's true for *server* traffic. The backup uses a separate protocol, `/mvs/backup/1`, keyed only by `tag`, outside any server.
-- **Finding holders:** a restoring device finds them through the relay mailbox, the DHT record, and DHT provider records for `tag`. It dials them over relay circuits like any peer.
+- **Finding holders:** a restoring device finds them through the bootstrap mailbox and the DHT provider records for `tag`. It dials them **over relay circuits only** (R3), like any peer.
+- **Untrusted answers (R4):** every answer is checked for `w`, the tag, the AEAD and the version before use.
 - **No secret needed:** a restore needs no server secret; the secrets come out of the blob.
 - **Who may ask a node to hold a blob:** only a bound member of a server we share. That stops spam.
 - **Who may fetch:** anyone who presents `tag`, rate-limited. Only I can compute the tag.
@@ -90,7 +104,7 @@
 ## 5. Restore
 
 1. The UI runs the agreement, country, birth date and words, then calls `restoreIdentity(words, input)`.
-2. The core derives `tag`, `k` and `w`, and asks the holders: relay mailbox, DHT record, DHT providers.
+2. The core derives `tag`, `k` and `w`, and asks the holders: the bootstrap mailbox and the DHT providers.
    - It runs in the background, retrying for up to 24 h.
    - It emits a new `restore.progress { found, servers }` event.
 3. It verifies, decrypts, and merges with anything already local.
@@ -108,7 +122,7 @@
   - A tombstone (left, kicked or closed) beats a membership with an equal or earlier `joined_at`.
   - A deliberate rejoin after a leave makes a new entry with a later `joined_at`. Closed and kicked tombstones are final.
   - On a kick, the next write drops the secret and keeps only the tombstone.
-  - The profile is last-writer-wins.
+  - The profile is last-writer-wins on `changed_at`, in the local merge only (R5). Holders never compare contents: they keep the highest valid `version`.
   - A device that sees a version with entries it lacks merges and republishes it as `max(version) + 1`. Concurrent writes converge after one round.
 - **Records:** both devices sign with the same key. That's valid: `seq` decides neither validity nor order (a min-ID topological sort).
 - **Leave or close on one device:** the other sees it in the server log, drops the server, and marks the entry.
@@ -128,7 +142,7 @@
 - **Alpha, one bootstrap:**
   - Every path goes through that relay, so availability is about the relay's: about 99% on the owner's machine.
   - Buddies protect against the relay *losing its store*, not against the relay being down.
-- **After GAP-9, two or more bootstraps:** the DHT record and provider records live on each, and buddies are reachable through either.
+- **After GAP-9, two or more bootstraps:** provider records live on each bootstrap, and buddies (phase B) are reachable through either.
   - With 2 bootstraps at 99% and 3 buddies, a restore succeeds unless every bootstrap is down, or every holder has dropped or lost the blob. Target: ≥ 99.9%.
 - **Retention:** 13 months on bootstraps and 180 days on buddies. A user can be away for 6 months with no device and still restore from a buddy, or for a year from a bootstrap.
 
@@ -138,18 +152,24 @@
 |---|---|---|
 | Backup keys from the seed | dev-identity | `core/identity/src/lib.rs` (+ tests) |
 | Backup format, padding, merge, encrypt and sign; write hooks; republish; restore flow and "re-add without posting"; `restore.progress` | dev-identity | new `core/api/src/backup.rs`, `service.rs`, `types.rs`, `ports.rs` (`Network::put_backup`, `fetch_backup`), `CONFORMANCE.md` |
-| `/mvs/backup/1` store and fetch, holder store with quotas and expiry, DHT record and provider records, store only from bound co-members, fetch rate limit | dev-sync | `core/sync/src/node.rs`, new `core/sync/src/backup.rs`, `store.rs` |
+| `/mvs/backup/1` store and fetch, holder store with quotas and expiry, DHT provider records, store only from bound co-members (phase B), fetch rate limit | dev-sync | `core/sync/src/node.rs`, new `core/sync/src/backup.rs`, `store.rs` |
 | Bootstrap mailbox and DHT server role, retention, rate limits | devops | `infra/relay/**` |
 | Restore steps, progress and copy | dev-ui | `ui/src/screens/onboarding/*`, `i18n` |
 | Tests | each owner, then QA | api `flows.rs`: restore with every device gone, rollback, a left server not re-entered, two-device merge. Sync `tests/relay.rs`: fetch via DHT providers through a relay |
 
-## 9. Questions for the reviewers
+## 9. Decisions (Tech Lead and Security Lead, on #291)
 
-1. The tag, key and signing-key derivations, and whether the tag should rotate (e.g. per year) to limit how long a buddy can link it.
-2. k, the retention periods, and the buddies' per-node quota.
-3. Whether a bootstrap should also be a DHT *server* (today it is the only one).
-4. Whether to include the profile and birth date in the backup: the spec's "encrypted identity backup".
-5. Answered by the Tech Lead and the Security Lead: the relay mailbox is a fine home; derivations as in §1; sync secrets may go in the blob; tombstone merge; joinCall refusal; the concurrent re-key test.
+1. **Derivations:** as in §1, with the tag from `derive_key`. **No tag rotation in v1.**
+2. **Numbers:** k = 5, the retention periods and the buddy quota are fine, as constants.
+3. **DHT:** the bootstrap acts as a DHT server. The DHT carries provider records only.
+4. **Contents:** the profile and birth date go in the backup. Sync secrets may too; channel keys, messages and invite keys stay out.
+5. **Also decided:**
+   - the relay mailbox is the home in phase A, and buddies come in phase B, after GAP-9;
+   - a tombstone merge;
+   - the `joinCall` refusal;
+   - the concurrent re-key test (#290: it converges);
+   - the Security Lead's conditions R1–R5, folded into §2 and §6.
+6. **Owners:** the Security Lead reviews the protocol and derivations, and devops builds the infra side.
 
 ## 10. Future: email + password (owner roadmap, not now)
 
