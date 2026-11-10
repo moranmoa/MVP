@@ -139,6 +139,26 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 - `Member.connection: 'direct' | 'relay' | null` (#187): how we reach an online member, a direct connection (LAN) or through the relay; `null` for us and for members who are offline. A change fires `members.changed`.
 - `CoreError.code`: `'bad-request' | 'not-implemented' | 'internal'`, and `'keyring-unavailable'` (QA-20): the OS keychain (Secret Service on Linux) is missing or unusable. The core still starts; `getIdentity` and anything needing the identity reject with it, and the UI shows the keyring cause.
 - `NoticeKind`: `'rekey-waiting'`, sent when removed members still hold a channel key and only a moderator can renew it. Until a moderator does, sending there answers `not-allowed`.
+- Server lifecycle (#229 design, #251 authority; `docs/design/server-rename-leave-delete.md`):
+  - `renameServer(serverId, name)` returns the updated `ServerSummary` and fires `server.updated` (here, and for every member when they read it). The name is trimmed, then must pass the strict server-name rule (1–100 code points, no bidi, control or zero-width characters). The owner or an admin only.
+  - `leaveServer(serverId)` returns `null`. Any member but the owner (who deletes instead). **It never answers `update-needed`.** The server leaves this device at once and `server.removed { serverId, reason: 'left' }` fires.
+    - The signed `Leave` waits in a durable outbox, which survives restarts. Only the server's sync secret and its control subscription stay.
+    - Each sync round it goes out once the rollout gate is open, and is retried until a member has it (B6 `sent`). Then the secret and subscription go too, and the others re-key.
+    - If I'm kicked first, the `Leave` is dropped.
+    - The leaver isn't banned, and comes back through a new invite as a plain member.
+  - `getUpdateNeeded(serverId)` returns the user IDs of members whose latest profile post lacks `server-lifecycle-v1`, or who have none: who blocks a rename or a delete. An empty list means the gate is open.
+  - `closeServer(serverId)` returns `null`. The owner deletes the server for good: the core syncs first, then sends the close.
+    - On the owner's core, and on every member's when it reads the close, the server is closed, not purged at once. `server.closed { serverId }` fires; any call there ends; its keys and sync subscription go, and it's no longer synced. It stays in `listServers`, read-only, with `ServerSummary.closed: true` (additive).
+    - 30 days (`CLOSED_RETENTION_MS`) after the close was received, the rest is purged and `server.removed { serverId, reason: 'closed' }` fires. Its genesis and close record are kept forever, so the server reads as closed, never unknown.
+    - An old invite, from someone who was in it or a stranger a stale peer still serves, gives `join.status` `{ phase: 'closed', link }`.
+  - Purge (a leave, or a closed server's 30 days): the server's records, sync secret, channel keys, sync subscription, and any call in it. "Removed from your devices", not erased: other members keep their copies.
+  - `server.removed` gains an optional `reason: 'left' | 'closed'`. It's absent for a kick, as before.
+  - Errors:
+    - `not-found`: a server I'm not in.
+    - `not-allowed`: not permitted (role), or the owner leaving.
+    - `bad-request`: a name that fails the rule.
+    - `update-needed` (rename and close only): a current member's latest profile post doesn't carry `caps: ['server-lifecycle-v1']`, or they have no profile post. Nothing was signed. An older member would refuse the record and stall on every control record after it.
+  - Profile posts now carry `caps: ['server-lifecycle-v1']`, and older versions ignore the field. A core re-posts its profile once where its latest post lacks the cap.
 - `syncNow()`: test-only until `sync` drives updates. It shouldn't ship in
   the UI.
 
