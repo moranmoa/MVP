@@ -397,6 +397,13 @@ const closeConfirmed = new WeakSet();
  */
 const closeHeldAt = new WeakMap();
 const CLOSE_AGAIN_MS = 10_000;
+/** Quitting (OS shutdown, an update restart, a test harness): never held. */
+let quitting = false;
+app.on('before-quit', () => {
+  quitting = true;
+});
+/** Pages that stopped answering (the 'unresponsive' event) can't be asked either. */
+const unresponsive = new WeakSet();
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -421,10 +428,22 @@ function createWindow() {
   // Close quits; during a call the page asks first ("This will end your
   // call. Close MVS?") and confirms with window:control close.
   // A second close within 10 s closes whatever the page does.
+  // Only a live, answering page is asked: a quit, a crashed or killed
+  // renderer, or a hung one closes at once (a dead page never answers).
+  win.on('unresponsive', () => unresponsive.add(win));
+  win.on('responsive', () => unresponsive.delete(win));
+  win.webContents.on('render-process-gone', () => {
+    // The page held the call's audio; the call ends with it.
+    if (callGate.inCall) {
+      callGate.end();
+      core?.request('leaveCall', {}).catch(() => {});
+    }
+  });
   win.on('close', (e) => {
     if (!callGate.inCall) return;
     const held = closeHeldAt.get(win);
-    const askPage = FRAME !== 'native' && !closeConfirmed.has(win) && sec.isInternalUrl(win.webContents.getURL());
+    const pageCanAnswer = !quitting && !win.webContents.isCrashed() && !unresponsive.has(win);
+    const askPage = FRAME !== 'native' && pageCanAnswer && !closeConfirmed.has(win) && sec.isInternalUrl(win.webContents.getURL());
     if (askPage && (held === undefined || Date.now() - held > CLOSE_AGAIN_MS)) {
       closeHeldAt.set(win, Date.now());
       e.preventDefault();
