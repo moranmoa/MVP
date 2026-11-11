@@ -3224,6 +3224,7 @@ input.switch:disabled {
 .titlebar-button.close:focus-visible {
   background: #c42b1c;
   color: #fff;
+}
 
 .language-picker-row {
   display: flex;
