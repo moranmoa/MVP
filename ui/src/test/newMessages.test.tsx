@@ -1,7 +1,7 @@
 // G-21 (docs/ux/GAPS.md §2.3): where the new messages start, and a jump to them.
 
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { App } from '../app/App';
 import type { Settings } from '../app/settings';
 import { MockCore } from '../core/mock';
@@ -67,5 +67,27 @@ describe('new messages (G-21)', () => {
     expect(divider.closest('[data-index]')?.getAttribute('data-index')).toBe('3');
     // (Whether the bar shows depends on real row heights: jsdom measures every row 800px,
     // so that part is checked in the screenshot run, 340.)
+  });
+});
+
+describe('read while watching (core sends channel.updated on new messages)', () => {
+  it('a new message from someone else in the open channel, at the bottom, is read at once', async () => {
+    // The window has focus (jsdom's document.hasFocus() is false on its own).
+    const focus = vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+    const core = new MockCore({ demo: true, speed: 0, simulateActivity: false });
+    render(<App core={core} initialSettings={en} />);
+    await screen.findByRole('textbox', { name: /^Message / });
+    let reads = 0;
+    const real = core.markRead.bind(core);
+    // The store's guard reads the channel: make the open one unread, as the core now announces.
+    const ch = (core as unknown as { channelIndex: Map<string, { channel: Channel }> }).channelIndex.get('c-general')!;
+    core.markRead = (id) => (reads++, real(id));
+    await act(async () => {
+      ch.channel = { ...ch.channel, unread: true, unreadCount: 1, firstUnreadIndex: 99_999 };
+      (core as unknown as { emit: (e: string, p: unknown) => void }).emit('channel.updated', ch.channel);
+    });
+    await waitFor(async () => expect((await unreadOf(core, 'c-general')).unread).toBe(false));
+    expect(reads).toBeGreaterThan(0);
+    focus.mockRestore();
   });
 });
