@@ -460,10 +460,11 @@ export class MockCore implements CoreApi {
         appendedCount: 0,
       };
       // A little unread state so the badges show up in the demo.
-      if (ci === 1) ch.channel.unread = true;
+      // G-21: where the unread start, as the core reports it (12 here, 300 in #clips).
+      const unreadFrom = (n: number) => ({ unread: true, unreadCount: n, firstUnreadIndex: Math.max(0, c.count - n) });
+      if (ci === 1) ch.channel = { ...ch.channel, ...unreadFrom(12) };
       if (ci === 2 && seed.id === 's-gamers') {
-        ch.channel.unread = true;
-        ch.channel.mentions = 2;
+        ch.channel = { ...ch.channel, ...unreadFrom(300), mentions: 2 };
       }
       state.channels.push(ch);
       this.channelIndex.set(c.id, ch);
@@ -1098,7 +1099,8 @@ export class MockCore implements CoreApi {
   async markRead(channelId: Id): Promise<void> {
     const ch = this.channelIndex.get(channelId);
     if (!ch || (!ch.channel.unread && ch.channel.mentions === 0)) return;
-    ch.channel = { ...ch.channel, unread: false, mentions: 0 };
+    const { firstUnreadIndex: _first, unreadCount: _n, ...read } = ch.channel;
+    ch.channel = { ...read, unread: false, mentions: 0 };
     const s = this.serverOf(ch);
     this.refreshServerUnread(s);
     this.emit('channel.updated', ch.channel);
