@@ -4080,6 +4080,38 @@ mod tests {
         assert!(map.contains_key(&(MAX_T23_ENTRIES as u32 + 49)), "the newest went");
     }
 
+    /// WIP, FAILS TODAY (parked until after 2026-11-17): T23 under `open` plus
+    /// the queue. Opening 40 servers back to back while an unbound peer is
+    /// connected sends ~40 control pulls within a second, past the peer's
+    /// burst (30); refused pulls aren't recorded as empty and are re-asked
+    /// (51 pulls for 40 logs). Fix: pace outgoing pulls per peer (e.g. burst
+    /// 20, 8/s) and drain the queue on a 1 s tick.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn servers_opened_while_a_peer_is_connected_are_probed_once_each() {
+        use crate::testutil::test_key;
+        let key = |n: u8| -> Option<Arc<dyn Binder>> { Some(Arc::new(test_key(n))) };
+        let access = |n: u8| Access { binder: key(n), read_gate: Some(Arc::new(AcceptAll)), stub_gate: None };
+        let (opener, _events) = test_node_events("t23-opener", None, None, access(1)).await;
+        let peer = test_node("t23-peer", None, Some(port_of(&opener).await), access(0)).await;
+        peer.open_server(ServerId::from_bytes([99; 32]), ServerSecret::from_bytes([98; 32])).unwrap();
+        let start = Instant::now();
+        while opener.peers().await.unwrap().is_empty() {
+            assert!(start.elapsed() < Duration::from_secs(10), "never connected");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let before = peer.pulls_received().await;
+        for i in 0..40u8 {
+            opener.open_server(ServerId::from_bytes([20 + i; 32]), ServerSecret::from_bytes([120 + i; 32])).unwrap();
+        }
+        tokio::time::sleep(ANTI_ENTROPY * 3 + Duration::from_secs(1)).await;
+        let asked = peer.pulls_received().await - before;
+        assert!(asked <= 44, "{asked} pulls for 40 control logs (at most one each, plus a few)");
+        assert!(asked >= 40, "only {asked}: the opened servers weren't probed");
+        for node in [opener, peer] {
+            node.shutdown().await.unwrap();
+        }
+    }
+
     async fn counts(node: &Node) -> (u64, u64) {
         let control = node.state(&log_name(server(), Scope::Control)).await.unwrap().count;
         (control, node.state(&chan()).await.unwrap().count)
