@@ -4145,7 +4145,7 @@ fn channel_order_is_shared_and_only_admins_count() {
 
     // The owner moves gamma first: the same order everywhere, with positions.
     owner.events.take();
-    // Before the first other channel (IDs, so today's order, are random).
+    // Before the first other channel (unplaced: the order they were made).
     let first = today.iter().find(|c| c.name != "gamma").unwrap().id.clone();
     let moved = owner.core.move_channel(&server.id, &id("gamma"), Some(&first), None).unwrap();
     assert_eq!(moved[0].name, "gamma");
@@ -4684,4 +4684,39 @@ fn a_new_server_sees_the_picture_set_before() {
     let theirs = carol.core.create_server("Carol's", AgeRestriction::None).unwrap();
     bob.core.join_server(&theirs.invite_link).unwrap();
     assert_eq!(look(&carol, &theirs.id), expected);
+}
+
+/// #323 (QA on 0.4.2, 1 run in 4): unplaced channels are listed in the order
+/// they were made, not by their random IDs, so the owner's first move lands
+/// where they asked, and the member sees the same. Eight servers, so a fix
+/// that only works for some ID orders fails here: with ID order, all eight
+/// listing general, two, three by chance is (1/6)^8.
+#[test]
+fn unplaced_channels_keep_creation_order_and_the_first_move_lands() {
+    let world = World::new();
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let member = world.peer();
+    sign_up(&member, "Member");
+    for round in 0..8 {
+        let server = owner.core.create_server(&format!("Order {round}"), AgeRestriction::None).unwrap();
+        for name in ["two", "three"] {
+            owner.core.create_channel(&server.id, name, false).unwrap();
+        }
+        member.core.join_server(&server.invite_link).unwrap();
+        owner.core.sync_now().unwrap();
+        member.core.sync_now().unwrap();
+        let listed = owner.core.list_channels(&server.id).unwrap();
+        let general = listed.iter().find(|c| c.is_default).unwrap().name.clone();
+        let made = [general.as_str(), "two", "three"];
+        let after = ["three", general.as_str(), "two"];
+        assert_eq!(channel_names(&listed), made, "round {round}");
+        assert_eq!(channel_names(&member.core.list_channels(&server.id).unwrap()), made);
+
+        let id = |name: &str| listed.iter().find(|c| c.name == name).unwrap().id.clone();
+        let moved = owner.core.move_channel(&server.id, &id("three"), Some(&id(&general)), None).unwrap();
+        assert_eq!(channel_names(&moved), after, "round {round}");
+        member.core.sync_now().unwrap();
+        assert_eq!(channel_names(&member.core.list_channels(&server.id).unwrap()), after);
+    }
 }
