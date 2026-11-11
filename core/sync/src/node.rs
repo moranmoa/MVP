@@ -1255,6 +1255,11 @@ impl Task {
                 }
                 _ = anti_entropy.tick() => {
                     self.pending.expire(Instant::now(), PENDING_TTL);
+                    // T23 state outlives a disconnect (a reset relay circuit
+                    // must not make us re-probe everything), so it expires here.
+                    let now = Instant::now();
+                    self.empty_from.retain(|_, until| now < *until);
+                    self.probed.retain(|_, at| now < *at + UNBOUND_REPROBE);
                     self.pull_all("round");
                 }
                 _ = discovery.tick() => self.discover(),
@@ -1899,6 +1904,12 @@ impl Task {
 
     fn pull(&mut self, peer: PeerId, log: &str, cause: &'static str) {
         let key = (peer, log.to_string());
+        // T23 on every path (round, queue, again, more…): a control log an
+        // unbound peer answered empty lately isn't asked for again.
+        if self.empty_from.get(&key).is_some_and(|until| Instant::now() < *until) {
+            self.again.remove(&key);
+            return;
+        }
         if self.decoding.contains(&key) || self.inflight.values().any(|k| *k == key) {
             self.again.insert(key);
             return;
@@ -1920,7 +1931,10 @@ impl Task {
         let request = SyncRequest { log: self.sealing.wire(log), have, binding };
         // Why this pull went out, for sync debug logs (mvs.log through
         // MVS_DEBUG_LOG): the trigger only, never the peer or the log name.
-        debug!(cause, in_flight = self.inflight.values().filter(|(p, _)| *p == peer).count(), "pull sent");
+        // `bound`: whether the peer is bound for the log's server (a member
+        // pull) or not (a probe that carries our binding, T23).
+        let bound = self.sealing.get(log).is_none_or(|s| self.bound.contains_key(&(peer, s.server)));
+        debug!(cause, bound, in_flight = self.inflight.values().filter(|(p, _)| *p == peer).count(), "pull sent");
         let request = self.swarm.behaviour_mut().sync.send_request(&peer, request);
         self.inflight.insert(request, key);
     }
@@ -2093,8 +2107,6 @@ impl Task {
                 self.decoding.retain(|(p, _)| *p != peer_id);
                 self.again.retain(|(p, _)| *p != peer_id);
                 self.queued_pulls.remove(&peer_id);
-                self.empty_from.retain(|(p, _), _| *p != peer_id);
-                self.probed.retain(|(p, _), _| *p != peer_id);
             }
             SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
                 if peer_id == self.relay_peer {
