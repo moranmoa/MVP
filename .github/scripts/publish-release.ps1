@@ -45,7 +45,7 @@ param(
 if (-not $Key) { $Key = $env:MVS_ROOT_KEY }
 Remove-Item Env:\MVS_ROOT_KEY -ErrorAction SilentlyContinue
 $ErrorActionPreference = 'Stop'
-# Hebrew notes in the summary.
+# UTF-8 output (notes, and older Hebrew notes).
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $version = $Tag.Substring(1)
 
@@ -186,12 +186,16 @@ foreach ($pl in $plans) {
 }
 if (-not ($Channels -contains 'alpha')) { Write-Host '  note: not publishing to alpha, so users on "stable" will not get this update' -ForegroundColor Yellow }
 $body = $plans[0].Body
-if ($body.notes) {
-  foreach ($n in $body.notes.PSObject.Properties) {
-    $lines = @(($n.Value -split "`n") | Where-Object { $_.Trim() } | Select-Object -First 3)
-    Write-Host "  notes [$($n.Name)]"
-    foreach ($l in $lines) { if ($l.Length -gt 110) { $l = $l.Substring(0, 110) + '...' }; Write-Host "    | $l" }
-  }
+# The notes once: English (from 0.4.1 every locale carries the same text),
+# else whichever locale the body has.
+$noteProps = @()
+if ($body.notes) { $noteProps = @($body.notes.PSObject.Properties) }
+$shown = $noteProps | Where-Object { $_.Name -eq 'en' } | Select-Object -First 1
+if (-not $shown) { $shown = $noteProps | Select-Object -First 1 }
+if ($shown) {
+  Write-Host '  notes'
+  $lines = @(($shown.Value -split "`n") | Where-Object { $_.Trim() } | Select-Object -First 3)
+  foreach ($l in $lines) { if ($l.Length -gt 110) { $l = $l.Substring(0, 110) + '...' }; Write-Host "    | $l" }
 } else { Write-Host '  notes     (none)' -ForegroundColor Yellow }
 if ($Roots.Count) { Write-Host "  rotations $(($Roots | ForEach-Object { Split-Path -Leaf $_ }) -join ', ')" }
 

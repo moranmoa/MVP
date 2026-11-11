@@ -55,13 +55,21 @@ mapfile -t list < files
 
 echo SHA256SUMS >> files
 
-# "What's new" for the signed manifests: the version's CHANGELOG section,
-# Hebrew before its "---" line, English after (none for dry runs).
+# "What's new" for the signed manifests: the version's CHANGELOG section
+# (none for dry runs). Notes are English only from 0.4.1 (owner): a section
+# with no "---" line is all English, and the same text also goes to he.txt so
+# every locale's body has notes. Older sections keep their split: Hebrew
+# before the "---" line, English after.
 notes_args=()
 if section=$(node "$here/changelog-section.mjs" "$version" CHANGELOG.md 2>/dev/null); then
   mkdir -p notes
-  printf '%s\n' "$section" | awk '/^---$/{exit} {print}' > notes/he.txt
-  printf '%s\n' "$section" | awk 'f{print} /^---$/{f=1}' | sed '/./,$!d' > notes/en.txt
+  if printf '%s\n' "$section" | grep -qx -- '---'; then
+    printf '%s\n' "$section" | awk '/^---$/{exit} {print}' > notes/he.txt
+    printf '%s\n' "$section" | awk 'f{print} /^---$/{f=1}' | sed '/./,$!d' > notes/en.txt
+  else
+    printf '%s\n' "$section" > notes/en.txt
+    cp notes/en.txt notes/he.txt
+  fi
   notes_args=(--notes-dir notes)
 fi
 
