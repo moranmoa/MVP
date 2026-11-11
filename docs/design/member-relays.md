@@ -13,7 +13,7 @@
 
 **Who never relays, whatever their role:**
 - users under 18 (from the age claim);
-- relay-only users;
+- relay-only users (and they never *use* member relays either, §2);
 - a device on a metered connection, when the OS reports one.
 
 **Rules (all required):**
@@ -44,7 +44,7 @@
 - Ping every relay we hold a reservation on every 30 s. Three misses mark it down for 2 minutes with backoff, and we move to the next path.
 - Re-probe the higher-priority paths every 2 minutes, and move back when one is healthy.
 - With every path down, the node keeps retrying and shows "offline".
-- Relay-only users only ever use paths 2–4, never 1.
+- **Relay-only users use only paths 2 and 3** (our relay and a second operator-run bootstrap): never a direct link and **never a member relay**, because relay-only promises that no member sees my IP (Tech Lead, #368). If both are down, a relay-only user is offline.
 
 ## 3. Email sign-in: why member relays can't hold the OPRF or recovery shares
 
