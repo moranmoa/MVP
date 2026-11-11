@@ -10,7 +10,7 @@
 | Use | Form |
 | --- | --- |
 | App icon, installer, taskbar, about screen (256, 128, 64, 48, 32 px) | The tile: rounded square in `#4752c4` (the light-theme `--accent`), white bubble, indigo peers |
-| 16 px (window title bar, tab, favicon) | The same tile, with the lines dropped and the dots enlarged (a separate 16 px SVG, hand-tuned) |
+| 16 px (window title bar, tab, favicon) | [`../assets/mvs-logo-16.svg`](../assets/mvs-logo-16.svg): the same tile, with the lines dropped and the dots enlarged, pixel-aligned |
 | On the accent colour, or in single-colour contexts (notifications on Linux, print) | Monochrome: the bubble and peers in `currentColor`, no tile |
 | Dark theme | The same tile. The indigo tile reads on both light and dark backgrounds. Don't swap it to `#7b86f0` |
 
