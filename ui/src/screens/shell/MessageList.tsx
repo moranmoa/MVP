@@ -136,9 +136,14 @@ export function MessageList({
     if (openAtDivider && unread) virtualizer.scrollToIndex(Math.max(0, Math.min(unread.first - 1, count - 1)), { align: 'start' });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [win.ready, count]);
-  // Seeing the bottom with the window focused reads the channel.
+  // Seeing the bottom with the window focused reads the channel. Runs on every
+  // render, so a message arriving while I watch (channel.updated with unread)
+  // is read too. Measured from the DOM as well: a short channel that never
+  // scrolls has no scroll event to say it is at the bottom.
   useEffect(() => {
-    if (win.ready && count && atBottom.current && document.hasFocus()) onMarkRead();
+    const el = scrollRef.current;
+    const bottomInView = !!el && el.clientHeight > 0 && el.scrollHeight - el.scrollTop - el.clientHeight < BOTTOM_SLACK_PX;
+    if (win.ready && count && (atBottom.current || bottomInView) && document.hasFocus()) onMarkRead();
   });
 
   // Pin to the bottom while the reader is there: new messages and late row
