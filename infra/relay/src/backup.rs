@@ -19,6 +19,8 @@
 //! - per source: at most 30 writes an hour, 5 new tags a day, 60 fetches an
 //!   hour. The source is the remote IP; for the reverse proxy's address
 //!   (PROXY_IPS, every wss client) it is the peer ID instead;
+//! - new tags from everyone together: at most 200 an hour and 2,000 a day,
+//!   so no number of sources can fill the store quickly;
 //! - in total: at most 50,000 tags. When full, new tags are refused; a held
 //!   backup is never evicted;
 //! - expiry 13 months after the last write;
@@ -50,6 +52,11 @@ pub const WRITES_PER_TAG_HOUR: u32 = 12;
 pub const WRITES_PER_SOURCE_HOUR: u32 = 30;
 pub const NEW_TAGS_PER_SOURCE_DAY: u32 = 5;
 pub const FETCHES_PER_SOURCE_HOUR: u32 = 60;
+/// New tags from everyone together (Security Lead on #367): per-source caps
+/// don't hold behind the proxy, where peer IDs are free, so a script could
+/// otherwise fill all MAX_TAGS. Updates of held tags are not counted.
+pub const NEW_TAGS_ALL_HOUR: u32 = 200;
+pub const NEW_TAGS_ALL_DAY: u32 = 2_000;
 /// Sources and tags tracked by the rate limiters; past it, new ones are
 /// refused until windows expire (never a reason to let one through).
 const MAX_TRACKED: usize = 16_384;
@@ -142,6 +149,7 @@ pub enum Refused {
     RateTag,
     RateSource,
     NewTagsSource,
+    NewTagsAll,
     Full,
     Disk,
 }
@@ -154,6 +162,7 @@ pub struct Counts {
     pub refused_not_newer: u64,
     pub refused_rate: u64,
     pub refused_full: u64,
+    pub refused_new_tags_all: u64,
     pub refused_disk: u64,
     pub fetch_hit: u64,
     pub fetch_miss: u64,
@@ -168,6 +177,8 @@ pub struct Mailbox {
     writes_source: Windows<Source>,
     new_tags_source: Windows<Source>,
     fetches_source: Windows<Source>,
+    new_tags_hour: Windows<()>,
+    new_tags_day: Windows<()>,
     pub counts: Counts,
 }
 
@@ -226,6 +237,8 @@ impl Mailbox {
             writes_source: Windows::new(HOUR, WRITES_PER_SOURCE_HOUR),
             new_tags_source: Windows::new(DAY, NEW_TAGS_PER_SOURCE_DAY),
             fetches_source: Windows::new(HOUR, FETCHES_PER_SOURCE_HOUR),
+            new_tags_hour: Windows::new(HOUR, NEW_TAGS_ALL_HOUR),
+            new_tags_day: Windows::new(DAY, NEW_TAGS_ALL_DAY),
             counts: Counts::default(),
         };
         mailbox.counts.stored = mailbox.held.len();
@@ -251,6 +264,7 @@ impl Mailbox {
             Err(Refused::NotNewer) => c.refused_not_newer += 1,
             Err(Refused::RateTag | Refused::RateSource | Refused::NewTagsSource) => c.refused_rate += 1,
             Err(Refused::Full) => c.refused_full += 1,
+            Err(Refused::NewTagsAll) => c.refused_new_tags_all += 1,
             Err(Refused::Disk) => c.refused_disk += 1,
         }
         c.stored = self.held.len();
@@ -278,6 +292,9 @@ impl Mailbox {
             if !self.new_tags_source.would_allow(source, now) {
                 return Err(Refused::NewTagsSource);
             }
+            if !self.new_tags_hour.would_allow((), now) || !self.new_tags_day.would_allow((), now) {
+                return Err(Refused::NewTagsAll);
+            }
         }
         let path = self.path(&tag);
         let tmp = path.with_extension("tmp");
@@ -295,6 +312,8 @@ impl Mailbox {
         self.writes_tag.take(tag, now);
         if known.is_none() {
             self.new_tags_source.take(source, now);
+            self.new_tags_hour.take((), now);
+            self.new_tags_day.take((), now);
         }
         self.held.insert(tag, (version, now));
         Ok(tag)
@@ -538,6 +557,50 @@ mod tests {
         assert_eq!(m.put(a, &blob(120, 1, PAD), 0), Err(Refused::NewTagsSource));
         assert!(m.put(b, &blob(121, 1, PAD), 0).is_ok(), "another client behind the same proxy");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn many_proxied_peers_cannot_flood_new_tags() {
+        // 10,000 new tags from distinct proxied peer IDs (free to mint), in
+        // one hour: only the global hourly cap gets through; over a day the
+        // daily cap holds; existing tags still update.
+        let dir = tmp("flood");
+        let mut m = Mailbox::open(&dir).unwrap();
+        let t0 = 100 * DAY;
+        let blobs: Vec<Vec<u8>> = (0..10_000u32).map(|i| flood_blob(i, 1)).collect();
+        let ok = blobs.iter().filter(|b| m.put(Source::Proxied(PeerId::random()), b, t0).is_ok()).count();
+        assert_eq!(ok, NEW_TAGS_ALL_HOUR as usize);
+        assert_eq!(m.counts.refused_new_tags_all, 10_000 - NEW_TAGS_ALL_HOUR as u64);
+        // Every hour of the day: never more than the daily cap in total.
+        for h in 1..24u64 {
+            // A fresh slice of not-yet-held tags each hour.
+            for b in blobs.iter().skip(h as usize * 400).take(400) {
+                let _ = m.put(Source::Proxied(PeerId::random()), b, t0 + h * HOUR);
+            }
+        }
+        assert_eq!(m.counts.stored, NEW_TAGS_ALL_DAY as usize);
+        // Held tags still update, at the cap and from anyone.
+        let held = flood_blob(0, 2);
+        assert!(m.put(Source::Proxied(PeerId::random()), &held, t0 + 23 * HOUR).is_ok());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Distinct write keys from a counter, for the flood test.
+    fn flood_blob(i: u32, version: u64) -> Vec<u8> {
+        let mut seed = [0u8; 32];
+        seed[..4].copy_from_slice(&i.to_le_bytes());
+        seed[31] = 0xf0;
+        let w = SigningKey::from_bytes(&seed);
+        let w_pub = w.verifying_key().to_bytes();
+        let mut out = MAGIC.to_vec();
+        out.extend_from_slice(&blake3::derive_key(TAG_CONTEXT, &w_pub));
+        out.extend_from_slice(&w_pub);
+        out.extend_from_slice(&version.to_le_bytes());
+        out.extend_from_slice(&[7; 24]);
+        out.extend(std::iter::repeat_n(9u8, PAD + AEAD_TAG));
+        let sig = w.sign(&out).to_bytes();
+        out.extend_from_slice(&sig);
+        out
     }
 
     #[test]

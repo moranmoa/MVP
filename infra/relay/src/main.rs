@@ -414,6 +414,7 @@ async fn run() -> Result<()> {
                     backup_refused_not_newer = b.refused_not_newer,
                     backup_refused_rate = b.refused_rate,
                     backup_refused_full = b.refused_full,
+                    backup_refused_new_tags_all = b.refused_new_tags_all,
                     backup_refused_disk = b.refused_disk,
                     backup_fetch_hit = b.fetch_hit,
                     backup_fetch_miss = b.fetch_miss,
