@@ -45,7 +45,7 @@ export function useDesktopNotifications(viewing: Id | null, open: (serverId: Id,
           ? intl.formatMessage({ id: 'notify.grouped' }, { count, channel: where.channel.name })
           : prefs.preview && m.body
             ? m.body
-            : intl.formatMessage({ id: 'notify.hidden' });
+            : intl.formatMessage({ id: m.mentionsMe ? 'notify.hiddenMention' : 'notify.hidden' }, { channel: where.channel.name });
       void notify({
         title: count > 1 || !author ? place : `${displayName(author)} · ${place}`,
         body,

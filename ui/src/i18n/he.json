@@ -469,13 +469,15 @@
   "notify.settings.desktop": "התראות דסקטופ",
   "notify.settings.desktopHint": "מופיעות כשהחלון של MVS לא בחזית. אפשר לכוון כל שרת וערוץ מהתפריט שלו (לחיצה ימנית).",
   "notify.settings.preview": "תצוגה מקדימה של ההודעה בהתראה",
-  "notify.settings.previewHint": "כבוי: בהתראה כתוב \"הודעה חדשה\", בלי הטקסט.",
+  "notify.settings.previewHint": "כבוי: בהתראה כתוב \"הודעה חדשה ב-#ערוץ\", בלי הטקסט.",
   "notify.settings.desktopOnly": "התראות עובדות באפליקציית הדסקטופ.",
-  "notify.hidden": "הודעה חדשה",
+  "notify.hidden": "הודעה חדשה ב-⁨#{channel}⁩",
   "notify.grouped": "{count, plural, one {הודעה חדשה אחת} two {שתי הודעות חדשות} other {# הודעות חדשות}} ב-⁨#{channel}⁩",
   "settings.nav.notifications": "התראות",
   "notify.dialog.titleServer": "התראות של ⁨{name}⁩",
   "notify.dialog.titleChannel": "התראות של ⁨#{name}⁩",
   "notify.mute.label": "השתקה",
-  "notify.settings.previewDisabled": "קודם צריך להפעיל התראות דסקטופ."
+  "notify.settings.previewDisabled": "קודם צריך להפעיל התראות דסקטופ.",
+  "notify.hiddenMention": "אזכור חדש שלך ב-⁨#{channel}⁩",
+  "notify.settings.previewPrivacy": "כשהתצוגה המקדימה פועלת, Windows שומר את טקסט ההודעה בהיסטוריית ההתראות ויכול להציג אותו במסך הנעילה."
 }

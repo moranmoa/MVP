@@ -125,8 +125,8 @@ describe('desktop notifications in the app', () => {
     return { author, emit };
   }
 
-  it('sends the sender, channel and server, once; with the preview off, no text', async () => {
-    const { author, emit } = await setup(all);
+  it('with the preview on: the sender, channel and server, and the text, once', async () => {
+    const { author, emit } = await setup({ ...all, preview: true });
     emit('message.added', msg({ id: 'm-x', channelId: 'c-clips', authorId: author.id, createdAt: Date.now() }));
     expect(notify).toHaveBeenCalledTimes(1);
     expect(notify).toHaveBeenCalledWith({
@@ -137,10 +137,13 @@ describe('desktop notifications in the app', () => {
     });
   });
 
-  it('with the preview off the body is "New message"', async () => {
-    const { author, emit } = await setup({ ...all, preview: false });
+  it('the preview is off by default: "New message in #channel", or the mention wording; never the text', async () => {
+    expect(defaultNotifyPrefs().preview).toBe(false);
+    const { author, emit } = await setup(all);
     emit('message.added', msg({ channelId: 'c-clips', authorId: author.id, createdAt: Date.now() }));
-    expect(notify).toHaveBeenCalledWith(expect.objectContaining({ body: 'New message' }));
+    expect(notify).toHaveBeenLastCalledWith(expect.objectContaining({ body: 'New message in ⁨#clips⁩' }));
+    emit('message.added', msg({ id: 'm-2', channelId: 'c-lfg', authorId: author.id, createdAt: Date.now(), mentionsMe: true }));
+    expect(notify).toHaveBeenLastCalledWith(expect.objectContaining({ body: 'New mention of you in ⁨#מחפשים-קבוצה⁩' }));
     expect(JSON.stringify(notify.mock.calls)).not.toContain('Anyone up tonight?');
   });
 
@@ -170,14 +173,16 @@ describe('desktop notifications in the app', () => {
     expect(await screen.findByRole('textbox', { name: /^Message .*clips/ })).toBeTruthy();
   });
 
-  it('Settings → Notifications has the two switches, saved locally', async () => {
+  it('Settings → Notifications: preview off by default; turning it on shows the privacy note', async () => {
     await setup(all);
     fireEvent.click(screen.getAllByRole('button', { name: 'Settings' })[0]);
     fireEvent.click(await screen.findByRole('button', { name: 'Notifications' }));
     const preview = screen.getByRole('switch', { name: 'Show message preview in notifications' });
-    expect((preview as HTMLInputElement).checked).toBe(true);
-    fireEvent.click(preview);
     expect((preview as HTMLInputElement).checked).toBe(false);
+    expect(screen.queryByText(/notification history/)).toBeNull();
+    fireEvent.click(preview);
+    expect((preview as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByText(/Windows keeps the message text in its notification history and can show it on the lock screen/)).toBeTruthy();
     fireEvent.click(screen.getByRole('switch', { name: 'Desktop notifications' }));
     expect((preview as HTMLInputElement).disabled).toBe(true);
   });

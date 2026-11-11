@@ -343,6 +343,11 @@ function NotificationsSection() {
       <p className="muted small" id="notify-preview-hint">
         <FormattedMessage id="notify.settings.previewHint" />
       </p>
+      {prefs.desktop && prefs.preview && (
+        <p className="muted small" role="note">
+          <FormattedMessage id="notify.settings.previewPrivacy" />
+        </p>
+      )}
       {!prefs.desktop && (
         <p className="muted small" id="notify-preview-off">
           <FormattedMessage id="notify.settings.previewDisabled" />

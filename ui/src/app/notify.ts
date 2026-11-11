@@ -15,7 +15,11 @@ export interface NotifyScope {
 export interface NotifyPrefs {
   /** "Desktop notifications", the main switch. */
   desktop: boolean;
-  /** "Show message preview in notifications"; off: the body is "New message". */
+  /**
+   * "Show message preview in notifications". Off by default (owner): the OS
+   * keeps what it is shown (Windows: notification history, lock screen), so
+   * the body is "New message in #channel" unless the person opts in.
+   */
   preview: boolean;
   servers: Record<Id, NotifyScope>;
   /** A channel's level overrides its server's. */
@@ -28,7 +32,7 @@ export const GROUP_MS = 10_000;
 export const STALE_MS = 10 * 60_000;
 
 export function defaultNotifyPrefs(): NotifyPrefs {
-  return { desktop: true, preview: true, servers: {}, channels: {} };
+  return { desktop: true, preview: false, servers: {}, channels: {} };
 }
 
 const LEVELS: readonly NotifyLevel[] = ['all', 'mentions', 'none'];

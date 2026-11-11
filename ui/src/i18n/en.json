@@ -469,13 +469,15 @@
   "notify.settings.desktop": "Desktop notifications",
   "notify.settings.desktopHint": "Shown when the MVS window isn't in front. Each server and channel can be set from its menu (right-click).",
   "notify.settings.preview": "Show message preview in notifications",
-  "notify.settings.previewHint": "Off: notifications say \"New message\" without the text.",
+  "notify.settings.previewHint": "Off: notifications say \"New message in #channel\" without the text.",
   "notify.settings.desktopOnly": "Notifications work in the desktop app.",
-  "notify.hidden": "New message",
+  "notify.hidden": "New message in ⁨#{channel}⁩",
   "notify.grouped": "{count, plural, one {# new message} other {# new messages}} in ⁨#{channel}⁩",
   "settings.nav.notifications": "Notifications",
   "notify.dialog.titleServer": "Notifications for ⁨{name}⁩",
   "notify.dialog.titleChannel": "Notifications for ⁨#{name}⁩",
   "notify.mute.label": "Mute",
-  "notify.settings.previewDisabled": "Turn on desktop notifications first."
+  "notify.settings.previewDisabled": "Turn on desktop notifications first.",
+  "notify.hiddenMention": "New mention of you in ⁨#{channel}⁩",
+  "notify.settings.previewPrivacy": "With the preview on, Windows keeps the message text in its notification history and can show it on the lock screen."
 }
