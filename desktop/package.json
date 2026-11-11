@@ -24,7 +24,7 @@
     "name": "MVS",
     "email": "spike@example.invalid"
   },
-  "homepage": "https://github.com/moranmoa/MVP",
+  "homepage": "https://github.com/moranmoa/MVS",
   "build": {
     "appId": "dev.mvs.app",
     "productName": "MVS",
