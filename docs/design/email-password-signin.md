@@ -88,3 +88,12 @@
 2. **Mailer trust:** run by us on a bootstrap, or a third-party transactional mailer (it sees addresses either way)?
 3. **Recovery:** is the 72-hour hold right, and should recovery default to off?
 4. **Argon2id parameters:** about 1 s on a mid laptop; what's the phone budget later?
+
+## 7. PO conditions (accepted, for the build)
+1. **Opt-in only:** email and password, and email recovery on top.
+2. **Warnings when enabling:** a plain sentence about the 72-hour takeover, and a single-device warning (with one device there's nobody to cancel a recovery).
+3. **Same release:** the invite pack (it says "no email" today) and the privacy note are updated.
+4. **Deleting from the mailer:** removing the email or password deletes the mailer's copy (`r`, and the email if it was ever kept), with a test.
+5. **Wording and logs:** neutral wording, and the password never in any log.
+- **PO's data rule for the mailer:** it keeps the email only to send codes, deletes it on removal, and never logs it. The design is stricter still: the client passes the address at send time, so the mailer needn't keep it at all.
+- **Still open:** the Security Lead's and Tech Lead's verdicts, and the owner's choice on the second bootstrap (ship behind a flag, or wait).
