@@ -70,7 +70,7 @@ fn names(events: &[Event]) -> Vec<&'static str> {
             Event::MessageUpdated(_) => "message.updated",
             Event::CallState(_) => "call.state",
             Event::CallSignal { .. } => "call.signal",
-            Event::VoiceRoom(_) => "voice.room",
+            Event::VoiceRooms { .. } => "voice.rooms",
         })
         .collect()
 }
@@ -2568,28 +2568,33 @@ fn a_call_between_members() {
     for peer in [&owner, &alice, &bob] {
         peer.core.sync_now().unwrap();
     }
-    let room = owner.core.get_voice_room(&server.id).unwrap().room_id;
     let peers = [(owner_id.as_str(), &owner), (alice_id.as_str(), &alice), (bob_id.as_str(), &bob)];
 
     // No transport yet: not-implemented. Then relay-only: calls are off.
-    assert_eq!(owner.core.join_call(&room).unwrap_err().code, ErrorCode::NotImplemented);
+    let create = |peer: &Peer| peer.core.create_voice_room(&server.id);
+    assert_eq!(create(&owner).unwrap_err().code, ErrorCode::NotImplemented);
     for (id, peer) in peers {
         hub.connect(peer, id);
     }
     hub.relay_only.store(true, std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(owner.core.join_call(&room).unwrap_err().code, ErrorCode::RelayOnly);
+    assert_eq!(create(&owner).unwrap_err().code, ErrorCode::RelayOnly);
     hub.relay_only.store(false, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(owner.core.join_call(&"ab".repeat(32)).unwrap_err().code, ErrorCode::NotFound);
-    // Calls happen only in the room: a text channel is not-allowed.
+    // Calls happen only in rooms: a text channel is not-allowed.
     let general = owner.core.list_channels(&server.id).unwrap().remove(0).id;
-    assert_ne!(general, room);
     assert_eq!(owner.core.join_call(&general).unwrap_err().code, ErrorCode::NotAllowed);
-    // Every member derives the same room; an unknown server is not-found.
-    assert_eq!(bob.core.get_voice_room(&server.id).unwrap().room_id, room);
-    assert_eq!(bob.core.get_voice_room(&"ab".repeat(32)).unwrap_err().code, ErrorCode::NotFound);
+    // No rooms yet; an unknown server is not-found.
+    assert!(bob.core.list_voice_rooms(&server.id).unwrap().is_empty());
+    assert_eq!(bob.core.list_voice_rooms(&"ab".repeat(32)).unwrap_err().code, ErrorCode::NotFound);
+    assert_eq!(
+        owner.core.create_voice_room(&"ab".repeat(32)).unwrap_err().code,
+        ErrorCode::NotFound
+    );
 
-    // The owner, then Alice, join; each sees both.
-    let state = owner.core.join_call(&room).unwrap();
+    // The owner creates a room, then Alice joins it; each sees both.
+    let state = create(&owner).unwrap();
+    let room = state.channel_id.clone();
+    assert_ne!(general, room);
     assert_eq!((who(&state), state.full), (vec![owner_id.as_str()], false));
     assert!(owner.core.in_call());
     hub.pump(&peers);
@@ -2600,32 +2605,34 @@ fn a_call_between_members() {
     let seen = call_states(owner.events.take());
     assert_eq!(who(seen.last().unwrap()), [owner_id.as_str(), alice_id.as_str()]);
 
-    // Bob isn't in the call but sees who is: one voice.room at his tick,
-    // and the same from getVoiceRoom. Identity and muted only.
+    // Bob isn't in the call but sees the room: one voice.rooms at his tick,
+    // and the same from listVoiceRooms. The owner created it, joined first,
+    // and is its master; members by joinedAt.
     bob.events.take();
     bob.core.voice_tick();
-    let rooms: Vec<VoiceRoom> = bob
-        .events
-        .take()
-        .into_iter()
-        .filter_map(|e| match e {
-            Event::VoiceRoom(room) => Some(room),
-            _ => None,
-        })
-        .collect();
+    let rooms = voice_rooms(bob.events.take());
     assert_eq!(rooms.len(), 1);
-    let mut inside: Vec<&str> = rooms[0].participants.iter().map(|p| p.user_id.as_str()).collect();
-    inside.sort();
-    let mut want = [owner_id.as_str(), alice_id.as_str()];
-    want.sort();
-    assert_eq!(inside, want);
+    let inside: Vec<&str> = rooms[0].members.iter().map(|m| m.user_id.as_str()).collect();
+    assert_eq!(inside, [owner_id.as_str(), alice_id.as_str()]);
     assert_eq!(
         (rooms[0].server_id.as_str(), rooms[0].room_id.as_str()),
         (server.id.as_str(), room.as_str())
     );
-    assert_eq!(bob.core.get_voice_room(&server.id).unwrap(), rooms[0]);
+    assert_eq!((rooms[0].master_id.as_str(), rooms[0].creator_id.as_str()), (owner_id.as_str(), owner_id.as_str()));
+    assert_eq!((rooms[0].name.clone(), rooms[0].limit), (None, 5));
+    assert_eq!(bob.core.list_voice_rooms(&server.id).unwrap(), rooms);
     let json = serde_json::to_value(&rooms[0]).unwrap();
-    assert_eq!(json["participants"][0].as_object().unwrap().len(), 2, "more than id and muted");
+    assert_eq!(json["members"][0].as_object().unwrap().len(), 3, "more than id, muted and joinedAt");
+    assert!(json.get("name").is_none(), "a default name is absent");
+
+    // Only the master (or the owner) renames: Bob may not; the owner, the
+    // master here, may, and everyone sees it.
+    let code = bob.core.edit_voice_room(&room, Some("Bob's".into()), None).unwrap_err().code;
+    assert_eq!(code, ErrorCode::NotAllowed);
+    owner.core.edit_voice_room(&room, Some("Talk".into()), Some(4)).unwrap();
+    hub.pump(&peers);
+    let seen = bob.core.list_voice_rooms(&server.id).unwrap();
+    assert_eq!((seen[0].name.as_deref(), seen[0].limit), (Some("Talk"), 4));
 
     // Signalling: only to a participant, offers and answers with a fingerprint.
     assert_eq!(
@@ -2745,19 +2752,21 @@ impl Network for RelayOnlyNet {
     }
 }
 
+/// The rooms of every `voice.rooms` event, in order.
 fn voice_rooms(events: Vec<Event>) -> Vec<VoiceRoom> {
     events
         .into_iter()
         .filter_map(|e| match e {
-            Event::VoiceRoom(room) => Some(room),
+            Event::VoiceRooms { rooms, .. } => Some(rooms),
             _ => None,
         })
+        .flatten()
         .collect()
 }
 
 /// GAP-6r: `setRelayOnly` is stored, given to the network at start and on
 /// each change, ends my call (with a bye), refuses calls while on, and is
-/// shown up front on `getAppInfo`, `getVoiceRoom`, `voice.room` and
+/// shown up front on `getAppInfo`, `listVoiceRooms`, `voice.rooms` and
 /// `call.state`. It survives a restart.
 #[test]
 fn relay_only_is_stored_applied_and_turns_calls_off() {
@@ -2787,12 +2796,12 @@ fn relay_only_is_stored_applied_and_turns_calls_off() {
     // Off by default, and the network was told so at start.
     assert_eq!(net.applied(), [false]);
     assert!(!owner.core.get_app_info().unwrap().relay_only);
-    let room = owner.core.get_voice_room(&server.id).unwrap();
-    assert!(!room.relay_only);
-    let state = owner.core.join_call(&room.room_id).unwrap();
+    let state = owner.core.create_voice_room(&server.id).unwrap();
     assert!(!state.relay_only);
+    assert!(!owner.core.list_voice_rooms(&server.id).unwrap()[0].relay_only);
+    let room = state.channel_id.clone();
     hub.pump(&peers);
-    alice.core.join_call(&room.room_id).unwrap();
+    alice.core.join_call(&room).unwrap();
     hub.pump(&peers);
     assert!(owner.core.in_call());
 
@@ -2818,14 +2827,16 @@ fn relay_only_is_stored_applied_and_turns_calls_off() {
     // Up front: app info, the room, and one voice.room per server at the
     // next tick. Joining is refused.
     assert!(owner.core.get_app_info().unwrap().relay_only);
-    assert!(owner.core.get_voice_room(&server.id).unwrap().relay_only);
+    // Alice is still in the room, so it lives on.
+    assert!(owner.core.list_voice_rooms(&server.id).unwrap()[0].relay_only);
     owner.core.voice_tick();
     let rooms = voice_rooms(owner.events.take());
     assert_eq!(rooms.len(), 1);
     assert!(rooms[0].relay_only && rooms[0].server_id == server.id);
-    assert_eq!(owner.core.join_call(&room.room_id).unwrap_err().code, ErrorCode::RelayOnly);
+    assert_eq!(owner.core.join_call(&room).unwrap_err().code, ErrorCode::RelayOnly);
+    assert_eq!(owner.core.create_voice_room(&server.id).unwrap_err().code, ErrorCode::RelayOnly);
     // Another member's setting is theirs: Alice's room isn't relay-only.
-    assert!(!alice.core.get_voice_room(&server.id).unwrap().relay_only);
+    assert!(!alice.core.list_voice_rooms(&server.id).unwrap()[0].relay_only);
 
     // A restart keeps it: read before the network starts, and given to the
     // network as the core opens.
@@ -2837,14 +2848,14 @@ fn relay_only_is_stored_applied_and_turns_calls_off() {
     assert_eq!(net.applied(), [true]);
     assert!(owner.core.get_app_info().unwrap().relay_only);
     hub.connect(&owner, &owner_id);
-    assert_eq!(owner.core.join_call(&room.room_id).unwrap_err().code, ErrorCode::RelayOnly);
+    assert_eq!(owner.core.create_voice_room(&server.id).unwrap_err().code, ErrorCode::RelayOnly);
 
     // Off again: applied, stored, and calls work.
     owner.core.set_relay_only(false).unwrap();
     assert_eq!(net.applied(), [true, false]);
     assert!(!api::stored_relay_only(&db));
-    assert!(!owner.core.get_voice_room(&server.id).unwrap().relay_only);
-    assert!(!owner.core.join_call(&room.room_id).unwrap().relay_only);
+    assert!(!owner.core.create_voice_room(&server.id).unwrap().relay_only);
+    assert!(!owner.core.list_voice_rooms(&server.id).unwrap()[0].relay_only);
     owner.core.leave_call().unwrap();
 
     // A database that can't be opened: on (fails closed, see the unit test).
@@ -2872,7 +2883,6 @@ fn a_call_holds_five_and_kicked_members_are_ignored() {
     for (_, peer) in &others {
         peer.core.sync_now().unwrap();
     }
-    let room = owner.core.get_voice_room(&server.id).unwrap().room_id;
     hub.connect(&owner, &owner_id);
     for (id, peer) in &others {
         hub.connect(peer, id);
@@ -2880,7 +2890,7 @@ fn a_call_holds_five_and_kicked_members_are_ignored() {
     let mut peers: Vec<(&str, &Peer)> = vec![(owner_id.as_str(), &owner)];
     peers.extend(others.iter().map(|(id, peer)| (id.as_str(), peer)));
 
-    owner.core.join_call(&room).unwrap();
+    let room = owner.core.create_voice_room(&server.id).unwrap().channel_id;
     hub.pump(&peers);
     for (_, peer) in &others[..4] {
         peer.core.join_call(&room).unwrap();
@@ -2904,16 +2914,16 @@ fn a_call_holds_five_and_kicked_members_are_ignored() {
     hub.pump(&peers);
     let state = owner.core.join_call(&room).unwrap();
     assert!(!who(&state).contains(&kicked_id.as_str()));
-    let roster = owner.core.get_voice_room(&server.id).unwrap();
-    assert!(!roster.participants.iter().any(|p| &p.user_id == kicked_id));
-    assert!(roster.participants.len() <= 5);
+    let roster = owner.core.list_voice_rooms(&server.id).unwrap().remove(0);
+    assert!(!roster.members.iter().any(|m| &m.user_id == kicked_id));
+    assert!(roster.members.len() <= 5);
 
     // Once P0 reads its kick: no roster for it, by command or event.
     kicked.core.sync_now().unwrap();
     kicked.events.take();
     kicked.core.voice_tick();
-    assert!(!kicked.events.take().iter().any(|e| matches!(e, Event::VoiceRoom(_))));
-    let code = kicked.core.get_voice_room(&server.id).unwrap_err().code;
+    assert!(!kicked.events.take().iter().any(|e| matches!(e, Event::VoiceRooms { .. })));
+    let code = kicked.core.list_voice_rooms(&server.id).unwrap_err().code;
     assert!(matches!(code, ErrorCode::NotFound | ErrorCode::NotAllowed), "{code:?}");
 }
 
@@ -3778,7 +3788,6 @@ fn a_call_on_my_other_computer_blocks_joining_here() {
     for peer in [&pc, &carol, &laptop] {
         peer.core.sync_now().unwrap();
     }
-    let room = pc.core.get_voice_room(&server.id).unwrap().room_id;
     // A hub per computer: what's sent to my identity reaches both of mine.
     let (pc_hub, laptop_hub, carol_hub) =
         (Arc::new(VoiceHub::default()), Arc::new(VoiceHub::default()), Arc::new(VoiceHub::default()));
@@ -3797,23 +3806,26 @@ fn a_call_on_my_other_computer_blocks_joining_here() {
         }
     };
 
-    pc.core.join_call(&room).unwrap();
+    let room = pc.core.create_voice_room(&server.id).unwrap().channel_id;
     deliver(&pc_hub);
     // The echo didn't count on the PC: it's still in the call, can re-join.
     assert!(pc.core.in_call());
     pc.core.join_call(&room).unwrap();
-    // The laptop is refused; Carol sees me once.
-    assert_eq!(laptop.core.join_call(&room).unwrap_err().code, ErrorCode::InCallElsewhere);
+    // The laptop is refused: it never lists a room only my own identity is
+    // in (not-found), and creating one is in-call-elsewhere. Carol sees me once.
+    assert_eq!(laptop.core.join_call(&room).unwrap_err().code, ErrorCode::NotFound);
+    assert_eq!(laptop.core.create_voice_room(&server.id).unwrap_err().code, ErrorCode::InCallElsewhere);
     assert!(!laptop.core.in_call());
-    let seen = carol.core.get_voice_room(&server.id).unwrap();
-    assert_eq!(seen.participants.iter().map(|p| p.user_id.as_str()).collect::<Vec<_>>(), [me.as_str()]);
+    let seen = carol.core.list_voice_rooms(&server.id).unwrap();
+    assert_eq!(seen[0].members.iter().map(|m| m.user_id.as_str()).collect::<Vec<_>>(), [me.as_str()]);
 
-    // The PC leaves (a bye to both of mine): the laptop may join now.
+    // The PC leaves (a bye to both of mine; its room goes): the laptop may
+    // create one now, and then the PC is refused.
     pc.core.leave_call().unwrap();
     deliver(&pc_hub);
-    laptop.core.join_call(&room).unwrap();
+    laptop.core.create_voice_room(&server.id).unwrap();
     deliver(&laptop_hub);
-    assert_eq!(pc.core.join_call(&room).unwrap_err().code, ErrorCode::InCallElsewhere);
+    assert_eq!(pc.core.create_voice_room(&server.id).unwrap_err().code, ErrorCode::InCallElsewhere);
 }
 
 /// The AgeClaim records `who` (a user ID) wrote in `server`, as their
@@ -4145,7 +4157,7 @@ fn channel_order_is_shared_and_only_admins_count() {
 
     // The owner moves gamma first: the same order everywhere, with positions.
     owner.events.take();
-    // Before the first other channel (IDs, so today's order, are random).
+    // Before the first other channel (unplaced: the order they were made).
     let first = today.iter().find(|c| c.name != "gamma").unwrap().id.clone();
     let moved = owner.core.move_channel(&server.id, &id("gamma"), Some(&first), None).unwrap();
     assert_eq!(moved[0].name, "gamma");
@@ -4684,4 +4696,39 @@ fn a_new_server_sees_the_picture_set_before() {
     let theirs = carol.core.create_server("Carol's", AgeRestriction::None).unwrap();
     bob.core.join_server(&theirs.invite_link).unwrap();
     assert_eq!(look(&carol, &theirs.id), expected);
+}
+
+/// #323 (QA on 0.4.2, 1 run in 4): unplaced channels are listed in the order
+/// they were made, not by their random IDs, so the owner's first move lands
+/// where they asked, and the member sees the same. Eight servers, so a fix
+/// that only works for some ID orders fails here: with ID order, all eight
+/// listing general, two, three by chance is (1/6)^8.
+#[test]
+fn unplaced_channels_keep_creation_order_and_the_first_move_lands() {
+    let world = World::new();
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let member = world.peer();
+    sign_up(&member, "Member");
+    for round in 0..8 {
+        let server = owner.core.create_server(&format!("Order {round}"), AgeRestriction::None).unwrap();
+        for name in ["two", "three"] {
+            owner.core.create_channel(&server.id, name, false).unwrap();
+        }
+        member.core.join_server(&server.invite_link).unwrap();
+        owner.core.sync_now().unwrap();
+        member.core.sync_now().unwrap();
+        let listed = owner.core.list_channels(&server.id).unwrap();
+        let general = listed.iter().find(|c| c.is_default).unwrap().name.clone();
+        let made = [general.as_str(), "two", "three"];
+        let after = ["three", general.as_str(), "two"];
+        assert_eq!(channel_names(&listed), made, "round {round}");
+        assert_eq!(channel_names(&member.core.list_channels(&server.id).unwrap()), made);
+
+        let id = |name: &str| listed.iter().find(|c| c.name == name).unwrap().id.clone();
+        let moved = owner.core.move_channel(&server.id, &id("three"), Some(&id(&general)), None).unwrap();
+        assert_eq!(channel_names(&moved), after, "round {round}");
+        member.core.sync_now().unwrap();
+        assert_eq!(channel_names(&member.core.list_channels(&server.id).unwrap()), after);
+    }
 }
