@@ -24,12 +24,18 @@
 //   came. The answerer drops a connection still not up after
 //   `connectTimeoutMs` (`peer-failed`); the offerer's next offer starts over.
 // - ICE servers come from the config's optional STUN URL only (`stunUrl`),
-//   never a public default.
+//   never a public default; plus, behind `enableTurn` (G-81), TURN
+//   credentials from the core, cleaned (exact relay host, allowed ports) and
+//   never logged. They are fetched before the first connection (at most
+//   `turnFetchTimeoutMs`, then the call goes on without), cached until 80% of
+//   their ttl, and refreshed then: every connection gets the new servers
+//   (setConfiguration) and the offerer restarts ICE on the same connection.
+//   See docs/design/voice-across-networks.md.
 // - Speaking: an AnalyserNode per stream, level over a threshold.
 
 import type { CallSignal, CallState, Id } from '../core/types';
 import type { VoiceCore } from './adapter';
-import { iceServersFor, normalizeFingerprint, soleFingerprint } from './sdp';
+import { cleanTurnCredentials, iceServersFor, normalizeFingerprint, soleFingerprint, type TurnCredentials } from './sdp';
 
 export type PeerConnectionState = 'connecting' | 'connected' | 'failed';
 
@@ -89,6 +95,12 @@ export interface VoiceEngineOptions {
   answerTimeoutMs?: number;
   /** The answerer's wait for a connection. Default 30 s. */
   connectTimeoutMs?: number;
+  /** G-81, off by default: use TURN credentials from the core. */
+  enableTurn?: boolean;
+  /** The configured relay host; TURN URLs must name exactly this host. Without it, no TURN. */
+  turnHost?: string | null;
+  /** The longest wait for TURN credentials before the first connection. Default 2 s. */
+  turnFetchTimeoutMs?: number;
   /** RMS level above which someone counts as speaking (0..1). */
   speakingThreshold?: number;
 }
@@ -116,6 +128,11 @@ export interface VoiceEngine {
   on<E extends keyof VoiceEvents>(event: E, cb: (payload: VoiceEvents[E]) => void): () => void;
   /** Leaves the audio and unsubscribes from the core for good. */
   dispose(): void;
+  /**
+   * Diagnostics: per connected peer, the candidate types of the selected pair
+   * (`host`, `srflx`, `prflx`, `relay`), never the addresses. null while none.
+   */
+  connectionTypes(): Promise<Record<Id, { local: string; remote: string } | null>>;
 }
 
 const MAX_PEERS = 4; // 5 in a call, me included
@@ -183,7 +200,12 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
   const threshold = options.speakingThreshold ?? 0.02;
   const answerTimeoutMs = options.answerTimeoutMs ?? 5000;
   const connectTimeoutMs = options.connectTimeoutMs ?? 30_000;
-  const iceServers = iceServersFor(options.stunUrl);
+  const turnFetchTimeoutMs = options.turnFetchTimeoutMs ?? 2000;
+  /** Cleaned TURN credentials, and when to refresh them (80% of the ttl). */
+  let turn: TurnCredentials | null = null;
+  let turnRefreshAt = 0;
+  let turnTimer: ReturnType<typeof setTimeout> | null = null;
+  const iceServers = () => iceServersFor(options.stunUrl, turn && turn.expiresAt > Date.now() ? turn : null);
 
   const listeners: { [E in keyof VoiceEvents]: Set<(p: VoiceEvents[E]) => void> } = {
     participants: new Set(),
@@ -310,7 +332,7 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
   // ---- peers -----------------------------------------------------------------
   function createPeer(id: Id, offerer: boolean, attempt = 1): Peer {
     const pc = env.createPeerConnection({
-      iceServers,
+      iceServers: iceServers(),
       bundlePolicy: 'max-bundle',
       rtcpMuxPolicy: 'require',
     });
@@ -566,7 +588,20 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
     try {
       if (signal.kind === 'offer') {
         if (iOffer) return; // glare: the lower identity offers, so mine wins
-        // A new offer from the same peer (it restarted): start over.
+        // An ICE restart (new TURN credentials) on a working connection: same
+        // certificate, so renegotiate on it; the checks still run.
+        if (
+          existing &&
+          !existing.offerer &&
+          existing.verified &&
+          existing.pc.signalingState === 'stable' &&
+          soleFingerprint(signal.payload) === existing.fingerprint
+        ) {
+          if (!(await applyRemote(existing, 'offer', signal.payload)) || existing.closed) return;
+          await sendDescription(existing, 'answer');
+          return;
+        }
+        // Any other new offer from the same peer (it restarted): start over.
         if (existing) dropPeer(existing);
         if (peers.size >= MAX_PEERS) return;
         const peer = createPeer(signal.from, false);
@@ -628,6 +663,69 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
     emitParticipants();
   }
 
+  // ---- TURN (G-81) -------------------------------------------------------------
+  /** Fresh credentials from the core, cleaned; null on any failure. Never logged. */
+  async function fetchTurn(): Promise<TurnCredentials | null> {
+    if (!options.enableTurn || !options.turnHost || !core.getTurnCredentials) return null;
+    try {
+      const raw = await Promise.race([
+        core.getTurnCredentials(),
+        new Promise<null>((r) => setTimeout(() => r(null), turnFetchTimeoutMs)),
+      ]);
+      return cleanTurnCredentials(raw, options.turnHost);
+    } catch {
+      return null; // relay-only, not-implemented, rate-limited: STUN only
+    }
+  }
+
+  function scheduleTurnRefresh(gen: number) {
+    if (turnTimer) clearTimeout(turnTimer);
+    turnTimer = null;
+    if (!turn) return;
+    turnTimer = setTimeout(() => void refreshTurn(gen), Math.max(1000, turnRefreshAt - Date.now()));
+  }
+
+  function keepTurn(next: TurnCredentials) {
+    turn = next;
+    turnRefreshAt = Date.now() + next.ttl * 800; // 80% of the ttl
+  }
+
+  /** New credentials into every connection; the offerer restarts ICE. */
+  async function refreshTurn(gen: number) {
+    turnTimer = null;
+    const next = await fetchTurn();
+    if (gen !== generation || !active) return;
+    if (!next) {
+      // Keep the old ones while they last; try again in 30 s.
+      if (turn && turn.expiresAt > Date.now() + 30_000) turnTimer = setTimeout(() => void refreshTurn(gen), 30_000);
+      return;
+    }
+    keepTurn(next);
+    for (const p of peers.values()) {
+      try {
+        p.pc.setConfiguration({ ...p.pc.getConfiguration(), iceServers: iceServers() });
+        if (p.offerer && p.verified && p.pc.signalingState === 'stable') {
+          p.pc.restartIce();
+          void sendDescription(p, 'offer').catch(() => {});
+        }
+      } catch {
+        // this connection keeps its current servers
+      }
+    }
+    scheduleTurnRefresh(gen);
+  }
+
+  /** Cached credentials while fresh, else a fetch (bounded by turnFetchTimeoutMs). */
+  async function ensureTurn(gen: number) {
+    if (!options.enableTurn) return;
+    if (!turn || Date.now() >= turnRefreshAt) {
+      const next = await fetchTurn();
+      if (gen !== generation) return;
+      if (next) keepTurn(next);
+    }
+    scheduleTurnRefresh(gen);
+  }
+
   // ---- lifecycle -------------------------------------------------------------
   async function start(state: CallState, myId: Id) {
     if (active) stop();
@@ -637,6 +735,7 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
     channelId = state.channelId;
     micState = 'connecting';
     speaking = {};
+    const turnReady = ensureTurn(gen); // alongside the microphone
     try {
       local = await openMic(inputId);
       if (gen !== generation) {
@@ -652,6 +751,8 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
       micState = 'failed';
       emit('error', { code: micError(e) }); // still listen
     }
+    await turnReady;
+    if (gen !== generation) return;
     timer = setInterval(pollSpeaking, SPEAKING_POLL_MS);
     reconcile(state);
   }
@@ -667,6 +768,8 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
     localMeter = null;
     if (timer) clearInterval(timer);
     timer = null;
+    if (turnTimer) clearTimeout(turnTimer); // the cache stays; no refreshing outside a call
+    turnTimer = null;
     void ctx?.close?.().catch(() => {});
     ctx = null;
     refused.clear();
@@ -745,6 +848,32 @@ export function createVoiceEngine(core: VoiceCore, options: VoiceEngineOptions =
     on(event, cb) {
       listeners[event].add(cb);
       return () => listeners[event].delete(cb);
+    },
+    async connectionTypes() {
+      const out: Record<Id, { local: string; remote: string } | null> = {};
+      for (const p of peers.values()) {
+        out[p.id] = null;
+        try {
+          const stats = await p.pc.getStats();
+          const byId = new Map<string, Record<string, unknown>>();
+          stats.forEach((r: Record<string, unknown>) => byId.set(r.id as string, r));
+          let pair: Record<string, unknown> | undefined;
+          for (const r of byId.values()) {
+            if (r.type === 'transport' && typeof r.selectedCandidatePairId === 'string') pair = byId.get(r.selectedCandidatePairId);
+          }
+          if (!pair) {
+            for (const r of byId.values()) if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') pair = r;
+          }
+          const type = (id: unknown) => {
+            const t = typeof id === 'string' ? byId.get(id)?.candidateType : undefined;
+            return typeof t === 'string' && /^(host|srflx|prflx|relay)$/.test(t) ? t : 'unknown';
+          };
+          if (pair) out[p.id] = { local: type(pair.localCandidateId), remote: type(pair.remoteCandidateId) };
+        } catch {
+          // no stats: null
+        }
+      }
+      return out;
     },
     dispose() {
       stop();
