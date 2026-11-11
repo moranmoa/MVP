@@ -48,8 +48,10 @@ const COMMANDS = Object.freeze({
   // Safety
   blockUser: ['userId'],
   kickMember: ['serverId', 'userId'],
-  // Voice v1 (#223)
-  getVoiceRoom: ['serverId'],
+  // Voice (#223); voice rooms (0.4.3)
+  listVoiceRooms: ['serverId'],
+  createVoiceRoom: ['serverId'],
+  editVoiceRoom: ['roomId', 'edit'],
   joinCall: ['channelId'],
   leaveCall: [],
   setMuted: ['muted'],

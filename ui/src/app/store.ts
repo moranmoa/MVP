@@ -123,7 +123,8 @@ export interface StoreState {
   /** Why the last joinCall failed, until the next try or dismissal. */
   callError: string | null;
   /** Each server's voice room (who is in it), by server id. */
-  voiceRooms: Record<Id, VoiceRoom>;
+  /** Voice rooms (0.4.3): each server's live rooms, oldest first. */
+  voiceRooms: Record<Id, VoiceRoom[]>;
   /**
    * Relay-only is on (#272): calls are off. Read up front from AppInfo and every
    * voice room, and also learned from a call ended or a join refused for it.
@@ -228,7 +229,7 @@ export class Store {
           ...(ended && relayOnly ? { callError: 'relay-only' } : {}),
         });
       }),
-      on('voice.room', (r) => this.setRoom(r)),
+      on('voice.rooms', (p) => this.setRooms(p.serverId, p.rooms)),
       on('update.rolledBack', (u) => this.set({ updateNote: { kind: 'rolledBack', ...u } })),
       // rekey-waiting: the failed message's own line says why; no toast (UX, #289).
       on('notice', (n) => n.kind !== 'rekey-waiting' && this.set({ notice: { ...n, kind: n.kind, at: Date.now() } })),
@@ -261,18 +262,21 @@ export class Store {
       channels: { ...this.state.channels, [id]: channels },
       members: { ...this.state.members, [id]: members },
     });
-    await this.loadVoiceRoom(id);
+    await this.loadVoiceRooms(id);
   }
 
-  /** Re-reads a server's voice room (events are hints): on start and on server switch. */
-  async loadVoiceRoom(serverId: Id): Promise<void> {
-    const room = await this.core.getVoiceRoom(serverId).catch(() => null);
-    if (room) this.setRoom(room);
+  /** Re-reads a server's voice rooms (events are hints): on start and on server switch. */
+  async loadVoiceRooms(serverId: Id): Promise<void> {
+    const rooms = await this.core.listVoiceRooms(serverId).catch(() => null);
+    if (rooms) this.setRooms(serverId, rooms);
   }
 
-  /** Every room carries the device's relay-only flag (#272), so "Join" is off before trying. */
-  private setRoom(room: VoiceRoom): void {
-    this.set({ voiceRooms: { ...this.state.voiceRooms, [room.serverId]: room }, relayOnly: room.relayOnly === true });
+  /** Every room carries the device's relay-only flag (#272), so "Join" is off before trying; no rooms says nothing. */
+  private setRooms(serverId: Id, rooms: VoiceRoom[]): void {
+    this.set({
+      voiceRooms: { ...this.state.voiceRooms, [serverId]: rooms },
+      ...(rooms.length ? { relayOnly: rooms.some((r) => r.relayOnly === true) } : {}),
+    });
   }
 
   private reloadTimers = new Map<Id, ReturnType<typeof setTimeout>>();
@@ -372,9 +376,18 @@ export class Store {
    * nothing staged there is nothing to restart into.
    */
   async joinCall(channelId: Id): Promise<void> {
+    await this.callWith(() => this.core.joinCall(channelId));
+  }
+
+  /** Voice rooms (0.4.3): opens a new room in a server and joins it (leaving any call). */
+  async createVoiceRoom(serverId: Id): Promise<void> {
+    await this.callWith(() => this.core.createVoiceRoom(serverId));
+  }
+
+  private async callWith(start: () => Promise<CallState>): Promise<void> {
     this.set({ callError: null });
     try {
-      const call = await this.core.joinCall(channelId);
+      const call = await start();
       this.set({ call: call.participants.length ? call : null });
     } catch (e) {
       const code = (e as { code?: string })?.code ?? 'internal';

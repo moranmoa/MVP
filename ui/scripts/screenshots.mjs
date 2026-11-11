@@ -227,6 +227,7 @@ const shot = async (p, name) => {
 }
 
 // ---- chat -------------------------------------------------------------------
+const PHONE_ROOMS = { width: 375, height: 812, phone: true };
 async function chat(query, name, opts) {
   const p = await page(query, opts);
   await p.getByRole('article').first().waitFor();
@@ -392,16 +393,16 @@ for (const [detail, name] of [
 }
 
 // ---- voice v1, pieces E and E2: the voice room and the call bar (240-249) -------
-// Joining: the room entry, then the one-time IP notice (243-244, docs/ux/specs/voice-ip-notice.md).
+// Joining: the first room's row, then the one-time IP notice (243-244, docs/ux/specs/voice-ip-notice.md).
 async function joinRoom(p, ok = 'הבנתי') {
-  await p.locator('.voice-room-entry').click();
+  await p.locator('.voice-room-row').first().click();
   await p.getByRole('dialog').getByRole('button', { name: ok }).click();
 }
 {
   const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999', 'x');
   await p.locator('.voice-room-people li').first().waitFor();
   await shot(p, '245-voice-room-he');
-  await p.locator('.voice-room-entry').click();
+  await p.locator('.voice-room-row').first().click();
   await p.getByRole('dialog').waitFor();
   await shot(p, '243-call-ip-notice-he');
   await p.getByRole('dialog').getByRole('button', { name: 'הבנתי' }).click();
@@ -421,7 +422,7 @@ async function joinRoom(p, ok = 'הבנתי') {
 }
 {
   const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999&roomFull=1', 'x');
-  await p.locator('.voice-room-reason').waitFor();
+  await p.locator('.voice-room-count.full').waitFor();
   await shot(p, '242-call-full-he');
   await p.close();
 }
@@ -433,7 +434,7 @@ async function joinRoom(p, ok = 'הבנתי') {
 }
 {
   const p = await chat('?demo=1&still=1&lang=en&theme=light&update=999999', 'x');
-  await p.locator('.voice-room-entry').click();
+  await p.locator('.voice-room-row').first().click();
   await p.getByRole('dialog').waitFor();
   await shot(p, '244-call-ip-notice-en-light');
   await p.close();
@@ -980,6 +981,75 @@ for (const [lang, t] of [
   await p.locator('.closed-banner').waitFor();
   await p.waitForTimeout(600);
   await shot(p, '256-server-closed-he');
+  await p.close();
+}
+
+
+// ---- voice rooms, 0.4.3 (380-389, docs/ux/specs/voice-rooms.md) ------------
+const ROOMS = '?demo=1&still=1&lang=he&theme=light&update=999999';
+async function sidebarShot(p, name) {
+  await p.waitForTimeout(250);
+  const box = await p.locator('nav:has(.voice-rooms)').boundingBox();
+  await p.screenshot({ path: `${OUT}/${name}.png`, clip: { x: box.x, y: box.y, width: box.width, height: Math.min(box.height, 760) } });
+  console.log('saved', name);
+}
+{
+  const p = await chat(`${ROOMS}&voiceRooms=2`, 'x');
+  await p.locator('.voice-room-row').nth(1).waitFor();
+  await sidebarShot(p, '380-voice-rooms-two-he');
+  await p.close();
+}
+{
+  const p = await chat(`${ROOMS}&voiceRooms=2&roomFull=1`, 'x');
+  await p.locator('.voice-room-count.full').waitFor();
+  await p.locator('.voice-room-row').first().hover();
+  await sidebarShot(p, '381-voice-room-full-he');
+  await p.close();
+}
+{
+  // The host's menu: open a room (IP notice first), then its menu.
+  const p = await chat(`${ROOMS}&voiceRooms=1`, 'x');
+  await p.locator('.voice-root').click();
+  await p.getByRole('dialog').getByRole('button', { name: 'הבנתי' }).click();
+  const mine = p.locator('.voice-room-row.in-room');
+  await mine.waitFor();
+  // The call bar slides in under the list; the speaking ring keeps the row from settling.
+  await p.waitForTimeout(500);
+  await mine.click({ button: 'right', force: true });
+  await p.getByRole('menu').waitFor();
+  await shot(p, '382-voice-room-menu-master-he');
+  await p.getByRole('menuitem', { name: 'שינוי שם' }).click();
+  const field = p.getByRole('textbox', { name: 'שינוי שם' });
+  await field.fill('ערב משחקים');
+  await sidebarShot(p, '383-voice-room-rename-he');
+  await p.close();
+}
+{
+  const p = await page('?demo=1&still=1&lang=he&theme=dark&update=999999&voiceRooms=2', { ...PHONE_ROOMS, colorScheme: 'dark' });
+  const row = p.locator('.voice-room-row').nth(1);
+  await row.waitFor();
+  await p.locator('.voice-rooms').scrollIntoViewIfNeeded();
+  await p.mouse.move(1, 1);
+  await shot(p, '384-voice-rooms-phone-he');
+  // Long-press (here: the context menu) opens the bottom sheet (B25 §5).
+  await row.click({ button: 'right' });
+  await p.getByRole('menu').waitFor();
+  await p.waitForTimeout(300);
+  await shot(p, '386-voice-room-sheet-phone-he');
+  await p.close();
+}
+{
+  const p = await chat('?demo=1&still=1&lang=en&theme=light&update=999999&voiceRooms=2', 'x');
+  await p.locator('.voice-room-row').nth(1).waitFor();
+  await sidebarShot(p, '385-voice-rooms-en-light');
+  await p.close();
+}
+{
+  // 10 rooms: the pinned row is off with the cap reason; 8 listed, "2 more rooms".
+  const p = await chat(`${ROOMS}&voiceRooms=10`, 'x');
+  await p.locator('.voice-rooms-more').waitFor();
+  await p.locator('.voice-root').scrollIntoViewIfNeeded();
+  await shot(p, '387-voice-rooms-cap-he');
   await p.close();
 }
 

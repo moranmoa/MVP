@@ -364,23 +364,63 @@ const ROOM_ID = /^(?:[0-9a-f]{64}|[A-Za-z0-9_-]{1,40})$/;
 const isRoomId = (v: unknown): v is Id => typeof v === 'string' && ROOM_ID.test(v);
 const onlyKeys = (o: object, keys: string[]) => Object.keys(o).every((k) => keys.includes(k));
 
+/** Voice rooms (0.4.3): what the UI accepts from the core (design §5). */
+export const VOICE_ROOMS_MAX = 10;
+export const VOICE_ROOM_LIMIT_MAX = 5;
+export const VOICE_ROOM_NAME_MAX = 32;
+const isTime = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+
 /**
- * A voice room from the core, or null to drop it: a bad id, more than 5 people,
- * a person twice, a non-boolean `muted` or any unknown field (voice-room contract).
+ * One voice room, or null to drop it: a bad id, a limit outside 2–5, more
+ * people than the limit, a person twice, a host who isn't in the room, a
+ * non-boolean `muted`, or any unknown field. A name that cleans to nothing
+ * is the default name.
  */
 export function cleanVoiceRoom(r: unknown): VoiceRoom | null {
-  if (!r || typeof r !== 'object' || !onlyKeys(r, ['serverId', 'roomId', 'participants', 'relayOnly'])) return null;
-  const { serverId, roomId, participants, relayOnly } = r as Record<string, unknown>;
-  if (!isRoomId(serverId) || !isRoomId(roomId) || !Array.isArray(participants) || participants.length > 5) return null;
+  const KEYS = ['serverId', 'roomId', 'creatorId', 'createdAt', 'name', 'limit', 'masterId', 'members', 'relayOnly'];
+  if (!r || typeof r !== 'object' || !onlyKeys(r, KEYS)) return null;
+  const { serverId, roomId, creatorId, createdAt, name, limit, masterId, members, relayOnly } = r as Record<string, unknown>;
+  if (!isRoomId(serverId) || !isRoomId(roomId) || !isRoomId(creatorId) || !isRoomId(masterId) || !isTime(createdAt)) return null;
+  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 2 || limit > VOICE_ROOM_LIMIT_MAX) return null;
+  if (!Array.isArray(members) || members.length === 0 || members.length > limit) return null;
+  if (name !== undefined && typeof name !== 'string') return null;
   if (relayOnly !== undefined && typeof relayOnly !== 'boolean') return null;
-  const out: VoiceRoom['participants'] = [];
-  for (const p of participants as unknown[]) {
-    if (!p || typeof p !== 'object' || !onlyKeys(p, ['userId', 'muted'])) return null;
-    const { userId, muted } = p as Record<string, unknown>;
-    if (!isRoomId(userId) || typeof muted !== 'boolean' || out.some((x) => x.userId === userId)) return null;
-    out.push({ userId, muted });
+  const out: VoiceRoom['members'] = [];
+  for (const p of members as unknown[]) {
+    if (!p || typeof p !== 'object' || !onlyKeys(p, ['userId', 'muted', 'joinedAt'])) return null;
+    const { userId, muted, joinedAt } = p as Record<string, unknown>;
+    if (!isRoomId(userId) || typeof muted !== 'boolean' || !isTime(joinedAt) || out.some((x) => x.userId === userId)) return null;
+    out.push({ userId, muted, joinedAt });
   }
-  return { serverId, roomId, participants: out, ...(relayOnly === true ? { relayOnly: true } : {}) };
+  if (!out.some((p) => p.userId === masterId)) return null;
+  const clean = cleanName(name, VOICE_ROOM_NAME_MAX);
+  return {
+    serverId,
+    roomId,
+    creatorId,
+    createdAt,
+    ...(clean ? { name: clean } : {}),
+    limit,
+    masterId,
+    members: out,
+    ...(relayOnly === true ? { relayOnly: true } : {}),
+  };
+}
+
+/**
+ * A server's rooms, oldest first. Null (drop) for more than 10 rooms, a room
+ * twice, or one from another server; a malformed room alone is left out.
+ */
+export function cleanVoiceRooms(serverId: unknown, rooms: unknown): VoiceRoom[] | null {
+  if (!isRoomId(serverId) || !Array.isArray(rooms) || rooms.length > VOICE_ROOMS_MAX) return null;
+  const out: VoiceRoom[] = [];
+  for (const raw of rooms as unknown[]) {
+    const room = cleanVoiceRoom(raw);
+    if (!room) continue;
+    if (room.serverId !== serverId || out.some((x) => x.roomId === room.roomId)) return null;
+    out.push(room);
+  }
+  return out.sort((a, b) => a.createdAt - b.createdAt);
 }
 
 /** A cleaner may return null to drop the event altogether. */
@@ -407,7 +447,10 @@ const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[
   'window.closeRequest': () => ({}),
   'notify.click': (p) => (typeof p?.channelId === 'string' ? { channelId: id(p.channelId), messageId: typeof p.messageId === 'string' ? id(p.messageId) : null } : null),
   'call.state': (c) => cleanCall(c),
-  'voice.room': (r) => cleanVoiceRoom(r),
+  'voice.rooms': (p) => {
+    const rooms = cleanVoiceRooms(p?.serverId, p?.rooms);
+    return rooms ? { serverId: p.serverId, rooms } : null;
+  },
   // For the voice engine: anything malformed is dropped, never coerced.
   'call.signal': (s) => {
     const kind = (['offer', 'answer', 'ice'] as const).find((k) => k === s?.kind);
@@ -461,11 +504,13 @@ export function guardCore(core: CoreApi): CoreApi {
     listInvites: wrap(core.listInvites, (l) => l.map(cleanInvite)),
     joinServer: wrap(core.joinServer, cleanJoin),
     joinCall: wrap(core.joinCall, cleanCall),
-    getVoiceRoom: wrap(core.getVoiceRoom, (r) => {
-      const room = cleanVoiceRoom(r);
-      if (!room) throw { code: 'internal' };
-      return room;
-    }),
+    listVoiceRooms: (serverId: Id) =>
+      core.listVoiceRooms(serverId).then((l) => {
+        const rooms = cleanVoiceRooms(serverId, l);
+        if (!rooms) throw { code: 'internal' };
+        return rooms;
+      }),
+    createVoiceRoom: wrap(core.createVoiceRoom, cleanCall),
     getMessages: wrap(core.getMessages, cleanRange),
     sendMessage: wrap(core.sendMessage, cleanMessage),
     on: <E extends CoreEventName>(event: E, handler: (p: CoreEvents[E]) => void) => {

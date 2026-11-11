@@ -8,7 +8,8 @@ import { isCoreError } from '../../core';
 import type { Channel, Id, ServerSummary } from '../../core';
 import { Avatar, Badge, Code, Name } from '../../components/common';
 import { BellOffIcon, GearIcon, HashIcon, PlusIcon } from '../../components/icons';
-import { CallBar, VoiceRoomEntry, useCallEngine } from './CallBar';
+import { CallBar, useCallEngine } from './CallBar';
+import { VoiceRooms } from './VoiceRooms';
 import { useContextMenu, type MenuItem } from '../../components/ContextMenu';
 import { copyText } from '../../app/clipboard';
 import { useCore } from '../../core';
@@ -313,7 +314,7 @@ export function ChannelSidebar({
           })}
         </ul>
         {/* A closed server is read-only (#261): no calls; the core ends any call there. */}
-        {!server.closed && <VoiceRoomEntry serverId={server.id} myId={identity.id} engine={engine} />}
+        {!server.closed && <VoiceRooms server={server} myId={identity.id} engine={engine} />}
       </nav>
       <CallBar myId={identity.id} engine={engine} />
       <footer className="me-panel">

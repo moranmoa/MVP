@@ -1,15 +1,14 @@
 // Voice v1, piece E (#223) and E2 (voice-room amendment): the UI around a call.
-// Join the server's voice room from the channel sidebar, see who is in it,
-// mute, leave. The audio itself (microphone, WebRTC, speaking levels) is the
+// The call bar (mute, leave) and what the voice rooms share (VoiceRooms.tsx):
+// the IP notice, the join error line, the roster notes. The audio itself (microphone, WebRTC, speaking levels) is the
 // voice engine's, piece D in ui/src/voice.
 
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
-import { Avatar, Dialog, Name } from '../../components/common';
-import { AlertIcon, HangUpIcon, MicIcon, MicOffIcon, PhoneIcon, SpeakerIcon } from '../../components/icons';
-import { useCore, type Id, type Member } from '../../core';
+import { AlertIcon, HangUpIcon, MicIcon, MicOffIcon, PhoneIcon } from '../../components/icons';
+import { useCore, type Id } from '../../core';
 import { useVoiceEngine, type PeerFailure, type VoiceEngineView } from '../../voice';
 
 /**
@@ -64,7 +63,7 @@ function useStunUrl(): string | null {
 }
 
 /** The short code the app shows for someone not (yet) in the member list. */
-function codeOf(id: Id): string {
+export function codeOf(id: Id): string {
   const s = id.replace(/[^0-9a-z]/gi, '').slice(0, 8).toUpperCase();
   return `${s.slice(0, 4)}-${s.slice(4)}`;
 }
@@ -73,27 +72,26 @@ const ERROR_TEXT: Record<string, string> = {
   'call-full': 'call.error.full',
   'relay-only': 'call.error.relayOnly',
   'in-call-elsewhere': 'call.error.inCallElsewhere',
+  'room-cap': 'voiceRooms.capReached',
   'not-implemented': 'call.error.notImplemented',
   'not-allowed': 'call.error.notAllowed',
 };
 
-const NO_MEMBERS: Member[] = [];
-const FAILURE_TEXT: Record<PeerFailure, [text: string, hint: string]> = {
+export const FAILURE_TEXT: Record<PeerFailure, [text: string, hint: string]> = {
   failed: ['call.peerFailed', 'call.peerFailedHint'],
   refused: ['call.peerRefused', 'call.peerRefusedHint'],
 };
-const ROOM_MAX = 5;
 
 /** docs/ux/specs/voice-ip-notice.md: shown once per computer, before the first join. */
 const IP_NOTICE_KEY = 'mvs.notices.voiceIp.v1';
-function ipNoticeSeen(): boolean {
+export function ipNoticeSeen(): boolean {
   try {
     return localStorage.getItem(IP_NOTICE_KEY) === '1';
   } catch {
     return false; // no storage: explain every time rather than join unexplained
   }
 }
-function rememberIpNotice(): void {
+export function rememberIpNotice(): void {
   try {
     localStorage.setItem(IP_NOTICE_KEY, '1');
   } catch {
@@ -101,159 +99,7 @@ function rememberIpNotice(): void {
   }
 }
 
-/**
- * The server's voice room in the channel sidebar: "Join chat" with a speaker
- * icon, and who is inside under it, for every member. Disabled, with the reason
- * under it, when the room is full or calls are off (relay-only).
- */
-export function VoiceRoomEntry({ serverId, myId, engine }: { serverId: Id; myId: Id; engine: CallEngine }) {
-  const store = useAppStore();
-  const intl = useIntl();
-  const room = useStore(store, (s) => s.voiceRooms[serverId]);
-  const members = useStore(store, (s) => s.members[serverId] ?? NO_MEMBERS);
-  const relayOnly = useStore(store, (s) => s.relayOnly);
-  const callError = useStore(store, (s) => s.callError);
-  const callHere = useStore(store, (s) => !!s.call && s.call.channelId === s.voiceRooms[serverId]?.roomId);
-  const [notice, setNotice] = useState(false);
-  const entryRef = useRef<HTMLButtonElement>(null);
-  const okRef = useRef<HTMLButtonElement>(null);
-  // Spec §3: focus starts on "Got it" (the dialog opens in its own effect, which runs first).
-  useEffect(() => {
-    if (notice) okRef.current?.focus();
-  }, [notice]);
-  const bodyId = useId();
-  // Events are hints: re-read the room whenever this server comes on screen.
-  useEffect(() => {
-    void store.loadVoiceRoom(serverId);
-  }, [store, serverId]);
-
-  const people = room?.participants ?? [];
-  const inRoom = people.some((p) => p.userId === myId);
-  const full = !inRoom && people.length >= ROOM_MAX;
-  const blocked = relayOnly ? 'call.error.relayOnly' : full ? 'call.error.full' : null;
-  const title = inRoom ? 'call.roomIn' : full ? 'call.roomFull' : 'call.room';
-  const count = intl.formatMessage({ id: 'call.roomCount' }, { count: people.length, max: ROOM_MAX });
-  const byId = new Map(members.map((m) => [m.id, m]));
-  const reasonId = `voice-room-reason-${serverId}`;
-  const label = [intl.formatMessage({ id: title }), people.length ? count : null].filter(Boolean).join(', ');
-
-  return (
-    <div className="voice-room">
-      <button
-        type="button"
-        ref={entryRef}
-        className={`channel voice-room-entry ${inRoom ? 'in-room' : ''}`}
-        aria-label={label}
-        aria-disabled={blocked || inRoom ? true : undefined}
-        aria-describedby={blocked ? reasonId : undefined}
-        disabled={!room}
-        onClick={() => {
-          if (!room || blocked || inRoom) return;
-          // In a call, computers connect directly: say so before the first join.
-          if (!ipNoticeSeen()) setNotice(true);
-          else void store.joinCall(room.roomId);
-        }}
-      >
-        <SpeakerIcon />
-        <span className="channel-name">
-          <FormattedMessage id={title} />
-        </span>
-        {people.length > 0 && (
-          // The button's label already says the count; this is its short form.
-          <span className="voice-room-count" aria-hidden="true" title={count}>
-            <bdi dir="ltr">
-              {people.length}/{ROOM_MAX}
-            </bdi>
-          </span>
-        )}
-      </button>
-      {blocked && (
-        <p id={reasonId} className="voice-room-reason">
-          <FormattedMessage id={blocked} />
-          {relayOnly && (
-            <>
-              {' '}
-              <button type="button" className="link small" onClick={() => store.openSettings('privacy')}>
-                <FormattedMessage id="privacy.relayOnly.open" />
-              </button>
-            </>
-          )}
-        </p>
-      )}
-      {!blocked && callError && <CallError />}
-      <Dialog
-        open={notice}
-        onClose={() => {
-          setNotice(false);
-          entryRef.current?.focus();
-        }}
-        title={intl.formatMessage({ id: 'call.ipNotice.title' })}
-        describedBy={bodyId}
-        className="ip-notice"
-      >
-        <p id={bodyId}>
-          <FormattedMessage id="call.ipNotice.body" />
-        </p>
-        <div className="actions">
-          <button
-            type="button"
-            className="primary"
-            ref={okRef}
-            onClick={async () => {
-              rememberIpNotice();
-              setNotice(false);
-              if (room) await store.joinCall(room.roomId);
-              document.querySelector<HTMLButtonElement>('.call-bar .call-mute')?.focus();
-            }}
-          >
-            <FormattedMessage id="call.ipNotice.ok" />
-          </button>
-          <button
-            type="button"
-            className="secondary"
-            onClick={() => {
-              setNotice(false);
-              entryRef.current?.focus();
-            }}
-          >
-            <FormattedMessage id="common.cancel" />
-          </button>
-        </div>
-      </Dialog>
-      {people.length > 0 && (
-        <ul className="voice-room-people" aria-label={intl.formatMessage({ id: 'call.roomPeople' })}>
-          {people.map((p) => {
-            const m = byId.get(p.userId);
-            const name = m?.displayName || codeOf(p.userId);
-            return (
-              <li key={p.userId} className={callHere && engine.speaking[p.userId] ? 'speaking' : undefined}>
-                <Avatar name={name} color={m?.color ?? m?.avatarColor ?? '#888'} src={m?.avatarDataUrl} size={20} />
-                <span className="call-person">
-                  <Name>{name}</Name>
-                  {callHere && p.userId !== myId && engine.peerFailed[p.userId] && (
-                    <span
-                      className={`call-peer-failed ${engine.peerFailed[p.userId]}`}
-                      title={intl.formatMessage({ id: (FAILURE_TEXT[engine.peerFailed[p.userId]] ?? FAILURE_TEXT.failed)[1] })}
-                    >
-                      <FormattedMessage id={(FAILURE_TEXT[engine.peerFailed[p.userId]] ?? FAILURE_TEXT.failed)[0]} />
-                    </span>
-                  )}
-                </span>
-                {p.muted && (
-                  <span className="call-muted" role="img" aria-label={intl.formatMessage({ id: 'call.micOff' })}>
-                    <MicOffIcon />
-                  </span>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-/** Why joining failed, under the voice room entry, until dismissed or retried. */
+/** Why joining or opening a room failed, under the "Join chat" row, until dismissed or retried. */
 export function CallError() {
   const store = useAppStore();
   const intl = useIntl();
@@ -282,7 +128,7 @@ export function CallBar({ myId, engine }: { myId: Id; engine: CallEngine }) {
   const intl = useIntl();
   const call = useStore(store, (s) => s.call);
   // The call may be in another server's room than the one on screen.
-  const serverId = useStore(store, (s) => Object.values(s.voiceRooms).find((r) => r.roomId === s.call?.channelId)?.serverId);
+  const serverId = useStore(store, (s) => Object.entries(s.voiceRooms).find(([, rooms]) => rooms.some((r) => r.roomId === s.call?.channelId))?.[0]);
   const serverName = useStore(store, (s) => s.servers.find((x) => x.id === serverId)?.name ?? '');
   if (!call) return null;
 

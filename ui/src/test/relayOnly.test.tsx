@@ -65,7 +65,7 @@ describe('relay-only', () => {
   it('in a call, turning it on asks first; confirming ends the call', async () => {
     const { core } = await setup();
     const [server] = await core.listServers();
-    const room = await core.getVoiceRoom(server.id);
+    const [room] = await core.listVoiceRooms(server.id);
     await act(async () => {
       await core.joinCall(room.roomId);
     });
@@ -95,7 +95,7 @@ describe('relay-only', () => {
 });
 
 describe('sanitizer', () => {
-  const room = { serverId: 's-1', roomId: 's-1-voice', participants: [] };
+  const room = { serverId: 's-1', roomId: 's-1-room-1', creatorId: 'u-1', createdAt: 1, limit: 5, masterId: 'u-1', members: [{ userId: 'u-1', muted: false, joinedAt: 1 }] };
 
   it('a voice room may carry relayOnly; anything but a boolean drops the room', () => {
     expect(cleanVoiceRoom({ ...room, relayOnly: true })).toEqual({ ...room, relayOnly: true });

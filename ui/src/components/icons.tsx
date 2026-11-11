@@ -52,6 +52,12 @@ export const PhoneIcon = (p: IconProps) => (
     <path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a1 1 0 0 1-1 1A16 16 0 0 1 4 5a1 1 0 0 1 1-1z" />
   </Icon>
 );
+/** Voice rooms: the room's host. */
+export const CrownIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M4 18h16M5 15l-1-9 5 4 3-6 3 6 5-4-1 9z" />
+  </Icon>
+);
 export const SpeakerIcon = (p: IconProps) => (
   <Icon {...p}>
     <path d="M4 9h4l5-4v14l-5-4H4zM16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12" />
