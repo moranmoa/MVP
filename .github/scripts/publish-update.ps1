@@ -1,6 +1,6 @@
 # Publishes an offline-signed update manifest to the fixed-tag release the
 # app polls (B8-5, #211):
-#   https://github.com/moranmoa/MVP/releases/download/update-<channel>/manifest.json
+#   https://github.com/moranmoa/MVS/releases/download/update-<channel>/manifest.json
 # Run by the OWNER on the online PC after signing on the offline machine.
 # CI never holds a signing key.
 #
@@ -17,7 +17,7 @@ param(
   [Parameter(Mandatory)][string]$Root,
   [string[]]$Roots = @(),
   [string]$Updater = 'updater',
-  [string]$Repo = 'moranmoa/MVP'
+  [string]$Repo = 'moranmoa/MVS'
 )
 $ErrorActionPreference = 'Stop'
 

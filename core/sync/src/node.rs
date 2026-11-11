@@ -345,6 +345,8 @@ enum Command {
     InboundPulls { reply: oneshot::Sender<usize> },
     #[cfg(test)]
     Dial { addr: Multiaddr },
+    #[cfg(test)]
+    Disconnect { peer: PeerId },
     Prune { id: RecordId, reply: oneshot::Sender<Result<bool>> },
     VoiceSend { to: PublicKey, bytes: Vec<u8>, reply: oneshot::Sender<Result<(), VoiceError>> },
     ServeInvite { server: ServerId, handle: [u8; 32], publication: Vec<u8>, announce: bool, reply: oneshot::Sender<bool> },
@@ -764,6 +766,12 @@ impl Node {
     #[cfg(test)]
     fn test_dial(&self, addr: Multiaddr) {
         self.send(Command::Dial { addr }).unwrap();
+    }
+
+    /// Tests: close every connection to `peer` (as a relay circuit reset does).
+    #[cfg(test)]
+    fn test_disconnect(&self, peer: PeerId) {
+        self.send(Command::Disconnect { peer }).unwrap();
     }
 
     /// Tests: how many inbound pulls this node refused (any of the three limits).
@@ -1396,6 +1404,10 @@ impl Task {
             #[cfg(test)]
             Command::Dial { addr } => {
                 let _ = self.swarm.dial(addr);
+            }
+            #[cfg(test)]
+            Command::Disconnect { peer } => {
+                let _ = self.swarm.disconnect_peer_id(peer);
             }
             Command::VoiceSend { to, bytes, reply } => {
                 let _ = reply.send(self.voice_send(to, bytes));
@@ -2273,6 +2285,12 @@ impl Task {
                     info!(%peer_id, "peer connected");
                     self.reached = true;
                     self.emit(NodeEvent::PeerConnected(peer_id));
+                    // A new connection is a new chance to bind: drop the
+                    // re-probe wait for this peer (a member whose link reset
+                    // would otherwise stay unbound, so offline, for up to
+                    // UNBOUND_REPROBE). Empty answers still count
+                    // (`empty_from`), so a reset doesn't re-probe what it lacks.
+                    self.probed.retain(|(p, _), _| *p != peer_id);
                     self.pull_shared(peer_id, "connect", FIRST_CONTACT_PULLS);
                 }
             }
@@ -4078,6 +4096,66 @@ mod tests {
         assert_eq!(map.len(), MAX_T23_ENTRIES);
         assert!(!map.contains_key(&0) && !map.contains_key(&49), "the oldest stayed");
         assert!(map.contains_key(&(MAX_T23_ENTRIES as u32 + 49)), "the newest went");
+    }
+
+    /// 0.4.1 presence bug: three members in a triangle (each has another bound
+    /// member). One link resets and comes back: both ends must see each other
+    /// online again soon, not after T23's 10-minute re-probe wait.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn members_see_each_other_online_again_after_a_link_reset() {
+        use crate::testutil::test_key;
+        let key = |n: u8| -> Option<Arc<dyn Binder>> { Some(Arc::new(test_key(n))) };
+        let access = |n: u8| Access { binder: key(n), read_gate: Some(Arc::new(AcceptAll)), stub_gate: None };
+        let secret = ServerSecret::from_bytes([14; 32]);
+        async fn online(node: &Node, want: PublicKey) -> bool {
+            node.presence(server()).await.unwrap().online.contains(&want)
+        }
+        let id = |n: u8| test_key(n).identity();
+        let addr = |port: u16| -> Multiaddr { format!("/ip4/127.0.0.1/tcp/{port}").parse().unwrap() };
+        // C first; B meets C, then A meets C: A and B each already have a
+        // bound member when they meet, so their first probes are recorded.
+        let (c, _) = test_node_events("tri-c", None, None, access(2)).await;
+        c.open_server(server(), secret.clone()).unwrap();
+        let b = test_node("tri-b", None, Some(port_of(&c).await), access(1)).await;
+        b.open_server(server(), secret.clone()).unwrap();
+        let a = test_node("tri-a", None, Some(port_of(&c).await), access(0)).await;
+        a.open_server(server(), secret).unwrap();
+        // Generous: the Windows runner is slow to set up connections.
+        let wait = |what: &'static str| (what, Instant::now() + Duration::from_secs(60));
+        let (what, until) = wait("B and A bound to C");
+        while !(online(&b, id(2)).await && online(&a, id(2)).await) {
+            assert!(Instant::now() < until, "{what}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        a.test_dial(addr(port_of(&b).await));
+        let (what, until) = wait("A and B bound");
+        while !(online(&a, id(1)).await && online(&b, id(0)).await) {
+            assert!(Instant::now() < until, "{what}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // The A–B link resets (a relay circuit reset), then A dials B again.
+        a.test_disconnect(b.peer_id());
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        // Redial until linked again, over TCP and QUIC: on Windows a TCP
+        // redial from the reused listen port to the same peer can sit in
+        // TIME_WAIT for minutes (a real device would come back through the
+        // relay). Only the link is retried; the claim stays the same.
+        let port_b = port_of(&b).await;
+        let quic_b: Multiaddr = format!("/ip4/127.0.0.1/udp/{port_b}/quic-v1").parse().unwrap();
+        let (what, until) = wait("A and B online again after the reset");
+        let mut redial = Instant::now() - Duration::from_secs(10);
+        while !(online(&a, id(1)).await && online(&b, id(0)).await) {
+            assert!(Instant::now() < until, "{what}");
+            if redial.elapsed() >= Duration::from_secs(3) && !a.peers().await.unwrap().contains(&b.peer_id()) {
+                a.test_dial(addr(port_b));
+                a.test_dial(quic_b.clone());
+                redial = Instant::now();
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        for node in [a, b, c] {
+            node.shutdown().await.unwrap();
+        }
     }
 
     async fn counts(node: &Node) -> (u64, u64) {

@@ -48,12 +48,13 @@ describe('invite link', () => {
     expect(screen.getByRole('button', { name: 'Copy' })).toBeTruthy(); // not "Copied"
   });
 
-  it('is shown from the server sidebar', async () => {
+  it('is no longer a button in the server header; the server menu copies it (owner request)', async () => {
     const settings: Settings = { locale: 'en', theme: 'light', uiScale: 1, fontSize: 15 };
     render(<App core={new MockCore({ demo: true, speed: 0, simulateActivity: false })} initialSettings={settings} />);
-    const button = await screen.findByRole('button', { name: 'Show the invite link' });
-    fireEvent.click(button);
-    expect(button.getAttribute('aria-expanded')).toBe('true');
-    expect(document.querySelector('#sidebar-invite .invite-link')?.textContent).toMatch(/^mvp:\/\/join\//);
+    await screen.findByRole('textbox', { name: /^Message / });
+    expect(screen.queryByRole('button', { name: 'Show the invite link' })).toBeNull();
+    expect(document.querySelector('.sidebar-header .age-tag')).toBeNull();
+    fireEvent.contextMenu(screen.getAllByRole('button').find((b) => b.getAttribute('aria-current') === 'page' && b.closest('.rail'))!);
+    expect(screen.getByRole('menuitem', { name: 'Copy invite link' })).toBeTruthy();
   });
 });

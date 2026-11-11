@@ -238,7 +238,7 @@ function LanguageStep({ onNext, onRestore }: { onNext: () => void; onRestore: ()
       <p className="muted">
         <FormattedMessage id="onb.language.hint" />
       </p>
-      <LanguagePicker label={intl.formatMessage({ id: 'onb.language.title' })} />
+      <LanguagePicker label={intl.formatMessage({ id: 'onb.language.title' })} hideLabel />
       <div className="actions">
         <button type="button" className="primary" onClick={onNext}>
           <FormattedMessage id="common.next" />
