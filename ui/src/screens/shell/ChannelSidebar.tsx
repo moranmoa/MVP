@@ -324,7 +324,7 @@ export function ChannelSidebar({
           aria-label={intl.formatMessage({ id: 'profile.edit.open' })}
           title={intl.formatMessage({ id: 'profile.edit.open' })}
         >
-          <Avatar name={identity.displayName || identity.shortCode} color={identity.avatarColor} src={identity.avatarDataUrl} size={32} presence="online" />
+          <Avatar name={identity.displayName || identity.shortCode} color={identity.color ?? identity.avatarColor} src={identity.avatarDataUrl} size={32} presence="online" />
           <span className="me-text">
             <span className="me-name">
               <Name>{identity.displayName || identity.shortCode}</Name>

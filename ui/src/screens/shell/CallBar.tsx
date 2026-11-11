@@ -227,7 +227,7 @@ export function VoiceRoomEntry({ serverId, myId, engine }: { serverId: Id; myId:
             const name = m?.displayName || codeOf(p.userId);
             return (
               <li key={p.userId} className={callHere && engine.speaking[p.userId] ? 'speaking' : undefined}>
-                <Avatar name={name} color={m?.avatarColor ?? '#888'} size={20} />
+                <Avatar name={name} color={m?.color ?? m?.avatarColor ?? '#888'} src={m?.avatarDataUrl} size={20} />
                 <span className="call-person">
                   <Name>{name}</Name>
                   {callHere && p.userId !== myId && engine.peerFailed[p.userId] && (

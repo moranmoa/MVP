@@ -46,6 +46,20 @@ export function Code({ value, label }: { value: string; label?: string }) {
   );
 }
 
+/**
+ * #362: the letter colour on `hex` (#rrggbb): white or black, whichever
+ * has the higher WCAG contrast. Members pick any colour; the better of the two
+ * is always at least 4.58:1, so the letter meets AA on every colour.
+ */
+export function inkOn(hex: string): string {
+  const lin = (i: number) => {
+    const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  const l = 0.2126 * lin(1) + 0.7152 * lin(3) + 0.0722 * lin(5);
+  return 1.05 / (l + 0.05) >= (l + 0.05) / 0.05 ? '#fff' : '#000';
+}
+
 export function Avatar({
   name,
   color,
@@ -60,8 +74,9 @@ export function Avatar({
   presence?: 'online' | 'offline';
 }) {
   const letter = [...(name.trim() || '?')][0].toUpperCase();
+  const bg = safeColor(color);
   return (
-    <span className="avatar" style={{ width: `${size / 16}rem`, height: `${size / 16}rem`, background: safeColor(color) }} aria-hidden="true">
+    <span className="avatar" style={{ width: `${size / 16}rem`, height: `${size / 16}rem`, background: bg, color: inkOn(bg) }} aria-hidden="true">
       {safeImageSrc(src) ? <img src={safeImageSrc(src)} alt="" /> : <span style={{ fontSize: `${size / 40}rem` }}>{letter}</span>}
       {presence && <span className={`presence presence-${presence}`} />}
     </span>

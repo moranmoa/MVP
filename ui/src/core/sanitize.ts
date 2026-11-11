@@ -183,10 +183,21 @@ function cleanPendingBirthDate(raw: unknown): Identity['pendingBirthDate'] {
   return { date: d, effectiveAt };
 }
 
+/** #359: a member's small picture: WebP or PNG base64 only, within the core's cap. */
+const SMALL_AVATAR = /^data:image\/(?:webp|png);base64,[A-Za-z0-9+/]+={0,2}$/;
+export function cleanSmallAvatar(raw: unknown): string | undefined {
+  return typeof raw === 'string' && raw.length <= 3500 && SMALL_AVATAR.test(raw) ? raw : undefined;
+}
+/** #359: a chosen colour, #rrggbb only. */
+export function cleanHexColor(raw: unknown): string | undefined {
+  return typeof raw === 'string' && /^#[0-9a-f]{6}$/i.test(raw) ? raw.toLowerCase() : undefined;
+}
+
 export function cleanIdentity(i: Identity): Identity {
-  const { pendingBirthDate, ...rest } = i;
+  const { pendingBirthDate, color: _color, ...rest } = i;
   const pending = cleanPendingBirthDate(pendingBirthDate);
   return {
+    ...(cleanHexColor(i.color) ? { color: cleanHexColor(i.color) } : {}),
     ...rest,
     ...(pending ? { pendingBirthDate: pending } : {}),
     shortCode: cleanCode(i.shortCode),
@@ -251,7 +262,13 @@ export function cleanChannel(c: Channel): Channel {
 }
 
 export function cleanMember(m: Member): Member {
+  const { avatarDataUrl: rawAvatar, color: rawColor, ...m0 } = m;
+  const avatar = cleanSmallAvatar(rawAvatar);
+  const color = cleanHexColor(rawColor);
+  m = m0 as Member;
   return {
+    ...(avatar ? { avatarDataUrl: avatar } : {}),
+    ...(color ? { color } : {}),
     ...m,
     displayName: cleanName(m.displayName),
     shortCode: cleanCode(m.shortCode),

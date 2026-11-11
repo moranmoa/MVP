@@ -192,7 +192,7 @@ function MembersPage({ server }: { server: ServerSummary }) {
       <ul className="settings-list">
         {members.map((m) => (
           <li key={m.id}>
-            <Avatar name={displayName(m)} color={m.avatarColor} size={32} presence={m.presence} />
+            <Avatar name={displayName(m)} color={m.color ?? m.avatarColor} src={m.avatarDataUrl} size={32} presence={m.presence} />
             <Name className="name grow">{displayName(m)}</Name>
             {m.isOwner && (
               <span className="owner-tag">
