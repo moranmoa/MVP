@@ -100,6 +100,11 @@ const MAX_ANSWERING: usize = 8;
 /// budget (`SERVED_BYTES_BURST`) for each pull until the answer goes out, so
 /// 3 stay under it: a burst of pulls is never refused for the budget.
 const MAX_PULLS_IN_FLIGHT: usize = 3;
+/// T24: outgoing pulls per peer: a burst, then a steady rate, under the
+/// answering side's (`PULL_BURST` 30, `PULL_RATE` 10/s), so its limit never
+/// refuses ours (a refused pull fails, isn't an empty answer, and is re-asked).
+const OUT_PULL_BURST: u32 = 20;
+const OUT_PULL_RATE: u32 = 8;
 /// Most pulls `pull_all` sends one peer in one anti-entropy round: under the
 /// answering side's burst (`PULL_BURST`) and what its rate (`PULL_RATE`)
 /// refills between rounds, so a peer that holds none of our servers' logs
@@ -612,6 +617,7 @@ impl Node {
             pending: Pending::new(MAX_PENDING, MAX_PENDING_BYTES),
             refused: Refused::new(MAX_REFUSED),
             inbound_pulls: RateLimiter::new(PULL_BURST, PULL_RATE, MAX_TRACKED_PEERS),
+            outbound_pulls: RateLimiter::new(OUT_PULL_BURST, OUT_PULL_RATE, MAX_TRACKED_PEERS),
             all_inbound_pulls: RateLimiter::new(GLOBAL_PULL_BURST, GLOBAL_PULL_RATE, 1),
             served_bytes: RateLimiter::new(SERVED_BYTES_BURST, SERVED_BYTES_RATE, MAX_TRACKED_PEERS),
             all_served_bytes: RateLimiter::new(ALL_SERVED_BYTES_BURST, ALL_SERVED_BYTES_RATE, 1),
@@ -1122,6 +1128,8 @@ struct Task {
     /// Channel records refused by the authorizer (or built only on refused ones).
     refused: Refused,
     inbound_pulls: RateLimiter<PeerId>,
+    /// T24: our pulls per peer (`OUT_PULL_BURST`, `OUT_PULL_RATE`).
+    outbound_pulls: RateLimiter<PeerId>,
     all_inbound_pulls: RateLimiter<()>,
     /// Byte budgets for served pages (tokens are bytes).
     served_bytes: RateLimiter<PeerId>,
@@ -1308,6 +1316,13 @@ impl Task {
                 Some(answer) = answers.recv() => self.send_answer(answer),
                 Some((key, records, more, acked)) = decoded.recv() => self.on_decoded(key, records, more, acked),
                 _ = soon.tick() => {
+                    // T24: send what the outgoing rate held back.
+                    let waiting: Vec<PeerId> = self.queued_pulls.keys().copied().collect();
+                    for peer in waiting {
+                        for _ in 0..MAX_PULLS_IN_FLIGHT {
+                            self.pull_next(peer);
+                        }
+                    }
                     self.pull_soon();
                     self.direct_fallback();
                     self.recheck_punch();
@@ -2117,7 +2132,7 @@ impl Task {
             for log in &probes {
                 if let Some(server) = self.sealing.get(log).map(|s| s.server) {
                     if self.bound.keys().any(|(_, s)| *s == server) {
-                        cap_oldest(&mut self.probed, |at| *at);
+                        cap_oldest(&mut self.probed, &(peer, server), |at| *at);
                         self.probed.insert((peer, server), now);
                     }
                 }
@@ -2143,7 +2158,12 @@ impl Task {
         }
         // At most MAX_PULLS_IN_FLIGHT out to one peer; the rest wait their
         // turn (`pull_next`) instead of being refused for its byte budget.
-        if self.inflight.values().filter(|(p, _)| *p == peer).count() >= MAX_PULLS_IN_FLIGHT {
+        // T24: and no faster than the answering side's rate, so a burst
+        // (opening many servers, quick answers freeing slots) never runs past
+        // its limit; the queue drains on the 1 s tick.
+        if self.inflight.values().filter(|(p, _)| *p == peer).count() >= MAX_PULLS_IN_FLIGHT
+            || !self.outbound_pulls.allow(peer, Instant::now())
+        {
             self.queued_pulls.entry(peer).or_default().insert(key.1);
             return;
         }
@@ -2786,7 +2806,7 @@ impl Task {
         if response.records.is_empty() && !response.more {
             if let Some(server) = self.sealing.get(&key.1).map(|s| s.server) {
                 if key.1.ends_with(CONTROL_SUFFIX) && !self.bound.contains_key(&(key.0, server)) {
-                    cap_oldest(&mut self.empty_from, |until| *until);
+                    cap_oldest(&mut self.empty_from, &key, |until| *until);
                     self.empty_from.insert(key.clone(), Instant::now() + UNBOUND_REPROBE);
                 }
             }
@@ -3379,8 +3399,9 @@ fn answer_with_ids(store: &Store, log: &str, have: &[ByteBuf], max_bytes: usize)
 /// timer tries again later.
 /// Before an insert into a T23 map: at [`MAX_T23_ENTRIES`], drop the entry
 /// whose time (`at`) is earliest, so the map never grows past the cap.
-fn cap_oldest<K: Clone + Eq + std::hash::Hash, V>(map: &mut HashMap<K, V>, at: impl Fn(&V) -> Instant) {
-    if map.len() < MAX_T23_ENTRIES {
+fn cap_oldest<K: Clone + Eq + std::hash::Hash, V>(map: &mut HashMap<K, V>, key: &K, at: impl Fn(&V) -> Instant) {
+    // An overwrite doesn't grow the map (tech lead): nothing to drop.
+    if map.len() < MAX_T23_ENTRIES || map.contains_key(key) {
         return;
     }
     if let Some(oldest) = map.iter().min_by_key(|(_, v)| at(v)).map(|(k, _)| k.clone()) {
@@ -4090,12 +4111,18 @@ mod tests {
         let mut map: HashMap<u32, Instant> = HashMap::new();
         let start = Instant::now();
         for i in 0..(MAX_T23_ENTRIES as u32 + 50) {
-            cap_oldest(&mut map, |at| *at);
+            cap_oldest(&mut map, &i, |at| *at);
             map.insert(i, start + Duration::from_millis(u64::from(i)));
         }
         assert_eq!(map.len(), MAX_T23_ENTRIES);
         assert!(!map.contains_key(&0) && !map.contains_key(&49), "the oldest stayed");
         assert!(map.contains_key(&(MAX_T23_ENTRIES as u32 + 49)), "the newest went");
+        // At the cap, overwriting a key drops nothing.
+        let key = MAX_T23_ENTRIES as u32 + 49;
+        cap_oldest(&mut map, &key, |at| *at);
+        map.insert(key, start);
+        assert_eq!(map.len(), MAX_T23_ENTRIES);
+        assert!(map.contains_key(&50), "an overwrite evicted the oldest");
     }
 
     /// 0.4.1 presence bug: three members in a triangle (each has another bound
