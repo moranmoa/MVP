@@ -365,6 +365,7 @@ const EVENT_CLEANERS: { [E in CoreEventName]?: (p: CoreEvents[E]) => CoreEvents[
       : null,
   'join.status': cleanJoin,
   'link.open': (p) => ({ link: cleanInviteLink(p?.link) }),
+  'notify.click': (p) => (typeof p?.channelId === 'string' ? { channelId: id(p.channelId), messageId: typeof p.messageId === 'string' ? id(p.messageId) : null } : null),
   'call.state': (c) => cleanCall(c),
   'voice.room': (r) => cleanVoiceRoom(r),
   // For the voice engine: anything malformed is dropped, never coerced.

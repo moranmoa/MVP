@@ -7,7 +7,7 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node --test test/security.test.js test/commands.test.js test/sidecar.test.js test/deeplink.test.js test/config.test.js test/update.test.js test/signout.test.js test/logfile.test.js",
+    "test": "node --test test/security.test.js test/commands.test.js test/sidecar.test.js test/deeplink.test.js test/config.test.js test/update.test.js test/signout.test.js test/logfile.test.js test/notify.test.js",
     "e2e": "node --test --test-concurrency=1 test/e2e.test.mjs test/deeplink.e2e.test.mjs",
     "dist:linux": "electron-builder --linux AppImage deb",
     "dist:win": "electron-builder --win nsis",

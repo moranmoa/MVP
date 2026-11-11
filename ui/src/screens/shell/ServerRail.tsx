@@ -9,6 +9,7 @@ import { isCoreError, useCore, type Id, type ServerSummary } from '../../core';
 import { GearIcon, HomeIcon, PlusIcon, RefreshIcon } from '../../components/icons';
 import { useContextMenu, type MenuItem } from '../../components/ContextMenu';
 import { copyText } from '../../app/clipboard';
+import { NotifyDialog } from './NotifyDialog';
 
 /** How far the mouse moves before a press becomes a drag (G-01). */
 const DRAG_START_PX = 4;
@@ -42,6 +43,8 @@ export function ServerRail({
   const listRef = useRef<HTMLUListElement>(null);
   const myId = useStore(store, (s) => s.identity?.id);
   const { bind, menu } = useContextMenu();
+  // G-61: the server whose notification settings are open.
+  const [notifyFor, setNotifyFor] = useState<ServerSummary | null>(null);
 
   // G-01: my order, local only. New servers come at the end.
   const servers = sortByOrder(joined, settings.serverOrder ?? []);
@@ -87,6 +90,7 @@ export function ServerRail({
             label: intl.formatMessage({ id: 'menu.copyInvite' }),
             onSelect: async () => store.showFlash((await copyText(s.inviteLink)) ? 'common.copied' : 'menu.copyFailed'),
           },
+          { key: 'notify', label: intl.formatMessage({ id: 'notify.menu' }), onSelect: () => setNotifyFor(s) },
           ...(s.ownerId === myId ? [{ key: 'settings', label: intl.formatMessage({ id: 'server.settings.open' }), onSelect: () => onOpenServerSettings(s.id) }] : []),
           { kind: 'separator' },
           ...(s.ownerId !== myId ? [{ key: 'leave', label: intl.formatMessage({ id: 'server.leave' }), danger: true, onSelect: () => onLeaveServer(s.id) }] : []),
@@ -295,6 +299,7 @@ export function ServerRail({
         </button>
       </div>
       {menu}
+      {notifyFor && <NotifyDialog kind="server" id={notifyFor.id} name={notifyFor.name} onClose={() => setNotifyFor(null)} />}
     </nav>
     </>
   );

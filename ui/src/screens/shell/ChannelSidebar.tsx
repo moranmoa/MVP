@@ -12,6 +12,7 @@ import { CallBar, VoiceRoomEntry, useCallEngine } from './CallBar';
 import { useContextMenu, type MenuItem } from '../../components/ContextMenu';
 import { copyText } from '../../app/clipboard';
 import { useCore } from '../../core';
+import { NotifyDialog } from './NotifyDialog';
 
 const NO_CHANNELS: Channel[] = [];
 
@@ -50,6 +51,8 @@ export function ChannelSidebar({
   // The one voice engine for my call, shared by the room entry and the call bar.
   const engine = useCallEngine(identity.id);
   const { bind, menu } = useContextMenu();
+  // G-61: the channel whose notification settings are open.
+  const [notifyFor, setNotifyFor] = useState<Channel | null>(null);
   const phone = useMediaQuery(phoneQuery(useSettings().settings.uiScale));
 
   // G-11 (#323): the owner reorders the channels; everyone sees the core's order.
@@ -139,6 +142,7 @@ export function ChannelSidebar({
       label: intl.formatMessage({ id: 'menu.copyChannelId' }),
       onSelect: async () => store.showFlash((await copyText(c.id)) ? 'common.copied' : 'menu.copyFailed'),
     },
+    { key: 'notify', label: intl.formatMessage({ id: 'notify.menu' }), onSelect: () => setNotifyFor(c) },
     { kind: 'separator' },
     ...(canMove && channels.indexOf(c) > 0
       ? [{ key: 'up', label: intl.formatMessage({ id: 'channelOrder.moveUp' }), onSelect: () => moveChannel(c, channels.indexOf(c) - 1) }]
@@ -339,6 +343,7 @@ export function ChannelSidebar({
         </button>
       </footer>
       {menu}
+      {notifyFor && <NotifyDialog kind="channel" id={notifyFor.id} name={`#${notifyFor.name}`} onClose={() => setNotifyFor(null)} />}
     </aside>
   );
 }
