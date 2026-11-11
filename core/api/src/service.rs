@@ -70,6 +70,11 @@ const KV_BACKUP_PUT_AT: &str = "backup-put-at";
 /// Restore servers: an unchanged backup is put again this often (design
 /// §4), so holders keep it and copies heal.
 pub const BACKUP_REPUBLISH_MS: u64 = 24 * 3_600_000;
+/// Restore servers: a restore still waiting (no backup found yet, or
+/// servers nobody could be reached for) is retried after 1 min, doubling
+/// to at most 1 h (Tech Lead); back to 1 min once it's done.
+pub const BACKUP_RETRY_FIRST_MS: u64 = 60_000;
+pub const BACKUP_RETRY_MAX_MS: u64 = 60 * 60_000;
 
 pub struct Config {
     /// `None` keeps everything in memory (tests).
@@ -268,6 +273,10 @@ pub struct Core {
     signed_out: AtomicBool,
     /// Restore servers: the first sync round after start backs up (login).
     backup_started: AtomicBool,
+    /// Restore servers: when the next retry of a pending restore is due and
+    /// the wait after it (ms, core clock): 1 min doubling to 1 h, reset
+    /// once the restore is done.
+    backup_retry: Mutex<(u64, u64)>,
 }
 
 struct PendingJoin {
@@ -429,6 +438,7 @@ impl Core {
             db_path: config.db_path,
             signed_out: AtomicBool::new(false),
             backup_started: AtomicBool::new(false),
+            backup_retry: Mutex::new((0, BACKUP_RETRY_FIRST_MS)),
         })
     }
 
@@ -718,7 +728,9 @@ impl Core {
         // Restore servers (#291 phase A): my backup on the network brings
         // my servers back, rejoined as the same member (the #290 path).
         self.lock().db.set(KV_BACKUP_PENDING, b"1")?;
-        self.restore_from_backup();
+        if !self.restore_from_backup() {
+            self.schedule_backup_retry(false);
+        }
         Ok(identity)
     }
 
@@ -729,12 +741,13 @@ impl Core {
     /// me as a member isn't entered (a stale backup can't undo a leave or a
     /// kick). Servers nobody can be reached for are tried again each sync
     /// round until all are in.
-    fn restore_from_backup(&self) {
+    fn restore_from_backup(&self) -> bool {
         let Some(keys) = self.lock().me.as_ref().map(|me| me.identity.backup_keys()) else {
-            return;
+            return true;
         };
         let answers = self.ports.network.fetch_backup(keys.tag());
-        let Some(plain) = backup::newest(&keys, &answers) else { return };
+        // No backup found (yet): try again later.
+        let Some(plain) = backup::newest(&keys, &answers) else { return false };
         let mut waiting = false;
         for (id, entry) in plain.servers.iter().filter(|(_, e)| e.live()) {
             let (Some(server), Some(secret)) = (
@@ -763,6 +776,33 @@ impl Core {
         }
         if !waiting {
             let _ = self.lock().db.delete(KV_BACKUP_PENDING);
+        }
+        !waiting
+    }
+
+    /// After a restore attempt that isn't done: the next one after the
+    /// current wait, and the wait after that doubled, at most
+    /// [`BACKUP_RETRY_MAX_MS`]. `done`: back to [`BACKUP_RETRY_FIRST_MS`].
+    fn schedule_backup_retry(&self, done: bool) {
+        let now = self.ports.clock.now_ms();
+        let mut retry = self.backup_retry.lock().expect("not poisoned");
+        *retry = if done {
+            (0, BACKUP_RETRY_FIRST_MS)
+        } else {
+            (now + retry.1, (retry.1 * 2).min(BACKUP_RETRY_MAX_MS))
+        };
+    }
+
+    /// Each sync round: a pending restore is tried again only when its
+    /// backoff is up (dev-sync on #339: a real holder lookup is slow).
+    fn retry_backup_restore(&self) {
+        if self.lock().db.get(KV_BACKUP_PENDING).ok().flatten().is_none() {
+            return;
+        }
+        let due = self.backup_retry.lock().expect("not poisoned").0 <= self.ports.clock.now_ms();
+        if due {
+            let done = self.restore_from_backup();
+            self.schedule_backup_retry(done);
         }
     }
 
@@ -1925,10 +1965,9 @@ impl Core {
     pub fn sync_now(&self) -> CoreResult<()> {
         self.retry_joins();
         self.flush_leaves();
-        // A restore still waiting on servers nobody could be reached for.
-        if self.lock().db.get(KV_BACKUP_PENDING).ok().flatten().is_some() {
-            self.restore_from_backup();
-        }
+        // A restore still waiting on its backup or on servers nobody could
+        // be reached for: retried with backoff.
+        self.retry_backup_restore();
         // Restore servers (#291 phase A): my server list, backed up when it
         // changed, at login, or every 24 h; the network calls run outside
         // the core lock.

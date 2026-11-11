@@ -4386,3 +4386,81 @@ fn mentions_mark_the_message_and_count_until_read() {
     assert!(mention.body.contains(&format!("<@{noa_id}>")));
     assert_eq!(mention.mentions.as_deref(), Some(&[nadav_id][..]));
 }
+
+/// A network that holds backups but can't reach any server's records until
+/// `reachable` is set; it counts backup fetches.
+struct FarServers {
+    world: Arc<LoopbackNetwork>,
+    reachable: std::sync::atomic::AtomicBool,
+    fetches: std::sync::atomic::AtomicUsize,
+}
+
+impl Network for FarServers {
+    fn publish(&self, record: &records::Record) {
+        self.world.publish(record);
+    }
+    fn fetch(&self, server: ServerId) -> Vec<records::Record> {
+        if self.reachable.load(std::sync::atomic::Ordering::SeqCst) {
+            self.world.fetch(server)
+        } else {
+            Vec::new()
+        }
+    }
+    fn put_backup(&self, tag: [u8; 32], blob: &[u8]) {
+        self.world.put_backup(tag, blob);
+    }
+    fn fetch_backup(&self, tag: [u8; 32]) -> Vec<Vec<u8>> {
+        self.fetches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.world.fetch_backup(tag)
+    }
+}
+
+/// dev-sync on #339: a restore whose servers nobody can be reached for is
+/// retried with backoff (1 min, 2, 4, … up to 1 h), not every sync round,
+/// and stops once every server is back.
+#[test]
+fn a_waiting_restore_backs_off() {
+    let world = World::new();
+    let me = world.peer();
+    let created = me.core.create_identity(adult()).unwrap();
+    assert!(answer(&me, &created.words, &[]).1.unwrap().ok);
+    me.core.create_server("Mine", AgeRestriction::None).unwrap();
+    me.core.sync_now().unwrap();
+
+    let net = Arc::new(FarServers {
+        world: world.network.clone(),
+        reachable: Default::default(),
+        fetches: Default::default(),
+    });
+    let laptop = world.peer_on(net.clone(), Arc::new(MemoryStore::new()), None, Arc::new(PendingGroupKeys));
+    laptop.core.restore_identity(created.words.clone()).unwrap();
+    assert!(laptop.core.list_servers().unwrap().is_empty(), "nobody online yet");
+    let fetches = || net.fetches.load(std::sync::atomic::Ordering::SeqCst);
+    laptop.core.sync_now().unwrap(); // the login backup round fetches once too
+    let base = fetches();
+    let round = |ms: u64| {
+        advance(&world, ms);
+        laptop.core.sync_now().unwrap();
+        fetches() - base
+    };
+    // Rounds every 2 s for a minute: no retry until the first minute is up.
+    for _ in 0..25 {
+        assert_eq!(round(2_000), 0);
+    }
+    assert_eq!(round(15_000), 1, "the 1-minute retry");
+    assert_eq!(round(60_000), 1, "then it waits 2 minutes");
+    assert_eq!(round(61_000), 2);
+    assert_eq!(round(4 * 60_000 + 1_000), 3, "then 4");
+    assert_eq!(round(8 * 60_000 + 1_000), 4, "then 8");
+    assert_eq!(round(16 * 60_000 + 1_000), 5, "then 16");
+    assert_eq!(round(32 * 60_000 + 1_000), 6, "then 32");
+    assert_eq!(round(30 * 60_000), 6, "not yet: the wait is an hour now");
+    assert_eq!(round(30 * 60_000 + 1_000), 7, "then at most an hour");
+    assert_eq!(round(60 * 60_000 + 1_000), 8);
+    // The servers can be reached: the next retry restores them, then stops.
+    net.reachable.store(true, std::sync::atomic::Ordering::SeqCst);
+    // (+1: the server set changed, so that round also writes the backup.)
+    assert_eq!(round(60 * 60_000 + 1_000), 10);
+    assert_eq!(laptop.core.list_servers().unwrap().len(), 1);
+    assert_eq!(round(2 * 60 * 60_000), 10, "done: no more retries");
+}
