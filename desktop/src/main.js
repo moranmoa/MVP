@@ -205,6 +205,24 @@ function serveCoreIpc() {
       toPages('notify.click', target);
     },
   });
+  // Our own title bar (docs/ux/specs/desktop-chrome.md): one command for
+  // the window, from our top frame, on the sender's own window only.
+  // minimize (to the taskbar; there is no tray), toggle-maximize, close (the
+  // page asks first during a call), and on Windows the overlay buttons'
+  // colours for the app's theme (fixed pairs, never colours from the page).
+  ipcMain.handle('window:control', (event, action) => {
+    if (!fromUs(event) || FRAME === 'native') return false;
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win) return false;
+    if (action === 'minimize') win.minimize();
+    else if (action === 'toggle-maximize') win.isMaximized() ? win.unmaximize() : win.maximize();
+    else if (action === 'close') {
+      closeConfirmed.add(win);
+      win.close();
+    } else if ((action === 'theme:light' || action === 'theme:dark') && FRAME === 'overlay') win.setTitleBarOverlay(OVERLAY[action.slice(6)]);
+    else return false;
+    return true;
+  });
   ipcMain.handle('notify:show', (event, notice) => {
     if (!fromUs(event)) return false;
     return notifier.show(notice);
@@ -351,8 +369,39 @@ app.on('open-url', (event, url) => {
   openInvite(url);
 });
 
+/**
+ * Our own title bar (docs/ux/specs/desktop-chrome.md §2), 32px, drawn by the
+ * page. Windows: hidden title bar with the native buttons on an overlay
+ * (Snap Layouts keep working). Linux: frameless, the page draws the buttons.
+ * macOS keeps its native frame for now.
+ */
+const FRAME = process.platform === 'win32' ? 'overlay' : process.platform === 'linux' ? 'custom' : 'native';
+/** The overlay buttons on --bg-rail, per theme (ui/src/styles/theme.css). */
+const OVERLAY = {
+  light: { color: '#dde0e6', symbolColor: '#1d2129', height: 32 },
+  dark: { color: '#121418', symbolColor: '#e6e8ec', height: 32 },
+};
+const FRAME_OPTIONS = {
+  overlay: { titleBarStyle: 'hidden', titleBarOverlay: OVERLAY.light },
+  custom: { frame: false },
+  native: {},
+}[FRAME];
+/** The window icon (Linux; Windows takes the exe's). */
+const ICON = app.isPackaged ? path.join(process.resourcesPath, 'icon.png') : path.join(__dirname, '..', 'build', 'icons', '512x512.png');
+/** Windows whose close the page confirmed (during a call, it asks first). */
+const closeConfirmed = new WeakSet();
+/**
+ * When a close was last held for the page to ask. A second close within
+ * this long always goes through, so a hung or hostile page can never keep
+ * the app (and the call's microphone) open (Security Lead, #358).
+ */
+const closeHeldAt = new WeakMap();
+const CLOSE_AGAIN_MS = 10_000;
+
 function createWindow() {
   const win = new BrowserWindow({
+    ...FRAME_OPTIONS,
+    ...(fs.existsSync(ICON) ? { icon: ICON } : {}),
     width: 1280,
     height: 800,
     minWidth: 360,
@@ -362,6 +411,31 @@ function createWindow() {
     webPreferences: { ...sec.WEB_PREFERENCES, preload: path.join(__dirname, 'preload.js'), devTools: !app.isPackaged },
   });
   win.once('ready-to-show', () => win.show());
+  // The title bar shows maximize or restore, and hides in fullscreen.
+  const sendState = () => {
+    if (sec.isInternalUrl(win.webContents.getURL())) {
+      win.webContents.send('core:event', 'window.state', { maximized: win.isMaximized(), fullScreen: win.isFullScreen() });
+    }
+  };
+  for (const e of ['maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen']) win.on(e, sendState);
+  // Close quits; during a call the page asks first ("This will end your
+  // call. Close MVS?") and confirms with window:control close.
+  // A second close within 10 s closes whatever the page does.
+  win.on('close', (e) => {
+    if (!callGate.inCall) return;
+    const held = closeHeldAt.get(win);
+    const askPage = FRAME !== 'native' && !closeConfirmed.has(win) && sec.isInternalUrl(win.webContents.getURL());
+    if (askPage && (held === undefined || Date.now() - held > CLOSE_AGAIN_MS)) {
+      closeHeldAt.set(win, Date.now());
+      e.preventDefault();
+      win.webContents.send('core:event', 'window.closeRequest', {});
+      return;
+    }
+    // Closing during a call ends it here, not by trusting the page: the
+    // microphone gate shuts now and the core leaves the call.
+    callGate.end();
+    core?.request('leaveCall', {}).catch(() => {});
+  });
   // Every load (a reload too) gets the current core status.
   win.webContents.on('did-finish-load', () => {
     flushInvite();

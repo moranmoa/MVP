@@ -10,6 +10,7 @@ const START_TIMEOUT_MS = 10_000;
 import { Onboarding, resumeStep } from '../screens/onboarding/Onboarding';
 import { Shell } from '../screens/shell/Shell';
 import { SettingsProvider, type Settings } from './settings';
+import { WindowFrame } from './TitleBar';
 import { Store, useStore } from './store';
 
 const StoreContext = createContext<Store | null>(null);
@@ -68,7 +69,7 @@ export function App({ core: rawCore, initialSettings }: { core: CoreApi; initial
     <CoreContext.Provider value={core}>
       <StoreContext.Provider value={store}>
         <SettingsProvider initial={initialSettings}>
-          {down ? <CoreDownScreen detail={down.detail} onRetry={retry} /> : ready ? <Root /> : <Splash />}
+          <WindowFrame>{down ? <CoreDownScreen detail={down.detail} onRetry={retry} /> : ready ? <Root /> : <Splash />}</WindowFrame>
         </SettingsProvider>
       </StoreContext.Provider>
     </CoreContext.Provider>

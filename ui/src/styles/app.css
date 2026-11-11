@@ -3133,6 +3133,98 @@ input.switch:disabled {
   min-height: 2.75rem;
 }
 
+/* Our own title bar (docs/ux/specs/desktop-chrome.md §2), desktop app on Windows
+   and Linux. 32px whatever the UI scale, to line up with the OS buttons. The
+   window buttons stay on the physical right in both languages. */
+.window-frame {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+}
+
+.window-body {
+  min-height: 0;
+}
+
+.titlebar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding-left: 10px;
+  /* Room for the buttons: the OS overlay on Windows (3 × 46px), ours on Linux (3 × 32px). */
+  padding-right: 138px;
+  background: var(--bg-rail);
+  color: var(--text);
+  font-size: 12px;
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+/* In RTL the content starts on the right, next to the buttons: a little more room. */
+[dir='rtl'] .titlebar {
+  padding-right: 148px;
+}
+
+.titlebar.custom {
+  padding-right: 96px;
+}
+
+[dir='rtl'] .titlebar.custom {
+  padding-right: 106px;
+}
+
+.titlebar-mark {
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
+.titlebar-title {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+
+.titlebar-controls {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  height: 32px;
+  -webkit-app-region: no-drag;
+}
+
+.titlebar-button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+}
+
+.titlebar-button .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.titlebar-button:hover,
+.titlebar-button:focus-visible {
+  background: color-mix(in srgb, var(--text) 14%, transparent);
+}
+
+.titlebar-button.close:hover,
+.titlebar-button.close:focus-visible {
+  background: #c42b1c;
+  color: #fff;
+
 .language-picker-row {
   display: flex;
   align-items: center;

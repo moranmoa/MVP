@@ -481,5 +481,10 @@
   "notify.mute.label": "Mute",
   "notify.settings.previewDisabled": "Turn on desktop notifications first.",
   "notify.hiddenMention": "You were mentioned in ⁨#{channel}⁩",
-  "notify.settings.previewPrivacy": "With the preview on, the operating system keeps the message text in its notification history and can show it on the lock screen."
+  "notify.settings.previewPrivacy": "With the preview on, the operating system keeps the message text in its notification history and can show it on the lock screen.",
+  "window.minimize": "Minimize",
+  "window.maximize": "Maximize",
+  "window.restore": "Restore",
+  "window.close": "Close",
+  "window.closeInCall": "This will end your call. Close MVS?"
 }
