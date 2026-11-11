@@ -475,6 +475,8 @@ for (const [query, name, opts, steps] of [
   ['lang=en&theme=light', '92-account-en-light', {}, 'open'],
   ['lang=he&theme=light&profileError=1', '93-account-save-error-he', {}, 'error'],
   ['lang=he&theme=light', '97-account-phone-he', { width: 375, height: 812, phone: true }, 'dirty'],
+  // #362: a light custom colour gets a dark letter; "צבע אחר" is ticked.
+  ['lang=he&theme=dark', '98-account-color-custom-dark-he', { colorScheme: 'dark' }, 'custom'],
 ]) {
   const p = opts.phone
     ? await page(`?demo=1&still=1&update=999999&settings=account&${query}`, opts)
@@ -485,11 +487,19 @@ for (const [query, name, opts, steps] of [
     await p.locator('.me-profile').click();
   }
   const dialog = p.getByRole('dialog');
-  const field = dialog.locator('.profile-editor input:not([type=file])');
+  const field = dialog.locator('.profile-editor input:not([type=file]):not([type=color])');
   await field.waitFor();
   if (steps !== 'open') {
     await field.fill(name.includes('-en') ? 'Moran B' : 'מורן ב.');
     await dialog.locator('.profile-editor textarea').fill('גיימרית בלילות, מתכנתת בימים');
+  }
+  // #362: the palette is a radio group; dirty shots pick pink, custom picks a light yellow.
+  if (steps === 'dirty') await dialog.getByRole('radio').nth(3).click();
+  if (steps === 'custom') {
+    await dialog.locator('.color-custom input').fill('#ffd43b');
+    // Show the preview (dark letter on yellow) with the picker under it.
+    await p.evaluate(() => (document.activeElement)?.blur());
+    await dialog.locator('.profile-editor').evaluate((el) => el.scrollIntoView({ block: 'start' }));
   }
   if (steps === 'error') {
     await dialog.locator('.profile-actions .primary').click();
@@ -1033,6 +1043,34 @@ for (const [lang, t] of [
   await p.mouse.move(1, 1);
   await shot(p, '351-muted-server-and-channel-he');
   await p.evaluate(() => localStorage.removeItem('mvs.mute.v1'));
+  await p.close();
+}
+
+// Our own title bar (docs/ux/specs/desktop-chrome.md): 390 (he, light), 391 (en, dark),
+// 392 (close during a call). A stand-in for the shell's window bridge, with
+// our own buttons as on Linux; on Windows the OS draws them on the overlay.
+for (const [lang, theme, name, query] of [
+  ['he', 'light', '390-title-bar-he-light', ''],
+  ['en', 'dark', '391-title-bar-en-dark', ''],
+  ['he', 'light', '392-close-in-call-he', 'call'],
+]) {
+  const ctx = await browser.newContext({ viewport: { width: 1366, height: 800 }, colorScheme: theme, locale: lang === 'he' ? 'he-IL' : 'en-US' });
+  await ctx.addInitScript(() => {
+    window.mvs = { windowFrame: 'custom', windowControl: async () => true };
+  });
+  const p = await ctx.newPage();
+  p.on('pageerror', (e) => problems.push(`page error: ${e.message}`));
+  await p.goto(`${BASE}?demo=1&still=1&lang=${lang}&theme=${theme}&update=999999`);
+  await p.locator('.titlebar').waitFor();
+  await p.getByRole('article').first().waitFor();
+  if (query === 'call') {
+    await joinRoom(p);
+    await p.getByRole('region', { name: 'שיחה קולית' }).waitFor();
+    await p.locator('.titlebar-button.close').click();
+    await p.getByRole('dialog').waitFor();
+  }
+  await p.waitForTimeout(500);
+  await shot(p, name);
   await p.close();
 }
 

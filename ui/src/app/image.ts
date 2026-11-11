@@ -60,3 +60,27 @@ export async function avatarFromFile(file: File): Promise<ImageResult> {
     bitmap.close();
   }
 }
+
+/**
+ * #359: the 48×48 picture others see: WebP (PNG where WebP isn't available),
+ * lowering the quality until it's 2,560 bytes or less. Re-encoding through the
+ * canvas drops any EXIF. Undefined when it can't be made small enough.
+ */
+export async function smallAvatarFrom(dataUrl: string): Promise<string | undefined> {
+  if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas !== 'function') return undefined;
+  try {
+    const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
+    const side = Math.min(bitmap.width, bitmap.height);
+    const canvas = new OffscreenCanvas(48, 48);
+    canvas.getContext('2d')!.drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, 48, 48);
+    bitmap.close();
+    for (const quality of [0.8, 0.6, 0.4, 0.25]) {
+      const blob = await canvas.convertToBlob({ type: 'image/webp', quality });
+      if (blob.size <= 2560) return safeImageSrc(await readAsDataUrl(blob));
+    }
+    const png = await canvas.convertToBlob({ type: 'image/png' });
+    return png.size <= 2560 ? safeImageSrc(await readAsDataUrl(png)) : undefined;
+  } catch {
+    return undefined;
+  }
+}

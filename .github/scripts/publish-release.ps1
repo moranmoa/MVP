@@ -38,7 +38,7 @@ param(
   [string[]]$Roots = @(),
   [int]$RestampAfterHours = 48,
   [switch]$WhatIf,
-  [string]$Repo = 'moranmoa/MVP'
+  [string]$Repo = 'moranmoa/MVS'
 )
 # Read the key's path once, then drop it from the environment before any
 # native command runs: git, gh, cargo (build scripts) and node never see it.

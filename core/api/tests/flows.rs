@@ -474,10 +474,10 @@ fn profile_fields_are_capped() {
     sign_up(&peer, "Me");
     let input = |name: &str, bio: Option<String>, avatar: Option<&str>| ProfileInput {
         display_name: name.into(),
-        avatar_small: None,
-        color: None,
         bio,
         avatar_data_url: avatar.map(String::from),
+        avatar_small: None,
+        color: None,
     };
     let ok = [
         input("נועה", Some("שורה\nשורה".into()), Some("data:image/png;base64,iVBORw0KGgo=")),
@@ -4471,6 +4471,76 @@ fn a_waiting_restore_backs_off() {
     assert_eq!(round(60 * 60_000 + 1_000), 10);
     assert_eq!(laptop.core.list_servers().unwrap().len(), 1);
     assert_eq!(round(2 * 60 * 60_000), 10, "done: no more retries");
+}
+
+/// Owner bug (v0.4.1): unread dots stuck at the channel or server level. The
+/// core sent no `channel.updated` when a message arrived, and no
+/// `server.updated` after `markRead`, so the UI's state drifted from the read
+/// marker. Now: a message from someone else brings `channel.updated` and a
+/// counted `server.updated` (unread, mentions); `markRead` brings both back
+/// to zero; my own messages don't count; the marker survives a restart.
+#[test]
+fn unread_dots_follow_new_messages_and_mark_read() {
+    let world = World::new();
+    let (owner, server, channel) = keyed_server(&world, "Dots");
+    let dir = std::env::temp_dir().join(format!("mvs-api-dots-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let secrets = Arc::new(MemoryStore::new());
+    let bob = keyed_peer(&world, secrets.clone(), Some(dir.join("core.db")));
+    let bob_id = sign_up(&bob, "Bob").id;
+    bob.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    bob.core.sync_now().unwrap();
+    let updates = |peer: &Peer| -> (Vec<Channel>, Vec<ServerSummary>) {
+        let mut channels = Vec::new();
+        let mut servers = Vec::new();
+        for e in peer.events.take() {
+            match e {
+                Event::ChannelUpdated(c) if c.id == channel => channels.push(c),
+                Event::ServerUpdated(s) if s.id == server.id => servers.push(s),
+                _ => {}
+            }
+        }
+        (channels, servers)
+    };
+    updates(&bob);
+
+    // A message mentioning Bob arrives: both levels light up, live.
+    owner.core.send_message(&channel, &format!("hey <@{bob_id}>"), None).unwrap();
+    bob.core.sync_now().unwrap();
+    let (channels, servers) = updates(&bob);
+    let c = channels.last().expect("channel.updated on a new message");
+    assert_eq!((c.unread, c.unread_count, c.mentions), (true, Some(1), 1));
+    let s = servers.last().expect("server.updated on a new message");
+    assert_eq!((s.unread, s.mentions), (true, 1));
+
+    // Read: both levels clear, with events.
+    bob.core.mark_read(&channel).unwrap();
+    let (channels, servers) = updates(&bob);
+    let c = channels.last().expect("channel.updated after markRead");
+    assert_eq!((c.unread, c.unread_count, c.mentions, c.first_unread_index), (false, Some(0), 0, None));
+    let s = servers.last().expect("server.updated after markRead");
+    assert_eq!((s.unread, s.mentions), (false, 0));
+
+    // My own message: nothing to light up.
+    bob.core.send_message(&channel, "mine", None).unwrap();
+    bob.core.sync_now().unwrap();
+    assert!(updates(&bob).0.iter().all(|c| !c.unread));
+    assert!(!bob.core.list_servers().unwrap()[0].unread);
+
+    // The marker survives a restart.
+    drop(bob);
+    let bob = keyed_peer(&world, secrets, Some(dir.join("core.db")));
+    bob.core.sync_now().unwrap();
+    let c = bob.core.list_channels(&server.id).unwrap().into_iter().find(|c| c.id == channel).unwrap();
+    assert_eq!((c.unread, c.unread_count), (false, Some(0)));
+    owner.core.send_message(&channel, "after the restart", None).unwrap();
+    bob.core.sync_now().unwrap();
+    let c = bob.core.list_channels(&server.id).unwrap().into_iter().find(|c| c.id == channel).unwrap();
+    assert_eq!(c.unread_count, Some(1));
+    drop(bob);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A 48×48 lossy WebP header (never decoded: the core reads the header),

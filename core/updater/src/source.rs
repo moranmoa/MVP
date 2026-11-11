@@ -52,7 +52,7 @@ pub trait UpdateSource: Send + Sync {
 }
 
 /// Release assets of the project repository.
-pub const RELEASE_BASE: &str = "https://github.com/moranmoa/MVP/releases/download/";
+pub const RELEASE_BASE: &str = "https://github.com/moranmoa/MVS/releases/download/";
 
 /// The only hosts a download may touch (A4): GitHub itself and the exact
 /// hosts it redirects release assets to. Not `*.githubusercontent.com`:
@@ -81,7 +81,7 @@ pub struct HttpsSource {
 }
 
 impl HttpsSource {
-    /// `https://github.com/moranmoa/MVP/releases/download/update-<channel>/`.
+    /// `https://github.com/moranmoa/MVS/releases/download/update-<channel>/`.
     pub fn release(channel: &str) -> Result<Self, SourceError> {
         if !is_valid_name(channel) {
             return Err(SourceError::Refused(format!("bad channel {channel:?}")));
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn only_https_to_the_exact_github_hosts() {
         for ok in [
-            "https://github.com/moranmoa/MVP/releases/download/update-alpha/manifest.json",
+            "https://github.com/moranmoa/MVS/releases/download/update-alpha/manifest.json",
             "https://objects.githubusercontent.com/github-production-release-asset/1?x=y",
             "https://release-assets.githubusercontent.com/github-production-release-asset/1",
             "https://GitHub.com:443/x",
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn release_urls_are_fixed_and_channel_checked() {
         let s = HttpsSource::release("alpha").unwrap();
-        assert_eq!(s.url("manifest.json"), "https://github.com/moranmoa/MVP/releases/download/update-alpha/manifest.json");
+        assert_eq!(s.url("manifest.json"), "https://github.com/moranmoa/MVS/releases/download/update-alpha/manifest.json");
         assert!(HttpsSource::release("../x").is_err());
         assert!(HttpsSource::release("Alpha").is_err());
     }

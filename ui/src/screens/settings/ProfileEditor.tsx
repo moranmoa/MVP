@@ -2,13 +2,13 @@
 // an explicit Save: a profile change goes out as a signed record to every
 // server, so saving on each keystroke would make dozens of them.
 
-import { forwardRef, useEffect, useImperativeHandle, useId, useRef, useState } from 'react';
+import { type KeyboardEvent, forwardRef, useEffect, useImperativeHandle, useId, useRef, useState } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
-import { avatarFromFile, IMAGE_TYPES } from '../../app/image';
+import { avatarFromFile, IMAGE_TYPES, smallAvatarFrom } from '../../app/image';
 import { useStore } from '../../app/store';
 import { useUserTextProps } from '../../app/textDir';
-import { Avatar, Code, Name } from '../../components/common';
+import { Avatar, Code, inkOn, Name } from '../../components/common';
 import { isCoreError, useCore } from '../../core';
 import { cleanName } from '../../core/sanitize';
 
@@ -36,7 +36,91 @@ export interface ProfileEditorHandle {
   discard(): void;
 }
 
-type Draft = { name: string; bio: string; avatar?: string };
+type Draft = { name: string; bio: string; avatar?: string; color?: string };
+
+/** #359: the colour others see behind my letter when I have no picture. */
+const PALETTE = [
+  ['#5865f2', 'blue'],
+  ['#3ba55c', 'green'],
+  ['#e67e22', 'orange'],
+  ['#e91e63', 'pink'],
+  ['#9b59b6', 'purple'],
+  ['#1098ad', 'teal'],
+  ['#d6336c', 'raspberry'],
+  ['#607d8b', 'grey'],
+] as const;
+
+/**
+ * #359: the palette is a radio group (one colour is mine): arrows move and pick,
+ * the picked one gets a ring and a tick. "Custom colour" opens the system picker
+ * and is ticked when my colour is not one of the eight.
+ */
+function ColorPicker({ value, fallback, disabled, onChange }: { value?: string; fallback: string; disabled: boolean; onChange(c: string): void }) {
+  const intl = useIntl();
+  const labelId = useId();
+  const hintId = useId();
+  const refs = useRef<(HTMLButtonElement | null)[]>([]);
+  const picked = PALETTE.findIndex(([c]) => c === value);
+  const custom = !!value && picked < 0;
+  const focusable = picked < 0 ? 0 : picked;
+  const move = (e: KeyboardEvent<HTMLElement>, i: number) => {
+    const rtl = getComputedStyle(e.currentTarget).direction === 'rtl';
+    const step = { ArrowDown: 1, ArrowUp: -1, ArrowRight: rtl ? -1 : 1, ArrowLeft: rtl ? 1 : -1 }[e.key];
+    let to: number | undefined = step === undefined ? undefined : (i + step + PALETTE.length) % PALETTE.length;
+    if (e.key === 'Home') to = 0;
+    if (e.key === 'End') to = PALETTE.length - 1;
+    if (to === undefined) return;
+    e.preventDefault();
+    onChange(PALETTE[to][0]);
+    refs.current[to]?.focus();
+  };
+  return (
+    <div className="color-picker">
+      <span className="color-picker-label" id={labelId}>
+        <FormattedMessage id="profile.color" />
+      </span>
+      <div className="color-swatches" role="radiogroup" aria-labelledby={labelId} aria-describedby={hintId}>
+        {PALETTE.map(([c, name], i) => (
+          <button
+            key={c}
+            ref={(el) => {
+              refs.current[i] = el;
+            }}
+            type="button"
+            role="radio"
+            className="color-swatch"
+            style={{ background: c, color: inkOn(c) }}
+            aria-checked={i === picked}
+            aria-label={intl.formatMessage({ id: `profile.color.${name}` })}
+            tabIndex={i === focusable ? 0 : -1}
+            disabled={disabled}
+            onClick={() => onChange(c)}
+            onKeyDown={(e) => move(e, i)}
+          >
+            {i === picked && <span aria-hidden="true">✓</span>}
+          </button>
+        ))}
+      </div>
+      <label className={`color-custom${custom ? ' is-picked' : ''}`}>
+        <span className="color-custom-dot" style={{ background: custom && value ? value : 'conic-gradient(red, yellow, lime, cyan, blue, magenta, red)', color: custom && value ? inkOn(value) : undefined }} aria-hidden="true">
+          {custom && '✓'}
+        </span>
+        <FormattedMessage id="profile.colorCustom" />
+        <input
+          type="color"
+          className="visually-hidden"
+          value={value ?? fallback}
+          disabled={disabled}
+          aria-describedby={hintId}
+          onChange={(e) => onChange(e.target.value.toLowerCase())}
+        />
+      </label>
+      <p className="muted small color-hint" id={hintId}>
+        <FormattedMessage id="profile.colorHint" />
+      </p>
+    </div>
+  );
+}
 
 /** The counter "24/32", shown from `from`; read out only when 5 or fewer are left. */
 function Counter({ value, max, from }: { value: string; max: number; from: number }) {
@@ -64,7 +148,7 @@ export const ProfileEditor = forwardRef<ProfileEditorHandle, { onDirtyChange: (d
   const core = useCore();
   const intl = useIntl();
   const identity = useStore(store, (s) => s.identity)!;
-  const saved: Draft = { name: identity.displayName, bio: identity.bio ?? '', avatar: identity.avatarDataUrl };
+  const saved: Draft = { name: identity.displayName, bio: identity.bio ?? '', avatar: identity.avatarDataUrl, color: identity.color };
   const [draft, setDraft] = useState<Draft>(saved);
   const [busy, setBusy] = useState<'image' | 'saving' | null>(null);
   const [imageError, setImageError] = useState<'too-large' | 'unsupported' | null>(null);
@@ -76,7 +160,7 @@ export const ProfileEditor = forwardRef<ProfileEditorHandle, { onDirtyChange: (d
   const bioProps = useUserTextProps(draft.bio);
   const ids = { name: useId(), nameError: useId(), image: useId(), hint: useId() };
 
-  const dirty = draft.name !== saved.name || draft.bio !== saved.bio || draft.avatar !== saved.avatar;
+  const dirty = draft.name !== saved.name || draft.bio !== saved.bio || draft.avatar !== saved.avatar || draft.color !== saved.color;
   useEffect(() => onDirtyChange(dirty), [dirty, onDirtyChange]);
   // The save bar turns sticky with the first change: keep the field being edited
   // clear of it (the panel's scroll-padding sets how far).
@@ -104,7 +188,15 @@ export const ProfileEditor = forwardRef<ProfileEditorHandle, { onDirtyChange: (d
     setSaveError(false);
     try {
       // The core replaces every field: send the whole profile (no avatar = removed).
-      await core.updateProfile({ displayName: draft.name.trim(), bio: draft.bio.trim() || undefined, avatarDataUrl: draft.avatar });
+      // #359: others see a 48×48 copy; '' removes it. The colour: '' clears.
+      const avatarSmall = draft.avatar === saved.avatar ? undefined : draft.avatar ? await smallAvatarFrom(draft.avatar) : '';
+      await core.updateProfile({
+        displayName: draft.name.trim(),
+        bio: draft.bio.trim() || undefined,
+        avatarDataUrl: draft.avatar,
+        ...(avatarSmall !== undefined ? { avatarSmall } : {}),
+        ...(draft.color !== saved.color ? { color: draft.color ?? '' } : {}),
+      });
       setDraft((d) => ({ ...d, name: d.name.trim(), bio: d.bio.trim() }));
       setJustSaved(true);
       return true;
@@ -135,7 +227,7 @@ export const ProfileEditor = forwardRef<ProfileEditorHandle, { onDirtyChange: (d
       <div className="profile-preview" aria-hidden="true">
         <div className="profile-preview-banner" style={{ background: identity.avatarColor }} />
         <div className="profile-preview-body">
-          <Avatar name={previewName} color={identity.avatarColor} src={draft.avatar} size={80} />
+          <Avatar name={previewName} color={draft.color ?? identity.avatarColor} src={draft.avatar} size={80} />
           <div className="profile-preview-text">
             <span className="profile-preview-name" title={previewName}>
               <Name>{previewName}</Name>
@@ -180,6 +272,13 @@ export const ProfileEditor = forwardRef<ProfileEditorHandle, { onDirtyChange: (d
           <FormattedMessage id={imageError === 'too-large' ? 'profile.image.tooLarge' : 'profile.image.unsupported'} />
         </p>
       )}
+
+      <ColorPicker
+        value={draft.color}
+        fallback={identity.avatarColor}
+        disabled={!!busy}
+        onChange={(color) => edit({ color })}
+      />
 
       <label className="field">
         <span>

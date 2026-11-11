@@ -123,7 +123,7 @@ pub enum SourceError { Offline(String), TooLarge, NotFound, Refused(String) }
 ```
 
 `HttpsSource::release(channel)` reads
-`https://github.com/moranmoa/MVP/releases/download/update-<channel>/`:
+`https://github.com/moranmoa/MVS/releases/download/update-<channel>/`:
 `manifest.json`, `root-<n>.json` for n = 2.., and `mvs-<v>-<platform>.zip`.
 
 - TLS through rustls; `https://` only; no cookies; timeouts.

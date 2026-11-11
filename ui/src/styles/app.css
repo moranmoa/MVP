@@ -3132,3 +3132,199 @@ input.switch:disabled {
 .language-picker select {
   min-height: 2.75rem;
 }
+
+/* Our own title bar (docs/ux/specs/desktop-chrome.md §2), desktop app on Windows
+   and Linux. 32px whatever the UI scale, to line up with the OS buttons. The
+   window buttons stay on the physical right in both languages. */
+.window-frame {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+}
+
+.window-body {
+  min-height: 0;
+}
+
+.titlebar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding-left: 10px;
+  /* Room for the buttons: the OS overlay on Windows (3 × 46px), ours on Linux (3 × 32px). */
+  padding-right: 138px;
+  background: var(--bg-rail);
+  color: var(--text);
+  font-size: 12px;
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+/* In RTL the content starts on the right, next to the buttons: a little more room. */
+[dir='rtl'] .titlebar {
+  padding-right: 148px;
+}
+
+.titlebar.custom {
+  padding-right: 96px;
+}
+
+[dir='rtl'] .titlebar.custom {
+  padding-right: 106px;
+}
+
+.titlebar-mark {
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
+.titlebar-title {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+
+.titlebar-controls {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  height: 32px;
+  -webkit-app-region: no-drag;
+}
+
+.titlebar-button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+}
+
+.titlebar-button .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.titlebar-button:hover,
+.titlebar-button:focus-visible {
+  background: color-mix(in srgb, var(--text) 14%, transparent);
+}
+
+.titlebar-button.close:hover,
+.titlebar-button.close:focus-visible {
+  background: #c42b1c;
+  color: #fff;
+
+.language-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.language-picker-row select {
+  flex: 1;
+}
+
+.language-globe {
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+/* #359: my colour. A radio group of swatches; the picked one has a ring and a tick. */
+.color-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.color-picker-label {
+  width: 100%;
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+
+.color-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.color-swatch,
+.color-custom-dot {
+  display: inline-grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  font-weight: 700;
+  font-size: 0.875rem;
+  line-height: 1;
+}
+
+.color-swatch[aria-checked="true"],
+.color-custom.is-picked .color-custom-dot {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
+.color-swatch:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* "Custom colour" looks like a button; the system picker input inside is hidden. */
+.color-custom {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.25rem;
+  padding-inline: 0.375rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.color-custom:hover {
+  background: var(--bg-hover);
+}
+
+.color-custom:focus-within {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.color-custom-dot {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+.color-hint {
+  width: 100%;
+  margin: 0;
+}
+
+@media (pointer: coarse) {
+  .color-swatch {
+    width: 2.75rem;
+    height: 2.75rem;
+  }
+  .color-custom {
+    min-height: 2.75rem;
+  }
+}

@@ -6,8 +6,8 @@ import { useSettings } from '../../app/settings';
 import { phoneQuery, useMediaQuery } from '../../app/media';
 import { isCoreError } from '../../core';
 import type { Channel, Id, ServerSummary } from '../../core';
-import { Avatar, Badge, Code, InviteBox, Name } from '../../components/common';
-import { BellOffIcon, GearIcon, HashIcon, LinkIcon, PlusIcon } from '../../components/icons';
+import { Avatar, Badge, Code, Name } from '../../components/common';
+import { BellOffIcon, GearIcon, HashIcon, PlusIcon } from '../../components/icons';
 import { CallBar, VoiceRoomEntry, useCallEngine } from './CallBar';
 import { useContextMenu, type MenuItem } from '../../components/ContextMenu';
 import { copyText } from '../../app/clipboard';
@@ -44,9 +44,6 @@ export function ChannelSidebar({
   const channels = useStore(store, (s) => s.channels[server.id] ?? NO_CHANNELS);
   const identity = useStore(store, (s) => s.identity)!;
   const intl = useIntl();
-  // The invite link, shown selectable with a Copy button (P0 from v0.2.0: the
-  // desktop page can't write the clipboard by itself, see app/clipboard.ts).
-  const [showInvite, setShowInvite] = useState(false);
   // A closed server is read-only (#261): no owner controls there.
   const owner = server.ownerId === identity.id && !server.closed;
   const core = useCore();
@@ -175,9 +172,7 @@ export function ChannelSidebar({
         <h1 className="server-name">
           <Name>{server.name}</Name>
         </h1>
-        <span className="age-tag">
-          <FormattedMessage id={`age.${server.ageRestriction === 'none' ? 'none' : server.ageRestriction.slice(0, 2)}`} />
-        </span>
+        {/* Owner request (0.4.x): no age tag here; it stays in server settings. */}
         {owner && (
           <button
             type="button"
@@ -189,22 +184,8 @@ export function ChannelSidebar({
             <GearIcon />
           </button>
         )}
-        <button
-          type="button"
-          className="icon-button"
-          onClick={() => setShowInvite((v) => !v)}
-          aria-label={intl.formatMessage({ id: 'server.invite' })}
-          aria-expanded={showInvite}
-          aria-controls="sidebar-invite"
-        >
-          <LinkIcon />
-        </button>
       </header>
-      {showInvite && (
-        <div id="sidebar-invite" className="sidebar-invite">
-          <InviteBox link={server.inviteLink} />
-        </div>
-      )}
+      {/* The invite link is in server settings and the server's right-click menu (owner request). */}
       <nav className="channel-list" aria-label={intl.formatMessage({ id: 'channels.label' })}>
         {owner && (
           <div className="channel-list-header">
@@ -343,7 +324,7 @@ export function ChannelSidebar({
           aria-label={intl.formatMessage({ id: 'profile.edit.open' })}
           title={intl.formatMessage({ id: 'profile.edit.open' })}
         >
-          <Avatar name={identity.displayName || identity.shortCode} color={identity.avatarColor} src={identity.avatarDataUrl} size={32} presence="online" />
+          <Avatar name={identity.displayName || identity.shortCode} color={identity.color ?? identity.avatarColor} src={identity.avatarDataUrl} size={32} presence="online" />
           <span className="me-text">
             <span className="me-name">
               <Name>{identity.displayName || identity.shortCode}</Name>

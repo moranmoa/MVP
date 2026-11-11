@@ -18,6 +18,8 @@ export interface Identity {
   /** CSS colour for the generated avatar; real avatars come later. */
   avatarColor: string;
   avatarDataUrl?: string;
+  /** #359: my chosen colour (#rrggbb), shown to others; falls back to avatarColor. */
+  color?: string;
   bio?: string;
   country: string;
   birthDate: BirthDate;
@@ -41,6 +43,10 @@ export interface ProfileInput {
   displayName: string;
   bio?: string;
   avatarDataUrl?: string;
+  /** #359: a 48×48 WebP/PNG (≤ 2,560 bytes) that others see. Absent = unchanged, '' = removed. */
+  avatarSmall?: string;
+  /** #359: #rrggbb. Absent = unchanged, '' = cleared. */
+  color?: string;
 }
 
 export type AgeRestriction = 'none' | '16+' | '18+';
@@ -102,6 +108,10 @@ export interface Member {
   /** Blocked by me: their messages are collapsed on this device only. */
   blocked?: boolean;
   bio?: string;
+  /** #359: the member's small picture (data:image/webp|png), from their profile post. */
+  avatarDataUrl?: string;
+  /** #359: the member's chosen colour (#rrggbb). */
+  color?: string;
 }
 
 /** `keyring`: the OS keychain is missing or unusable (QA-20; core code `keyring-unavailable`). */

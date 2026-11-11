@@ -907,13 +907,8 @@ impl Core {
         let mut out = Vec::new();
         for id in inner.db.servers()? {
             inner.load(id)?;
-            let mut summary = inner.summary(id)?;
             // G-21 and G-24: the server rail's unread dot and mention badge.
-            let me = inner.me.as_ref().map(Me::key);
-            let mut channels = inner.view(id)?.channels(me);
-            inner.fill_unread(&*self.ports.cipher, id, &mut channels)?;
-            summary.unread = channels.iter().any(|c| c.unread);
-            summary.mentions = channels.iter().map(|c| c.mentions).fold(0, u32::saturating_add);
+            let summary = inner.counted_summary(&*self.ports.cipher, id)?;
             out.push(summary);
         }
         Ok(out)
@@ -1225,7 +1220,7 @@ impl Core {
             inner.lifecycle_role(server, authority::Role::Admin)?;
             inner.lifecycle_gate(server)?;
             inner.publish_control(ports, server, &Action::ServerEdit { name: name.to_owned() })?;
-            let summary = inner.summary(server)?;
+            let summary = inner.counted_summary(&*ports.cipher, server)?;
             events.push(Event::ServerUpdated(summary.clone()));
             Ok(summary)
         })
@@ -1527,7 +1522,8 @@ impl Core {
 
     /// G-21 `markRead(channelId)`: everything in the channel now counts as
     /// read (the marker moves to its last message), and `channel.updated`
-    /// carries the reset `unreadCount` and no `firstUnreadIndex`. Local only.
+    /// carries the reset `unreadCount` and no `firstUnreadIndex`, then
+    /// `server.updated` with the server's recounted dot and badge. Local only.
     pub fn mark_read(&self, channel_id: &str) -> CoreResult<()> {
         let (server, channel) = {
             let mut inner = self.lock();
@@ -1542,6 +1538,9 @@ impl Core {
         };
         let json = self.channel_json(server, channel)?;
         self.ports.events.emit(&Event::ChannelUpdated(json));
+        // The server rail too: its dot and badge come from all its channels.
+        let summary = self.lock().counted_summary(&*self.ports.cipher, server)?;
+        self.ports.events.emit(&Event::ServerUpdated(summary));
         Ok(())
     }
 
@@ -1601,7 +1600,7 @@ impl Core {
             let record = inner.publish_control(ports, server, &action)?;
             if matches!(action, Action::Invite { .. } | Action::RevokeInvite { .. }) {
                 // The server's link may name another invite now.
-                events.push(Event::ServerUpdated(inner.summary(server)?));
+                events.push(Event::ServerUpdated(inner.counted_summary(&*ports.cipher, server)?));
                 return Ok(record.id());
             }
             let after = inner.view(server)?;
@@ -2064,7 +2063,7 @@ impl Core {
                     continue;
                 }
                 if inner.view(server)?.state.server_name != name_before {
-                    events.push(Event::ServerUpdated(inner.summary(server)?));
+                    events.push(Event::ServerUpdated(inner.counted_summary(&*ports.cipher, server)?));
                 }
                 // Release N: say this version reads lifecycle records. Never
                 // aborts the other servers; the next round retries.
@@ -2742,12 +2741,27 @@ impl Inner {
     ) -> CoreResult<()> {
         let me = self.me.as_ref().map(Me::key);
         let members = self.view(server)?.state.members.clone();
+        // Channels with a new message from someone else: their unread
+        // counts changed (owner bug, v0.4.1: without these events the UI's
+        // dots drifted from the read marker and stuck).
+        let mut fresh = Vec::new();
         for channel in self.known(server)? {
             let shown = self.shown(cipher, server, channel)?;
             let seen = self.announced.entry(server).or_default();
             for (index, s) in shown.iter().enumerate() {
                 let state = announced(s, me, &Status { net: &*self.net, db: &self.db });
                 let event = match seen.insert(s.record.id(), state) {
+                    None if Some(s.record.author()) != me && !fresh.contains(&channel) => {
+                        fresh.push(channel);
+                        Event::MessageAdded(message_json(
+                            s,
+                            index,
+                            channel,
+                            me,
+                            &Status { net: &*self.net, db: &self.db },
+                            &members,
+                        ))
+                    }
                     None => Event::MessageAdded(message_json(
                         s,
                         index,
@@ -2769,7 +2783,29 @@ impl Inner {
                 events.push(event);
             }
         }
+        if !fresh.is_empty() {
+            let mut channels: Vec<Channel> = self.view(server)?.channels(me);
+            channels.retain(|c| {
+                model::parse_hex32(&c.id).is_some_and(|id| fresh.contains(&ChannelId::from_bytes(id)))
+            });
+            self.fill_unread(cipher, server, &mut channels)?;
+            events.extend(channels.into_iter().map(Event::ChannelUpdated));
+            events.push(Event::ServerUpdated(self.counted_summary(cipher, server)?));
+        }
         Ok(())
+    }
+
+    /// The server's summary with its unread dot and mention badge (G-21,
+    /// G-24): what `listServers` returns and `server.updated` carries after
+    /// new messages or `markRead`.
+    fn counted_summary(&mut self, cipher: &dyn GroupCipher, server: ServerId) -> CoreResult<ServerSummary> {
+        let mut summary = self.summary(server)?;
+        let me = self.me.as_ref().map(Me::key);
+        let mut channels = self.view(server)?.channels(me);
+        self.fill_unread(cipher, server, &mut channels)?;
+        summary.unread = channels.iter().any(|c| c.unread);
+        summary.mentions = channels.iter().map(|c| c.mentions).fold(0, u32::saturating_add);
+        Ok(summary)
     }
 
     /// Seals `text` for `channel`'s members. If no key is usable yet, a

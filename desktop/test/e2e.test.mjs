@@ -186,9 +186,10 @@ test('legacy desktop capture never gives a stream', async () => {
   assert.equal(await page.evaluate(() => location.origin), 'app://mvs');
 });
 
-test('the page sees only copyText, invoke, notify, onEvent and the core-down actions', async () => {
+test('the page sees only copyText, invoke, notify, onEvent, the core-down actions and the title bar', async () => {
   const keys = await page.evaluate(() => Object.keys(window.mvs).sort());
-  assert.deepEqual(keys, ['copyText', 'invoke', 'notify', 'onEvent', 'openLogsFolder', 'retryCore']);
+  const frame = process.platform === 'darwin' ? [] : ['windowControl', 'windowFrame'];
+  assert.deepEqual(keys, ['copyText', 'invoke', 'notify', 'onEvent', 'openLogsFolder', 'retryCore', ...frame].sort());
   assert.equal(await page.evaluate(() => typeof window.ipcRenderer), 'undefined');
 });
 
@@ -203,6 +204,15 @@ test('copyText writes plain text only, through main', async () => {
   // The page itself still has no clipboard permission.
   const web = await page.evaluate(() => navigator.clipboard.writeText('web').then(() => 'ok', () => 'denied'));
   assert.equal(web, 'denied');
+});
+
+test('the title bar command does only its actions', { skip: process.platform === 'darwin' }, async () => {
+  assert.equal(await page.evaluate(() => window.mvs.windowFrame), process.platform === 'win32' ? 'overlay' : 'custom');
+  for (const bad of ['setBounds', 'devtools', '', 'constructor', 'theme:#ff0000', 'maximize', 'state']) {
+    assert.equal(await page.evaluate((a) => window.mvs.windowControl(a), bad), false);
+  }
+  assert.equal(await page.evaluate(() => window.mvs.windowControl('toggle-maximize')), true);
+  assert.equal(await page.evaluate(() => window.mvs.windowControl('toggle-maximize')), true);
 });
 
 test('notify goes through main; the page itself still cannot notify (G-61)', async () => {
@@ -254,4 +264,18 @@ test('retryCore restarts the core, at most once in 5 s; the log file exists (T8-
   const dir = await app.evaluate(({ app: a }) => a.getPath('logs'));
   const { readdirSync } = await import('node:fs');
   assert.ok(readdirSync(dir).includes('mvs.log'), 'mvs.log in the logs folder');
+});
+
+// Last: it closes the app. During a call a close is held for the page to ask
+// first; this demo page never answers, and a second close still closes.
+test('during a call, a second close always closes (the page cannot keep the app open)', { skip: process.platform === 'darwin' }, async () => {
+  const joined = await page.evaluate(() => window.mvs.invoke('joinCall', ['c'.repeat(64)]));
+  assert.ok(joined.ok, JSON.stringify(joined));
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 1, 'the first close is held');
+  const closed = new Promise((resolve) => app.once('close', resolve));
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close()).catch(() => {});
+  await closed;
+  app = null;
 });
