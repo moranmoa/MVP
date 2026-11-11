@@ -1815,12 +1815,15 @@ impl Task {
                 held.ok().flatten().unwrap_or_default()
             }
             crate::backup::Request::Put(blob) => {
-                let me = self.access.binder.as_ref().map(|b| b.identity());
+                let me = self.access.binder.as_ref().map(|b| *b.identity().as_bytes());
+                let from = self.member_identity(peer).map(|identity| *identity.as_bytes());
+                let owner = crate::backup::write_owner(from, me);
                 let kept = crate::backup::check(&blob)
-                    .filter(|_| me.is_some() && self.member_identity(peer) == me)
+                    .filter(|_| owner.is_some())
                     .filter(|(tag, _)| self.backup_limits.allow_write(peer, *tag, now))
                     .filter(|(tag, version)| {
-                        self.store.put_backup(tag, *version, &blob, None, unix_now()).unwrap_or(false)
+                        let owner = owner.flatten();
+                        self.store.put_backup(tag, *version, &blob, owner.as_ref(), unix_now()).unwrap_or(false)
                     });
                 if let Some((tag, _)) = kept {
                     self.provide_backup(tag);

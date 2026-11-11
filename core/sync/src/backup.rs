@@ -37,6 +37,25 @@ pub const MAX_BACKUP: usize = 64 * 1024;
 pub const MAX_HELD: usize = 8;
 /// How long a held backup lives after its last write (buddies, design §7).
 pub const RETENTION: Duration = Duration::from_secs(180 * 24 * 3600);
+/// Phase B (design §2, after GAP-9): holding co-members' backups as their
+/// "buddy". Off in phase A (Tech Lead on #339): a node keeps only my own
+/// backup, from my own devices; the store already bounds others' (one per
+/// owner, [`MAX_HELD`], [`RETENTION`]) for when it is turned on.
+pub const BUDDIES: bool = false;
+
+/// Whose a write from a peer is, if this node keeps it: `Some(None)` for
+/// mine (sent by my own other device), `Some(Some(owner))` for a
+/// co-member's (phase B, only with [`BUDDIES`]), `None` to refuse.
+/// `from`: the identity the peer is bound to as a current member of a
+/// server we share; `me`: mine.
+pub(crate) fn write_owner(from: Option<[u8; 32]>, me: Option<[u8; 32]>) -> Option<Option<[u8; 32]>> {
+    match (from, me) {
+        (Some(from), Some(me)) if from == me => Some(None),
+        (Some(from), _) if BUDDIES => Some(Some(from)),
+        _ => None,
+    }
+}
+
 /// How often a holder re-announces itself as a provider (design §2).
 pub const REANNOUNCE: Duration = Duration::from_secs(12 * 3600);
 
@@ -308,6 +327,17 @@ pub(crate) mod tests {
         // Expiry takes others' only.
         store.expire_backups(10_000, 100).unwrap();
         assert_eq!(store.backup_tags().unwrap(), [tag]);
+    }
+
+    #[test]
+    fn phase_a_keeps_writes_from_my_own_devices_only() {
+        // Phase B (buddies) is off until GAP-9 (Tech Lead on #339): a
+        // co-member's write is refused.
+        let (me, other) = ([1; 32], [2; 32]);
+        assert_eq!(write_owner(Some(me), Some(me)), Some(None), "my own device's");
+        assert_eq!(write_owner(Some(other), Some(me)), None, "a co-member's");
+        assert_eq!(write_owner(None, Some(me)), None, "not a member");
+        assert_eq!(write_owner(Some(me), None), None, "no identity here");
     }
 
     #[test]

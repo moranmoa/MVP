@@ -61,6 +61,7 @@
 **Phases (Tech Lead):**
 - **Phase A:** my devices, the bootstrap mailbox, provider records, restore, and the merge.
 - **Phase B, after GAP-9:** buddies.
+  - The holder code for buddies (one blob per owner, at most 8, 180 days) ships with phase A but is **off** behind `sync::backup::BUDDIES = false` (Tech Lead on #339). In phase A a node keeps writes only from my own devices.
 - **Target:** 1 bootstrap in phase A; at least 3 reachable holders besides my own devices in phase B.
 
 **Mailbox quotas, for devops** (constants; R2):
