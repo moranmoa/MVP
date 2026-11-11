@@ -1926,7 +1926,10 @@ impl Task {
         let request = SyncRequest { log: self.sealing.wire(log), have, binding };
         // Why this pull went out, for sync debug logs (mvs.log through
         // MVS_DEBUG_LOG): the trigger only, never the peer or the log name.
-        debug!(cause, in_flight = self.inflight.values().filter(|(p, _)| *p == peer).count(), "pull sent");
+        // `bound`: whether the peer is bound for the log's server (a member
+        // pull) or not (a probe that carries our binding, T23).
+        let bound = self.sealing.get(log).is_none_or(|s| self.bound.contains_key(&(peer, s.server)));
+        debug!(cause, bound, in_flight = self.inflight.values().filter(|(p, _)| *p == peer).count(), "pull sent");
         let request = self.swarm.behaviour_mut().sync.send_request(&peer, request);
         self.inflight.insert(request, key);
     }
