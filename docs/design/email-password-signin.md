@@ -97,3 +97,23 @@
 5. **Wording and logs:** neutral wording, and the password never in any log.
 - **PO's data rule for the mailer:** it keeps the email only to send codes, deletes it on removal, and never logs it. The design is stricter still: the client passes the address at send time, so the mailer needn't keep it at all.
 - **Still open:** the Security Lead's and Tech Lead's verdicts, and the owner's choice on the second bootstrap (ship behind a flag, or wait).
+
+## 8. Security Lead's changes (at fc26da1; these replace §1–§3 where they differ)
+- **E1, the recovery notice and cancel:**
+  - The recovering client has no seed, so it can't sign with `w`, and an attacker wouldn't post a notice anyway.
+  - So when recovery is turned on, the client **registers `w_pub` with the mailer**. The mailer itself records the pending reset, and my signed-in devices **poll the mailer** for it.
+  - **A cancel is signed by `w`**, and the mailer checks it against the registered `w_pub`.
+  - **Stated plainly:** the 72-hour hold relies on an honest mailer.
+- **E2, a password change kills old envelopes:**
+  - Each account has an **OPRF key version** at the OPRF servers. Changing the password rotates it, and the servers **delete the old share**, so an old envelope can no longer be opened by anyone.
+  - The envelope header carries that version, and the Argon2id parameters.
+  - This replaces "an old copy opens with the old password until holders refresh" in §3.
+- **E3, one operator today:** for now the same operator runs the OPRF servers and the mailer. That operator could take over recovery-enabled accounts, and could guess passwords offline against stolen envelopes.
+  - §3's table gets this as a row.
+  - **The opt-in text discloses it.**
+- **More limits:** OPRF evaluations are also rate-limited **per handle**, not only per IP.
+- **Answers to §6:**
+  1. **Gating:** it ships **behind a flag, off until at least 2 independent bootstraps are live**.
+  2. **The mailer:** it's ours, on a host **outside the OPRF set**. The SMTP provider may be a third party.
+  3. **Recovery:** 72 hours and **off by default**, with an optional 7-day hold.
+  4. **Argon2id parameters:** they go in the envelope header; 64–128 MiB on phones, 256 MiB on desktop.
