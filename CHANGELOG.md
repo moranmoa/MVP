@@ -10,6 +10,20 @@ New sections must not contain a `---` line: the release scripts still read
 it as the old Hebrew/English split.
 Never put the relay domain or any IP address here.
 
+## [0.4.3] - 2026-11-11
+
+This version replaces 0.4.2, which was never published. It includes everything in 0.4.2 plus the fixes below.
+
+### Fixed
+- **Closing the app during a call:** the app now always closes when you quit, when Windows shuts down or restarts for an update, or if the window stops responding during a call. The call ends cleanly.
+- **Channel order:** moving a channel for the first time now always lands it in the right place. Channels that were never moved keep the order they were created in.
+- **Fewer network requests** when you create or open many servers at once.
+- **Language and colour pickers:** their layout is back to normal.
+
+### Known
+- **Voice calls are officially supported only when everyone is on the same network** (for example the same Wi-Fi). Calls across networks are on the way.
+- On first run, Windows may ask whether to allow MVS on the network. Please allow it (also on private networks); otherwise voice calls won't connect.
+
 ## [0.4.2] - 2026-11-11
 
 ### New
