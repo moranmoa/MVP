@@ -303,6 +303,37 @@ short troubleshooting only, because it writes peer IDs and possibly IP
 addresses into that file; set it back to `info` and recreate the container
 (`docker compose up -d relay`), which also drops the old log.
 
+## Backup mailbox (`/mvs/backup/1`)
+
+The relay keeps each user's encrypted server-list backup, so a new device
+can restore from the 12 words alone (restore phase A, design note
+`docs/design/restore-servers-from-network.md` §2). Code: `relay/src/backup.rs`.
+
+- **What it stores:** one opaque blob per tag, under `/data/backup/` on the
+  `relay-data` volume (`BACKUP_DIR` to move it), one file per tag. It holds
+  no index of who wrote what, and can't read the contents.
+- **Who can write:** only the tag's own write key (the owner's devices). The
+  signature is checked before anything is stored.
+- **Quotas** (constants): blobs of at most 64 KiB in 4 KiB steps; a newer
+  version only; 12 writes an hour per tag; per source IP 30 writes an hour,
+  5 new tags a day and 60 fetches an hour (behind `PROXY_IPS`, per peer
+  instead). **New tags from everyone together:** at most 200 an hour and 2,000
+  a day, because peer IDs are free and behind the proxy a script could mint
+  one per write. Updates of held tags aren't counted. At most 50,000 tags:
+  when full, new tags are refused and nothing is ever evicted.
+- **Disk:** about 3.2 GB at the cap; a few MB for an alpha.
+- **Expiry:** 13 months after the last write, swept at start and daily.
+- **Logs:** counts only, in the `stats` line (`backups_stored`,
+  `backup_writes_ok`, `backup_refused_*`, `backup_fetch_hit/miss`,
+  `backups_expired`). Never a tag, an address or a peer ID.
+- **Alerts** (on the `stats` line): **`backup_refused_new_tags_all` rising**
+  means someone is hitting the global new-tag cap: real users' first backups
+  wait until the next hour or day, so look at it. **`backup_refused_full` > 0**
+  means the store is full and new users get no remote backup: raise the cap
+  only after finding out why. Also watch `backups_stored` against 50,000.
+- **Backups of the relay:** losing `/data/backup` loses users' remote copies
+  until their devices republish (every login, and daily), not their data.
+
 ## Backing up the relay key
 
 `relay-data` holds `node.key`, the relay's identity. If it is lost, the

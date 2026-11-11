@@ -5,6 +5,10 @@ Dependabot's included) goes through this list before merge. Chromium's
 permission and capture paths change between versions. The desktop e2e is
 what proves our refusals still hold.
 
+A bump that fixes an image decoder (libwebp, libpng, libjpeg, AVIF, ...) is a
+**security update**: avatars from other members are decoded in the app, so
+ship it promptly (Security Lead, A4).
+
 ## Before merge
 
 1. **Version age.** The `electron version age` CI job is green: we are no
