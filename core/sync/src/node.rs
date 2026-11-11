@@ -114,6 +114,9 @@ const FIRST_CONTACT_PULLS: usize = 5;
 /// probed for a server we already have a bound member of. Each such pull
 /// carries our binding to a peer that isn't known to be a member.
 const UNBOUND_REPROBE: Duration = Duration::from_secs(600);
+/// Most entries `empty_from` and `probed` each keep (security lead): peer IDs
+/// are free, so churned peers can't grow them; the oldest goes first.
+const MAX_T23_ENTRIES: usize = 10_000;
 /// How a control log's name ends (`log_name`): queued first.
 const CONTROL_SUFFIX: &str = "/control";
 /// Per-peer pull buckets remembered (also after disconnecting).
@@ -2114,6 +2117,7 @@ impl Task {
             for log in &probes {
                 if let Some(server) = self.sealing.get(log).map(|s| s.server) {
                     if self.bound.keys().any(|(_, s)| *s == server) {
+                        cap_oldest(&mut self.probed, |at| *at);
                         self.probed.insert((peer, server), now);
                     }
                 }
@@ -2782,6 +2786,7 @@ impl Task {
         if response.records.is_empty() && !response.more {
             if let Some(server) = self.sealing.get(&key.1).map(|s| s.server) {
                 if key.1.ends_with(CONTROL_SUFFIX) && !self.bound.contains_key(&(key.0, server)) {
+                    cap_oldest(&mut self.empty_from, |until| *until);
                     self.empty_from.insert(key.clone(), Instant::now() + UNBOUND_REPROBE);
                 }
             }
@@ -3372,6 +3377,17 @@ fn answer_with_ids(store: &Store, log: &str, have: &[ByteBuf], max_bytes: usize)
 /// Whether to ask for the next page right away. A peer that keeps saying
 /// "more" without sending anything new is not followed; the anti-entropy
 /// timer tries again later.
+/// Before an insert into a T23 map: at [`MAX_T23_ENTRIES`], drop the entry
+/// whose time (`at`) is earliest, so the map never grows past the cap.
+fn cap_oldest<K: Clone + Eq + std::hash::Hash, V>(map: &mut HashMap<K, V>, at: impl Fn(&V) -> Instant) {
+    if map.len() < MAX_T23_ENTRIES {
+        return;
+    }
+    if let Some(oldest) = map.iter().min_by_key(|(_, v)| at(v)).map(|(k, _)| k.clone()) {
+        map.remove(&oldest);
+    }
+}
+
 fn follow_up(more: bool, added_any: bool) -> bool {
     more && added_any
 }
@@ -4067,6 +4083,19 @@ mod tests {
         for node in [a, b, c, d] {
             node.shutdown().await.unwrap();
         }
+    }
+
+    #[test]
+    fn t23_maps_stay_under_the_cap_dropping_the_oldest() {
+        let mut map: HashMap<u32, Instant> = HashMap::new();
+        let start = Instant::now();
+        for i in 0..(MAX_T23_ENTRIES as u32 + 50) {
+            cap_oldest(&mut map, |at| *at);
+            map.insert(i, start + Duration::from_millis(u64::from(i)));
+        }
+        assert_eq!(map.len(), MAX_T23_ENTRIES);
+        assert!(!map.contains_key(&0) && !map.contains_key(&49), "the oldest stayed");
+        assert!(map.contains_key(&(MAX_T23_ENTRIES as u32 + 49)), "the newest went");
     }
 
     /// 0.4.1 presence bug: three members in a triangle (each has another bound
