@@ -265,3 +265,17 @@ test('retryCore restarts the core, at most once in 5 s; the log file exists (T8-
   const { readdirSync } = await import('node:fs');
   assert.ok(readdirSync(dir).includes('mvs.log'), 'mvs.log in the logs folder');
 });
+
+// Last: it closes the app. During a call a close is held for the page to ask
+// first; this demo page never answers, and a second close still closes.
+test('during a call, a second close always closes (the page cannot keep the app open)', { skip: process.platform === 'darwin' }, async () => {
+  const joined = await page.evaluate(() => window.mvs.invoke('joinCall', ['c'.repeat(64)]));
+  assert.ok(joined.ok, JSON.stringify(joined));
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 1, 'the first close is held');
+  const closed = new Promise((resolve) => app.once('close', resolve));
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close()).catch(() => {});
+  await closed;
+  app = null;
+});
