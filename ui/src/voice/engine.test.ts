@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CallSignal, CallState, Id } from '../core/types';
 import type { SignalKind, VoiceCore } from './adapter';
 import { createVoiceEngine, type VoiceEngineOptions, type VoiceEnv, type VoiceError, type VoiceParticipant } from './engine';
-import { fingerprints, iceServersFor, normalizeFingerprint, soleFingerprint } from './sdp';
+import { cleanTurnCredentials, fingerprints, iceServersFor, normalizeFingerprint, soleFingerprint } from './sdp';
 
 const A: Id = 'a'.repeat(64);
 const B: Id = 'b'.repeat(64);
@@ -82,7 +82,22 @@ class FakePC {
   ontrack: ((e: { track: FakeTrack; streams: FakeStream[] }) => void) | null = null;
   onconnectionstatechange: (() => void) | null = null;
 
-  constructor(readonly config: RTCConfiguration) {
+  /** setConfiguration calls (G-81 refresh) and restartIce calls. */
+  configs: RTCConfiguration[] = [];
+  restarts = 0;
+  /** Candidate types of the selected pair, for connectionTypes. */
+  pairTypes: [string, string] = ['host', 'host'];
+  getConfiguration() {
+    return this.config;
+  }
+  setConfiguration(c: RTCConfiguration) {
+    this.configs.push(c);
+    this.config = c;
+  }
+  restartIce() {
+    this.restarts++;
+  }
+  constructor(public config: RTCConfiguration) {
     allPcs.push(this);
   }
   private transceiver(direction: string, track: FakeTrack | null, mid: string | null): FakeTransceiver {
@@ -166,7 +181,10 @@ class FakePC {
     if (this.statsMode === 'none') return new Map<string, Record<string, unknown>>([['X', { id: 'X', type: 'codec' }]]);
     const remote = this.presentedFingerprint ?? soleFingerprint(this.remoteDescription?.sdp ?? '')?.split(' ')[1];
     return new Map<string, Record<string, unknown>>([
-      ['T1', { id: 'T1', type: 'transport', remoteCertificateId: 'CR' }],
+      ['T1', { id: 'T1', type: 'transport', remoteCertificateId: 'CR', selectedCandidatePairId: 'P' }],
+      ['P', { id: 'P', type: 'candidate-pair', localCandidateId: 'L', remoteCandidateId: 'R', state: 'succeeded', nominated: true }],
+      ['L', { id: 'L', type: 'local-candidate', candidateType: this.pairTypes[0], address: '192.0.2.10', port: 5000 }],
+      ['R', { id: 'R', type: 'remote-candidate', candidateType: this.pairTypes[1], address: '198.51.100.20', port: 6000 }],
       ['CR', { id: 'CR', type: 'certificate', fingerprint: remote?.toUpperCase(), fingerprintAlgorithm: 'sha-256' }],
     ]);
   }
@@ -260,6 +278,8 @@ class FakeCore implements VoiceCore {
   left = 0;
   /** Where sendSignal delivers (another engine's core), if wired. */
   wire: ((to: Id, kind: SignalKind, payload: string) => void) | null = null;
+  /** G-81: mocked TURN credentials (the core api does not have it yet). */
+  getTurnCredentials?: () => Promise<unknown>;
   constructor(readonly me: Id, readonly participants: Id[]) {}
   state(): CallState {
     return { channelId: CH, participants: this.participants.map((identity) => ({ identity, muted: false })), full: false };
@@ -878,5 +898,218 @@ describe('voice engine', () => {
     engine.dispose();
     expect(core.stateHandlers.size).toBe(0);
     expect(core.signalHandlers.size).toBe(0);
+  });
+});
+
+// ---- TURN (G-81) ------------------------------------------------------------------
+
+const TURN_HOST = 'turn.example.test';
+/** Credentials as the relay would mint them (mocked until the core api exists). */
+function turnCreds(ttl = 600, now = Date.now(), tag = 'abcdEFGH1234') {
+  return {
+    urls: [`turn:${TURN_HOST}:3478?transport=udp`, `turn:${TURN_HOST}:3478?transport=tcp`, `turns:${TURN_HOST}:5349`],
+    username: `${Math.floor(now / 1000) + ttl}:${tag}`,
+    credential: `c2VjcmV0${tag}=`,
+    ttl,
+    expiresAt: now + ttl * 1000,
+  };
+}
+const turnServer = (c: { username: string }) => (pc: FakePC) =>
+  (pc.config.iceServers ?? []).find((s) => (s as RTCIceServer).username === c.username);
+
+describe('TURN credentials (cleanTurnCredentials)', () => {
+  const now = Date.now();
+  const ok = turnCreds(600, now);
+  const clean = (patch: Record<string, unknown>, host: string | null = TURN_HOST) => cleanTurnCredentials({ ...ok, ...patch }, host, now);
+
+  it('accepts well-formed credentials for the configured host', () => {
+    expect(cleanTurnCredentials(ok, TURN_HOST, now)).toEqual(ok);
+    expect(cleanTurnCredentials(ok, 'TURN.Example.Test', now)).toEqual(ok); // host case does not matter
+  });
+
+  it('pins the URLs: exact host, allowed ports, transport= only', () => {
+    expect(clean({}, null)).toBeNull(); // no configured relay host: no TURN
+    expect(clean({ urls: ['turn:evil.example.test:3478'] })).toBeNull();
+    expect(clean({ urls: [`turn:${TURN_HOST}.evil.test:3478`] })).toBeNull();
+    expect(clean({ urls: [`turn:x.${TURN_HOST}:3478`] })).toBeNull();
+    expect(clean({ urls: [`turn:${TURN_HOST}:3479`] })).toBeNull();
+    expect(clean({ urls: [`turn:${TURN_HOST}`] })).toBeNull(); // the port is required
+    expect(clean({ urls: [`turn:${TURN_HOST}:3478?transport=udp&x=1`] })).toBeNull();
+    expect(clean({ urls: [`turn:${TURN_HOST}:3478?transport=sctp`] })).toBeNull();
+    expect(clean({ urls: [`stun:${TURN_HOST}:3478`] })).toBeNull();
+    expect(clean({ urls: [`turn:user@${TURN_HOST}:3478`] })).toBeNull();
+    expect(clean({ urls: [] })).toBeNull();
+    expect(clean({ urls: Array(5).fill(`turn:${TURN_HOST}:3478`) })).toBeNull();
+    expect(clean({ urls: [`turns:${TURN_HOST}:443?transport=tcp`] })?.urls).toEqual([`turns:${TURN_HOST}:443?transport=tcp`]);
+  });
+
+  it('wants <expiry>:<random> (never a peer id), a plain credential, a sane ttl and expiry', () => {
+    expect(clean({ username: 'a'.repeat(64) })).toBeNull();
+    expect(clean({ username: `1800000000:${'a'.repeat(64)}:x` })).toBeNull();
+    expect(clean({ username: 'x'.repeat(300) })).toBeNull();
+    expect(clean({ credential: '' })).toBeNull();
+    expect(clean({ credential: 'has space' })).toBeNull();
+    expect(clean({ credential: 'x'.repeat(257) })).toBeNull();
+    expect(clean({ ttl: 30 })).toBeNull();
+    expect(clean({ ttl: 100_000 })).toBeNull();
+    expect(clean({ ttl: 600.5 })).toBeNull();
+    expect(clean({ expiresAt: now - 1 })).toBeNull();
+    expect(clean({ expiresAt: now + 3_600_000 })).toBeNull(); // beyond its own ttl
+    expect(cleanTurnCredentials(null, TURN_HOST, now)).toBeNull();
+    expect(cleanTurnCredentials('turn:x', TURN_HOST, now)).toBeNull();
+  });
+
+  it('iceServersFor: STUN, then TURN with its credentials', () => {
+    expect(iceServersFor('stun:stun.example.test:3478', ok)).toEqual([
+      { urls: 'stun:stun.example.test:3478' },
+      { urls: ok.urls, username: ok.username, credential: ok.credential },
+    ]);
+    expect(iceServersFor(null, ok)).toEqual([{ urls: ok.urls, username: ok.username, credential: ok.credential }]);
+  });
+});
+
+describe('voice engine with TURN', () => {
+  it('off by default: never asks the core, STUN only', async () => {
+    const h = fakeEnv();
+    const core = new FakeCore(A, [A, B]);
+    const ask = vi.fn(async () => turnCreds());
+    core.getTurnCredentials = ask;
+    const engine = createVoiceEngine(core, { env: h.env, stunUrl: 'stun:stun.example.test:3478', turnHost: TURN_HOST });
+    await engine.attach(core.state(), A);
+    await flush();
+    expect(ask).not.toHaveBeenCalled();
+    expect(h.pcs[0]!.config.iceServers).toEqual([{ urls: 'stun:stun.example.test:3478' }]);
+    engine.dispose();
+  });
+
+  it('on: the first connection already has TURN', async () => {
+    const h = fakeEnv();
+    const core = new FakeCore(A, [A, B]);
+    const c = turnCreds();
+    core.getTurnCredentials = async () => c;
+    const engine = createVoiceEngine(core, { env: h.env, stunUrl: 'stun:stun.example.test:3478', enableTurn: true, turnHost: TURN_HOST });
+    await engine.attach(core.state(), A);
+    await flush();
+    expect(h.pcs).toHaveLength(1);
+    expect(h.pcs[0]!.config.iceServers).toEqual([
+      { urls: 'stun:stun.example.test:3478' },
+      { urls: c.urls, username: c.username, credential: c.credential },
+    ]);
+    engine.dispose();
+  });
+
+  const failures: [string, () => Promise<unknown>][] = [
+    ['rejects', async () => Promise.reject(Object.assign(new Error('x'), { code: 'not-implemented' }))],
+    ['never answers (2 s, then without)', () => new Promise<never>(() => {})],
+    ['answers for another host', async () => ({ ...turnCreds(), urls: ['turn:evil.example.test:3478'] })],
+  ];
+  for (const [name, ask] of failures) {
+    it(`goes on without TURN when the core ${name}`, async () => {
+      vi.useFakeTimers();
+      const h = fakeEnv();
+      const core = new FakeCore(A, [A, B]);
+      core.getTurnCredentials = ask;
+      const engine = createVoiceEngine(core, { env: h.env, enableTurn: true, turnHost: TURN_HOST });
+      const errors = record<VoiceError>((cb) => engine.on('error', cb));
+      const attached = engine.attach(core.state(), A);
+      await vi.advanceTimersByTimeAsync(2_100);
+      await attached;
+      expect(h.pcs).toHaveLength(1);
+      expect(h.pcs[0]!.config.iceServers).toEqual([]);
+      expect(errors).toEqual([]);
+      engine.dispose();
+    });
+  }
+
+  it('caches the credentials until 80% of the ttl: a second call does not ask again', async () => {
+    const h = fakeEnv();
+    const core = new FakeCore(A, [A, B]);
+    const c = turnCreds(600);
+    const ask = vi.fn(async () => c);
+    core.getTurnCredentials = ask;
+    const engine = createVoiceEngine(core, { env: h.env, enableTurn: true, turnHost: TURN_HOST });
+    await engine.attach(core.state(), A);
+    engine.detach();
+    await engine.attach(core.state(), A);
+    await flush();
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(turnServer(c)(h.pcs.at(-1)!)).toBeTruthy();
+    engine.dispose();
+  });
+
+  it('refresh at 80% of the ttl: new servers on every connection, only the offerer restarts ICE, same connection', async () => {
+    vi.useFakeTimers();
+    const { hx, hy, cx, cy, ex, ey } = pair([A, B], { enableTurn: true, turnHost: TURN_HOST });
+    let n = 0;
+    const issued: ReturnType<typeof turnCreds>[] = [];
+    const mint = async () => {
+      const c = turnCreds(100, Date.now(), `tag${++n}xxxxxx`);
+      issued.push(c);
+      return c;
+    };
+    cx.getTurnCredentials = mint;
+    cy.getTurnCredentials = mint;
+    await ex.attach(cx.state(), A);
+    await ey.attach(cy.state(), B);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(hx.pcs).toHaveLength(1);
+    expect(hy.pcs).toHaveLength(1);
+    expect(hx.audios).toHaveLength(1);
+    expect(issued).toHaveLength(2);
+
+    await vi.advanceTimersByTimeAsync(80_000); // 80% of 100 s
+    expect(issued).toHaveLength(4);
+    const offerer = hx.pcs[0]!;
+    const answerer = hy.pcs[0]!;
+    const fresh = (pc: FakePC) => !!(turnServer(issued[2]!)(pc) ?? turnServer(issued[3]!)(pc));
+    expect(fresh(offerer)).toBe(true);
+    expect(fresh(answerer)).toBe(true);
+    expect(offerer.configs).toHaveLength(1);
+    expect(answerer.configs).toHaveLength(1);
+    expect(offerer.restarts).toBe(1);
+    expect(answerer.restarts).toBe(0);
+    // The offerer renegotiated on the same connection; the answerer answered on it.
+    expect(cx.sent.map((s) => s.kind)).toEqual(['offer', 'offer']);
+    expect(cy.sent.map((s) => s.kind)).toEqual(['answer', 'answer']);
+    expect(hx.pcs).toHaveLength(1);
+    expect(hy.pcs).toHaveLength(1);
+    expect(offerer.closed || answerer.closed).toBe(false);
+    expect(hx.audios).toHaveLength(1);
+    ex.dispose();
+    ey.dispose();
+  });
+
+  it('never puts the credentials in an event, even when fetching fails', async () => {
+    vi.useFakeTimers();
+    const { cx, cy, ex, ey } = pair([A, B], { enableTurn: true, turnHost: TURN_HOST });
+    const c = turnCreds(100);
+    cx.getTurnCredentials = async () => c;
+    cy.getTurnCredentials = async () => Promise.reject(new Error(`${c.username} ${c.credential}`));
+    const seen: unknown[] = [];
+    for (const e of [ex, ey]) {
+      e.on('participants', (p) => seen.push(p));
+      e.on('speaking', (p) => seen.push(p));
+      e.on('error', (p) => seen.push(p));
+    }
+    await ex.attach(cx.state(), A);
+    await ey.attach(cy.state(), B);
+    await vi.advanceTimersByTimeAsync(81_000);
+    const text = JSON.stringify(seen) + JSON.stringify(await ex.connectionTypes());
+    expect(seen.length).toBeGreaterThan(0);
+    expect(text).not.toContain(c.credential);
+    expect(text).not.toContain(c.username);
+    ex.dispose();
+    ey.dispose();
+  });
+
+  it('connectionTypes: the selected pair candidate types, never addresses', async () => {
+    const { hx, cx, cy, ex, ey } = pair();
+    await ex.attach(cx.state(), A);
+    await ey.attach(cy.state(), B);
+    await flush();
+    hx.pcs[0]!.pairTypes = ['relay', 'srflx'];
+    const types = await ex.connectionTypes();
+    expect(types).toEqual({ [B]: { local: 'relay', remote: 'srflx' } });
+    expect(JSON.stringify(types)).not.toMatch(/\d+\.\d+\.\d+\.\d+/);
   });
 });
