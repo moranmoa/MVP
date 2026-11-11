@@ -95,6 +95,12 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 - New-messages divider (G-21, option A):
   - `Channel.unreadCount?: number` and `Channel.firstUnreadIndex?: number` (additive) count the messages after my read marker that aren't mine, in `getMessages` order. `firstUnreadIndex` is the `getMessages` index of the first of them, and is absent when there are none. `Channel.unread` is `unreadCount > 0`. They appear in `listChannels` and `channel.updated`.
   - `markRead(channelId)` returns `null` and moves the marker to the channel's last message. It emits `channel.updated` with `unreadCount: 0` and no `firstUnreadIndex`.
+  - Events keep the UI in step with the marker (v0.4.1 fix):
+    - A new message from someone else brings `channel.updated` for its channel, with `unread`, `unreadCount`, `firstUnreadIndex` and `mentions`.
+    - Then a `server.updated` with the server's recounted `unread` and `mentions`.
+    - `markRead` brings `channel.updated` and then that same `server.updated`.
+    - Every `server.updated` carries the counted `unread` and `mentions`.
+    - While a channel is open and its bottom is seen, the UI calls `markRead` on such a `channel.updated`.
   - A channel never read counts from when this device joined the server, so history from before isn't unread.
   - The marker is local only (kv `read/<channel>`), and phase 3 syncs it. The count comes from the stored records, with no network or paging.
   - **v1 limit:** the marker is a point in `(time, ID)` order, and a message counts as unread only if it comes after it. A message that arrives late, with a time older than the marker (an offline peer catching up, say), is shown in its place but isn't counted as unread.
