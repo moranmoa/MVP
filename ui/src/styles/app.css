@@ -3021,6 +3021,12 @@ input.switch:disabled {
 .channel.muted .unread-dot {
   display: none;
 }
+.channel.muted .channel-name {
+  color: var(--text-muted);
+}
+.channel .bell-off-wrap {
+  display: inline-flex;
+}
 .channel .bell-off {
   flex: none;
   width: 1rem;

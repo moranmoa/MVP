@@ -29,6 +29,11 @@ export function isMuted(mutes: Mutes, serverId: Id, channelId?: Id, now = Date.n
   return isMutedKey(mutes, serverMuteKey(serverId), now) || (!!channelId && isMutedKey(mutes, channelMuteKey(channelId), now));
 }
 
+/** Until when a key is muted (MUTE_FOREVER for good), or null when it isn't. */
+export function mutedUntil(mutes: Mutes, key: MuteKey, now = Date.now()): number | null {
+  return isMutedKey(mutes, key, now) ? mutes[key] : null;
+}
+
 /** Drops expired entries. */
 export function liveMutes(mutes: Mutes, now = Date.now()): Mutes {
   return Object.fromEntries(Object.entries(mutes).filter(([key]) => isMutedKey(mutes, key, now)));

@@ -12,8 +12,8 @@ import { CallBar, VoiceRoomEntry, useCallEngine } from './CallBar';
 import { useContextMenu, type MenuItem } from '../../components/ContextMenu';
 import { copyText } from '../../app/clipboard';
 import { useCore } from '../../core';
-import { channelMuteKey, isMutedKey } from '../../app/mute';
-import { MuteDialog, type MuteTarget } from './MuteDialog';
+import { channelMuteKey, isMutedKey, mutedUntil, MUTE_FOREVER } from '../../app/mute';
+import { MuteDialog, useMutedLabel, type MuteTarget } from './MuteDialog';
 
 const NO_CHANNELS: Channel[] = [];
 
@@ -135,11 +135,18 @@ export function ChannelSidebar({
   // G-17: a channel muted on this device (app/mute.ts).
   const mutes = useStore(store, (st) => st.mutes);
   const [muteTarget, setMuteTarget] = useState<MuteTarget | null>(null);
+  const mutedLabel = useMutedLabel();
   const channelItems = (c: Channel, active: boolean): MenuItem[] => [
     ...(c.unread && !active ? [{ key: 'read', label: intl.formatMessage({ id: 'menu.markRead' }), onSelect: () => void core.markRead(c.id) }] : []),
     isMutedKey(mutes, channelMuteKey(c.id))
-      ? { key: 'unmute', label: intl.formatMessage({ id: 'notify.unmute' }), onSelect: () => store.unmute(channelMuteKey(c.id)) }
-      : { key: 'mute', label: intl.formatMessage({ id: 'notify.muteMenu' }), onSelect: () => setMuteTarget({ key: channelMuteKey(c.id), name: '#' + c.name }) },
+      ? {
+          key: 'unmute',
+          label: [intl.formatMessage({ id: 'notify.unmute' }), (mutedUntil(mutes, channelMuteKey(c.id)) ?? MUTE_FOREVER) !== MUTE_FOREVER ? mutedLabel(mutedUntil(mutes, channelMuteKey(c.id))!) : null]
+            .filter(Boolean)
+            .join(' · '),
+          onSelect: () => store.unmute(channelMuteKey(c.id)),
+        }
+      : { key: 'mute', label: intl.formatMessage({ id: 'notify.muteMenu' }), onSelect: () => setMuteTarget({ key: channelMuteKey(c.id), name: c.name, kind: 'channel' }) },
     ...(owner ? [{ key: 'rename', label: intl.formatMessage({ id: 'menu.renameChannel' }), onSelect: () => onEditChannel(c) }] : []),
     { kind: 'separator' },
     {
@@ -274,7 +281,11 @@ export function ChannelSidebar({
                   <span className="channel-name">
                     <bdi>{c.name}</bdi>
                   </span>
-                  {muted && <BellOffIcon />}
+                  {muted && (
+                    <span className="bell-off-wrap" title={mutedLabel(mutedUntil(mutes, channelMuteKey(c.id)) ?? MUTE_FOREVER)}>
+                      <BellOffIcon />
+                    </span>
+                  )}
                   {c.adult && (
                     <span className="adult-tag" aria-hidden="true">
                       18+

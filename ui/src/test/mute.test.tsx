@@ -52,6 +52,19 @@ describe('mute a channel', () => {
   });
 });
 
+describe('a timed mute says until when', () => {
+  it('the menu reads "Unmute · Muted until …" and the 🔕 title says the same', async () => {
+    const { channels } = await setup();
+    fireEvent.contextMenu(within(channels()).getByRole('button', { name: /^clips/ }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Mute…' }));
+    fireEvent.click(screen.getByRole('button', { name: 'For 1 hour' }));
+    const row = within(channels()).getByRole('button', { name: /^clips, Muted/ });
+    expect(row.querySelector('.bell-off-wrap')!.getAttribute('title')).toMatch(/^Muted until ⁨.+⁩$/);
+    fireEvent.contextMenu(row);
+    expect(menuItems().find((t) => t?.startsWith('Unmute'))).toMatch(/^Unmute · Muted until ⁨.+⁩$/);
+  });
+});
+
 describe('mute a server, and mark it all as read', () => {
   it('the rail button says Muted; Mark all as read clears every unread channel', async () => {
     const { rail, channels } = await setup();
