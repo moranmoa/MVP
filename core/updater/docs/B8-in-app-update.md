@@ -171,7 +171,7 @@ B8 is integration: where files live, who runs what, and the transport.
  begin_boot():
    Normal(v) / Trial(v, n)  ──► spawn versions/<v>/MVS
    RolledBack(prev)              --mvs-update-root=<root> argv...  ──► --update-root <root>
- exit (no waiting)                                                     every 6 h + at start:
+ exit (no waiting)                                                     every 1 h + at start:
                                  did-finish-load + core ping ok          checkForUpdate
                                  ──► markHealthy (core-only) ──────────► report_healthy()
                                                                          downloadUpdate: fetch,
