@@ -146,7 +146,10 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 pub const INVITE_FETCH_WAIT: Duration = Duration::from_secs(3);
 /// How long [`Node::fetch_backup`] waits for holders (a provider lookup and
 /// circuit dials included).
-pub const BACKUP_FETCH_WAIT: Duration = Duration::from_secs(8);
+pub const BACKUP_FETCH_WAIT: Duration = Duration::from_secs(3);
+/// A provider lookup for one tag at most this often: a restore retries each
+/// sync round, and the lookup is the slow part.
+const BACKUP_LOOKUP_EVERY: Duration = Duration::from_secs(60);
 /// Providers of a backup tag one fetch asks.
 const MAX_BACKUP_PROVIDERS: usize = 8;
 /// Peers one envelope fetch asks.
@@ -667,6 +670,7 @@ impl Node {
             backup_fetch_of: HashMap::new(),
             backup_lookups: HashMap::new(),
             backups_expired: Instant::now(),
+            backup_looked_up: HashMap::new(),
         };
         for log in config.logs {
             task.open(log, None);
@@ -1230,6 +1234,8 @@ struct Task {
     backup_fetch_of: HashMap<request_response::OutboundRequestId, u64>,
     backup_lookups: HashMap<kad::QueryId, (u64, [u8; 32])>,
     backups_expired: Instant,
+    /// When each tag's providers were last looked up.
+    backup_looked_up: HashMap<[u8; 32], Instant>,
 }
 
 /// One [`Node::fetch_invite`]: answers so far, until every peer answered or
@@ -1843,7 +1849,16 @@ impl Task {
             self.backup_fetch_of.insert(request, id);
         }
         let mut waiting = peers.len();
-        if relayed {
+        // The provider lookup only on a fresh device restoring (no server
+        // opened yet, nothing held for the tag): it can take seconds, and a
+        // writer's round runs in the api's sync loop, so it must stay quick
+        // (the relay and my connected devices answer at once).
+        let due = self.backup_looked_up.get(&tag).is_none_or(|at| at.elapsed() >= BACKUP_LOOKUP_EVERY);
+        if relayed && answers.is_empty() && self.secrets.is_empty() && due {
+            if self.backup_looked_up.len() >= MAX_FETCH_PEERS {
+                self.backup_looked_up.retain(|_, at| at.elapsed() < BACKUP_LOOKUP_EVERY);
+            }
+            self.backup_looked_up.insert(tag, Instant::now());
             let query = self.swarm.behaviour_mut().kad.get_providers(kad::RecordKey::new(&tag));
             self.backup_lookups.insert(query, (id, tag));
             waiting += 1;
