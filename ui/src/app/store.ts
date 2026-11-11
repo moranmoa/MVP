@@ -429,8 +429,28 @@ export class Store {
 
   private set(patch: Partial<StoreState>): void {
     this.state = { ...this.state, ...patch };
+    // Profile save (docs/ux/specs/profile-save.md): every place that shows me
+    // renders from my identity, not from my member row, which only follows
+    // once my profile post comes back. So a save shows everywhere at once.
+    if (patch.identity !== undefined || patch.members !== undefined) this.state.members = withMe(this.state.members, this.state.identity);
     this.listeners.forEach((l) => l());
   }
+}
+
+/** My row in every server, with my name, colour and picture from my identity. Unchanged objects when nothing differs. */
+export function withMe(members: Record<Id, Member[]>, me: Identity | null): Record<Id, Member[]> {
+  if (!me) return members;
+  let out = members;
+  for (const [serverId, list] of Object.entries(members)) {
+    const i = list.findIndex((m) => m.id === me.id);
+    if (i < 0) continue;
+    const m = list[i];
+    const mine: Member = { ...m, displayName: me.displayName || m.displayName, color: me.color, avatarDataUrl: me.avatarDataUrl };
+    if (mine.displayName === m.displayName && mine.color === m.color && mine.avatarDataUrl === m.avatarDataUrl) continue;
+    if (out === members) out = { ...members };
+    out[serverId] = list.map((x, j) => (j === i ? mine : x));
+  }
+  return out;
 }
 
 export function useStore<T>(store: Store, select: (s: StoreState) => T): T {

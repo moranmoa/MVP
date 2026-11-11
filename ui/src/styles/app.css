@@ -3410,3 +3410,9 @@ input.switch:disabled {
     min-height: 2.75rem;
   }
 }
+
+/* Profile save (0.4.5): "others will see it later" under "Profile saved". */
+.saved-later {
+  display: block;
+  flex-basis: 100%;
+}

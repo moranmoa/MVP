@@ -154,7 +154,7 @@ export const ProfileEditor = forwardRef<ProfileEditorHandle, { onDirtyChange: (d
   const [imageError, setImageError] = useState<'too-large' | 'unsupported' | null>(null);
   const [nameError, setNameError] = useState<'empty' | 'chars' | null>(null);
   const [saveError, setSaveError] = useState(false);
-  const [justSaved, setJustSaved] = useState(false);
+  const [justSaved, setJustSaved] = useState<false | 'shared' | 'local'>(false);
   const nameRef = useRef<HTMLInputElement>(null);
   const nameProps = useUserTextProps(draft.name);
   const bioProps = useUserTextProps(draft.bio);
@@ -198,7 +198,8 @@ export const ProfileEditor = forwardRef<ProfileEditorHandle, { onDirtyChange: (d
         ...(draft.color !== saved.color ? { color: draft.color ?? '' } : {}),
       });
       setDraft((d) => ({ ...d, name: d.name.trim(), bio: d.bio.trim() }));
-      setJustSaved(true);
+      // Spec profile-save §2: the name, colour and picture reach the others later.
+      setJustSaved(draft.name.trim() !== saved.name || draft.color !== saved.color || draft.avatar !== saved.avatar ? 'shared' : 'local');
       return true;
     } catch (e) {
       // B23: bidi, control or zero-width characters are refused, not stripped.
@@ -326,6 +327,11 @@ export const ProfileEditor = forwardRef<ProfileEditorHandle, { onDirtyChange: (d
         {justSaved && !dirty && (
           <p className="success" role="status">
             <FormattedMessage id="profile.edit.saved" />
+            {justSaved === 'shared' && (
+              <span className="muted small saved-later">
+                <FormattedMessage id="profile.edit.savedLater" />
+              </span>
+            )}
           </p>
         )}
         <div className="actions">

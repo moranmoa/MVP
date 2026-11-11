@@ -43,7 +43,7 @@ describe('edit profile (B11e)', () => {
     await act(async () => {
       fireEvent.click(save());
     });
-    expect(await within(dialog).findByRole('status')).toHaveProperty('textContent', 'Profile saved');
+    expect(await within(dialog).findByRole('status')).toHaveProperty('textContent', 'Profile savedOthers in your servers will see it within a few minutes.');
     const me = await core.getIdentity();
     expect(me).toMatchObject({ displayName: 'Moran B', bio: 'Plays at night' });
     const [server] = await core.listServers();
