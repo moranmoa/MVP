@@ -3132,3 +3132,18 @@ input.switch:disabled {
 .language-picker select {
   min-height: 2.75rem;
 }
+
+.language-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.language-picker-row select {
+  flex: 1;
+}
+
+.language-globe {
+  font-size: 1.25rem;
+  line-height: 1;
+}
