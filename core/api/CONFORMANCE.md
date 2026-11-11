@@ -175,6 +175,7 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
     - `masterId` is computed by the core: the earliest `joinedAt`, with ties going to the smaller ID.
       - `joinedAt` is checked on the first hello of a stay: no earlier than `createdAt`, and within 120 s of the hello's time. It's frozen after that.
       - Accepted residual: someone joining within 2 minutes of another member can claim to be earlier.
+      - So the master is advisory: it can only rename and set the limit, and grants no other right. The server owner's edit always wins: the master applies it whatever the master set before.
     - `name` and `limit` come only from the master's hellos. With `name` absent, the UI shows the default name with the master's display name.
   - `createVoiceRoom(serverId)` returns a `CallState` for the new room (its `channelId` is the room ID), with me as its creator and master. It leaves any other call first.
     - Errors: `not-found` (a server I don't have), `not-allowed` (not a member, or kicked), `room-cap` (10 live rooms, by this core's view), `relay-only`, `in-call-elsewhere`, `not-implemented`.
