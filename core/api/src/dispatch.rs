@@ -306,7 +306,7 @@ impl Core {
             "joinServer" => ok(self.join_server(&args::<LinkArg>(raw)?.link)),
             "cancelJoin" => ok(self.cancel_join(&args::<LinkArg>(raw)?.link)),
 
-            "markRead" => Ok(Value::Null),
+            "markRead" => ok(self.mark_read(&args::<ChannelIdArg>(raw)?.channel_id)),
             "blockUser" => ok(self.block_user(&args::<UserArg>(raw)?.user_id)),
             // Server lifecycle (#251).
             "renameServer" => {

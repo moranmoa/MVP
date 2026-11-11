@@ -4275,3 +4275,61 @@ fn channel_order_spam_from_a_member_is_cheap_and_ignored() {
     // Resolving each post's past would take tens of seconds here.
     assert!(start.elapsed() < std::time::Duration::from_secs(3), "{:?}", start.elapsed());
 }
+
+/// G-21 (new-messages divider): `unreadCount` and `firstUnreadIndex` from
+/// the local read marker, my own messages not counted; `markRead` resets
+/// both; history from before I joined isn't unread; 300 unread are counted
+/// from the stored records, quickly.
+#[test]
+fn unread_counts_follow_the_read_marker() {
+    let world = World::new();
+    let (owner, server, channel) = keyed_server(&world, "Unread");
+    owner.core.send_message(&channel, "before Bob joined", None).unwrap();
+    let bob = joiner(&world, &server, "Bob");
+    owner.core.sync_now().unwrap();
+    bob.core.sync_now().unwrap();
+    let unread = |peer: &Peer| -> (Option<u64>, Option<u64>, bool) {
+        let list = peer.core.list_channels(&server.id).unwrap();
+        let c = list.into_iter().find(|c| c.id == channel).unwrap();
+        (c.unread_count, c.first_unread_index, c.unread)
+    };
+    // Nothing new since Bob joined.
+    assert_eq!(unread(&bob), (Some(0), None, false));
+
+    // Bob's own message first, then the owner's and Bob's mixed.
+    bob.core.send_message(&channel, "b0", None).unwrap();
+    owner.core.sync_now().unwrap();
+    for text in ["o1", "o2"] {
+        owner.core.send_message(&channel, text, None).unwrap();
+    }
+    bob.core.sync_now().unwrap();
+    bob.core.send_message(&channel, "b1", None).unwrap();
+    owner.core.send_message(&channel, "o3", None).unwrap();
+    bob.core.sync_now().unwrap();
+    let count = bob.core.get_message_count(&channel).unwrap() as u64;
+    let (n, first, flag) = unread(&bob);
+    assert_eq!((n, flag), (Some(3), true));
+    let first = first.expect("an index") as usize;
+    let page = bob.core.get_messages(&channel, first, count as usize).unwrap().messages;
+    assert_eq!(page[0].body, "o1", "firstUnreadIndex points past Bob's own b0");
+    // The owner sees Bob's two (the owner joined first).
+    owner.core.sync_now().unwrap();
+    assert_eq!(unread(&owner).0, Some(2));
+
+    // markRead: both reset, with channel.updated.
+    bob.events.take();
+    bob.core.handle(&format!(r#"{{"id":1,"cmd":"markRead","args":{{"channelId":"{channel}"}}}}"#));
+    assert_eq!(unread(&bob), (Some(0), None, false));
+    assert!(bob.events.take().iter().any(|e| matches!(e, Event::ChannelUpdated(c) if c.id == channel && c.unread_count == Some(0))));
+
+    // 300 unread: counted from the stored records, quickly.
+    for i in 0..300 {
+        owner.core.send_message(&channel, &format!("m{i}"), None).unwrap();
+    }
+    bob.core.sync_now().unwrap();
+    let start = std::time::Instant::now();
+    let (n, first, _) = unread(&bob);
+    assert_eq!(n, Some(300));
+    assert_eq!(first, Some(count));
+    assert!(start.elapsed() < std::time::Duration::from_secs(2), "{:?}", start.elapsed());
+}
