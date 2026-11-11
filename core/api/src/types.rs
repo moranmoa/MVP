@@ -286,6 +286,8 @@ pub enum ErrorCode {
     /// computer (same recovery words). One computer per call until linked
     /// devices (phase 3).
     InCallElsewhere,
+    /// Voice rooms: the server has 10 live rooms (by this core's view).
+    RoomCap,
     /// Server lifecycle: a member still runs a version that can't read a
     /// rename, leave or delete (no `server-lifecycle-v1` cap); nothing was
     /// signed.
@@ -490,11 +492,12 @@ pub enum Event {
     /// answers come only verified (see `voice`), so the flag is always true.
     #[serde(rename = "call.signal", rename_all = "camelCase")]
     CallSignal { from: Id, kind: SignalKind, payload: String, fingerprint_verified: bool },
-    /// Voice: who is in a server's room changed (join, leave, mute,
-    /// timeout, kick), mine or not. At most one per room per sync round,
-    /// only while I'm a member. A hint: `getVoiceRoom` re-reads it.
-    #[serde(rename = "voice.room")]
-    VoiceRoom(VoiceRoom),
+    /// Voice rooms: a server's live rooms changed (created, gone, join,
+    /// leave, mute, timeout, kick, rename, limit), mine or not: the whole
+    /// list, oldest first. At most one per server per sync round, only
+    /// while I'm a member. A hint: `listVoiceRooms` re-reads it.
+    #[serde(rename = "voice.rooms", rename_all = "camelCase")]
+    VoiceRooms { server_id: Id, rooms: Vec<VoiceRoom> },
     /// Once, after `markHealthy` commits a new version. Text only.
     #[serde(rename = "update.installed")]
     UpdateInstalled { version: String, notes: Option<String> },
@@ -587,27 +590,41 @@ pub enum RemovedReason {
     Closed,
 }
 
-/// Voice: a server's one voice room and who is in it, from verified hellos.
+/// Voice rooms: a live room and who is in it, from verified hellos (soft
+/// state: nothing is stored).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceRoom {
     pub server_id: Id,
     /// What `joinCall` takes; `CallState.channelId` in a call.
     pub room_id: Id,
-    /// At most 5: me first when I'm in it, then the others.
-    pub participants: Vec<VoiceParticipant>,
-    /// Relay-only is on: `joinCall` answers `relay-only`, so the UI can
-    /// disable "Join" up front. A new `voice.room` follows each change.
+    pub creator_id: Id,
+    /// ms since the epoch, by the creator's clock.
+    pub created_at: u64,
+    /// Set by the master or the server owner. Absent: the UI shows the
+    /// default name with the master's display name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// 2 to 5.
+    pub limit: u8,
+    /// Computed by the core: the earliest `joinedAt` (ties: the smaller ID).
+    pub master_id: Id,
+    /// At most 5, by `joinedAt` (the master first); me too when I'm in it.
+    pub members: Vec<VoiceMember>,
+    /// Relay-only is on: `createVoiceRoom` and `joinCall` answer
+    /// `relay-only`, so the UI can disable them up front.
     #[serde(default)]
     pub relay_only: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VoiceParticipant {
+pub struct VoiceMember {
     pub user_id: Id,
     /// A display hint only.
     pub muted: bool,
+    /// ms since the epoch: its claim, checked within 2 minutes and frozen.
+    pub joined_at: u64,
 }
 
 /// Voice: the WebRTC signalling `sendSignal` carries.

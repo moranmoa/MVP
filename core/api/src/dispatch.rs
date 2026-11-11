@@ -41,6 +41,16 @@ struct RenameServerArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct EditVoiceRoomArgs {
+    room_id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    limit: Option<u8>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ChannelIdArg {
     channel_id: String,
 }
@@ -373,8 +383,13 @@ impl Core {
             }
             "syncNow" => ok(self.sync_now()),
 
-            // Voice (piece B). `joinCall` takes the room ID as `channelId`.
-            "getVoiceRoom" => ok(self.get_voice_room(&args::<ServerArg>(raw)?.server_id)),
+            // Voice rooms. `joinCall` takes the room ID as `channelId`.
+            "createVoiceRoom" => ok(self.create_voice_room(&args::<ServerArg>(raw)?.server_id)),
+            "listVoiceRooms" => ok(self.list_voice_rooms(&args::<ServerArg>(raw)?.server_id)),
+            "editVoiceRoom" => {
+                let a = args::<EditVoiceRoomArgs>(raw)?;
+                ok(self.edit_voice_room(&a.room_id, a.name, a.limit))
+            }
             "joinCall" => ok(self.join_call(&args::<ChannelIdArg>(raw)?.channel_id)),
             "leaveCall" => ok(self.leave_call()),
             "setMuted" => ok(self.set_muted(args::<MutedArg>(raw)?.muted)),
