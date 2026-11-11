@@ -273,14 +273,13 @@ PowerShell on your normal (online) PC, in the repo:
 4. **Sign offline, one manifest per channel.** The draft carries
    `manifest-body-beta.json` and `manifest-body-alpha.json`. Both have the
    same artifacts and the "what's new" notes from `CHANGELOG.md` (English;
-   sections up to 0.4.0 are bilingual). Every release goes to **beta**; sign **alpha** too only when the
-   release is promoted to stable. Copy only the bodies to the signing machine
+   sections up to 0.4.0 are bilingual). **Both channels are signed by
+   default** (alpha = stable and beta, #309). Copy only the bodies to the signing machine
    (USB stick). The key never comes to the online PC. There:
 
    ```powershell
    updater sign-manifest --key E:\mvs-keys\root.key --body manifest-body-beta.json --out manifest-beta.json
    updater verify --manifest manifest-beta.json --root root.json
-   # stable only:
    updater sign-manifest --key E:\mvs-keys\root.key --body manifest-body-alpha.json --out manifest-alpha.json
    ```
 
