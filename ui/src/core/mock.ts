@@ -1032,6 +1032,8 @@ export class MockCore implements CoreApi {
     const index = this.count(ch);
     ch.appendedCount++;
     if (this.options.keyPending) return this.sendHeld(ch, index, body);
+    const memberIds = new Set(this.serverOf(ch).members.map((m) => m.id));
+    const mentions = [...new Set([...body.matchAll(/<@([0-9A-Za-z_-]{1,64})>/g)].map((x) => x[1]))].filter((id) => memberIds.has(id));
     const msg: Message = {
       id: this.messageId(channelId, index),
       channelId,
@@ -1040,6 +1042,7 @@ export class MockCore implements CoreApi {
       body,
       createdAt: Date.now(),
       sendState: 'pending',
+      ...(mentions.length ? { mentions } : {}),
     };
     if (replyToId) {
       const { ch: rch, index: ri } = this.parseId(replyToId);
