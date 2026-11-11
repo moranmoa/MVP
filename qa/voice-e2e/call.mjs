@@ -450,6 +450,31 @@ try {
     await page.locator('.call-bar .call-leave').waitFor({ timeout: 5000 });
   });
 
+  // Voice rooms (0.4.4): the owner renames the room and sets its limit, both sides see it,
+  // and a member who is neither the host nor the owner can't edit it.
+  const rowShows = async () => {
+    const t = await roomRow().innerText().catch(() => '');
+    return /QA room/.test(t) && /2\/2/.test(t) ? t.replace(/\s+/g, ' ') : null;
+  };
+  if (ROLE === 'a') {
+    await check('VR.1', 'the owner renames the room and sets its limit to 2', async () => {
+      await invoke('editVoiceRoom', (await firstRoom()).roomId, 'QA room', 2);
+      return until('edit shown', rowShows, 15_000);
+    });
+    put('edited');
+  } else {
+    await take('edited');
+    await check('VR.2', 'B sees the new name and 2/2', () => until('edit seen', rowShows, 15_000));
+    await check('VR.3', 'a member (not host, not owner) can\'t edit the room', async () => {
+      const res = await invoke('editVoiceRoom', (await firstRoom()).roomId, 'B was here', 3).then(
+        () => 'accepted',
+        (e) => `refused: ${e?.code ?? e?.message ?? e}`,
+      );
+      if (res === 'accepted') throw new Error('editVoiceRoom accepted from a member');
+      return res;
+    });
+  }
+
   const connected = await check('V2.2', 'the WebRTC connection to the other side reaches "connected"', async () => {
     const c = await until('connected', async () => (await live()).find((x) => x.state === 'connected'), 45_000, 500);
     return `${c.candidates}, dtls ${c.dtls}`;
@@ -586,6 +611,9 @@ try {
       await until('roster empty', async () => (await roster().count()) === 0, 15_000);
       return `${((Date.now() - at) / 1000).toFixed(1)} s`;
     });
+    await check('VR.4', 'B sees the room end when everyone has left (no row)', () =>
+      until('no room row', async () => (await page.locator('.voice-room-row').count()) === 0, 15_000),
+    );
     put('saw-empty');
   } else {
     const { at } = await take('left');
@@ -601,6 +629,13 @@ try {
       await page.locator('.call-bar').waitFor({ state: 'detached', timeout: 10_000 });
       await until('roster empty', async () => (await roster().count()) === 0, 10_000);
     });
+    await check('VR.4', 'the room ends when everyone has left (no room in the core, no row)', () =>
+      until(
+        'no rooms',
+        async () => (await invoke('listVoiceRooms', serverId)).length === 0 && (await page.locator('.voice-room-row').count()) === 0,
+        15_000,
+      ),
+    );
     put('left');
     // Rejoining (V6.4) before B has seen the empty roster would race its check.
     await take('saw-empty');
