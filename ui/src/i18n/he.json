@@ -478,6 +478,6 @@
   "notify.dialog.titleChannel": "התראות של ⁨#{name}⁩",
   "notify.mute.label": "השתקה",
   "notify.settings.previewDisabled": "קודם צריך להפעיל התראות דסקטופ.",
-  "notify.hiddenMention": "אזכור חדש שלך ב-⁨#{channel}⁩",
-  "notify.settings.previewPrivacy": "כשהתצוגה המקדימה פועלת, Windows שומר את טקסט ההודעה בהיסטוריית ההתראות ויכול להציג אותו במסך הנעילה."
+  "notify.hiddenMention": "הזכירו אותך ב-⁨#{channel}⁩",
+  "notify.settings.previewPrivacy": "כשהתצוגה המקדימה פועלת, מערכת ההפעלה שומרת את טקסט ההודעה בהיסטוריית ההתראות ויכולה להציג אותו במסך הנעילה."
 }

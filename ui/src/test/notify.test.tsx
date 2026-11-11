@@ -143,7 +143,7 @@ describe('desktop notifications in the app', () => {
     emit('message.added', msg({ channelId: 'c-clips', authorId: author.id, createdAt: Date.now() }));
     expect(notify).toHaveBeenLastCalledWith(expect.objectContaining({ body: 'New message in ⁨#clips⁩' }));
     emit('message.added', msg({ id: 'm-2', channelId: 'c-lfg', authorId: author.id, createdAt: Date.now(), mentionsMe: true }));
-    expect(notify).toHaveBeenLastCalledWith(expect.objectContaining({ body: 'New mention of you in ⁨#מחפשים-קבוצה⁩' }));
+    expect(notify).toHaveBeenLastCalledWith(expect.objectContaining({ body: 'You were mentioned in ⁨#מחפשים-קבוצה⁩' }));
     expect(JSON.stringify(notify.mock.calls)).not.toContain('Anyone up tonight?');
   });
 
@@ -182,7 +182,7 @@ describe('desktop notifications in the app', () => {
     expect(screen.queryByText(/notification history/)).toBeNull();
     fireEvent.click(preview);
     expect((preview as HTMLInputElement).checked).toBe(true);
-    expect(screen.getByText(/Windows keeps the message text in its notification history and can show it on the lock screen/)).toBeTruthy();
+    expect(screen.getByText(/the operating system keeps the message text in its notification history and can show it on the lock screen/)).toBeTruthy();
     fireEvent.click(screen.getByRole('switch', { name: 'Desktop notifications' }));
     expect((preview as HTMLInputElement).disabled).toBe(true);
   });
