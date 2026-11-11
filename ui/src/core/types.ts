@@ -185,6 +185,12 @@ export interface Message {
   /** Only set on messages written on this device. */
   sendState?: SendState;
   mentionsMe?: boolean;
+  /**
+   * G-24 (#330): the users this message mentions who are members now, as
+   * 64-hex ids. The body holds them as <@id> tokens; the UI shows names from the
+   * member list, and a token whose id isn't here as a former member.
+   */
+  mentions?: string[];
   /** Set by the UI when the text was too long or had too many lines to show in full. */
   clipped?: boolean;
   /**
