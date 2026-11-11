@@ -3094,8 +3094,11 @@ input.switch:disabled {
   font-weight: 600;
 }
 
+/* A clear edge, so the @ visibly sits inside (UX on #338). The theme has no
+   --surface-2; --bg-input is its solid second surface. */
 .mention-chip.former {
-  background: var(--bg-hover);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
   color: var(--text-muted);
   font-weight: 400;
 }
