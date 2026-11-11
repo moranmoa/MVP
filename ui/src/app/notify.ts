@@ -1,15 +1,15 @@
 // G-61 (docs/ux/GAPS.md §2.4): which new messages become a desktop
-// notification. Everything here is local: levels, mutes and switches live
-// in the settings on this computer and are never sent anywhere.
+// notification. Everything here is local: levels and switches live in the
+// settings on this computer, mutes in app/mute.ts (G-03 / G-17); nothing is
+// sent anywhere.
 
 import type { Id, Message } from '../core/types';
 
 export type NotifyLevel = 'all' | 'mentions' | 'none';
 
-/** A server's or a channel's choice. `mutedUntil`: epoch ms, or 'forever'. */
+/** A server's or a channel's choice. */
 export interface NotifyScope {
   level?: NotifyLevel;
-  mutedUntil?: number | 'forever';
 }
 
 export interface NotifyPrefs {
@@ -26,7 +26,6 @@ export const DEFAULT_LEVEL: NotifyLevel = 'mentions';
 export const GROUP_MS = 10_000;
 /** Older messages arriving now (catch-up after being offline) are not news. */
 export const STALE_MS = 10 * 60_000;
-export const MUTE_HOURS = [1, 8, 24] as const;
 
 export function defaultNotifyPrefs(): NotifyPrefs {
   return { desktop: true, preview: true, servers: {}, channels: {} };
@@ -39,11 +38,8 @@ function cleanScopes(v: unknown): Record<Id, NotifyScope> {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return out;
   for (const [k, s] of Object.entries(v as Record<string, unknown>).slice(0, 2000)) {
     if (!s || typeof s !== 'object' || k.length > 128) continue;
-    const { level, mutedUntil } = s as Record<string, unknown>;
-    const scope: NotifyScope = {};
-    if (LEVELS.includes(level as NotifyLevel)) scope.level = level as NotifyLevel;
-    if (mutedUntil === 'forever' || (typeof mutedUntil === 'number' && Number.isFinite(mutedUntil))) scope.mutedUntil = mutedUntil;
-    if (scope.level || scope.mutedUntil !== undefined) out[k] = scope;
+    const { level } = s as Record<string, unknown>;
+    if (LEVELS.includes(level as NotifyLevel)) out[k] = { level: level as NotifyLevel };
   }
   return out;
 }
@@ -61,29 +57,14 @@ export function cleanNotifyPrefs(v: unknown): NotifyPrefs {
   };
 }
 
-export function isMuted(scope: NotifyScope | undefined, now: number): boolean {
-  const u = scope?.mutedUntil;
-  return u === 'forever' || (typeof u === 'number' && u > now);
-}
-
 export function levelFor(prefs: NotifyPrefs, serverId: Id, channelId: Id): NotifyLevel {
   return prefs.channels[channelId]?.level ?? prefs.servers[serverId]?.level ?? DEFAULT_LEVEL;
 }
 
-/** Sets or clears one scope's level or mute, dropping scopes left empty. */
-export function withScope(
-  prefs: NotifyPrefs,
-  kind: 'servers' | 'channels',
-  id: Id,
-  patch: Partial<Record<keyof NotifyScope, NotifyScope[keyof NotifyScope] | null>>,
-): NotifyPrefs {
-  const next: NotifyScope = { ...prefs[kind][id] };
-  for (const [k, v] of Object.entries(patch) as [keyof NotifyScope, unknown][]) {
-    if (v === null || v === undefined) delete next[k];
-    else (next as Record<string, unknown>)[k] = v;
-  }
+/** Sets one server's or channel's level; null goes back to the default (a channel: its server's). */
+export function withLevel(prefs: NotifyPrefs, kind: 'servers' | 'channels', id: Id, level: NotifyLevel | null): NotifyPrefs {
   const scopes = { ...prefs[kind] };
-  if (next.level || next.mutedUntil !== undefined) scopes[id] = next;
+  if (level) scopes[id] = { level };
   else delete scopes[id];
   return { ...prefs, [kind]: scopes };
 }
@@ -93,6 +74,8 @@ export interface NotifyContext {
   serverId: Id;
   myId: Id | undefined;
   authorBlocked: boolean;
+  /** The server or the channel is muted (app/mute.ts isMuted). */
+  muted: boolean;
   /** The window has focus and shows this channel. */
   watching: boolean;
   now: number;
@@ -102,9 +85,11 @@ export interface NotifyContext {
 export function shouldNotify(m: Message, c: NotifyContext): boolean {
   if (!c.prefs.desktop || c.watching || m.deleted || m.authorId === c.myId || c.authorBlocked) return false;
   if (c.now - m.createdAt > STALE_MS) return false;
-  if (isMuted(c.prefs.servers[c.serverId], c.now) || isMuted(c.prefs.channels[m.channelId], c.now)) return false;
   const level = levelFor(c.prefs, c.serverId, m.channelId);
-  return level === 'all' || (level === 'mentions' && m.mentionsMe === true);
+  const mention = m.mentionsMe === true;
+  // PO (#335): a mention of me still comes through a mute, unless the level is "Nothing".
+  if (c.muted) return mention && level !== 'none';
+  return level === 'all' || (level === 'mentions' && mention);
 }
 
 /**

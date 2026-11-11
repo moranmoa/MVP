@@ -3003,3 +3003,83 @@ input.switch:disabled {
 .channel-handle:hover {
   background: var(--bg-hover);
 }
+
+/* G-21: where the new messages start. */
+.unread-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.25rem 1rem;
+  color: var(--danger);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.unread-divider::before,
+.unread-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--danger);
+}
+
+.unread-bar {
+  position: absolute;
+  inset-block-start: 0.5rem;
+  inset-inline: 1rem;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.25rem 0.25rem 0.75rem;
+  border-radius: var(--radius-s);
+  background: var(--accent);
+  color: var(--accent-text);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 0.15);
+}
+
+.unread-bar-jump {
+  flex: 1;
+  min-height: 1.75rem;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-align: start;
+  cursor: pointer;
+}
+
+.unread-bar .icon-button {
+  color: inherit;
+}
+
+/* Muted on this device (G-03, G-17): quieter, but text keeps its contrast
+   (the muted text colour, not opacity), and a 🔕 mark says so without colour. */
+.rail-item.muted .rail-button {
+  filter: grayscale(1);
+}
+/* A mention still shows; plain unread doesn't. */
+.rail-item.muted .rail-pip {
+  visibility: hidden;
+}
+.channel.muted,
+.channel.muted.unread {
+  color: var(--text-muted);
+  font-weight: normal;
+}
+.channel.muted .unread-dot {
+  display: none;
+}
+.channel.muted .channel-name {
+  color: var(--text-muted);
+}
+.channel .bell-off-wrap {
+  display: inline-flex;
+}
+.channel .bell-off {
+  flex: none;
+  width: 1rem;
+  height: 1rem;
+  color: var(--text-muted);
+}

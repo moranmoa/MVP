@@ -229,10 +229,18 @@ export function cleanInvite(i: Invite): Invite {
 /** G-11 (#323): an order key, base-62, 1–32 characters, never ending in 0. */
 const POSITION = /^[0-9A-Za-z]{0,31}[1-9A-Za-z]$/;
 
+/** A non-negative whole number below 2^31, or undefined. */
+const index = (v: unknown): number | undefined => (Number.isInteger(v) && (v as number) >= 0 && (v as number) < 2 ** 31 ? (v as number) : undefined);
+
 export function cleanChannel(c: Channel): Channel {
-  const { position, ...rest } = c;
+  const { position, firstUnreadIndex, unreadCount, ...rest } = c;
+  const first = index(firstUnreadIndex);
+  const n = index(unreadCount);
   return {
     ...rest,
+    // G-21: kept only as sane numbers; dropped otherwise.
+    ...(first !== undefined ? { firstUnreadIndex: first } : {}),
+    ...(n !== undefined ? { unreadCount: n } : {}),
     ...(typeof position === 'string' && POSITION.test(position) ? { position } : {}),
     name: cleanName(c.name, CHANNEL_NAME_MAX) || '…',
     adult: c.adult === true,
@@ -260,14 +268,27 @@ export function cleanMember(m: Member): Member {
 export const HELD_ID = /^pending-[0-9a-f]{16}$/;
 export const isHeld = (m: Pick<Message, 'id'>): boolean => HELD_ID.test(m.id);
 
+/**
+ * G-24 (#330): the members a message mentions, as 64-hex user ids, at most 100,
+ * no repeats. Anything else in the list, or a list that isn't one, is dropped:
+ * names come from the member list, never from here.
+ */
+function cleanMentions(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const ids = [...new Set(raw.filter((x): x is string => typeof x === 'string' && /^[0-9a-f]{64}$/.test(x)))].slice(0, 100);
+  return ids.length ? ids : undefined;
+}
+
 export function cleanMessage(m: Message): Message {
   const { text, clipped } = cleanText(m.body);
   // Only the exact held-id shape is a replacement; anything else is dropped.
   const replaces = typeof m.replaces === 'string' && HELD_ID.test(m.replaces) ? m.replaces : undefined;
-  const { replaces: _ignored, ...rest } = m;
+  const { replaces: _ignored, mentions: rawMentions, ...rest } = m;
+  const mentions = cleanMentions(rawMentions);
   return {
     ...rest,
     ...(replaces ? { replaces } : {}),
+    ...(mentions ? { mentions } : {}),
     body: text,
     clipped: clipped || undefined,
     replyTo: m.replyTo && { ...m.replyTo, excerpt: cleanExcerpt(m.replyTo.excerpt) },

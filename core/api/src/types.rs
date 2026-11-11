@@ -117,6 +117,13 @@ pub struct Channel {
     /// key is informational only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<String>,
+    /// G-21: the index (as in `getMessages`) of the first message after my
+    /// read marker that isn't mine; absent with nothing unread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_unread_index: Option<u64>,
+    /// G-21: how many messages after my read marker aren't mine (0 too).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread_count: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

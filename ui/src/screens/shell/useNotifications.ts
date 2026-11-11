@@ -4,6 +4,7 @@
 import { useEffect, useRef } from 'react';
 import { useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
+import { isMuted } from '../../app/mute';
 import { createGrouper, defaultNotifyPrefs, shellNotify, shouldNotify } from '../../app/notify';
 import { useSettings } from '../../app/settings';
 import { useCoreEvent, type Id, type Message } from '../../core';
@@ -72,6 +73,7 @@ export function useDesktopNotifications(viewing: Id | null, open: (serverId: Id,
       serverId: where.serverId,
       myId: where.s.identity?.id,
       authorBlocked: author?.blocked === true,
+      muted: isMuted(where.s.mutes, where.serverId, m.channelId),
       watching: viewing === m.channelId && document.hasFocus(),
       now: Date.now(),
     });

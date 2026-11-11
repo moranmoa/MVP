@@ -1,10 +1,12 @@
 // G-61 (docs/ux/GAPS.md §2.4): desktop notifications through the shell's
-// `window.mvs.notify`, levels per server and channel, mutes, preview, grouping.
+// `window.mvs.notify`, levels per server and channel, mutes (app/mute.ts,
+// G-03 / G-17), preview, grouping.
 
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../app/App';
-import { cleanNotifyPrefs, createGrouper, defaultNotifyPrefs, GROUP_MS, shouldNotify, withScope, type NotifyContext, type NotifyPrefs } from '../app/notify';
+import { serverMuteKey } from '../app/mute';
+import { cleanNotifyPrefs, createGrouper, defaultNotifyPrefs, GROUP_MS, shouldNotify, withLevel, type NotifyContext, type NotifyPrefs } from '../app/notify';
 import type { Settings } from '../app/settings';
 import type { CoreEvents } from '../core/api';
 import { MockCore } from '../core/mock';
@@ -25,11 +27,12 @@ const ctx = (prefs: NotifyPrefs, over: Partial<NotifyContext> = {}): NotifyConte
   serverId: 's-gamers',
   myId: 'u-me',
   authorBlocked: false,
+  muted: false,
   watching: false,
   now: NOW,
   ...over,
 });
-const all = withScope(defaultNotifyPrefs(), 'servers', 's-gamers', { level: 'all' });
+const all = withLevel(defaultNotifyPrefs(), 'servers', 's-gamers', 'all');
 
 describe('which messages notify', () => {
   it('"All messages" notifies; never for me, a blocked author, the channel I am watching, or old catch-up', () => {
@@ -47,27 +50,26 @@ describe('which messages notify', () => {
     expect(shouldNotify(msg({ mentionsMe: true }), ctx(prefs))).toBe(true);
   });
 
-  it('a mute holds until it ends; "until I turn it back on" holds', () => {
-    const muted = withScope(all, 'servers', 's-gamers', { mutedUntil: NOW + 3_600_000 });
-    expect(shouldNotify(msg({ mentionsMe: true }), ctx(muted))).toBe(false);
-    expect(shouldNotify(msg({ createdAt: NOW + 3_600_000 }), ctx(muted, { now: NOW + 3_600_000 }))).toBe(true);
-    const forever = withScope(all, 'channels', 'c-general', { mutedUntil: 'forever' });
-    expect(shouldNotify(msg(), ctx(forever, { now: NOW + 1e12 }))).toBe(false);
+  it('a mute silences everything but a mention of me (unless the level is "Nothing")', () => {
+    expect(shouldNotify(msg(), ctx(all, { muted: true }))).toBe(false);
+    expect(shouldNotify(msg({ mentionsMe: true }), ctx(all, { muted: true }))).toBe(true);
+    const nothing = withLevel(all, 'channels', 'c-general', 'none');
+    expect(shouldNotify(msg({ mentionsMe: true }), ctx(nothing, { muted: true }))).toBe(false);
   });
 
   it("a channel's level overrides its server's", () => {
-    const quiet = withScope(all, 'channels', 'c-general', { level: 'none' });
+    const quiet = withLevel(all, 'channels', 'c-general', 'none');
     expect(shouldNotify(msg(), ctx(quiet))).toBe(false);
     expect(shouldNotify(msg({ channelId: 'c-clips' }), ctx(quiet))).toBe(true);
     // Back to "same as the server": the scope goes away.
-    expect(withScope(quiet, 'channels', 'c-general', { level: null }).channels).toEqual({});
+    expect(withLevel(quiet, 'channels', 'c-general', null).channels).toEqual({});
   });
 
   it('stored prefs are checked field by field', () => {
     expect(cleanNotifyPrefs(undefined)).toEqual(defaultNotifyPrefs());
     expect(
-      cleanNotifyPrefs({ desktop: 'yes', preview: false, servers: { a: { level: 'loud', mutedUntil: 'forever' }, b: { level: 'all' }, c: 5 }, channels: [] }),
-    ).toEqual({ desktop: true, preview: false, servers: { a: { mutedUntil: 'forever' }, b: { level: 'all' } }, channels: {} });
+      cleanNotifyPrefs({ desktop: 'yes', preview: false, servers: { a: { level: 'loud' }, b: { level: 'all' }, c: 5 }, channels: [] }),
+    ).toEqual({ desktop: true, preview: false, servers: { b: { level: 'all' } }, channels: {} });
   });
 
   it('3 messages within 10 s: the first at once, then one "3 new messages"', () => {
@@ -142,6 +144,19 @@ describe('desktop notifications in the app', () => {
     expect(JSON.stringify(notify.mock.calls)).not.toContain('Anyone up tonight?');
   });
 
+  it('a muted server (app/mute.ts) stays quiet; a mention of me still comes through', async () => {
+    localStorage.setItem('mvs.mute.v1', JSON.stringify({ [serverMuteKey('s-gamers')]: 0 }));
+    try {
+      const { author, emit } = await setup(all);
+      emit('message.added', msg({ id: 'm-a', channelId: 'c-clips', authorId: author.id, createdAt: Date.now() }));
+      expect(notify).not.toHaveBeenCalled();
+      emit('message.added', msg({ id: 'm-b', channelId: 'c-lfg', authorId: author.id, createdAt: Date.now(), mentionsMe: true }));
+      expect(notify).toHaveBeenCalledTimes(1);
+    } finally {
+      localStorage.removeItem('mvs.mute.v1');
+    }
+  });
+
   it('nothing for the channel on screen while the window has focus', async () => {
     const { author, emit } = await setup(all);
     vi.mocked(document.hasFocus).mockReturnValue(true);
@@ -167,7 +182,7 @@ describe('desktop notifications in the app', () => {
     expect((preview as HTMLInputElement).disabled).toBe(true);
   });
 
-  it("a channel's menu opens its notification level and mute", async () => {
+  it("a channel's menu opens its notification level", async () => {
     await setup(defaultNotifyPrefs());
     const channels = screen.getByRole('complementary', { name: /channels/i });
     fireEvent.contextMenu(within(channels).getByRole('button', { name: /^clips/ }));
@@ -176,7 +191,5 @@ describe('desktop notifications in the app', () => {
     expect((within(dialog).getByRole('radio', { name: 'Same as the server' }) as HTMLInputElement).checked).toBe(true);
     fireEvent.click(within(dialog).getByRole('radio', { name: 'Nothing' }));
     expect((within(dialog).getByRole('radio', { name: 'Nothing' }) as HTMLInputElement).checked).toBe(true);
-    fireEvent.click(within(dialog).getByRole('radio', { name: 'For 1 hour' }));
-    expect(within(dialog).getByRole('status').textContent).toMatch(/^Muted until/);
   });
 });

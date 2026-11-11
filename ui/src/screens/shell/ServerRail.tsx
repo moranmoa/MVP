@@ -9,6 +9,8 @@ import { isCoreError, useCore, type Id, type ServerSummary } from '../../core';
 import { GearIcon, HomeIcon, PlusIcon, RefreshIcon } from '../../components/icons';
 import { useContextMenu, type MenuItem } from '../../components/ContextMenu';
 import { copyText } from '../../app/clipboard';
+import { isMutedKey, mutedUntil, MUTE_FOREVER, serverMuteKey } from '../../app/mute';
+import { MuteDialog, useMutedLabel, type MuteTarget } from './MuteDialog';
 import { NotifyDialog } from './NotifyDialog';
 
 /** How far the mouse moves before a press becomes a drag (G-01). */
@@ -43,6 +45,17 @@ export function ServerRail({
   const listRef = useRef<HTMLUListElement>(null);
   const myId = useStore(store, (s) => s.identity?.id);
   const { bind, menu } = useContextMenu();
+  const mutes = useStore(store, (s) => s.mutes);
+  const [muteTarget, setMuteTarget] = useState<MuteTarget | null>(null);
+  const isServerMuted = (s: ServerSummary) => isMutedKey(mutes, serverMuteKey(s.id));
+  const mutedLabel = useMutedLabel();
+  /** "Unmute", with "· Muted until …" for a timed mute. */
+  const unmuteLabel = (until: number | null) =>
+    [intl.formatMessage({ id: 'notify.unmute' }), until !== null && until !== MUTE_FOREVER ? mutedLabel(until) : null].filter(Boolean).join(' · ');
+  // G-04: every unread channel of the server, through the core's markRead.
+  const markAllRead = (s: ServerSummary) => {
+    for (const c of store.getState().channels[s.id] ?? []) if (c.unread || c.mentions) void core.markRead(c.id);
+  };
   // G-61: the server whose notification settings are open.
   const [notifyFor, setNotifyFor] = useState<ServerSummary | null>(null);
 
@@ -85,12 +98,17 @@ export function ServerRail({
     const rest: MenuItem[] = s.closed
       ? []
       : [
+          ...(s.unread || s.mentions ? [{ key: 'read', label: intl.formatMessage({ id: 'unread.markAllRead' }), onSelect: () => markAllRead(s) }] : []),
+          isServerMuted(s)
+            ? { key: 'unmute', label: unmuteLabel(mutedUntil(mutes, serverMuteKey(s.id))), onSelect: () => store.unmute(serverMuteKey(s.id)) }
+            : { key: 'mute', label: intl.formatMessage({ id: 'notify.muteMenu' }), onSelect: () => setMuteTarget({ key: serverMuteKey(s.id), name: s.name, kind: 'server' }) },
+          { key: 'notify', label: intl.formatMessage({ id: 'notify.menu' }), onSelect: () => setNotifyFor(s) },
+          { kind: 'separator' },
           {
             key: 'invite',
             label: intl.formatMessage({ id: 'menu.copyInvite' }),
             onSelect: async () => store.showFlash((await copyText(s.inviteLink)) ? 'common.copied' : 'menu.copyFailed'),
           },
-          { key: 'notify', label: intl.formatMessage({ id: 'notify.menu' }), onSelect: () => setNotifyFor(s) },
           ...(s.ownerId === myId ? [{ key: 'settings', label: intl.formatMessage({ id: 'server.settings.open' }), onSelect: () => onOpenServerSettings(s.id) }] : []),
           { kind: 'separator' },
           ...(s.ownerId !== myId ? [{ key: 'leave', label: intl.formatMessage({ id: 'server.leave' }), danger: true, onSelect: () => onLeaveServer(s.id) }] : []),
@@ -174,6 +192,7 @@ export function ServerRail({
     [
       s.name,
       s.closed ? intl.formatMessage({ id: 'server.closedTag' }) : null,
+      isServerMuted(s) ? intl.formatMessage({ id: 'notify.muted' }) : null,
       s.mentions > 0 ? intl.formatMessage({ id: 'mentions.label' }, { count: s.mentions }) : null,
       s.unread ? intl.formatMessage({ id: 'unread.label' }) : null,
     ]
@@ -230,6 +249,7 @@ export function ServerRail({
               style={{ ['--server-color' as string]: s.color }}
               tabIndex={selected === s.id ? 0 : -1}
               unread={s.unread}
+              muted={isServerMuted(s)}
               mentions={s.mentions}
               serverId={s.id}
               menuProps={arranging ? undefined : bind(intl.formatMessage({ id: 'menu.forServer' }, { name: s.name }), () => serverItems(s))}
@@ -299,6 +319,7 @@ export function ServerRail({
         </button>
       </div>
       {menu}
+      <MuteDialog target={muteTarget} onClose={() => setMuteTarget(null)} />
       {notifyFor && <NotifyDialog kind="server" id={notifyFor.id} name={notifyFor.name} onClose={() => setNotifyFor(null)} />}
     </nav>
     </>
@@ -315,6 +336,7 @@ function RailButton({
   style,
   tabIndex,
   unread,
+  muted,
   mentions = 0,
   menuProps,
   serverId,
@@ -328,13 +350,15 @@ function RailButton({
   style?: CSSProperties;
   tabIndex?: number;
   unread?: boolean;
+  /** Muted on this device (G-03): shown quieter. */
+  muted?: boolean;
   mentions?: number;
   menuProps?: HTMLAttributes<HTMLButtonElement>;
   /** Servers only: lets the keyboard reorder find the focused one. */
   serverId?: Id;
 }) {
   return (
-    <div className={`rail-item ${active ? 'active' : ''} ${unread ? 'unread' : ''}`}>
+    <div className={`rail-item ${active ? 'active' : ''} ${unread ? 'unread' : ''} ${muted ? 'muted' : ''}`}>
       <span className="rail-pip" aria-hidden="true" />
       <button
         type="button"
