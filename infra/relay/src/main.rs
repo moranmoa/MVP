@@ -4,11 +4,16 @@
 //! (Kademlia DHT, server mode) and relays encrypted traffic when two peers
 //! can't connect directly (libp2p circuit relay v2).
 //!
+//! It also keeps the backup mailbox (`/mvs/backup/1`, backup.rs): opaque,
+//! signed server-list backups, under quotas, for restoring on a new device.
+//!
 //! `relay-node healthcheck` exits 0 if the local TCP listener accepts a
 //! connection; the Docker healthcheck runs it (the image has no curl/nc).
 
+mod backup;
+
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env, fs,
     io::Write,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream},
@@ -24,10 +29,11 @@ use libp2p::{
     connection_limits::{self, ConnectionLimits},
     identify, identity, kad, memory_connection_limits,
     multiaddr::Protocol,
-    noise, ping, relay,
+    noise, ping, relay, request_response,
     swarm::{NetworkBehaviour, Swarm, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, StreamProtocol, SwarmBuilder,
 };
+use libp2p::kad::store::RecordStore as _;
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -51,6 +57,7 @@ struct Behaviour {
     identify: identify::Behaviour,
     ping: ping::Behaviour,
     kademlia: kad::Behaviour<kad::store::MemoryStore>,
+    backup: backup::BackupBehaviour,
 }
 
 /// Counters for the periodic `stats` log line. Counts only - no addresses or
@@ -304,8 +311,19 @@ async fn run() -> Result<()> {
             // Deprecated in favour of Config::new, which takes one name only.
             #[allow(deprecated)]
             kad_config.set_protocol_names(vec![KAD_PROTOCOL, LEGACY_KAD_PROTOCOL]);
-            let mut kademlia =
-                kad::Behaviour::with_config(peer_id, kad::store::MemoryStore::new(peer_id), kad_config);
+            // The mailbox's provider records live in this (the only) DHT
+            // server's own store: no 12-hourly republish queries for up to
+            // MAX_TAGS keys. Revisit with a second bootstrap (GAP-9).
+            kad_config.set_provider_publication_interval(None);
+            let store_config = kad::store::MemoryStoreConfig {
+                max_provided_keys: backup::MAX_TAGS + 1024,
+                ..Default::default()
+            };
+            let mut kademlia = kad::Behaviour::with_config(
+                peer_id,
+                kad::store::MemoryStore::with_config(peer_id, store_config),
+                kad_config,
+            );
             kademlia.set_mode(Some(kad::Mode::Server));
             Behaviour {
                 limits: connection_limits::Behaviour::new(limits),
@@ -317,6 +335,7 @@ async fn run() -> Result<()> {
                 )),
                 ping: ping::Behaviour::new(ping::Config::new()),
                 kademlia,
+                backup: backup::behaviour(),
             }
         })?
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
@@ -346,17 +365,40 @@ async fn run() -> Result<()> {
 
     info!(peer_id = %swarm.local_peer_id(), "relay node started");
 
+    // The backup mailbox, on the data volume (the only writable path).
+    let backup_dir = env::var("BACKUP_DIR").unwrap_or_else(|_| "/data/backup".into());
+    let mut mailbox = backup::Mailbox::open(Path::new(&backup_dir))
+        .with_context(|| format!("opening the backup mailbox at {backup_dir}"))?;
+    mailbox.sweep(backup::unix_now());
+    let local_id = *swarm.local_peer_id();
+    for tag in mailbox.tags().copied().collect::<Vec<_>>() {
+        provide(&mut swarm, local_id, &tag);
+    }
+    info!(stored = mailbox.counts.stored, "backup mailbox");
+    let proxies = proxy_ips()?;
+    // Each connected peer's source IP: request-response events carry the
+    // peer only. Never logged.
+    let mut peer_ips: HashMap<PeerId, IpAddr> = HashMap::new();
+
     let started = Instant::now();
     let mut stats = Stats::default();
     // Peers whose circuit addresses we put into the DHT.
     let mut reserved = HashSet::new();
     let mut stats_timer = tokio::time::interval(stats_every);
+    let mut sweep_timer = tokio::time::interval(backup::SWEEP_EVERY);
 
     loop {
         let event = tokio::select! {
             event = swarm.select_next_some() => event,
+            _ = sweep_timer.tick() => {
+                for tag in mailbox.sweep(backup::unix_now()) {
+                    swarm.behaviour_mut().kademlia.store_mut().remove_provider(&kad::RecordKey::new(&tag), &local_id);
+                }
+                continue;
+            }
             _ = stats_timer.tick() => {
                 let net = swarm.network_info();
+                let b = mailbox.counts;
                 info!(
                     uptime_secs = started.elapsed().as_secs(),
                     peers = net.num_peers(),
@@ -366,6 +408,16 @@ async fn run() -> Result<()> {
                     circuits_denied = stats.circuits_denied,
                     reservations_accepted = stats.reservations_accepted,
                     reservations_denied = stats.reservations_denied,
+                    backups_stored = b.stored,
+                    backup_writes_ok = b.writes_ok,
+                    backup_refused_invalid = b.refused_invalid,
+                    backup_refused_not_newer = b.refused_not_newer,
+                    backup_refused_rate = b.refused_rate,
+                    backup_refused_full = b.refused_full,
+                    backup_refused_disk = b.refused_disk,
+                    backup_fetch_hit = b.fetch_hit,
+                    backup_fetch_miss = b.fetch_miss,
+                    backups_expired = b.expired,
                     "stats"
                 );
                 continue;
@@ -417,17 +469,52 @@ async fn run() -> Result<()> {
             }
             // Per-connection lines are debug-only so the log doesn't grow with
             // every peer; the stats line carries the totals.
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => debug!(%peer_id, "connected"),
+            SwarmEvent::Behaviour(BehaviourEvent::Backup(request_response::Event::Message {
+                peer,
+                message: request_response::Message::Request { request, channel, .. },
+            })) => {
+                let source = match peer_ips.get(&peer) {
+                    Some(ip) if !proxies.contains(ip) => backup::Source::Ip(*ip),
+                    _ => backup::Source::Proxied(peer),
+                };
+                let now = backup::unix_now();
+                let answer = match request {
+                    backup::Request::Put(blob) => match mailbox.put(source, &blob, now) {
+                        Ok(tag) => {
+                            provide(&mut swarm, local_id, &tag);
+                            vec![1]
+                        }
+                        Err(_) => vec![0],
+                    },
+                    backup::Request::Get(tag) => mailbox.get(source, &tag, now).unwrap_or_default(),
+                };
+                // The peer may be gone already; nothing to do then.
+                let _ = swarm.behaviour_mut().backup.send_response(channel, answer);
+            }
+            SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+                if let Some(ip) = source_ip(endpoint.get_remote_address()) {
+                    peer_ips.insert(peer_id, ip);
+                }
+                debug!(%peer_id, "connected")
+            }
             SwarmEvent::ConnectionClosed { peer_id, num_established, .. } => {
                 debug!(%peer_id, "disconnected");
                 // The relay drops a reservation silently with its connection.
                 if num_established == 0 {
                     forget_circuit(&mut swarm, &mut reserved, &peer_id);
+                    peer_ips.remove(&peer_id);
                 }
             }
             _ => {}
         }
     }
+}
+
+/// Announces the relay as a holder of `tag` in its own DHT store (design §2:
+/// provider records point restoring devices at the mailbox).
+fn provide(swarm: &mut Swarm<Behaviour>, local_id: PeerId, tag: &backup::Tag) {
+    let record = kad::ProviderRecord::new(kad::RecordKey::new(tag), local_id, Vec::new());
+    let _ = swarm.behaviour_mut().kademlia.store_mut().add_provider(record);
 }
 
 fn forget_circuit(swarm: &mut Swarm<Behaviour>, reserved: &mut HashSet<PeerId>, peer: &PeerId) {

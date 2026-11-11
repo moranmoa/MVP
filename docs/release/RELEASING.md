@@ -336,6 +336,11 @@ Microsoft's CRT security fixes reach users **only through our rebuilds**,
 not through Windows Update. When Microsoft ships a CRT security fix, rebuild
 with the updated MSVC toolchain and release promptly.
 
+Electron updates that fix image decoders (for example libwebp) are security
+updates: ship them promptly. The app decodes avatars sent by other members,
+so a decoder bug is reachable by anyone in a shared server (Security Lead,
+A4). Follow [ELECTRON-UPGRADE.md](ELECTRON-UPGRADE.md) as usual.
+
 A manifest expires (at most 30 days, 14 by default). Clients refuse it after
 that, which stops an attacker freezing users on an old release. Before it
 runs out, re-sign the same release without a new build: download
