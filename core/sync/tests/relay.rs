@@ -1081,3 +1081,77 @@ async fn relay_only_from_start_never_goes_direct_and_turning_it_on_closes_direct
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
 }
+
+/// A server-list backup as the api makes it (`api::backup`): the header,
+/// an opaque body, and the write key's signature. `seed` makes the key.
+fn backup_blob(seed: u8, version: u64) -> ([u8; 32], Vec<u8>) {
+    use ed25519_dalek::Signer;
+    let w = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+    let w_pub = w.verifying_key().to_bytes();
+    let tag = blake3::derive_key("mvs/backup-tag/v1", &w_pub);
+    let mut blob = b"mvsb1".to_vec();
+    blob.extend_from_slice(&tag);
+    blob.extend_from_slice(&w_pub);
+    blob.extend_from_slice(&version.to_le_bytes());
+    blob.extend_from_slice(&[7; 24]);
+    blob.extend_from_slice(&[9; 4096 + 16]);
+    let sig = w.sign(&blob).to_bytes();
+    blob.extend_from_slice(&sig);
+    (tag, blob)
+}
+
+/// G-91 (restore phase A): my device keeps my backup and announces it; my
+/// other device (the same identity) gets a copy and keeps it after the
+/// first goes; a fresh device with no server secret finds it by its tag
+/// (connected peers and the tag's DHT providers) and gets it back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fresh_device_gets_the_backup_back_by_its_tag() {
+    let relay_key = identity::Keypair::generate_ed25519();
+    let port = free_port();
+    let relay: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::from(relay_key.public())).parse().unwrap();
+    let circuits = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _relay = start_relay_counting(relay_key, port, circuits, true);
+    let server = test_server().0;
+    let me = records::PublicKey::from_bytes(SigningKey::from_bytes(&[41; 32]).verifying_key().to_bytes());
+
+    // Two devices of one identity (the same binder key), on one server.
+    let a = bound_node("backup-a", &relay, 41, false, Arc::new(AcceptAll)).await;
+    let a2 = bound_node("backup-a2", &relay, 41, false, Arc::new(AcceptAll)).await;
+    // (Presence never lists my own identity: wait for the connection.)
+    let start = Instant::now();
+    while !a.peers().await.unwrap().contains(&a2.peer_id()) {
+        assert!(start.elapsed() < Duration::from_secs(60), "my devices never met");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let _ = (server, me);
+    let (tag, blob) = backup_blob(5, 1);
+    // A malformed blob is refused outright.
+    let mut forged = blob.clone();
+    forged[100] ^= 1;
+    assert!(!a.put_backup(forged).await.unwrap());
+    // My other device takes the copy once it has bound A (pulls carry the
+    // bindings): put a few times, as the api does on each change and login
+    // (well under the 12 writes an hour per tag).
+    for _ in 0..6 {
+        assert!(a.put_backup(blob.clone()).await.unwrap());
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+    a.shutdown().await.unwrap();
+    assert!(a2.fetch_backup(tag).await.unwrap().contains(&blob), "my other device didn't keep it");
+
+    // A clean machine: no server, no secret, only the tag (from the words).
+    let (fresh, _) = node_lan("backup-fresh", &relay, false).await;
+    let start = Instant::now();
+    loop {
+        let answers = fresh.fetch_backup(tag).await.unwrap();
+        if answers.contains(&blob) {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(90), "the fresh device never found it");
+    }
+    // An unknown tag: the same empty answer.
+    assert!(fresh.fetch_backup([0xee; 32]).await.unwrap().is_empty());
+    for node in [a2, fresh] {
+        node.shutdown().await.unwrap();
+    }
+}

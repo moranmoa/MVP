@@ -144,6 +144,14 @@ const MAX_CONNECTIONS_PER_IP: usize = 8;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long [`Node::fetch_invite`] waits for answers (T8-02).
 pub const INVITE_FETCH_WAIT: Duration = Duration::from_secs(3);
+/// How long [`Node::fetch_backup`] waits for holders (a provider lookup and
+/// circuit dials included).
+pub const BACKUP_FETCH_WAIT: Duration = Duration::from_secs(3);
+/// A provider lookup for one tag at most this often: a restore retries each
+/// sync round, and the lookup is the slow part.
+const BACKUP_LOOKUP_EVERY: Duration = Duration::from_secs(60);
+/// Providers of a backup tag one fetch asks.
+const MAX_BACKUP_PROVIDERS: usize = 8;
 /// Peers one envelope fetch asks.
 const MAX_FETCH_PEERS: usize = 16;
 /// Traffic on every connection at least this often, well under the 100 s a
@@ -340,6 +348,8 @@ enum Command {
     DropInvite { handle: [u8; 32] },
     DropServerInvites { server: ServerId },
     FetchInvite { handle: [u8; 32], reply: oneshot::Sender<Vec<Vec<u8>>> },
+    PutBackup { blob: Vec<u8>, reply: oneshot::Sender<bool> },
+    FetchBackup { tag: [u8; 32], reply: oneshot::Sender<Vec<Vec<u8>>> },
     Shutdown { reply: oneshot::Sender<()> },
 }
 
@@ -416,6 +426,8 @@ struct Behaviour {
     invite_pub: crate::invite::PublishBehaviour,
     /// Envelope asks, from anyone (`/mvs/invite/1`).
     invite_ask: crate::invite::AskBehaviour,
+    /// Server-list backups (`/mvs/backup/1`, G-91).
+    backup: crate::backup::BackupBehaviour,
 }
 
 type SharedBackoff = Arc<Mutex<DialBackoff<PeerId>>>;
@@ -654,6 +666,11 @@ impl Node {
             fetches: HashMap::new(),
             fetch_of: HashMap::new(),
             next_fetch: 0,
+            backup_limits: crate::backup::BackupLimits::new(),
+            backup_fetch_of: HashMap::new(),
+            backup_lookups: HashMap::new(),
+            backups_expired: Instant::now(),
+            backup_looked_up: HashMap::new(),
         };
         for log in config.logs {
             task.open(log, None);
@@ -852,6 +869,28 @@ impl Node {
         Ok(rx.await?)
     }
 
+    /// G-91: keeps my backup blob here (I hold my own, announced as a DHT
+    /// provider of its tag) and hands it to the other holders: the relay
+    /// (its mailbox) and my own other devices that are connected (peers
+    /// bound to my identity). False, nothing kept or sent, if the blob
+    /// fails [`crate::backup::check`]. Best effort; the api writes again on
+    /// the next change, at login, and every 24 h.
+    pub async fn put_backup(&self, blob: Vec<u8>) -> Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::PutBackup { blob, reply })?;
+        Ok(rx.await?)
+    }
+
+    /// G-91: every blob held under `tag`, here and by reachable holders:
+    /// the relay, connected peers, and the DHT providers of the tag
+    /// (dialled through our relay's circuit). Within
+    /// [`crate::node::BACKUP_FETCH_WAIT`]. Untrusted: the api checks each.
+    pub async fn fetch_backup(&self, tag: [u8; 32]) -> Result<Vec<Vec<u8>>> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::FetchBackup { tag, reply })?;
+        Ok(rx.await?)
+    }
+
     /// Closes all connections and the store.
     pub async fn shutdown(self) -> Result<()> {
         let (reply, rx) = oneshot::channel();
@@ -898,7 +937,9 @@ async fn build_swarm(
             let peer_id = key.public().to_peer_id();
             // Our own protocol name, not the public IPFS DHT's `/ipfs/kad/1.0.0`
             // (threat model R2); the relay speaks it too.
-            let kad_config = kad::Config::new(KAD_PROTOCOL);
+            let mut kad_config = kad::Config::new(KAD_PROTOCOL);
+            // G-91: backup holders re-announce themselves this often (design §2).
+            kad_config.set_provider_publication_interval(Some(crate::backup::REANNOUNCE));
             let mut kad = kad::Behaviour::with_config(peer_id, kad::store::MemoryStore::new(peer_id), kad_config);
             // Server mode so peers can find each other through any peer, not
             // only through the bootstrap node. (GAP-6 moves this to client mode.)
@@ -963,6 +1004,7 @@ async fn build_swarm(
                 voice: crate::voice::behaviour(),
                 invite_pub: crate::invite::publish_behaviour(),
                 invite_ask: crate::invite::ask_behaviour(),
+                backup: crate::backup::behaviour(),
             })
         })?
         .with_swarm_config(|c| c.with_idle_connection_timeout(IDLE_TIMEOUT))
@@ -1185,6 +1227,15 @@ struct Task {
     fetches: HashMap<u64, Fetch>,
     fetch_of: HashMap<request_response::OutboundRequestId, u64>,
     next_fetch: u64,
+    /// G-91: caps on backup writes and fetches; backup fetches in flight
+    /// (request, and provider lookup, to the fetch they belong to); when
+    /// held backups were last expired.
+    backup_limits: crate::backup::BackupLimits,
+    backup_fetch_of: HashMap<request_response::OutboundRequestId, u64>,
+    backup_lookups: HashMap<kad::QueryId, (u64, [u8; 32])>,
+    backups_expired: Instant,
+    /// When each tag's providers were last looked up.
+    backup_looked_up: HashMap<[u8; 32], Instant>,
 }
 
 /// One [`Node::fetch_invite`]: answers so far, until every peer answered or
@@ -1354,6 +1405,10 @@ impl Task {
             }
             Command::DropServerInvites { server } => self.invites.retain(|_, (s, _)| *s != server),
             Command::FetchInvite { handle, reply } => self.fetch_invite(handle, reply),
+            Command::PutBackup { blob, reply } => {
+                let _ = reply.send(self.put_backup(blob));
+            }
+            Command::FetchBackup { tag, reply } => self.fetch_backup(tag, reply),
             Command::RelayOnly { on } => self.set_relay_only(on),
             Command::NoDirectDials => self.direct_dials = false,
             Command::NoHolePunch => self.swarm.behaviour_mut().punch.set_enabled(false),
@@ -1687,6 +1742,162 @@ impl Task {
         }
         let live: HashSet<u64> = self.fetches.keys().copied().collect();
         self.fetch_of.retain(|_, id| live.contains(id));
+        self.backup_fetch_of.retain(|_, id| live.contains(id));
+        self.backup_lookups.retain(|_, (id, _)| live.contains(id));
+        // Others' backups past their retention (phase B; mine stay).
+        if self.backups_expired.elapsed() >= Duration::from_secs(3600) {
+            self.backups_expired = Instant::now();
+            if let Err(err) = self.store.expire_backups(unix_now(), crate::backup::RETENTION.as_secs()) {
+                warn!(%err, "expiring held backups failed");
+            }
+        }
+    }
+
+    /// One answer (or failure) for fetch `id`; replies once nothing is
+    /// left to wait for.
+    fn fetch_answered(&mut self, id: u64, answer: Option<Vec<u8>>) {
+        let Some(fetch) = self.fetches.get_mut(&id) else { return };
+        fetch.waiting = fetch.waiting.saturating_sub(1);
+        if let Some(answer) = answer.filter(|a| !a.is_empty()) {
+            fetch.answers.push(answer);
+        }
+        if fetch.waiting == 0 {
+            let fetch = self.fetches.remove(&id).expect("just seen");
+            let _ = fetch.reply.send(fetch.answers);
+        }
+    }
+
+    /// The peers bound to my own identity (my other devices) that are
+    /// connected now.
+    fn my_devices(&self) -> Vec<PeerId> {
+        let Some(me) = self.access.binder.as_ref().map(|b| b.identity()) else { return Vec::new() };
+        let mut peers: Vec<PeerId> = self
+            .bound
+            .iter()
+            .filter(|((peer, _), (_, identity))| *identity == me && self.swarm.is_connected(peer))
+            .map(|((peer, _), _)| *peer)
+            .collect();
+        peers.sort();
+        peers.dedup();
+        peers
+    }
+
+    /// Announces us as a DHT provider of a backup tag we hold (kad then
+    /// re-announces it every 12 h on its own).
+    fn provide_backup(&mut self, tag: [u8; 32]) {
+        if let Err(err) = self.swarm.behaviour_mut().kad.start_providing(kad::RecordKey::new(&tag)) {
+            debug!(%err, "announcing a backup failed");
+        }
+    }
+
+    /// See [`Node::put_backup`].
+    fn put_backup(&mut self, blob: Vec<u8>) -> bool {
+        let Some((tag, version)) = crate::backup::check(&blob) else { return false };
+        if let Err(err) = self.store.put_backup(&tag, version, &blob, None, unix_now()) {
+            warn!(%err, "keeping my backup failed");
+            return false;
+        }
+        self.provide_backup(tag);
+        let mut holders = self.my_devices();
+        if self.swarm.is_connected(&self.relay_peer) {
+            holders.push(self.relay_peer);
+        }
+        for peer in holders {
+            self.swarm.behaviour_mut().backup.send_request(&peer, crate::backup::Request::Put(blob.clone()));
+        }
+        true
+    }
+
+    /// `/mvs/backup/1` from a peer. A fetch gets the blob held under exactly
+    /// that tag, or the same empty answer whatever the reason (R3). A write
+    /// is kept only from my own other devices (phase A: a peer bound to my
+    /// identity), within its rate caps, if it passes `check` and is newer.
+    fn on_backup_request(&mut self, peer: PeerId, request: crate::backup::Request, channel: ResponseChannel<Vec<u8>>) {
+        let now = Instant::now();
+        let answer = match request {
+            crate::backup::Request::Get(tag) => {
+                let held = if self.backup_limits.allow_fetch(peer, now) { self.store.backup(&tag) } else { Ok(None) };
+                held.ok().flatten().unwrap_or_default()
+            }
+            crate::backup::Request::Put(blob) => {
+                let me = self.access.binder.as_ref().map(|b| *b.identity().as_bytes());
+                let from = self.member_identity(peer).map(|identity| *identity.as_bytes());
+                let owner = crate::backup::write_owner(from, me);
+                let kept = crate::backup::check(&blob)
+                    .filter(|_| owner.is_some())
+                    .filter(|(tag, _)| self.backup_limits.allow_write(peer, *tag, now))
+                    .filter(|(tag, version)| {
+                        let owner = owner.flatten();
+                        self.store.put_backup(tag, *version, &blob, owner.as_ref(), unix_now()).unwrap_or(false)
+                    });
+                if let Some((tag, _)) = kept {
+                    self.provide_backup(tag);
+                }
+                vec![u8::from(kept.is_some())]
+            }
+        };
+        let _ = self.swarm.behaviour_mut().backup.send_response(channel, answer);
+    }
+
+    /// See [`Node::fetch_backup`]: mine if I hold it, one ask to the relay
+    /// and each connected peer, and a DHT lookup for the tag's providers
+    /// (each asked through our relay's circuit when found).
+    fn fetch_backup(&mut self, tag: [u8; 32], reply: oneshot::Sender<Vec<Vec<u8>>>) {
+        let id = self.next_fetch;
+        self.next_fetch += 1;
+        let answers: Vec<Vec<u8>> = self.store.backup(&tag).ok().flatten().into_iter().collect();
+        let mut peers: Vec<PeerId> = self.connected.iter().copied().collect();
+        peers.truncate(MAX_FETCH_PEERS);
+        let relayed = self.swarm.is_connected(&self.relay_peer);
+        if relayed {
+            peers.push(self.relay_peer);
+        }
+        for peer in &peers {
+            let request = self.swarm.behaviour_mut().backup.send_request(peer, crate::backup::Request::Get(tag));
+            self.backup_fetch_of.insert(request, id);
+        }
+        let mut waiting = peers.len();
+        // The provider lookup only on a fresh device restoring (no server
+        // opened yet, nothing held for the tag): it can take seconds, and a
+        // writer's round runs in the api's sync loop, so it must stay quick
+        // (the relay and my connected devices answer at once).
+        let due = self.backup_looked_up.get(&tag).is_none_or(|at| at.elapsed() >= BACKUP_LOOKUP_EVERY);
+        if relayed && answers.is_empty() && self.secrets.is_empty() && due {
+            if self.backup_looked_up.len() >= MAX_FETCH_PEERS {
+                self.backup_looked_up.retain(|_, at| at.elapsed() < BACKUP_LOOKUP_EVERY);
+            }
+            self.backup_looked_up.insert(tag, Instant::now());
+            let query = self.swarm.behaviour_mut().kad.get_providers(kad::RecordKey::new(&tag));
+            self.backup_lookups.insert(query, (id, tag));
+            waiting += 1;
+        }
+        if waiting == 0 {
+            let _ = reply.send(answers);
+            return;
+        }
+        let until = Instant::now() + BACKUP_FETCH_WAIT;
+        self.fetches.insert(id, Fetch { reply, waiting, answers, until });
+    }
+
+    /// Providers found for a backup fetch's tag: each asked once, through
+    /// our relay's circuit (R3), at most [`MAX_BACKUP_PROVIDERS`]. The
+    /// lookup's own wait ends on its last step.
+    fn on_backup_providers(&mut self, query: kad::QueryId, providers: Vec<PeerId>, last: bool) {
+        let Some(&(id, tag)) = self.backup_lookups.get(&query) else { return };
+        let me = *self.swarm.local_peer_id();
+        for peer in providers.into_iter().filter(|p| *p != me).take(MAX_BACKUP_PROVIDERS) {
+            let circuit = self.relay_addr.clone().with(Protocol::P2pCircuit).with(Protocol::P2p(peer));
+            self.swarm.add_peer_address(peer, circuit);
+            let request = self.swarm.behaviour_mut().backup.send_request(&peer, crate::backup::Request::Get(tag));
+            self.backup_fetch_of.insert(request, id);
+            if let Some(fetch) = self.fetches.get_mut(&id) {
+                fetch.waiting += 1;
+            }
+        }
+        if last {
+            self.backup_lookups.remove(&query);
+            self.fetch_answered(id, None);
+        }
     }
 
     /// "Relay only" on: drop the direct listener (identify then announces
@@ -2139,6 +2350,14 @@ impl Task {
                     self.emit(NodeEvent::RelayReserved);
                     let me = *self.swarm.local_peer_id();
                     self.swarm.behaviour_mut().kad.get_closest_peers(me);
+                    // G-91: our provider records carry our circuit: without
+                    // an address the relay answers with its routing table's,
+                    // which may not hold us. And the backups we hold are
+                    // announced again (a restarted relay forgot them).
+                    self.swarm.add_external_address(self.relay_addr.clone().with(Protocol::P2pCircuit));
+                    for tag in self.store.backup_tags().unwrap_or_default() {
+                        self.provide_backup(tag);
+                    }
                     self.pull_all("reservation");
                 }
             }
@@ -2154,6 +2373,7 @@ impl Task {
             SwarmEvent::ListenerClosed { listener_id, .. } if self.circuit == Some(listener_id) => {
                 // Reservation refused or lost: the next discovery tick asks again.
                 self.circuit = None;
+                self.swarm.remove_external_address(&self.relay_addr.clone().with(Protocol::P2pCircuit));
             }
             SwarmEvent::OutgoingConnectionError { peer_id: Some(peer), error, .. } if peer != self.relay_peer => {
                 // Back off this peer, and forget circuit addresses that failed
@@ -2253,6 +2473,41 @@ impl Task {
                 request_id,
                 ..
             })) => self.on_invite_answer(request_id, None),
+            SwarmEvent::Behaviour(BehaviourEvent::Backup(request_response::Event::Message { peer, message, .. })) => {
+                match message {
+                    request_response::Message::Request { request, channel, .. } => {
+                        self.on_backup_request(peer, request, channel)
+                    }
+                    request_response::Message::Response { request_id, response } => {
+                        if let Some(id) = self.backup_fetch_of.remove(&request_id) {
+                            self.fetch_answered(id, Some(response));
+                        }
+                    }
+                }
+            }
+            SwarmEvent::Behaviour(BehaviourEvent::Backup(request_response::Event::OutboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            })) => {
+                debug!(%peer, %error, "backup request failed");
+                if let Some(id) = self.backup_fetch_of.remove(&request_id) {
+                    self.fetch_answered(id, None);
+                }
+            }
+            SwarmEvent::Behaviour(BehaviourEvent::Kad(kad::Event::OutboundQueryProgressed {
+                id,
+                result: kad::QueryResult::GetProviders(result),
+                step,
+                ..
+            })) if self.backup_lookups.contains_key(&id) => {
+                let providers = match result {
+                    Ok(kad::GetProvidersOk::FoundProviders { providers, .. }) => providers.into_iter().collect(),
+                    _ => Vec::new(),
+                };
+                self.on_backup_providers(id, providers, step.last);
+            }
             SwarmEvent::Behaviour(BehaviourEvent::Punch(libp2p::dcutr::Event { remote_peer_id, result })) => {
                 // A success shows up as a direct connection: `track_connection`
                 // flips the link to direct and parks the relayed one (#206).

@@ -229,6 +229,11 @@ impl<K: Hash + Eq + Clone> RateLimiter<K> {
         Self { buckets: HashMap::new(), burst: burst as f64, per_sec: per_sec as f64, max_keys }
     }
 
+    /// Refilled at `per_hour` an hour.
+    pub fn per_hour(burst: u32, per_hour: u32, max_keys: usize) -> Self {
+        Self { buckets: HashMap::new(), burst: burst as f64, per_sec: per_hour as f64 / 3600.0, max_keys }
+    }
+
     /// Refilled at `per_min` a minute, for rates under one a second.
     pub fn per_minute(burst: u32, per_min: u32, max_keys: usize) -> Self {
         Self { buckets: HashMap::new(), burst: burst as f64, per_sec: per_min as f64 / 60.0, max_keys }
