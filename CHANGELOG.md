@@ -10,6 +10,17 @@ New sections must not contain a `---` line: the release scripts still read
 it as the old Hebrew/English split.
 Never put the relay domain or any IP address here.
 
+## [0.4.4] - 2026-11-11
+
+### New
+- **Voice rooms:** click "Join chat" in a server to open a new voice room. Live rooms show in the channel list with who is in them and who hosts. The room's owner can rename it and set how many people may join (2 to 5). A server can have up to 10 rooms at once, and you can be in one room at a time.
+- **Backup on the relay (groundwork):** the relay can now keep an encrypted backup of your servers, the first step towards restoring them on a new device. The relay can't read it. It starts working once the relay is updated.
+
+### Known
+- **Everyone needs 0.4.4 for voice.** Voice rooms use a new call format, so people on 0.4.3 or older can't join calls with people on 0.4.4. Please update.
+- **Voice calls are officially supported only when everyone is on the same network** (for example the same Wi-Fi). Calls across networks are on the way.
+- On first run, Windows may ask whether to allow MVS on the network. Please allow it (also on private networks); otherwise voice calls won't connect.
+
 ## [0.4.3] - 2026-11-11
 
 This version replaces 0.4.2, which was never published. It includes everything in 0.4.2 plus the fixes below.
