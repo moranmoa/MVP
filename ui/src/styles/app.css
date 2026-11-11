@@ -3054,3 +3054,33 @@ input.switch:disabled {
 .unread-bar .icon-button {
   color: inherit;
 }
+
+/* Muted on this device (G-03, G-17): quieter, but text keeps its contrast
+   (the muted text colour, not opacity), and a 🔕 mark says so without colour. */
+.rail-item.muted .rail-button {
+  filter: grayscale(1);
+}
+/* A mention still shows; plain unread doesn't. */
+.rail-item.muted .rail-pip {
+  visibility: hidden;
+}
+.channel.muted,
+.channel.muted.unread {
+  color: var(--text-muted);
+  font-weight: normal;
+}
+.channel.muted .unread-dot {
+  display: none;
+}
+.channel.muted .channel-name {
+  color: var(--text-muted);
+}
+.channel .bell-off-wrap {
+  display: inline-flex;
+}
+.channel .bell-off {
+  flex: none;
+  width: 1rem;
+  height: 1rem;
+  color: var(--text-muted);
+}
