@@ -173,7 +173,7 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
   - `VoiceRoom { serverId, roomId, creatorId, createdAt, name?, limit, masterId, members: { userId, muted, joinedAt }[], relayOnly }`.
     - `members` are ordered by `joinedAt`, at most 5. They're built from verified hellos only, each dropped 30 s after we last received one, and include me when I'm in the room.
     - `masterId` is computed by the core: the earliest `joinedAt`, with ties going to the smaller ID.
-      - `joinedAt` is checked on the first hello of a stay: no earlier than `createdAt`, and within 120 s of the hello's time. It's frozen after that.
+      - `joinedAt` is frozen for a stay. While a core is learning a room (within 30 s of first hearing of it: it just started, or the core just came online), a claim must be no earlier than `createdAt` and no later than the hello's time plus 120 s, or the hello is dropped. Every member already in the room says hello within that time, so cores agree whatever order the hellos arrive in. A newcomer to a room known for longer has its claim clamped to at least now minus 120 s, never dropped.
       - Accepted residual: someone joining within 2 minutes of another member can claim to be earlier.
       - So the master is advisory: it can only rename and set the limit, and grants no other right. The server owner's edit always wins: the master applies it whatever the master set before.
     - `name` and `limit` come only from the master's hellos. With `name` absent, the UI shows the default name with the master's display name.
@@ -212,9 +212,9 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
   - It fails closed. A core-to-core envelope is signed by the sender's identity key under `mvs/voice-signal/v1`, and the signature covers the SDP and its fingerprint. The core drops, without an event:
     - an envelope that doesn't verify, or isn't `v: 2` (0.4.x's v1 is dropped, so rooms need everyone on 0.4.3 or later);
     - one without a `room { creator, createdAt }`, or whose room ID doesn't derive from it;
-    - a hello for a room new to us whose `createdAt` is outside ±120 s, or whose creator may not call;
+    - a hello for a room new to us whose `createdAt` is more than 120 s ahead of our clock (an older room is fine: we may have come online late), or whose creator may not call;
     - an 11th room's hellos;
-    - a `joinedAt` outside the window above;
+    - a `joinedAt` outside the window above while learning a room;
     - an `edit` from anyone but the server owner, or one not sent to the master;
     - one outside ±120 s of our clock;
     - a replayed nonce (up to 4096 remembered; when the cache is full, new envelopes are dropped);

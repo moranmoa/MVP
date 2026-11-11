@@ -391,6 +391,9 @@ struct Room {
     peers: BTreeMap<PublicKey, Peer>,
     /// The last valid meta from its master.
     meta: Meta,
+    /// By our clock: when we first learned of it (see `on_hello`'s
+    /// `joinedAt` rule).
+    first_seen: u64,
 }
 
 #[derive(Default)]
@@ -588,7 +591,14 @@ impl Calls {
         let channel = room_id(server, me, created_at);
         self.rooms.insert(
             channel,
-            Room { server, creator: me, created_at, peers: BTreeMap::new(), meta: Meta::default() },
+            Room {
+                server,
+                creator: me,
+                created_at,
+                peers: BTreeMap::new(),
+                meta: Meta::default(),
+                first_seen: created_at,
+            },
         );
         self.enter(ctx, members, server, channel, created_at)
     }
@@ -905,28 +915,42 @@ impl Calls {
         let me = ctx.me();
         let (server, channel) = (signal.server, signal.channel);
         if !self.rooms.contains_key(&channel) {
-            // A room new to us: created recently by a member, and under the
-            // server's cap (the first rooms to arrive are kept).
-            let recent = signal.created_at.abs_diff(ctx.now) <= CLOCK_WINDOW_MS;
-            if !recent || !members.may_call(signal.creator, server) {
-                return tracing::debug!("voice: dropped a hello for a stale or foreign room");
+            // A room new to us: by a member, not from the future, and under
+            // the server's cap (the first rooms to arrive are kept). It may
+            // be old: we may have come online long after it started.
+            let ahead = signal.created_at > ctx.now.saturating_add(CLOCK_WINDOW_MS);
+            if ahead || !members.may_call(signal.creator, server) {
+                return tracing::debug!("voice: dropped a hello for a future or foreign room");
             }
             if self.live_rooms(server) >= MAX_ROOMS {
                 return tracing::debug!("voice: dropped a hello for a room over the server's cap");
             }
         }
         let before = self.rooms.get(&channel).and_then(|room| room.peers.get(&signal.from)).copied();
+        let first_seen = self.rooms.get(&channel).map_or(ctx.now, |room| room.first_seen);
         let joined_at = match before {
             // Frozen for the stay.
             Some(peer) => peer.joined_at,
-            None => {
+            // Learning the room (we just came online, or it just started):
+            // every member already in it says hello within one timeout, so
+            // their claims are taken as they are, if no earlier than the
+            // room and not ahead of the hello. The cores that saw the room
+            // start agree on these, whatever order the hellos arrive in.
+            None if ctx.now.saturating_sub(first_seen) <= HELLO_TIMEOUT_MS => {
                 let ok = signal.joined_at >= signal.created_at
-                    && signal.joined_at.abs_diff(signal.ts) <= CLOCK_WINDOW_MS;
+                    && signal.joined_at <= signal.ts.saturating_add(CLOCK_WINDOW_MS);
                 if !ok {
                     return tracing::debug!("voice: dropped a hello with a joinedAt outside the window");
                 }
                 signal.joined_at
             }
+            // A newcomer to a room we've known for a while: it can't have
+            // joined long before we heard of it, so its claim is clamped to
+            // the clock window (never dropped).
+            None => signal
+                .joined_at
+                .max(ctx.now.saturating_sub(CLOCK_WINDOW_MS))
+                .max(signal.created_at),
         };
         let room = self.rooms.entry(channel).or_insert_with(|| Room {
             server,
@@ -934,6 +958,7 @@ impl Calls {
             created_at: signal.created_at,
             peers: BTreeMap::new(),
             meta: Meta::default(),
+            first_seen: ctx.now,
         });
         let limit = usize::from(room.meta.limit);
         if before.is_none() {
@@ -1458,9 +1483,9 @@ mod tests {
         hello.room = Some(WireRoom { creator: user(2), created_at: NOW + 5 });
         hello.payload.clear();
         calls.received(&mut ctx, &mut club, None, &seal(&key(3), &hello));
-        // A stale room: created long before we first heard of it.
-        let stale = NOW - CLOCK_WINDOW_MS - 1;
-        calls.received(&mut ctx, &mut club, None, &hello_in(3, 3, stale, NOW, NOW, 2));
+        // A room from the future: created after our clock plus the window.
+        let ahead = NOW + CLOCK_WINDOW_MS + 1;
+        calls.received(&mut ctx, &mut club, None, &hello_in(3, 3, ahead, ahead, NOW, 2));
         // A room whose creator may not call (kicked).
         club.barred.push(pk(4));
         calls.received(&mut ctx, &mut club, None, &hello_in(3, 4, NOW, NOW, NOW, 3));
@@ -1468,25 +1493,37 @@ mod tests {
         assert!(calls.rooms_of(pk(1), SERVER).is_empty());
     }
 
-    /// `joinedAt` is checked on the first hello of a stay (no earlier than
-    /// the room, within the clock window of the hello) and frozen after.
+    /// `joinedAt` while learning a room (its first hello timeout): no
+    /// earlier than the room, not ahead of the hello, or dropped. After
+    /// that, a newcomer's claim is clamped to the clock window. Frozen for
+    /// the stay in every case.
     #[test]
-    fn a_joined_at_outside_the_window_is_dropped_and_then_frozen() {
+    fn a_joined_at_is_checked_clamped_and_then_frozen() {
         let mut calls = new_calls();
         let mut club = club(&[]);
         let mut events = Vec::new();
         let mut ctx = Ctx { key: &key(1), now: NOW, events: &mut events };
         calls.received(&mut ctx, &mut club, None, &hello_in(2, 2, NOW, NOW + 1000, NOW, 1));
-        // Before the room existed, or too far from its own time: dropped.
+        // Before the room existed, or ahead of its own hello: dropped.
         calls.received(&mut ctx, &mut club, None, &hello_in(3, 2, NOW, NOW - 1, NOW, 2));
         let far = NOW + 1000 + CLOCK_WINDOW_MS + 1;
         calls.received(&mut ctx, &mut club, None, &hello_in(4, 2, NOW, far, NOW + 1000, 3));
         assert_eq!(members_of(&calls, 1, room()), [user(2)]);
-        // 5 joins later; claiming an earlier time on its next hello changes nothing.
+        // 5 joins; claiming an earlier time on its next hello changes nothing.
         calls.received(&mut ctx, &mut club, None, &hello_in(5, 2, NOW, NOW + 2000, NOW + 2000, 4));
         calls.received(&mut ctx, &mut club, None, &hello_in(5, 2, NOW, NOW, NOW + 3000, 5));
         assert_eq!(members_of(&calls, 1, room()), [user(2), user(5)]);
         assert_eq!(calls.master(pk(1), room()), Some(pk(2)));
+        // 10 minutes on (2 and 5 still saying hello), 6 claims it joined at
+        // the start: clamped to 2 minutes ago, so not the master.
+        let later = NOW + 600_000;
+        ctx.now = later;
+        calls.received(&mut ctx, &mut club, None, &hello_in(2, 2, NOW, NOW + 1000, later, 6));
+        calls.received(&mut ctx, &mut club, None, &hello_in(5, 2, NOW, NOW + 2000, later, 7));
+        calls.received(&mut ctx, &mut club, None, &hello_in(6, 2, NOW, NOW, later, 8));
+        assert_eq!(members_of(&calls, 1, room()), [user(2), user(5), user(6)]);
+        let six = calls.roster(pk(1), room()).into_iter().find(|(_, k, _)| *k == pk(6)).unwrap();
+        assert_eq!(six.0, later - CLOCK_WINDOW_MS);
     }
 
     #[test]
@@ -1679,6 +1716,8 @@ mod tests {
         hub: Arc<Hub>,
         cores: Vec<(u8, Calls)>,
         club: Club,
+        /// Cores not running yet: nothing reaches them.
+        offline: Vec<u8>,
     }
 
     impl Mesh {
@@ -1694,7 +1733,7 @@ mod tests {
                 .collect();
             let mut club = club(ids);
             club.owner = Some(pk(owner));
-            Mesh { hub, cores, club }
+            Mesh { hub, cores, club, offline: Vec::new() }
         }
 
         fn run<T>(&mut self, n: u8, now: u64, f: impl FnOnce(&mut Calls, &mut Ctx, &mut Club) -> T) -> T {
@@ -1714,7 +1753,8 @@ mod tests {
                     return;
                 }
                 for (from, to, blob) in batch {
-                    if let Some(n) = self.cores.iter().map(|(n, _)| *n).find(|n| pk(*n) == to && pk(*n) != from) {
+                    let up = |n: &u8| !self.offline.contains(n);
+                    if let Some(n) = self.cores.iter().map(|(n, _)| *n).filter(up).find(|n| pk(*n) == to && pk(*n) != from) {
                         self.run(n, now, |calls, ctx, club| calls.received(ctx, club, Some(from), &blob));
                     }
                 }
@@ -1759,6 +1799,44 @@ mod tests {
         mesh.run(2, NOW + 15_000, |c, ctx, club| c.tick(ctx, club));
         mesh.pump(NOW + 15_000);
         assert_eq!(mesh.view(3)[0].name.as_deref(), Some("Gaming"));
+    }
+
+    /// A core that comes online 5 minutes after a room started lists it and
+    /// all its members, agrees on the master whatever order their hellos
+    /// arrive in, and can join.
+    #[test]
+    fn a_core_that_comes_online_later_sees_the_room() {
+        let mut mesh = Mesh::new(&[1, 2, 3], 9);
+        mesh.offline.push(3);
+        let state = mesh.run(1, NOW, |c, ctx, club| c.create(ctx, club, SERVER)).unwrap();
+        let room = model::parse_hex32(&state.channel_id).map(ChannelId::from_bytes).unwrap();
+        mesh.pump(NOW);
+        mesh.run(2, NOW + 1000, |c, ctx, club| c.join(ctx, club, SERVER, room)).unwrap();
+        mesh.pump(NOW + 1000);
+        // Ticks every 10 s for 5 minutes, 2 first, then 3 comes online.
+        let mut at = NOW + 1000;
+        while at < NOW + 300_000 {
+            at += HELLO_EVERY_MS;
+            if at >= NOW + 300_000 {
+                mesh.offline.clear();
+            }
+            for n in [2, 1] {
+                mesh.run(n, at, |c, ctx, club| c.tick(ctx, club));
+                mesh.pump(at);
+            }
+        }
+        for n in [1, 2, 3] {
+            let rooms = mesh.run(n, at, |c, ctx, _| c.rooms_of(ctx.me(), SERVER));
+            assert_eq!(rooms.len(), 1, "core {n}");
+            let ids: Vec<&str> = rooms[0].members.iter().map(|m| m.user_id.as_str()).collect();
+            assert_eq!(ids, [user(1), user(2)], "core {n}");
+            assert_eq!(rooms[0].master_id, user(1), "core {n}");
+        }
+        mesh.run(3, at, |c, ctx, club| c.join(ctx, club, SERVER, room)).unwrap();
+        mesh.pump(at);
+        for n in [1, 2] {
+            assert_eq!(mesh.run(n, at, |c, ctx, _| c.rooms_of(ctx.me(), SERVER))[0].members.len(), 3);
+        }
     }
 
     /// The owner's edit goes to the master, which applies it; a member's
