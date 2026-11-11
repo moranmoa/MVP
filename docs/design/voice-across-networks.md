@@ -1,6 +1,6 @@
 # Design note: voice calls across networks (G-81)
 
-Status: draft for the Security Lead and the Tech Lead. Author: dev-voice-shell (voice engine). No code yet. `infra/**` is devops'; this note only says what it needs.
+Status: Security Lead approved (option A, with conditions); Tech Lead review pending. Author: dev-voice-shell (voice engine). No code yet. `infra/**` is devops'; this note only says what it needs.
 
 ## What fails today
 Voice v1 officially works only on one network. Two people on different networks usually can't connect.
@@ -66,6 +66,13 @@ Gating: the manager asked for credentials that are member-gated. A server-agnost
   - The requester's core attaches a ticket signed by a call participant: `mvs/turn-ticket/v1 { server, channel, requester, expiry }`.
   - The relay can check the signature, but not that the signer is a member, without the server's control log. That's a GAP-4-sized change, so B is a follow-up.
 
+**Decision (Security Lead, on #333):** option A for the alpha, B later. A is effectively a bounded open relay, so these conditions are required:
+1. Credentials go only to peers that hold a relay reservation, rate-limited **per peer ID and per IP**.
+2. The username is `<expiry>:<random>` and **never** the peer ID or identity.
+3. Hard quotas: `--user-quota`, `--total-quota` and `--max-bps`. Allocation lifetime is no longer than the credential TTL.
+4. `denied-peer-ip` also covers `0.0.0.0/8`, `fc00::/7`, `fe80::/10` and **the relay host's own public IPs** (hairpin). N7 tests each one.
+5. The T2 secret rules: the secret is required and `change-me` is refused.
+
 **Long calls:** coturn checks the timestamp when an allocation is made and when it is refreshed. A call longer than the TTL needs new credentials. The engine fetches new ones at about 80% of the TTL, then `setConfiguration`, then an ICE restart by the offerer. To verify in step 4: if refreshing an existing allocation with the old username is enough, the restart isn't needed.
 
 ### 3. What changes
@@ -80,7 +87,9 @@ Gating: the manager asked for credentials that are member-gated. A server-agnost
 | Release (`.github`) | set `MVS_STUN_URL` | devops / owner |
 
 `sanitize` rules for the credentials:
-- `urls` must be `turn:` or `turns:` URLs whose host is the **configured relay host** (taken from the `relay` multiaddr's `/dns4/`). That way a confused or compromised answer can't send media through a third party.
+- `urls` must be `turn:` or `turns:` URLs whose host **exactly matches** the configured relay host (taken from the `relay` multiaddr's `/dns4/`). That way a confused or compromised answer can't send media through a third party.
+- The port must be on an allow-list (3478, 5349, and 443 once that exists).
+- The only query parameter allowed is `transport=udp|tcp`.
 - `username` and `credential` are at most 256 chars each.
 - `ttl` is between 60 and 86 400 s.
 - Anything else drops the TURN entry, and the call goes on with STUN only.
@@ -117,10 +126,11 @@ This extends QA's `qa/voice-e2e` (#276) with a new compose file.
 | N4 | N3 plus TURN | Connected with `relay` on at least one side, audio both ways, fingerprint check passes |
 | N5 | `net-b` blocks UDP out, TURN | Connected over TURN-TCP / `turns:` |
 | N6 | Wrong or expired credentials | No relay candidates; falls back to STUN; no crash, no credentials in logs |
-| N7 | A client allocates and tries to relay to the relay host's private address (`denied-peer-ip`) | Refused (T1) |
-| N8 | `/mvs/turn/1` rate limit (5 requests in 10 min) | 5th refused, `rate-limited` |
+| N7 | A client allocates and tries to relay to each denied range: private, loopback, link-local, CGNAT, `0.0.0.0/8`, `fc00::/7`, `fe80::/10`, and the relay host's own public IP (hairpin) | Each one refused (T1) |
+| N8 | `/mvs/turn/1` rate limit (5 requests in 10 min), per peer ID and per IP; a peer without a reservation | 5th refused, `rate-limited`; no reservation refused |
+| N8b | Credentials | The username is `<expiry>:<random>` with no peer ID; an allocation outlives neither the TTL nor the quotas |
 | N9 | Relay-only on | Join refused `relay-only`, no TURN request |
-| N10 | Privacy | coturn writes no logs. There are no DNS lookups or connections outside the compose networks. Credentials appear in no app or core log |
+| N10 | Privacy | coturn writes no logs. There are no DNS lookups or connections outside the compose networks. Credentials appear in no app or core log: an automated check greps `mvs.log` and the shell logs for the username and credential |
 | N11 | Long call with a short TTL (2 min in the test) | Audio continues across the refresh |
 
 ## Later (not G-81)
