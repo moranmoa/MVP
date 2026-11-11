@@ -73,12 +73,24 @@ fn png_size(b: &[u8]) -> Option<(u32, u32)> {
 }
 
 /// The canvas size of a still WebP (`VP8 `, `VP8L` or `VP8X` without the
-/// animation flag, and no `ANIM`/`ANMF` chunk: A2).
+/// animation flag, and no `ANIM`/`ANMF` chunk: A2). Every declared size must
+/// be within 1..=[`AVATAR_SIDE_MAX`] and all must agree, and there must be
+/// exactly one image chunk (`VP8 ` or `VP8L`): a small `VP8X` can't vouch
+/// for a huge image after it (Security Lead on #359).
 fn webp_size(b: &[u8]) -> Option<(u32, u32)> {
     if b.get(..4)? != b"RIFF" || b.get(8..12)? != b"WEBP" {
         return None;
     }
-    let mut size = None;
+    let mut size: Option<(u32, u32)> = None;
+    let mut images = 0;
+    let mut declare = |w: u32, h: u32| -> Option<()> {
+        let fits = (1..=AVATAR_SIDE_MAX).contains(&w) && (1..=AVATAR_SIDE_MAX).contains(&h);
+        if !fits || size.is_some_and(|s| s != (w, h)) {
+            return None;
+        }
+        size = Some((w, h));
+        Some(())
+    };
     let mut at = 12;
     while at + 8 <= b.len() {
         let kind = b.get(at..at + 4)?;
@@ -92,7 +104,7 @@ fn webp_size(b: &[u8]) -> Option<(u32, u32)> {
                 }
                 let w = u32::from_le_bytes([*data.get(4)?, *data.get(5)?, *data.get(6)?, 0]) + 1;
                 let h = u32::from_le_bytes([*data.get(7)?, *data.get(8)?, *data.get(9)?, 0]) + 1;
-                size = size.or(Some((w, h)));
+                declare(w, h)?;
             }
             b"VP8 " => {
                 // Frame tag (3), start code 9d 01 2a, then 14-bit w and h.
@@ -101,19 +113,24 @@ fn webp_size(b: &[u8]) -> Option<(u32, u32)> {
                 }
                 let w = u32::from(u16::from_le_bytes([*data.get(6)?, *data.get(7)?]) & 0x3fff);
                 let h = u32::from(u16::from_le_bytes([*data.get(8)?, *data.get(9)?]) & 0x3fff);
-                size = size.or(Some((w, h)));
+                declare(w, h)?;
+                images += 1;
             }
             b"VP8L" => {
                 if *data.first()? != 0x2f {
                     return None;
                 }
                 let bits = le32(data, 1)?;
-                size = size.or(Some(((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1)));
+                declare((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1)?;
+                images += 1;
             }
             _ => {}
         }
         // Chunks are padded to an even length.
         at = at.checked_add(8)?.checked_add(len)?.checked_add(len & 1)?;
+    }
+    if images != 1 {
+        return None;
     }
     size
 }
@@ -190,7 +207,27 @@ pub(crate) mod tests {
         assert!(!valid_avatar(&riff(&[(b"VP8X", vp8x)])));
         assert!(!valid_avatar(&riff(&[(b"ANIM", vec![0; 6]), (b"ANMF", vec![0; 16])])));
         let still = vec![0, 0, 0, 0, 47, 0, 0, 47, 0, 0];
-        assert!(valid_avatar(&riff(&[(b"VP8X", still)])));
+        // VP8X alone: no image chunk, refused. VP8X 48×48 with its VP8: fine.
+        assert!(!valid_avatar(&riff(&[(b"VP8X", still.clone())])));
+        let vp8 = |side: u16| {
+            let mut d = vec![0, 0, 0, 0x9d, 0x01, 0x2a];
+            d.extend_from_slice(&side.to_le_bytes());
+            d.extend_from_slice(&side.to_le_bytes());
+            d.extend_from_slice(&[0; 8]);
+            d
+        };
+        let lossless = |w: u32, h: u32| {
+            let mut d = vec![0x2f];
+            d.extend_from_slice(&((w - 1) | ((h - 1) << 14)).to_le_bytes());
+            d
+        };
+        assert!(valid_avatar(&riff(&[(b"VP8X", still.clone()), (b"VP8 ", vp8(48))])));
+        // Security Lead (#359): a 48×48 VP8X can't vouch for a 16,383×16,383
+        // VP8L after it; sizes must agree; one image chunk only.
+        assert!(!valid_avatar(&riff(&[(b"VP8X", still.clone()), (b"VP8L", lossless(16_383, 16_383))])));
+        assert!(!valid_avatar(&riff(&[(b"VP8X", still.clone()), (b"VP8 ", vp8(32))])));
+        assert!(!valid_avatar(&riff(&[(b"VP8 ", vp8(48)), (b"VP8 ", vp8(48))])));
+        assert!(!valid_avatar(&riff(&[(b"VP8 ", vp8(48)), (b"VP8L", lossless(48, 48))])));
         // VP8L (lossless): 48×48.
         let bits: u32 = 47 | (47 << 14);
         let mut vp8l = vec![0x2f];
