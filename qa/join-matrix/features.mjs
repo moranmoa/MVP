@@ -101,6 +101,10 @@ try {
     } else {
       put('ready', { link: s.inviteLink, me: (await call('getIdentity')).id });
       const { bId } = await take('joined');
+      // #359: the profile is posted to members: the small picture (avatarSmall) and the chosen colour.
+      const pic = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+      await call('updateProfile', { input: { displayName: 'feat-a', avatarSmall: pic, color: '#12ab34' } });
+      put('profile', { color: '#12ab34', pic });
       // Channel order: move "three" before general.
       const order = await call('moveChannel', { serverId: s.id, channelId: c3.id, before: general.id });
       result(order[0]?.id === c3.id, 'owner: moveChannel puts "three" first', names(order));
@@ -130,6 +134,19 @@ try {
     const s = await until(async () => (await call('listServers')).find((x) => x.name === 'features'), 120_000);
     if (!s) throw new Error('join failed');
     put('joined', { bId: me });
+    const prof = await take('profile');
+    const t2 = Date.now();
+    const owner = await until(async () => {
+      const m = (await call('listMembers', { serverId: s.id })).find((x) => x.displayName === 'feat-a');
+      return m && m.avatarDataUrl === prof.pic && m.color === prof.color ? m : null;
+    }, 60_000);
+    {
+      const m = (await call('listMembers', { serverId: s.id })).find((x) => x.displayName === 'feat-a');
+      log('owner as the member sees it:', JSON.stringify({ color: m?.color, want: prof.color, pic: m?.avatarDataUrl?.slice(0, 30) ?? null, picLen: m?.avatarDataUrl?.length ?? 0, wantLen: prof.pic.length, names: (await call('listMembers', { serverId: s.id })).map((x) => x.displayName) }));
+    }
+    result(!!owner, 'member sees the owner\'s picture and colour (#359)', owner ? `${((Date.now() - t2) / 1000).toFixed(1)} s` : 'not within 60 s');
+    const ownerNow = (await call('listMembers', { serverId: s.id })).find((x) => x.displayName === 'feat-a');
+    result(ownerNow?.presence === 'online', 'member sees the owner online', `presence ${ownerNow?.presence}`);
     const { order } = await take('moved');
     const t1 = Date.now();
     const seen = await until(async () => {
