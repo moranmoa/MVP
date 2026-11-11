@@ -3,7 +3,11 @@
 What changed in each MVS release, newest first. The release workflow puts
 the section of the tagged version into the release notes, and a tag build
 fails if its version has no section here. Write a section before tagging:
-`## [X.Y.Z] - YYYY-MM-DD`, then Hebrew and English (Fixed / New / Known).
+`## [X.Y.Z] - YYYY-MM-DD`, then English (New / Fixed / Known).
+Management text is English only (owner, 2026-11-11); the bilingual
+sections up to 0.4.0 stay as history.
+New sections must not contain a `---` line: the release scripts still read
+it as the old Hebrew/English split.
 Never put the relay domain or any IP address here.
 
 ## [0.4.0] - 2026-11-11
