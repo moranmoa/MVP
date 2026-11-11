@@ -3132,3 +3132,76 @@ input.switch:disabled {
 .language-picker select {
   min-height: 2.75rem;
 }
+
+/* Our own title bar (desktop app, Windows and Linux): the window is frameless. */
+.window-frame {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+}
+
+.window-body {
+  min-height: 0;
+}
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  height: 2rem;
+  padding-inline-start: 0.625rem;
+  background: var(--bg-sidebar);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+.titlebar-logo {
+  display: grid;
+  place-items: center;
+  width: 1.125rem;
+  height: 1.125rem;
+  border-radius: 0.3rem;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.6875rem;
+  font-weight: 700;
+}
+
+.titlebar-title {
+  flex: 1;
+  color: var(--text);
+}
+
+.titlebar-controls {
+  display: flex;
+  align-self: stretch;
+  -webkit-app-region: no-drag;
+}
+
+.titlebar-button {
+  display: grid;
+  place-items: center;
+  width: 2.875rem;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+}
+
+.titlebar-button .icon {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
+.titlebar-button:hover,
+.titlebar-button:focus-visible {
+  background: color-mix(in srgb, var(--text) 14%, transparent);
+}
+
+.titlebar-button.close:hover,
+.titlebar-button.close:focus-visible {
+  background: #c42b1c;
+  color: #fff;
+}

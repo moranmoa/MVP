@@ -481,5 +481,9 @@
   "notify.mute.label": "השתקה",
   "notify.settings.previewDisabled": "קודם צריך להפעיל התראות דסקטופ.",
   "notify.hiddenMention": "הזכירו אותך ב-⁨#{channel}⁩",
-  "notify.settings.previewPrivacy": "כשהתצוגה המקדימה פועלת, מערכת ההפעלה שומרת את טקסט ההודעה בהיסטוריית ההתראות ויכולה להציג אותו במסך הנעילה."
+  "notify.settings.previewPrivacy": "כשהתצוגה המקדימה פועלת, מערכת ההפעלה שומרת את טקסט ההודעה בהיסטוריית ההתראות ויכולה להציג אותו במסך הנעילה.",
+  "window.minimize": "מזעור",
+  "window.maximize": "הגדלה",
+  "window.restore": "שחזור",
+  "window.close": "סגירה"
 }

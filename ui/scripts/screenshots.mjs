@@ -1036,6 +1036,26 @@ for (const [lang, t] of [
   await p.close();
 }
 
+// Our own title bar (frameless desktop window): 370 (he, dark), 371 (en, light).
+// A stand-in for the shell's window.mvs.windowControl; the real one is in desktop/.
+for (const [lang, theme, name] of [
+  ['he', 'dark', '370-titlebar-he-dark'],
+  ['en', 'light', '371-titlebar-en-light'],
+]) {
+  const ctx = await browser.newContext({ viewport: { width: 1366, height: 800 }, colorScheme: theme, locale: lang === 'he' ? 'he-IL' : 'en-US' });
+  await ctx.addInitScript(() => {
+    window.mvs = { windowControl: async () => ({ maximized: false }) };
+  });
+  const p = await ctx.newPage();
+  p.on('pageerror', (e) => problems.push(`page error: ${e.message}`));
+  await p.goto(`${BASE}?demo=1&still=1&lang=${lang}&theme=${theme}&update=999999`);
+  await p.locator('.titlebar').waitFor();
+  await p.getByRole('article').first().waitFor();
+  await p.waitForTimeout(500);
+  await shot(p, name);
+  await p.close();
+}
+
 await browser.close();
 await server.close();
 

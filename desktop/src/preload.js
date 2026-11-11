@@ -37,6 +37,12 @@ contextBridge.exposeInMainWorld('mvs', {
    * by the shell; a click arrives as the `notify.click` event. Resolves true if shown.
    */
   notify: (notice) => ipcRenderer.invoke('notify:show', notice),
+  /**
+   * Our own title bar: 'minimize' | 'maximize' (toggles) | 'close' | 'state'.
+   * Resolves { maximized }; changes arrive as the `window.state` event.
+   * Only on Windows and Linux, where the window has no native frame.
+   */
+  ...(process.platform !== 'darwin' ? { windowControl: (action) => ipcRenderer.invoke('window:control', String(action)) } : {}),
   /** Opens the shell's logs folder (no words, no message content). Resolves true if it did. */
   openLogsFolder: () => ipcRenderer.invoke('logs:open'),
   onEvent: (callback) => {

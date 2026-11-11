@@ -45,7 +45,8 @@ runs the real core (otherwise core commands answer `core-unavailable`);
 
 | Rule | Where | Test |
 | --- | --- | --- |
-| The page gets only `window.mvs.invoke(cmd, args)`, `window.mvs.onEvent(cb)`, `window.mvs.copyText(text)` and `window.mvs.notify(notice)`, never `ipcRenderer` | `src/preload.js` | e2e |
+| The page gets only `window.mvs.invoke(cmd, args)`, `window.mvs.onEvent(cb)`, `window.mvs.copyText(text)`, `window.mvs.notify(notice)` and (Windows, Linux) `window.mvs.windowControl(action)`, never `ipcRenderer` | `src/preload.js` | e2e |
+| `windowControl(action)` (own title bar, Windows and Linux only; the window is frameless there): only from our top frame; `minimize` (to the taskbar), `maximize` (toggles), `close`, `state`; anything else answers null. Resolves `{ maximized }`; changes arrive as the `window.state` event | `main.js` `window:control` | e2e |
 | `notify` (G-61): only from our top frame; title ≤ 200 and body ≤ 300 chars of plain text (control and bidi-override characters dropped), ids checked, nothing else from the page (no icon, actions or sound); at most 20 a minute; a new one for a channel replaces its last. Shown by main with Electron's `Notification`; the page's `notifications` permission stays denied. A click restores the window and sends `notify.click` { channelId, messageId } | `src/notify.js`, `main.js` `notify:show` | unit |
 | `copyText`: plain text only (1–4096 chars), only from our top frame, written by main with `clipboard.writeText`; web clipboard permissions stay denied | `main.js` `clipboard:write` | e2e |
 | Main answers only our top frame on `app://mvs` (`event.senderFrame`) | `main.js` `serveCoreIpc` | e2e (indirect) |

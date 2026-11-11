@@ -205,6 +205,19 @@ function serveCoreIpc() {
       toPages('notify.click', target);
     },
   });
+  // Our own title bar (frameless window): minimize (to the taskbar),
+  // maximize / restore, close, and the current state. Our top frame only;
+  // nothing else about the window can be changed from the page.
+  ipcMain.handle('window:control', (event, action) => {
+    if (!fromUs(event)) return null;
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win) return null;
+    if (action === 'minimize') win.minimize();
+    else if (action === 'maximize') win.isMaximized() ? win.unmaximize() : win.maximize();
+    else if (action === 'close') win.close();
+    else if (action !== 'state') return null;
+    return { maximized: win.isMaximized() };
+  });
   ipcMain.handle('notify:show', (event, notice) => {
     if (!fromUs(event)) return false;
     return notifier.show(notice);
@@ -351,8 +364,12 @@ app.on('open-url', (event, url) => {
   openInvite(url);
 });
 
+/** Windows and Linux get our own title bar (the page draws it); macOS keeps its native one. */
+const CUSTOM_FRAME = process.platform !== 'darwin';
+
 function createWindow() {
   const win = new BrowserWindow({
+    frame: !CUSTOM_FRAME,
     width: 1280,
     height: 800,
     minWidth: 360,
@@ -362,6 +379,12 @@ function createWindow() {
     webPreferences: { ...sec.WEB_PREFERENCES, preload: path.join(__dirname, 'preload.js'), devTools: !app.isPackaged },
   });
   win.once('ready-to-show', () => win.show());
+  // The title bar shows maximize or restore.
+  const sendState = () => {
+    if (sec.isInternalUrl(win.webContents.getURL())) win.webContents.send('core:event', 'window.state', { maximized: win.isMaximized() });
+  };
+  win.on('maximize', sendState);
+  win.on('unmaximize', sendState);
   // Every load (a reload too) gets the current core status.
   win.webContents.on('did-finish-load', () => {
     flushInvite();
