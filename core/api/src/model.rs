@@ -165,7 +165,6 @@ pub(crate) const FIRST_INVITE: Action = Action::Invite { expires_ms: 0, max_uses
 /// Server lifecycle (#229): what a profile post says this version can read.
 /// Old versions ignore the field (`ProfileBody` takes unknown fields).
 pub(crate) const SERVER_LIFECYCLE_CAP: &str = "server-lifecycle-v1";
-
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProfileBody {
@@ -174,15 +173,30 @@ struct ProfileBody {
     /// Absent before server lifecycle.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     caps: Vec<String>,
+    /// #354: a small picture (`avatar::valid_avatar`); absent leaves the
+    /// earlier one, `""` clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    avatar: Option<String>,
+    /// #354: `#rrggbb`; absent leaves the earlier one, `""` clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    color: Option<String>,
 }
 
 /// The post a member signs to tell the server their display name, and
-/// what this version can read.
+/// what this version can read. No picture or colour: those stay as they
+/// were (#354), so joins and older devices never wipe them.
 pub(crate) fn profile_action(display_name: &str) -> Action {
+    profile_action_with(display_name, None, None)
+}
+
+/// [`profile_action`] with the picture and colour (`Some("")` clears).
+pub(crate) fn profile_action_with(display_name: &str, avatar: Option<&str>, color: Option<&str>) -> Action {
     let body = ProfileBody {
         mvs: PROFILE_TAG.to_owned(),
         display_name: display_name.to_owned(),
         caps: vec![SERVER_LIFECYCLE_CAP.to_owned()],
+        avatar: avatar.map(str::to_owned),
+        color: color.map(str::to_owned),
     };
     Action::Post { text: serde_json::to_string(&body).expect("plain struct") }
 }
@@ -381,6 +395,30 @@ impl<'a> ServerView<'a> {
     /// role, then key.
     /// Each author's latest display name from their profile posts. A name
     /// with bidi, control or zero-width characters (B23) isn't shown.
+    /// #354: each member's picture and colour from their profile posts, in
+    /// order: a valid value sets it, `""` clears it, an absent field leaves
+    /// it, and an invalid one is ignored (untrusted posts).
+    pub fn looks(&self) -> BTreeMap<PublicKey, (Option<String>, Option<String>)> {
+        let by_id: HashMap<RecordId, &Record> = self.records.iter().map(|r| (r.id(), r)).collect();
+        let mut out: BTreeMap<PublicKey, (Option<String>, Option<String>)> = BTreeMap::new();
+        for id in &self.state.posts {
+            let Some(record) = by_id.get(id) else { continue };
+            let Some(body) = parse_profile(record) else { continue };
+            let entry = out.entry(record.author()).or_default();
+            match body.avatar.as_deref() {
+                Some("") => entry.0 = None,
+                Some(url) if crate::avatar::valid_avatar(url) => entry.0 = Some(url.to_owned()),
+                _ => {}
+            }
+            match body.color.as_deref() {
+                Some("") => entry.1 = None,
+                Some(color) if crate::avatar::valid_color(color) => entry.1 = Some(color.to_owned()),
+                _ => {}
+            }
+        }
+        out
+    }
+
     pub fn display_names(&self) -> BTreeMap<PublicKey, String> {
         let by_id: HashMap<RecordId, &Record> = self.records.iter().map(|r| (r.id(), r)).collect();
         let mut names: BTreeMap<PublicKey, String> = BTreeMap::new();

@@ -54,7 +54,7 @@ fn peer(name: &str, words: &str, relay: &str) -> Peer {
     )
     .unwrap();
     core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
-    let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+    let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None, avatar_small: None, color: None };
     core.update_profile(profile).unwrap();
     Peer { core, events, net, _cipher: cipher, _dir: dir }
 }
