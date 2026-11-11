@@ -109,6 +109,11 @@ const PULLS_PER_PEER_ROUND: usize = 20;
 /// timer, a relay reservation and the other side's own first round can all
 /// land within the same few seconds.
 const FIRST_CONTACT_PULLS: usize = 5;
+/// T23 (GAP-4b, security lead): how long an unbound peer isn't asked again
+/// for a control log it answered empty, and how often an unbound peer is
+/// probed for a server we already have a bound member of. Each such pull
+/// carries our binding to a peer that isn't known to be a member.
+const UNBOUND_REPROBE: Duration = Duration::from_secs(600);
 /// How a control log's name ends (`log_name`): queued first.
 const CONTROL_SUFFIX: &str = "/control";
 /// Per-peer pull buckets remembered (also after disconnecting).
@@ -325,6 +330,10 @@ enum Command {
     Served { peer: PeerId, log: String, reply: oneshot::Sender<usize> },
     #[cfg(test)]
     RateLimited { reply: oneshot::Sender<usize> },
+    #[cfg(test)]
+    InboundPulls { reply: oneshot::Sender<usize> },
+    #[cfg(test)]
+    Dial { addr: Multiaddr },
     Prune { id: RecordId, reply: oneshot::Sender<Result<bool>> },
     VoiceSend { to: PublicKey, bytes: Vec<u8>, reply: oneshot::Sender<Result<(), VoiceError>> },
     ServeInvite { server: ServerId, handle: [u8; 32], publication: Vec<u8>, announce: bool, reply: oneshot::Sender<bool> },
@@ -629,6 +638,10 @@ impl Node {
             #[cfg(test)]
             rate_limited: 0,
             queued_pulls: HashMap::new(),
+            empty_from: HashMap::new(),
+            probed: HashMap::new(),
+            #[cfg(test)]
+            pulls_received: 0,
             pull_round: 0,
             presence: Presence::default(),
             last_seen: HashMap::new(),
@@ -719,6 +732,20 @@ impl Node {
     /// The addresses the node listens on right now (empty until the listener
     /// is up; a relay circuit shows once reserved).
     /// Tests: how many entries our pull answers to `peer` for `log` carried.
+    /// Tests: how many pull requests this node received.
+    #[cfg(test)]
+    async fn pulls_received(&self) -> usize {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::InboundPulls { reply }).unwrap();
+        rx.await.unwrap()
+    }
+
+    /// Tests: dial `addr` (a node met later than its bootstrap).
+    #[cfg(test)]
+    fn test_dial(&self, addr: Multiaddr) {
+        self.send(Command::Dial { addr }).unwrap();
+    }
+
     /// Tests: how many inbound pulls this node refused (any of the three limits).
     #[cfg(test)]
     async fn rate_limited(&self) -> usize {
@@ -1127,6 +1154,15 @@ struct Task {
     rate_limited: usize,
     /// Pulls waiting for one of the `MAX_PULLS_IN_FLIGHT` slots, per peer.
     queued_pulls: HashMap<PeerId, BTreeSet<String>>,
+    /// T23: control logs an unbound peer answered empty, and until when it
+    /// isn't asked for them again (`UNBOUND_REPROBE`).
+    empty_from: HashMap<(PeerId, String), Instant>,
+    /// T23: when we last probed an unbound peer for a server we already have
+    /// a bound member of.
+    probed: HashMap<(PeerId, ServerId), Instant>,
+    /// Tests: pull requests this node received.
+    #[cfg(test)]
+    pulls_received: usize,
     /// Anti-entropy rounds so far: which slice of the other control logs
     /// `pull_shared` takes this round.
     pull_round: usize,
@@ -1219,6 +1255,11 @@ impl Task {
                 }
                 _ = anti_entropy.tick() => {
                     self.pending.expire(Instant::now(), PENDING_TTL);
+                    // T23 state outlives a disconnect (a reset relay circuit
+                    // must not make us re-probe everything), so it expires here.
+                    let now = Instant::now();
+                    self.empty_from.retain(|_, until| now < *until);
+                    self.probed.retain(|_, at| now < *at + UNBOUND_REPROBE);
                     self.pull_all("round");
                 }
                 _ = discovery.tick() => self.discover(),
@@ -1293,6 +1334,14 @@ impl Task {
             #[cfg(test)]
             Command::RateLimited { reply } => {
                 let _ = reply.send(self.rate_limited);
+            }
+            #[cfg(test)]
+            Command::InboundPulls { reply } => {
+                let _ = reply.send(self.pulls_received);
+            }
+            #[cfg(test)]
+            Command::Dial { addr } => {
+                let _ = self.swarm.dial(addr);
             }
             Command::VoiceSend { to, bytes, reply } => {
                 let _ = reply.send(self.voice_send(to, bytes));
@@ -1819,13 +1868,34 @@ impl Task {
             .filter(|log| self.shares(peer, log))
             .cloned()
             .partition(|log| self.sealing.get(log).is_none_or(|s| self.bound.contains_key(&(peer, s.server))));
+        // T23: `rest` are control logs of servers this peer isn't bound for.
+        // Asking carries our binding, so: never one it answered empty lately,
+        // and for a server we already have a bound member of, at most one
+        // probe per UNBOUND_REPROBE (two members who meet late still bind).
+        let now = Instant::now();
+        rest.retain(|log| {
+            if self.empty_from.get(&(peer, log.clone())).is_some_and(|until| now < *until) {
+                return false;
+            }
+            let Some(server) = self.sealing.get(log).map(|s| s.server) else { return true };
+            let member_bound = self.bound.keys().any(|(_, s)| *s == server);
+            !member_bound || self.probed.get(&(peer, server)).is_none_or(|at| now >= *at + UNBOUND_REPROBE)
+        });
         bound.sort();
         rest.sort();
         bound.truncate(limit);
         let room = limit - bound.len();
         if !rest.is_empty() && room > 0 {
             let start = self.pull_round.wrapping_mul(room) % rest.len();
-            bound.extend((0..room.min(rest.len())).map(|i| rest[(start + i) % rest.len()].clone()));
+            let probes: Vec<String> = (0..room.min(rest.len())).map(|i| rest[(start + i) % rest.len()].clone()).collect();
+            for log in &probes {
+                if let Some(server) = self.sealing.get(log).map(|s| s.server) {
+                    if self.bound.keys().any(|(_, s)| *s == server) {
+                        self.probed.insert((peer, server), now);
+                    }
+                }
+            }
+            bound.extend(probes);
         }
         for log in bound {
             self.pull(peer, &log, cause);
@@ -1834,6 +1904,12 @@ impl Task {
 
     fn pull(&mut self, peer: PeerId, log: &str, cause: &'static str) {
         let key = (peer, log.to_string());
+        // T23 on every path (round, queue, again, more…): a control log an
+        // unbound peer answered empty lately isn't asked for again.
+        if self.empty_from.get(&key).is_some_and(|until| Instant::now() < *until) {
+            self.again.remove(&key);
+            return;
+        }
         if self.decoding.contains(&key) || self.inflight.values().any(|k| *k == key) {
             self.again.insert(key);
             return;
@@ -1855,7 +1931,10 @@ impl Task {
         let request = SyncRequest { log: self.sealing.wire(log), have, binding };
         // Why this pull went out, for sync debug logs (mvs.log through
         // MVS_DEBUG_LOG): the trigger only, never the peer or the log name.
-        debug!(cause, in_flight = self.inflight.values().filter(|(p, _)| *p == peer).count(), "pull sent");
+        // `bound`: whether the peer is bound for the log's server (a member
+        // pull) or not (a probe that carries our binding, T23).
+        let bound = self.sealing.get(log).is_none_or(|s| self.bound.contains_key(&(peer, s.server)));
+        debug!(cause, bound, in_flight = self.inflight.values().filter(|(p, _)| *p == peer).count(), "pull sent");
         let request = self.swarm.behaviour_mut().sync.send_request(&peer, request);
         self.inflight.insert(request, key);
     }
@@ -1901,6 +1980,10 @@ impl Task {
         if new {
             // T8-02: a member who was offline catches up on live invites.
             self.share_invites(peer, server);
+            // Bound now: its answers for this server count again (T23).
+            self.empty_from.retain(|(p, log), _| {
+                *p != peer || self.sealing.get(log).is_none_or(|s| s.server != server)
+            });
             // Now it shares this server's channels (`shares`): pull them at
             // once rather than at the next anti-entropy round.
             let channels: Vec<String> = self
@@ -2200,6 +2283,10 @@ impl Task {
     /// read-only connection. Dropping the channel fails the request on the
     /// other side.
     fn on_request(&mut self, peer: PeerId, request: SyncRequest, channel: ResponseChannel<SyncResponse>) {
+        #[cfg(test)]
+        {
+            self.pulls_received += 1;
+        }
         let now = Instant::now();
         if !self.inbound_pulls.allow(peer, now) || !self.all_inbound_pulls.allow((), now) {
             debug!(%peer, "pull rate limit exceeded");
@@ -2414,6 +2501,15 @@ impl Task {
                 if !addrs.is_empty() && self.relayed.contains_key(&key.0) {
                     self.direct_candidates.insert(key.0, direct_candidates_of(addrs));
                     self.try_direct(key.0);
+                }
+            }
+        }
+        // T23: an unbound peer with nothing for a control log isn't asked for
+        // it again for a while (each ask carries our binding).
+        if response.records.is_empty() && !response.more {
+            if let Some(server) = self.sealing.get(&key.1).map(|s| s.server) {
+                if key.1.ends_with(CONTROL_SUFFIX) && !self.bound.contains_key(&(key.0, server)) {
+                    self.empty_from.insert(key.clone(), Instant::now() + UNBOUND_REPROBE);
                 }
             }
         }
@@ -3622,6 +3718,80 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(3)).await;
         assert_eq!(other.rate_limited().await, 0, "the non-member refused pulls after a write burst");
         for node in [writer, other] {
+            node.shutdown().await.unwrap();
+        }
+    }
+
+    /// T23: once an unbound peer answered our servers' control logs empty, it
+    /// isn't asked for them again (each ask carries our binding): after the
+    /// first rounds, a fresh peer gets only the pulls for the server it shares.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unbound_peer_is_not_asked_again_for_what_it_answered_empty() {
+        use crate::testutil::test_key;
+        let key = |n: u8| -> Option<Arc<dyn Binder>> { Some(Arc::new(test_key(n))) };
+        let access = |n: u8| Access { binder: key(n), read_gate: Some(Arc::new(AcceptAll)), stub_gate: None };
+        let secret = ServerSecret::from_bytes([12; 32]);
+        let (many, _events) = test_node_events("t23-many", None, None, access(1)).await;
+        let port = port_of(&many).await;
+        for i in 0..40u8 {
+            let other = ServerId::from_bytes([60 + i; 32]);
+            many.open_server(other, ServerSecret::from_bytes([150 - i; 32])).unwrap();
+        }
+        many.open_server(server(), secret.clone()).unwrap();
+        let fresh = test_node("t23-fresh", None, Some(port), access(0)).await;
+        fresh.open_server(server(), secret).unwrap();
+        // Connect, then three rounds: every control log probed once.
+        tokio::time::sleep(ANTI_ENTROPY * 3 + Duration::from_secs(2)).await;
+        let before = fresh.pulls_received().await;
+        tokio::time::sleep(ANTI_ENTROPY * 2 + Duration::from_secs(1)).await;
+        let later = fresh.pulls_received().await - before;
+        // Two more rounds: only the shared server's control log (and
+        // follow-ups), not the 40 it has nothing of.
+        assert!(later <= 6, "{later} pulls in two rounds after the probes");
+        assert!(before >= 40, "only {before} pulls before: the probes never ran");
+        for node in [many, fresh] {
+            node.shutdown().await.unwrap();
+        }
+    }
+
+    /// T23: two members who each already have a bound peer for the server
+    /// still bind when they meet later (the first probe is allowed).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn members_who_meet_late_still_bind() {
+        use crate::testutil::test_key;
+        let key = |n: u8| -> Option<Arc<dyn Binder>> { Some(Arc::new(test_key(n))) };
+        let access = |n: u8| Access { binder: key(n), read_gate: Some(Arc::new(AcceptAll)), stub_gate: None };
+        let secret = ServerSecret::from_bytes([13; 32]);
+        let identity = |n: u8| test_key(n).identity();
+        let start_pair = |a: &'static str, b: &'static str, ka: u8, kb: u8| {
+            let secret = secret.clone();
+            async move {
+                let (first, _) = test_node_events(a, None, None, access(ka)).await;
+                first.open_server(server(), secret.clone()).unwrap();
+                let second = test_node(b, None, Some(port_of(&first).await), access(kb)).await;
+                second.open_server(server(), secret).unwrap();
+                (first, second)
+            }
+        };
+        async fn online(node: &Node, want: PublicKey) -> bool {
+            node.presence(server()).await.unwrap().online.contains(&want)
+        }
+        let seen = |node, n: u8| online(node, identity(n));
+        let (a, b) = start_pair("late-a", "late-b", 1, 0).await;
+        let (c, d) = start_pair("late-c", "late-d", 2, 3).await;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !(seen(&a, 0).await && seen(&c, 3).await) {
+            assert!(Instant::now() < deadline, "the first pairs never bound");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // Now A and C meet: each already has a bound member.
+        c.test_dial(format!("/ip4/127.0.0.1/tcp/{}", port_of(&a).await).parse().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !(seen(&a, 2).await && seen(&c, 1).await) {
+            assert!(Instant::now() < deadline, "members who met late never bound");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        for node in [a, b, c, d] {
             node.shutdown().await.unwrap();
         }
     }
