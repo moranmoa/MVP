@@ -41,7 +41,7 @@ The network:
 `call.mjs` runs on both sides. The two sides step through it together using files in a shared volume.
 
 1. **Setup through the bridge.** Each side creates an identity, passes the word check and sets a display name. A creates a server. B joins it by invite over the relay.
-2. **Join.** Each side opens the server in the UI. A clicks "Join chat", gets the IP notice and clicks OK. B, still outside the call, checks the roster, then joins the same way.
+2. **Join.** Each side opens the server in the UI. A clicks "Join chat", gets the IP notice and clicks OK. B, still outside the call, checks the roster, then joins A's room from its row (0.4.3 voice rooms: "Join chat" opens a new room).
 3. **WebRTC checks.** The test wraps `RTCPeerConnection` to read the engine's own connections, then checks:
    - the connection reaches `connected`;
    - the certificate the peer presents (`getStats`) equals the fingerprint in the signed SDP;
@@ -53,7 +53,7 @@ The network:
    - Then A leaves, and B (outside the call) sees an empty roster.
 7. **Rejoin.** Each side joins again without the IP notice. Last comes the legacy desktop-capture probe, because Chromium kills the renderer for it.
 
-   Then both are back in the room, and A kicks B (V4). A checks that B drops off its roster within 5 s (not the 30 s timeout) and that A stays in the call alone. B checks that its call ends, `getVoiceRoom` and `joinCall` are refused, the roster is gone, and the mic is refused.
+   Then both are back in the room, and A kicks B (V4). A checks that B drops off its roster within 5 s (not the 30 s timeout) and that A stays in the call alone. B checks that its call ends, `listVoiceRooms` and `joinCall` are refused, the roster is gone, and the mic is refused.
 
 Results land in `results/<project>/`, which is git-ignored:
 - `a.log` and `b.log`: one `PASS|FAIL <case>` line per check, plus diagnostics on failure;

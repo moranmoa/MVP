@@ -3361,9 +3361,12 @@ input.switch:disabled {
   background: var(--bg-active);
 }
 
-.voice-room-row[aria-disabled='true']:not(.in-room) {
+/* Full, or calls off: a muted name and no hover highlight (UX on #371). */
+.voice-room-row[aria-disabled='true']:not(.in-room),
+.voice-room-row[aria-disabled='true']:not(.in-room):hover {
   cursor: default;
-  opacity: 0.75;
+  background: none;
+  color: var(--text-faint);
 }
 
 .voice-room-count.full {
