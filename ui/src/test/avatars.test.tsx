@@ -94,9 +94,19 @@ describe('avatars and colours (#359)', () => {
   });
 
   it('the letter is dark on light colours and white on dark ones (#362)', () => {
-    expect(inkOn('#ffd43b')).toBe('#1a1a1a');
-    expect(inkOn('#ffffff')).toBe('#1a1a1a');
-    expect(inkOn('#5865f2')).toBe('#fff');
+    expect(inkOn('#ffd43b')).toBe('#000');
+    expect(inkOn('#ffffff')).toBe('#000');
+    expect(inkOn('#1e3a8a')).toBe('#fff');
     expect(inkOn('#000000')).toBe('#fff');
+    // AA: whichever is picked is the better of the two, and at least 4.5:1 (AA) on any colour.
+    const lum = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255).map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)).reduce((a, c, i) => a + c * [0.2126, 0.7152, 0.0722][i], 0);
+    const ratio = (a: string, b: string) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+    for (let v = 0; v < 4096; v++) {
+      const hex = '#' + [v >> 8, (v >> 4) & 15, v & 15].map((c) => (c * 17).toString(16).padStart(2, '0')).join('');
+      const ink = inkOn(hex);
+      const other = ink === '#fff' ? '#000000' : '#ffffff';
+      expect(ratio(hex, ink === '#fff' ? '#ffffff' : '#000000')).toBeGreaterThanOrEqual(ratio(hex, other) - 1e-9);
+      expect(ratio(hex, ink === '#fff' ? '#ffffff' : '#000000')).toBeGreaterThanOrEqual(4.5);
+    }
   });
 });

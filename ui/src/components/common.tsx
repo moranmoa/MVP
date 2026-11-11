@@ -47,9 +47,9 @@ export function Code({ value, label }: { value: string; label?: string }) {
 }
 
 /**
- * #362: the letter colour on `hex` (#rrggbb). White while it keeps 3:1 (the
- * WCAG bar for large bold text, which the letter is); members pick any colour,
- * so a light one gets a near-black letter instead.
+ * #362: the letter colour on `hex` (#rrggbb): white or black, whichever
+ * has the higher WCAG contrast. Members pick any colour; the better of the two
+ * is always at least 4.58:1, so the letter meets AA on every colour.
  */
 export function inkOn(hex: string): string {
   const lin = (i: number) => {
@@ -57,7 +57,7 @@ export function inkOn(hex: string): string {
     return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
   };
   const l = 0.2126 * lin(1) + 0.7152 * lin(3) + 0.0722 * lin(5);
-  return 1.05 / (l + 0.05) >= 3 ? '#fff' : '#1a1a1a';
+  return 1.05 / (l + 0.05) >= (l + 0.05) / 0.05 ? '#fff' : '#000';
 }
 
 export function Avatar({
