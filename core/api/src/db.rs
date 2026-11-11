@@ -369,6 +369,19 @@ impl Db {
         Ok(out)
     }
 
+    /// When this device added `server` (ms).
+    pub fn joined_at(&self, server: ServerId) -> Result<Option<u64>, CoreError> {
+        self.conn
+            .query_row(
+                "SELECT joined_at FROM servers WHERE id = ?1",
+                [server.as_bytes().as_slice()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map(|at| at.map(|at| at as u64))
+            .map_err(internal)
+    }
+
     pub fn add_server(&self, server: ServerId, joined_at: u64) -> Result<(), CoreError> {
         self.conn
             .execute(

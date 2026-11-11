@@ -75,6 +75,13 @@ export interface Channel {
    * informative: the order is the core's list order, never a re-sort by this.
    */
   position?: string;
+  /**
+   * G-21: the index of the first message I haven't read, from the core's read
+   * marker (my own messages don't count). Absent when everything is read.
+   */
+  firstUnreadIndex?: number;
+  /** G-21: how many messages from others I haven't read. */
+  unreadCount?: number;
 }
 
 export type Presence = 'online' | 'offline';
@@ -178,6 +185,12 @@ export interface Message {
   /** Only set on messages written on this device. */
   sendState?: SendState;
   mentionsMe?: boolean;
+  /**
+   * G-24 (#330): the users this message mentions who are members now, as
+   * 64-hex ids. The body holds them as <@id> tokens; the UI shows names from the
+   * member list, and a token whose id isn't here as a former member.
+   */
+  mentions?: string[];
   /** Set by the UI when the text was too long or had too many lines to show in full. */
   clipped?: boolean;
   /**
