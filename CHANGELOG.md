@@ -10,6 +10,20 @@ New sections must not contain a `---` line: the release scripts still read
 it as the old Hebrew/English split.
 Never put the relay domain or any IP address here.
 
+## [0.4.1] - 2026-11-11
+
+### New
+- **Language follows your system:** the app opens in your computer's language when it's available (Hebrew or English), otherwise in English.
+- **Language picker:** choose the language from a list in Settings → Language and on the first screen. More languages will be added to the same list.
+- **Release notes in English:** from this version on, the "What's new" notes are written in English.
+
+### Fixed
+- **Former members in mentions:** the "@former account" label now has a clear border and background.
+
+### Known
+- **Voice calls are officially supported only when everyone is on the same network** (for example the same Wi-Fi). Calls across networks are on the way.
+- On first run, Windows may ask whether to allow MVS on the network. Please allow it (also on private networks); otherwise voice calls won't connect.
+
 ## [0.4.0] - 2026-11-11
 
 ### מה חדש
