@@ -7,11 +7,13 @@ import { phoneQuery, useMediaQuery } from '../../app/media';
 import { isCoreError } from '../../core';
 import type { Channel, Id, ServerSummary } from '../../core';
 import { Avatar, Badge, Code, InviteBox, Name } from '../../components/common';
-import { GearIcon, HashIcon, LinkIcon, PlusIcon } from '../../components/icons';
+import { BellOffIcon, GearIcon, HashIcon, LinkIcon, PlusIcon } from '../../components/icons';
 import { CallBar, VoiceRoomEntry, useCallEngine } from './CallBar';
 import { useContextMenu, type MenuItem } from '../../components/ContextMenu';
 import { copyText } from '../../app/clipboard';
 import { useCore } from '../../core';
+import { channelMuteKey, isMutedKey, mutedUntil, MUTE_FOREVER } from '../../app/mute';
+import { MuteDialog, useMutedLabel, type MuteTarget } from './MuteDialog';
 
 const NO_CHANNELS: Channel[] = [];
 
@@ -130,8 +132,21 @@ export function ChannelSidebar({
   const dragging = drag?.active ? drag : null;
 
   // B25 §3: the channel menu. Rename and delete are also behind the channel's gear.
+  // G-17: a channel muted on this device (app/mute.ts).
+  const mutes = useStore(store, (st) => st.mutes);
+  const [muteTarget, setMuteTarget] = useState<MuteTarget | null>(null);
+  const mutedLabel = useMutedLabel();
   const channelItems = (c: Channel, active: boolean): MenuItem[] => [
     ...(c.unread && !active ? [{ key: 'read', label: intl.formatMessage({ id: 'menu.markRead' }), onSelect: () => void core.markRead(c.id) }] : []),
+    isMutedKey(mutes, channelMuteKey(c.id))
+      ? {
+          key: 'unmute',
+          label: [intl.formatMessage({ id: 'notify.unmute' }), (mutedUntil(mutes, channelMuteKey(c.id)) ?? MUTE_FOREVER) !== MUTE_FOREVER ? mutedLabel(mutedUntil(mutes, channelMuteKey(c.id))!) : null]
+            .filter(Boolean)
+            .join(' · '),
+          onSelect: () => store.unmute(channelMuteKey(c.id)),
+        }
+      : { key: 'mute', label: intl.formatMessage({ id: 'notify.muteMenu' }), onSelect: () => setMuteTarget({ key: channelMuteKey(c.id), name: c.name, kind: 'channel' }) },
     ...(owner ? [{ key: 'rename', label: intl.formatMessage({ id: 'menu.renameChannel' }), onSelect: () => onEditChannel(c) }] : []),
     { kind: 'separator' },
     {
@@ -217,8 +232,10 @@ export function ChannelSidebar({
         <ul ref={listRef} className={dragging ? 'dragging' : undefined}>
           {channels.map((c, i) => {
             const active = c.id === channelId;
+            const muted = isMutedKey(mutes, channelMuteKey(c.id));
             const parts = [
               c.name,
+              muted ? intl.formatMessage({ id: 'notify.muted' }) : null,
               c.adult ? intl.formatMessage({ id: 'channel.adult' }) : null,
               c.mentions ? intl.formatMessage({ id: 'mentions.label' }, { count: c.mentions }) : null,
               c.unread && !active ? intl.formatMessage({ id: 'unread.label' }) : null,
@@ -249,7 +266,7 @@ export function ChannelSidebar({
                 )}
                 <button
                   type="button"
-                  className={`channel ${active ? 'active' : ''} ${c.unread && !active ? 'unread' : ''}`}
+                  className={`channel ${active ? 'active' : ''} ${c.unread && !active ? 'unread' : ''} ${muted ? 'muted' : ''}`}
                   aria-current={active ? 'page' : undefined}
                   aria-label={parts.filter(Boolean).join(', ')}
                   data-channel-id={c.id}
@@ -264,6 +281,11 @@ export function ChannelSidebar({
                   <span className="channel-name">
                     <bdi>{c.name}</bdi>
                   </span>
+                  {muted && (
+                    <span className="bell-off-wrap" title={mutedLabel(mutedUntil(mutes, channelMuteKey(c.id)) ?? MUTE_FOREVER)}>
+                      <BellOffIcon />
+                    </span>
+                  )}
                   {c.adult && (
                     <span className="adult-tag" aria-hidden="true">
                       18+
@@ -339,6 +361,7 @@ export function ChannelSidebar({
         </button>
       </footer>
       {menu}
+      <MuteDialog target={muteTarget} onClose={() => setMuteTarget(null)} />
     </aside>
   );
 }

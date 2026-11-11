@@ -9,6 +9,8 @@ import { isCoreError, useCore, type Id, type ServerSummary } from '../../core';
 import { GearIcon, HomeIcon, PlusIcon, RefreshIcon } from '../../components/icons';
 import { useContextMenu, type MenuItem } from '../../components/ContextMenu';
 import { copyText } from '../../app/clipboard';
+import { isMutedKey, mutedUntil, MUTE_FOREVER, serverMuteKey } from '../../app/mute';
+import { MuteDialog, useMutedLabel, type MuteTarget } from './MuteDialog';
 
 /** How far the mouse moves before a press becomes a drag (G-01). */
 const DRAG_START_PX = 4;
@@ -42,6 +44,17 @@ export function ServerRail({
   const listRef = useRef<HTMLUListElement>(null);
   const myId = useStore(store, (s) => s.identity?.id);
   const { bind, menu } = useContextMenu();
+  const mutes = useStore(store, (s) => s.mutes);
+  const [muteTarget, setMuteTarget] = useState<MuteTarget | null>(null);
+  const isServerMuted = (s: ServerSummary) => isMutedKey(mutes, serverMuteKey(s.id));
+  const mutedLabel = useMutedLabel();
+  /** "Unmute", with "· Muted until …" for a timed mute. */
+  const unmuteLabel = (until: number | null) =>
+    [intl.formatMessage({ id: 'notify.unmute' }), until !== null && until !== MUTE_FOREVER ? mutedLabel(until) : null].filter(Boolean).join(' · ');
+  // G-04: every unread channel of the server, through the core's markRead.
+  const markAllRead = (s: ServerSummary) => {
+    for (const c of store.getState().channels[s.id] ?? []) if (c.unread || c.mentions) void core.markRead(c.id);
+  };
 
   // G-01: my order, local only. New servers come at the end.
   const servers = sortByOrder(joined, settings.serverOrder ?? []);
@@ -82,6 +95,11 @@ export function ServerRail({
     const rest: MenuItem[] = s.closed
       ? []
       : [
+          ...(s.unread || s.mentions ? [{ key: 'read', label: intl.formatMessage({ id: 'unread.markAllRead' }), onSelect: () => markAllRead(s) }] : []),
+          isServerMuted(s)
+            ? { key: 'unmute', label: unmuteLabel(mutedUntil(mutes, serverMuteKey(s.id))), onSelect: () => store.unmute(serverMuteKey(s.id)) }
+            : { key: 'mute', label: intl.formatMessage({ id: 'notify.muteMenu' }), onSelect: () => setMuteTarget({ key: serverMuteKey(s.id), name: s.name, kind: 'server' }) },
+          { kind: 'separator' },
           {
             key: 'invite',
             label: intl.formatMessage({ id: 'menu.copyInvite' }),
@@ -170,6 +188,7 @@ export function ServerRail({
     [
       s.name,
       s.closed ? intl.formatMessage({ id: 'server.closedTag' }) : null,
+      isServerMuted(s) ? intl.formatMessage({ id: 'notify.muted' }) : null,
       s.mentions > 0 ? intl.formatMessage({ id: 'mentions.label' }, { count: s.mentions }) : null,
       s.unread ? intl.formatMessage({ id: 'unread.label' }) : null,
     ]
@@ -226,6 +245,7 @@ export function ServerRail({
               style={{ ['--server-color' as string]: s.color }}
               tabIndex={selected === s.id ? 0 : -1}
               unread={s.unread}
+              muted={isServerMuted(s)}
               mentions={s.mentions}
               serverId={s.id}
               menuProps={arranging ? undefined : bind(intl.formatMessage({ id: 'menu.forServer' }, { name: s.name }), () => serverItems(s))}
@@ -295,6 +315,7 @@ export function ServerRail({
         </button>
       </div>
       {menu}
+      <MuteDialog target={muteTarget} onClose={() => setMuteTarget(null)} />
     </nav>
     </>
   );
@@ -310,6 +331,7 @@ function RailButton({
   style,
   tabIndex,
   unread,
+  muted,
   mentions = 0,
   menuProps,
   serverId,
@@ -323,13 +345,15 @@ function RailButton({
   style?: CSSProperties;
   tabIndex?: number;
   unread?: boolean;
+  /** Muted on this device (G-03): shown quieter. */
+  muted?: boolean;
   mentions?: number;
   menuProps?: HTMLAttributes<HTMLButtonElement>;
   /** Servers only: lets the keyboard reorder find the focused one. */
   serverId?: Id;
 }) {
   return (
-    <div className={`rail-item ${active ? 'active' : ''} ${unread ? 'unread' : ''}`}>
+    <div className={`rail-item ${active ? 'active' : ''} ${unread ? 'unread' : ''} ${muted ? 'muted' : ''}`}>
       <span className="rail-pip" aria-hidden="true" />
       <button
         type="button"

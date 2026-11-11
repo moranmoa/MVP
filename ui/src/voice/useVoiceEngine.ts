@@ -62,9 +62,11 @@ export function nextPeerFailed(
 /**
  * `call` is the store's current call (null outside one), `myId` my identity.
  * `options.stunUrl` is the config's STUN URL from the desktop shell (piece C);
- * without it, only host candidates are used.
+ * without it, only host candidates are used. `options.enableTurn` (off by
+ * default) and `options.turnHost` (the configured relay host) turn on TURN
+ * credentials from the core (G-81).
  */
-export function useVoiceEngine(call: CallState | null, myId: Id, options: Pick<VoiceEngineOptions, 'stunUrl'> = {}): VoiceEngineView {
+export function useVoiceEngine(call: CallState | null, myId: Id, options: Pick<VoiceEngineOptions, 'stunUrl' | 'enableTurn' | 'turnHost'> = {}): VoiceEngineView {
   const core = useCore();
   const engineRef = useRef<VoiceEngine | null>(null);
   const [ready, setReady] = useState(false);
@@ -77,8 +79,10 @@ export function useVoiceEngine(call: CallState | null, myId: Id, options: Pick<V
   const [outputId, setOutputId] = useState<string>();
 
   const stunUrl = options.stunUrl ?? null;
+  const enableTurn = options.enableTurn === true;
+  const turnHost = options.turnHost ?? null;
   useEffect(() => {
-    const engine = createVoiceEngine(fromCoreApi(core), { stunUrl });
+    const engine = createVoiceEngine(fromCoreApi(core), { stunUrl, enableTurn, turnHost });
     engineRef.current = engine;
     const offs = [
       engine.on('speaking', setSpeaking),
@@ -93,7 +97,7 @@ export function useVoiceEngine(call: CallState | null, myId: Id, options: Pick<V
       engine.dispose();
       engineRef.current = null;
     };
-  }, [core, stunUrl]);
+  }, [core, stunUrl, enableTurn, turnHost]);
 
   const callKey = call && call.participants.length ? call.channelId : null;
   useEffect(() => {
@@ -120,7 +124,7 @@ export function useVoiceEngine(call: CallState | null, myId: Id, options: Pick<V
     };
     // Re-attach only when the call itself changes, not on every participant update:
     // the engine follows call.state on its own.
-  },[callKey, myId, core, stunUrl]);
+  }, [callKey, myId, core, stunUrl, enableTurn, turnHost]);
 
   const setMicMuted = useCallback((muted: boolean) => engineRef.current?.setMicMuted(muted), []);
   const setInput = useCallback((id: string) => {

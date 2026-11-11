@@ -6,6 +6,7 @@
 import { useSyncExternalStore } from 'react';
 import type { CoreApi } from '../core/api';
 import type { Channel, Id, Identity, Member, Message, ServerSummary, UpdateInfo, CallState, VoiceRoom } from '../core/types';
+import { liveMutes, loadMutes, MUTE_DURATIONS, MUTE_FOREVER, nextExpiry, saveMutes, type MuteDuration, type MuteKey, type Mutes } from './mute';
 
 const PAGE = 100;
 
@@ -108,6 +109,8 @@ export interface StoreState {
   identity: Identity | null;
   /** A server left this device (left, closed and purged, or a kick): its name, for a toast. */
   serverGone: { name: string; reason: 'left' | 'closed' | 'kicked'; at: number } | null;
+  /** Muted servers and channels on this device (G-03, G-17), by mute key; see app/mute.ts. */
+  mutes: Mutes;
   servers: ServerSummary[];
   channels: Record<Id, Channel[]>;
   members: Record<Id, Member[]>;
@@ -150,6 +153,7 @@ export class Store {
     flash: null,
     settingsRequest: null,
     serverGone: null,
+    mutes: loadMutes(),
     messagesVersion: 0,
   };
   private listeners = new Set<() => void>();
@@ -158,7 +162,12 @@ export class Store {
   /** While my own leaveCall runs: that end of the call isn't news. */
   private leaving = false;
 
-  constructor(readonly core: CoreApi) {}
+  /** Fires when the next timed mute ends, so muted marks go away on time. */
+  private muteTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(readonly core: CoreApi) {
+    this.scheduleMuteExpiry();
+  }
 
   /** Subscribes to core events; returns the matching cleanup. */
   start(): () => void {
@@ -321,6 +330,32 @@ export class Store {
 
   clearFlash(): void {
     this.set({ flash: null });
+  }
+
+  /** Mutes a server or channel (a key from app/mute.ts), on this device only. */
+  mute(key: MuteKey, duration: MuteDuration): void {
+    const ms = MUTE_DURATIONS[duration];
+    this.setMutes({ ...liveMutes(this.state.mutes), [key]: ms === MUTE_FOREVER ? MUTE_FOREVER : Date.now() + ms });
+  }
+
+  unmute(key: MuteKey): void {
+    const { [key]: _gone, ...rest } = this.state.mutes;
+    this.setMutes(liveMutes(rest));
+  }
+
+  private setMutes(mutes: Mutes): void {
+    saveMutes(mutes);
+    this.set({ mutes });
+    this.scheduleMuteExpiry();
+  }
+
+  private scheduleMuteExpiry(): void {
+    if (this.muteTimer) clearTimeout(this.muteTimer);
+    this.muteTimer = null;
+    const next = nextExpiry(this.state.mutes);
+    if (next === null) return;
+    // setTimeout caps at about 24.8 days; a 24-hour mute is well inside.
+    this.muteTimer = setTimeout(() => this.setMutes(liveMutes(this.state.mutes)), Math.max(0, next - Date.now()) + 50);
   }
 
   clearServerGone(): void {

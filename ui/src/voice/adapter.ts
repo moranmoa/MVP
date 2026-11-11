@@ -19,10 +19,20 @@ export interface VoiceCore {
   sendSignal(to: Id, kind: SignalKind, payload: string): Promise<unknown>;
   onState(handler: (state: CallState) => void): () => void;
   onSignal(handler: (signal: CallSignal) => void): () => void;
+  /**
+   * G-81: short-lived TURN credentials `{ urls, username, credential, ttl,
+   * expiresAt }`, minted by the relay. Rejects relay-only, not-implemented,
+   * rate-limited. Absent until the core api has it; the engine then goes on
+   * without TURN. Whatever comes back is cleaned (cleanTurnCredentials).
+   */
+  getTurnCredentials?(): Promise<unknown>;
 }
 
 export function fromCoreApi(api: CoreApi): VoiceCore {
+  // Not in CoreApi yet (G-81 step 4); bound only when the core has it.
+  const turn = (api as Partial<{ getTurnCredentials(): Promise<unknown> }>).getTurnCredentials;
   return {
+    ...(typeof turn === 'function' ? { getTurnCredentials: () => turn.call(api) } : {}),
     joinCall: (channelId) => api.joinCall(channelId),
     leaveCall: () => api.leaveCall(),
     setMuted: (muted) => api.setMuted(muted),

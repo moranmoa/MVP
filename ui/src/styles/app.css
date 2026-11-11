@@ -1217,6 +1217,8 @@ legend {
   flex: 1;
   min-height: 0;
   display: flex;
+  /* Column: the G-21 bar takes its own row above the messages. */
+  flex-direction: column;
 }
 
 .message-scroll {
@@ -3023,11 +3025,10 @@ input.switch:disabled {
   background: var(--danger);
 }
 
+/* In the flow above the messages, so it never covers the top message (UX on #329). */
 .unread-bar {
-  position: absolute;
-  inset-block-start: 0.5rem;
-  inset-inline: 1rem;
-  z-index: 3;
+  order: -1;
+  margin: 0.5rem 1rem 0.25rem;
   display: flex;
   align-items: center;
   gap: 0.25rem;
@@ -3052,6 +3053,36 @@ input.switch:disabled {
 
 .unread-bar .icon-button {
   color: inherit;
+}
+
+/* Muted on this device (G-03, G-17): quieter, but text keeps its contrast
+   (the muted text colour, not opacity), and a 🔕 mark says so without colour. */
+.rail-item.muted .rail-button {
+  filter: grayscale(1);
+}
+/* A mention still shows; plain unread doesn't. */
+.rail-item.muted .rail-pip {
+  visibility: hidden;
+}
+.channel.muted,
+.channel.muted.unread {
+  color: var(--text-muted);
+  font-weight: normal;
+}
+.channel.muted .unread-dot {
+  display: none;
+}
+.channel.muted .channel-name {
+  color: var(--text-muted);
+}
+.channel .bell-off-wrap {
+  display: inline-flex;
+}
+.channel .bell-off {
+  flex: none;
+  width: 1rem;
+  height: 1rem;
+  color: var(--text-muted);
 }
 
 /* G-24: mentions. */
