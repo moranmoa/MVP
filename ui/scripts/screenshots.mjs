@@ -983,6 +983,24 @@ for (const [lang, t] of [
   await p.close();
 }
 
+// Mute (G-03, G-17) and mark all as read (G-04): 350–351.
+{
+  const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999', 'x');
+  const channels = p.getByRole('navigation', { name: 'ערוצים' });
+  await channels.getByRole('button', { name: /^clips/ }).click({ button: 'right' });
+  await p.getByRole('menuitem', { name: 'השתקה…' }).click();
+  await p.getByRole('dialog', { name: /^השתקה של/ }).waitFor();
+  await shot(p, '350-mute-dialog-he');
+  await p.getByRole('button', { name: 'עד שאבטל' }).click();
+  await p.getByRole('button', { name: /^Minecraft IL/ }).click({ button: 'right' });
+  await p.getByRole('menuitem', { name: 'השתקה…' }).click();
+  await p.getByRole('button', { name: 'ל-8 שעות' }).click();
+  await p.mouse.move(1, 1);
+  await shot(p, '351-muted-server-and-channel-he');
+  await p.evaluate(() => localStorage.removeItem('mvs.mute.v1'));
+  await p.close();
+}
+
 await browser.close();
 await server.close();
 
