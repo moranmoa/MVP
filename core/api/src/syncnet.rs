@@ -370,6 +370,20 @@ impl Network for SyncNetwork {
         self.runtime.block_on(self.node.fetch_invite(handle)).unwrap_or_default()
     }
 
+    /// G-91: kept by this node (its own, announced as a DHT provider) and
+    /// handed to the relay mailbox and my other connected devices. `tag` is
+    /// the blob's own (sync checks it again).
+    fn put_backup(&self, tag: [u8; 32], blob: &[u8]) {
+        let _ = tag;
+        if !self.runtime.block_on(self.node.put_backup(blob.to_vec())).unwrap_or(false) {
+            eprintln!("mvs-core: sync refused the server backup");
+        }
+    }
+
+    fn fetch_backup(&self, tag: [u8; 32]) -> Vec<Vec<u8>> {
+        self.runtime.block_on(self.node.fetch_backup(tag)).unwrap_or_default()
+    }
+
     fn take_invite_publications(&self) -> Vec<(ServerId, Vec<u8>)> {
         std::mem::take(&mut *self.invite_pushes.lock().expect("not poisoned"))
     }

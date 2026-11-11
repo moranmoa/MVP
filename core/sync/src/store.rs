@@ -231,7 +231,14 @@ impl Store {
                  log TEXT NOT NULL,
                  id  BLOB NOT NULL,
                  PRIMARY KEY (log, id)
-             ) WITHOUT ROWID;",
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS backups (
+                 tag        BLOB PRIMARY KEY,
+                 owner      BLOB,
+                 version    INTEGER NOT NULL,
+                 blob       BLOB NOT NULL,
+                 written_at INTEGER NOT NULL
+             );",
         )?;
         // Stores made before stubs (B6-p) lack the column.
         let has_stub: bool = conn
@@ -241,6 +248,69 @@ impl Store {
             conn.execute_batch("ALTER TABLE records ADD COLUMN stub INTEGER NOT NULL DEFAULT 0")?;
         }
         Ok(Self { conn })
+    }
+
+    /// G-91: keeps a checked backup blob (`backup::check`) under `tag` if its
+    /// version is above the one held. `owner`: the bound identity that sent
+    /// it, `None` for my own. Others' are limited to one tag per owner (R1)
+    /// and [`crate::backup::MAX_HELD`] in all, the least recently written
+    /// dropped first. True if kept.
+    pub fn put_backup(
+        &mut self,
+        tag: &[u8; 32],
+        version: u64,
+        blob: &[u8],
+        owner: Option<&[u8; 32]>,
+        now: u64,
+    ) -> rusqlite::Result<bool> {
+        let held: Option<i64> = self
+            .conn
+            .query_row("SELECT version FROM backups WHERE tag = ?1", [tag.as_slice()], |row| row.get(0))
+            .optional()?;
+        if held.is_some_and(|held| held as u64 >= version) {
+            return Ok(false);
+        }
+        let tx = self.conn.transaction()?;
+        if let Some(owner) = owner {
+            // One tag per bound identity: its previous one goes.
+            tx.execute("DELETE FROM backups WHERE owner = ?1 AND tag != ?2", params![owner.as_slice(), tag.as_slice()])?;
+            if held.is_none() {
+                let others: i64 = tx.query_row("SELECT COUNT(*) FROM backups WHERE owner IS NOT NULL", [], |row| row.get(0))?;
+                if others as usize >= crate::backup::MAX_HELD {
+                    tx.execute(
+                        "DELETE FROM backups WHERE tag = (SELECT tag FROM backups WHERE owner IS NOT NULL
+                         ORDER BY written_at LIMIT 1)",
+                        [],
+                    )?;
+                }
+            }
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO backups (tag, owner, version, blob, written_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![tag.as_slice(), owner.map(|o| o.as_slice()), version as i64, blob, now as i64],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// The backup held under exactly `tag`.
+    pub fn backup(&self, tag: &[u8; 32]) -> rusqlite::Result<Option<Vec<u8>>> {
+        self.conn.query_row("SELECT blob FROM backups WHERE tag = ?1", [tag.as_slice()], |row| row.get(0)).optional()
+    }
+
+    /// Every tag held (to announce as a provider).
+    pub fn backup_tags(&self) -> rusqlite::Result<Vec<[u8; 32]>> {
+        let mut stmt = self.conn.prepare("SELECT tag FROM backups")?;
+        let rows = stmt.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+        Ok(rows.filter_map(|r| r.ok().and_then(|t| t.try_into().ok())).collect())
+    }
+
+    /// Others' backups not written for `retention` seconds go; mine stay.
+    pub fn expire_backups(&mut self, now: u64, retention: u64) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "DELETE FROM backups WHERE owner IS NOT NULL AND written_at < ?1",
+            [now.saturating_sub(retention) as i64],
+        )
     }
 
     pub fn has(&self, id: &RecordId) -> rusqlite::Result<bool> {

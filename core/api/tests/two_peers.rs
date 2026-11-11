@@ -72,6 +72,29 @@ fn eventually(what: &str, mut ok: impl FnMut() -> bool) {
 /// publication, opens and checks it, and joins.
 #[test]
 #[ignore = "needs a relay: set RELAY and run with --ignored"]
+fn a_restore_on_a_fresh_device_brings_the_servers_back() {
+    let Ok(relay) = std::env::var("RELAY") else {
+        eprintln!("RELAY not set; skipped");
+        return;
+    };
+    // My first device: a server, and its backup (the login round writes it).
+    let first = peer("BackupFirst", OWNER, &relay);
+    let server = first.core.create_server("Backed up", AgeRestriction::None).unwrap();
+    first.core.sync_now().unwrap();
+    // A clean machine, the same words: the server comes back from the
+    // network (G-91: `/mvs/backup/1`, my first device as the holder).
+    let fresh = peer("BackupFresh", OWNER, &relay);
+    eventually("the fresh device to get my server back", || {
+        let _ = first.core.sync_now();
+        let _ = fresh.core.sync_now();
+        fresh.core.list_servers().unwrap().iter().any(|s| s.id == server.id)
+    });
+    eprintln!("restore from the network: done");
+}
+
+/// T8-02 (continued): see above.
+#[test]
+#[ignore = "needs a relay: set RELAY and run with --ignored"]
 fn a_short_link_joins_through_a_relay() {
     let Ok(relay) = std::env::var("RELAY") else {
         eprintln!("RELAY not set; skipped");
