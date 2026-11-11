@@ -45,6 +45,10 @@
         "to": "mvs-config.json"
       },
       {
+        "from": "build/icons/512x512.png",
+        "to": "icon.png"
+      },
+      {
         "from": "build/THIRD-PARTY-NOTICES.txt",
         "to": "THIRD-PARTY-NOTICES.txt"
       }
@@ -59,6 +63,7 @@
         "deb"
       ],
       "category": "Network",
+      "icon": "build/icons",
       "maintainer": "MVS <spike@example.invalid>",
       "extraResources": [
         {
@@ -86,6 +91,7 @@
     },
     "win": {
       "target": "nsis",
+      "icon": "build/icon.ico",
       "extraResources": [
         {
           "from": ".core/mvs-core.exe",
@@ -104,6 +110,8 @@
       "perMachine": false,
       "allowElevation": false,
       "include": "build/installer.nsh",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
       "deleteAppDataOnUninstall": false,
       "unicode": true
     },

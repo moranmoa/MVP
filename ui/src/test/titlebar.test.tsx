@@ -1,21 +1,27 @@
-// Our own window frame: the title bar is drawn only when the desktop shell
-// gives us a frameless window (`window.mvs.windowControl`).
+// Our own title bar (docs/ux/specs/desktop-chrome.md §2): drawn only when the
+// desktop shell gives us our own frame (`window.mvs.windowFrame`).
 
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../app/App';
 import type { Settings } from '../app/settings';
 import type { CoreEvents } from '../core/api';
 import { MockCore } from '../core/mock';
 
-async function setup(locale: 'en' | 'he' = 'en') {
-  const settings: Settings = { locale, theme: 'light', uiScale: 1, fontSize: 15 };
+async function setup(locale: 'en' | 'he' = 'en', theme: Settings['theme'] = 'light') {
+  const settings: Settings = { locale, theme, uiScale: 1, fontSize: 15 };
   const core = new MockCore({ demo: true, speed: 0, simulateActivity: false });
   render(<App core={core} initialSettings={settings} />);
   await screen.findAllByRole('textbox');
-  const emit = (p: CoreEvents['window.state']) =>
-    act(() => (core as unknown as { emit: (e: 'window.state', p: CoreEvents['window.state']) => void }).emit('window.state', p));
-  return { emit };
+  const emit = <E extends 'window.state' | 'window.closeRequest'>(e: E, p: CoreEvents[E]) =>
+    act(() => (core as unknown as { emit: (e: E, p: CoreEvents[E]) => void }).emit(e, p));
+  return { core, emit };
+}
+
+function shell(frame: 'overlay' | 'custom') {
+  const windowControl = vi.fn(async () => true);
+  (window as { mvs?: unknown }).mvs = { windowFrame: frame, windowControl };
+  return windowControl;
 }
 
 describe('title bar', () => {
@@ -25,35 +31,48 @@ describe('title bar', () => {
 
   it('is not drawn without the desktop shell', async () => {
     await setup();
-    expect(document.querySelector('.titlebar')).toBeNull();
+    expect(document.querySelector<HTMLElement>('.titlebar')).toBeNull();
   });
 
-  it('minimizes, maximizes and closes through the shell, and follows the window state', async () => {
-    const windowControl = vi.fn(async (a: string) => (a === 'close' || a === 'minimize' ? { maximized: false } : { maximized: a === 'maximize' }));
-    (window as { mvs?: unknown }).mvs = { windowControl };
+  it('Linux: shows the mark, MVS and the open server, and its own three buttons', async () => {
+    const windowControl = shell('custom');
     const { emit } = await setup();
-    const bar = document.querySelector('.titlebar')!;
-    expect(bar.textContent).toContain('MVS');
-    expect(windowControl).toHaveBeenCalledWith('state');
+    const bar = document.querySelector<HTMLElement>('.titlebar')!;
+    expect(bar.textContent).toBe('MVS · גיימרים ישראל');
+    expect(bar.querySelector('img.titlebar-mark')).not.toBeNull();
+    // The buttons keep the physical order in every language.
+    expect(bar.querySelector('.titlebar-controls')!.getAttribute('dir')).toBe('ltr');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Minimize' }));
+    fireEvent.click(within(bar).getByRole('button', { name: 'Minimize' }));
     expect(windowControl).toHaveBeenLastCalledWith('minimize');
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Maximize' }));
-    });
-    expect(windowControl).toHaveBeenLastCalledWith('maximize');
-    expect(screen.getByRole('button', { name: 'Restore' })).toBeTruthy();
-    // Restored from the OS (e.g. a drag off the top of the screen).
-    emit({ maximized: false });
-    expect(screen.getByRole('button', { name: 'Maximize' })).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    fireEvent.click(within(bar).getByRole('button', { name: 'Maximize' }));
+    expect(windowControl).toHaveBeenLastCalledWith('toggle-maximize');
+    emit('window.state', { maximized: true, fullScreen: false });
+    expect(within(bar).getByRole('button', { name: 'Restore' })).toBeTruthy();
+    fireEvent.click(within(bar).getByRole('button', { name: 'Close' }));
     expect(windowControl).toHaveBeenLastCalledWith('close');
+
+    // Fullscreen hides the bar.
+    emit('window.state', { maximized: false, fullScreen: true });
+    expect(document.querySelector<HTMLElement>('.titlebar')).toBeNull();
   });
 
-  it('speaks Hebrew in Hebrew', async () => {
-    (window as { mvs?: unknown }).mvs = { windowControl: vi.fn(async () => ({ maximized: false })) };
-    await setup('he');
-    expect(screen.getByRole('button', { name: 'מזעור' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'סגירה' })).toBeTruthy();
+  it('Windows: no buttons of ours (the OS overlay draws them); the overlay follows the theme', async () => {
+    const windowControl = shell('overlay');
+    await setup('en', 'dark');
+    expect(within(document.querySelector<HTMLElement>('.titlebar')!).queryAllByRole('button')).toHaveLength(0);
+    expect(windowControl).toHaveBeenCalledWith('theme:dark');
+  });
+
+  it('a close during a call asks first; Cancel keeps the app open', async () => {
+    const windowControl = shell('overlay');
+    const { emit } = await setup('he');
+    emit('window.closeRequest', {});
+    const dialog = screen.getByRole('dialog', { name: 'השיחה תסתיים. לסגור את MVS?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'ביטול' }));
+    expect(windowControl).not.toHaveBeenCalledWith('close');
+    emit('window.closeRequest', {});
+    fireEvent.click(screen.getByRole('dialog').querySelector('button.danger')!);
+    expect(windowControl).toHaveBeenLastCalledWith('close');
   });
 });

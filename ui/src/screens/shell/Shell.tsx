@@ -20,6 +20,7 @@ import { ServerRail } from './ServerRail';
 import { ServerSettings } from './ServerSettings';
 import { LeaveServerDialog } from './ServerLifecycle';
 import { useDesktopNotifications } from './useNotifications';
+import { useWindowTitle } from '../../app/TitleBar';
 
 const MEMBERS_KEY = 'mvp.ui.membersOpen';
 
@@ -107,6 +108,8 @@ export function Shell() {
     return () => clearTimeout(t);
   }, [channelGone]);
   const server = servers.find((s) => s.id === serverId);
+  // The title bar shows the open server's name (desktop app).
+  useWindowTitle(server?.name);
 
   useEffect(() => {
     if (serverId !== 'home' && !servers.some((s) => s.id === serverId)) setServerId(servers[0]?.id ?? 'home');

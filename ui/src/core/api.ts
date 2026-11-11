@@ -202,8 +202,10 @@ export interface CoreEvents {
   'core.status': CoreStatus;
   /** Desktop shell (G-61): a desktop notification was clicked; open its channel. */
   'notify.click': { channelId: Id; messageId: Id | null };
-  /** Desktop shell, own title bar: the window was maximized or restored. */
-  'window.state': { maximized: boolean };
+  /** Desktop shell, own title bar: maximized or restored, fullscreen or not. */
+  'window.state': { maximized: boolean; fullScreen: boolean };
+  /** Desktop shell: a close during a call; the UI asks, then closes with windowControl('close'). */
+  'window.closeRequest': Record<string, never>;
   /** Every change to my call; participants [] after leaving. */
   'call.state': CallState;
   'call.signal': CallSignal;

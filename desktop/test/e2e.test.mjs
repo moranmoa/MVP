@@ -188,7 +188,7 @@ test('legacy desktop capture never gives a stream', async () => {
 
 test('the page sees only copyText, invoke, notify, onEvent, the core-down actions and the title bar', async () => {
   const keys = await page.evaluate(() => Object.keys(window.mvs).sort());
-  const frame = process.platform === 'darwin' ? [] : ['windowControl'];
+  const frame = process.platform === 'darwin' ? [] : ['windowControl', 'windowFrame'];
   assert.deepEqual(keys, ['copyText', 'invoke', 'notify', 'onEvent', 'openLogsFolder', 'retryCore', ...frame].sort());
   assert.equal(await page.evaluate(() => typeof window.ipcRenderer), 'undefined');
 });
@@ -206,14 +206,13 @@ test('copyText writes plain text only, through main', async () => {
   assert.equal(web, 'denied');
 });
 
-test('the title bar controls only minimize, maximize, close and read the state', { skip: process.platform === 'darwin' }, async () => {
-  assert.deepEqual(await page.evaluate(() => window.mvs.windowControl('state')), { maximized: false });
-  for (const bad of ['setBounds', 'devtools', '', 'constructor']) {
-    assert.equal(await page.evaluate((a) => window.mvs.windowControl(a), bad), null);
+test('the title bar command does only its actions', { skip: process.platform === 'darwin' }, async () => {
+  assert.equal(await page.evaluate(() => window.mvs.windowFrame), process.platform === 'win32' ? 'overlay' : 'custom');
+  for (const bad of ['setBounds', 'devtools', '', 'constructor', 'theme:#ff0000', 'maximize', 'state']) {
+    assert.equal(await page.evaluate((a) => window.mvs.windowControl(a), bad), false);
   }
-  const maximized = await page.evaluate(() => window.mvs.windowControl('maximize'));
-  assert.equal(typeof maximized.maximized, 'boolean');
-  await page.evaluate(() => window.mvs.windowControl('maximize'));
+  assert.equal(await page.evaluate(() => window.mvs.windowControl('toggle-maximize')), true);
+  assert.equal(await page.evaluate(() => window.mvs.windowControl('toggle-maximize')), true);
 });
 
 test('notify goes through main; the page itself still cannot notify (G-61)', async () => {

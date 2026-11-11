@@ -38,11 +38,16 @@ contextBridge.exposeInMainWorld('mvs', {
    */
   notify: (notice) => ipcRenderer.invoke('notify:show', notice),
   /**
-   * Our own title bar: 'minimize' | 'maximize' (toggles) | 'close' | 'state'.
-   * Resolves { maximized }; changes arrive as the `window.state` event.
-   * Only on Windows and Linux, where the window has no native frame.
+   * Our own title bar (Windows, Linux): `windowFrame` is 'overlay' (Windows:
+   * the OS draws the buttons) or 'custom' (Linux: the page does).
+   * `windowControl`: 'minimize' | 'toggle-maximize' | 'close' |
+   * 'theme:light' | 'theme:dark' (Windows overlay colours). Resolves true if
+   * done. `window.state` { maximized, fullScreen } and `window.closeRequest`
+   * (a close during a call: ask, then 'close') arrive as events.
    */
-  ...(process.platform !== 'darwin' ? { windowControl: (action) => ipcRenderer.invoke('window:control', String(action)) } : {}),
+  ...(process.platform === 'win32' || process.platform === 'linux'
+    ? { windowFrame: process.platform === 'win32' ? 'overlay' : 'custom', windowControl: (action) => ipcRenderer.invoke('window:control', String(action)) }
+    : {}),
   /** Opens the shell's logs folder (no words, no message content). Resolves true if it did. */
   openLogsFolder: () => ipcRenderer.invoke('logs:open'),
   onEvent: (callback) => {

@@ -484,6 +484,7 @@
   "notify.settings.previewPrivacy": "כשהתצוגה המקדימה פועלת, מערכת ההפעלה שומרת את טקסט ההודעה בהיסטוריית ההתראות ויכולה להציג אותו במסך הנעילה.",
   "window.minimize": "מזעור",
   "window.maximize": "הגדלה",
-  "window.restore": "שחזור",
-  "window.close": "סגירה"
+  "window.restore": "שחזור גודל",
+  "window.close": "סגירה",
+  "window.closeInCall": "השיחה תסתיים. לסגור את MVS?"
 }
