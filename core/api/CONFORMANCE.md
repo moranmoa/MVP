@@ -119,7 +119,7 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
     - It's padded to 4 KiB steps, at most 64 KiB.
   - **On `restoreIdentity`:** the core fetches the backup (`Network::fetch_backup`), keeps the newest valid one, and rejoins each live server as the same member (#290). It posts no new join, profile or age claim.
     - A server whose log no longer lists me isn't entered.
-    - Servers nobody could be reached for are retried each sync round.
+    - A restore still waiting (no backup found yet, or servers nobody could be reached for) is retried with backoff: after 1 min, then 2, 4 and 8, then every 15 min, and not again once it's done.
   - **Holders:** the ports are no-ops until dev-sync's `/mvs/backup/1` and devops' mailbox exist. `LoopbackNetwork` holds them for tests.
 
 - `signOut({ words: string[] } | { withoutWords: true })` returns `null` (both read at the top level of `args`). It removes this identity from this computer.
