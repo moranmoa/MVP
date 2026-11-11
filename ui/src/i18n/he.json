@@ -402,6 +402,7 @@
   "profile.edit.discard": "ביטול שינויים",
   "profile.edit.publishHint": "השם, התמונה והצבע מוצגים לכל מי שנמצא איתך בשרתים. את הביו רואים בינתיים רק במחשב הזה.",
   "profile.edit.saved": "הפרופיל נשמר",
+  "profile.edit.savedLater": "אחרים בשרתים יראו את השינוי בדקות הקרובות.",
   "profile.edit.saveError": "לא הצלחנו לשמור את הפרופיל. אפשר לנסות שוב.",
   "profile.edit.nameEmpty": "צריך לתת שם.",
   "profile.edit.charsLeft": "{count, plural, one {נשאר תו אחד} other {נשארו # תווים}}",

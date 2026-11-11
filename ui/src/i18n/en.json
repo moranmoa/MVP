@@ -402,6 +402,7 @@
   "profile.edit.discard": "Discard changes",
   "profile.edit.publishHint": "Everyone in your servers sees your name, picture and colour. For now, your bio is seen only on this computer.",
   "profile.edit.saved": "Profile saved",
+  "profile.edit.savedLater": "Others in your servers will see it within a few minutes.",
   "profile.edit.saveError": "Couldn't save your profile. Try again.",
   "profile.edit.nameEmpty": "Enter a name.",
   "profile.edit.charsLeft": "{count, plural, one {# character left} other {# characters left}}",
