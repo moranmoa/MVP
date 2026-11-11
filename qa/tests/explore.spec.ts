@@ -493,7 +493,7 @@ test.describe('layout', () => {
     await shot(page, 'settings-dark');
     await page.getByRole('button', { name: 'שפה' }).click();
     const t1 = Date.now();
-    await page.getByRole('radio', { name: 'English' }).check();
+    await page.getByRole('combobox', { name: 'שפת הממשק' }).selectOption('en');
     await expect(page.locator('html')).toHaveAttribute('dir', 'ltr');
     expect(Date.now() - t1).toBeLessThan(1_000);
   });

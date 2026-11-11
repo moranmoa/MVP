@@ -6,7 +6,7 @@ import { useStore } from '../../app/store';
 import { useCore, type AppInfo, type StorageUsage } from '../../core';
 import { Avatar, Code, Dialog, Name, RICH } from '../../components/common';
 import { CheckIcon, ShieldIcon } from '../../components/icons';
-import { LOCALES } from '../../i18n';
+import { LanguagePicker } from '../../components/LanguagePicker';
 import { textDir, useUiDir } from '../../app/textDir';
 import { ProfileEditor, type ProfileEditorHandle } from './ProfileEditor';
 import { SignOutButton } from './SignOut';
@@ -164,26 +164,10 @@ function AccountSection({
 }
 
 function LanguageSection() {
-  const { settings, update } = useSettings();
   const intl = useIntl();
   return (
     <div className="stack">
-      <div className="choice-list" role="radiogroup" aria-label={intl.formatMessage({ id: 'settings.language.label' })}>
-        {LOCALES.map((l) => (
-          <button
-            key={l}
-            type="button"
-            role="radio"
-            aria-checked={settings.locale === l}
-            className="choice"
-            lang={l}
-            onClick={() => update({ locale: l })}
-          >
-            <FormattedMessage id={`lang.${l}`} />
-            {settings.locale === l && <CheckIcon />}
-          </button>
-        ))}
-      </div>
+      <LanguagePicker label={intl.formatMessage({ id: 'settings.language.label' })} />
       <p className="muted small">
         <FormattedMessage id="settings.instant" />
       </p>

@@ -118,7 +118,8 @@ test.describe('smoke', () => {
 
   test('English switches the layout to LTR', async ({ page }) => {
     await page.goto('/?fresh=1&still=1');
-    await page.getByRole('radio', { name: 'English' }).click();
+    // A list since 0.4.1; the page may start in either language (system language, else English).
+    await page.getByRole('combobox', { name: /בחירת שפה|Choose a language/ }).selectOption('en');
     await expect(page.getByRole('heading', { name: 'Choose a language' })).toBeVisible();
     await expect(page.locator('html')).toHaveAttribute('dir', 'ltr');
   });

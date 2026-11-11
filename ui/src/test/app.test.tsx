@@ -30,7 +30,8 @@ describe('app', () => {
 
   it('switches to English and LTR', async () => {
     render(<App core={new MockCore({ speed: 0 })} initialSettings={he} />);
-    fireEvent.click(await screen.findByRole('radio', { name: 'English' }));
+    // A list, each language in its own name (0.4.1).
+    fireEvent.change(await screen.findByRole('combobox', { name: 'בחירת שפה' }), { target: { value: 'en' } });
     expect(await screen.findByRole('heading', { name: 'Choose a language' })).toBeTruthy();
     expect(document.documentElement.dir).toBe('ltr');
   });

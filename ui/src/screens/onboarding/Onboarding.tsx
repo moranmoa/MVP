@@ -3,13 +3,13 @@ import { FormattedMessage, useIntl } from 'react-intl';
 import { ageOn, countryOptions, detectCountry, MIN_AGE, toBirthDate } from '../../app/age';
 import { useAppStore } from '../../app/App';
 import { useSettings } from '../../app/settings';
-import { isCoreError, useCore, useCoreEvent, type Identity, type Locale } from '../../core';
+import { isCoreError, useCore, useCoreEvent, type Identity } from '../../core';
 import type { CoreEvents } from '../../core/api';
 import { useUserTextProps } from '../../app/textDir';
 import { safeImageSrc } from '../../core/sanitize';
 import { Avatar, Code } from '../../components/common';
 import { CheckIcon } from '../../components/icons';
-import { LOCALES } from '../../i18n';
+import { LanguagePicker } from '../../components/LanguagePicker';
 import { RecoveryCheck, RecoveryWordsPanel } from './RecoveryWords';
 import { RestoreScreen } from './Restore';
 
@@ -226,7 +226,6 @@ function StepBody({ children }: { children: ReactNode }) {
 }
 
 function LanguageStep({ onNext, onRestore }: { onNext: () => void; onRestore: () => void }) {
-  const { settings, update } = useSettings();
   const intl = useIntl();
   return (
     <>
@@ -239,22 +238,7 @@ function LanguageStep({ onNext, onRestore }: { onNext: () => void; onRestore: ()
       <p className="muted">
         <FormattedMessage id="onb.language.hint" />
       </p>
-      <div className="choice-list" role="radiogroup" aria-label={intl.formatMessage({ id: 'onb.language.title' })}>
-        {LOCALES.map((l: Locale) => (
-          <button
-            key={l}
-            type="button"
-            role="radio"
-            aria-checked={settings.locale === l}
-            className="choice"
-            lang={l}
-            onClick={() => update({ locale: l })}
-          >
-            <FormattedMessage id={`lang.${l}`} />
-            {settings.locale === l && <CheckIcon />}
-          </button>
-        ))}
-      </div>
+      <LanguagePicker label={intl.formatMessage({ id: 'onb.language.title' })} />
       <div className="actions">
         <button type="button" className="primary" onClick={onNext}>
           <FormattedMessage id="common.next" />
