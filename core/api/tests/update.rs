@@ -341,7 +341,9 @@ fn the_loop_stops_when_asked() {
 }
 
 #[test]
-fn checks_are_six_hours_apart_with_half_an_hour_of_jitter() {
+fn checks_are_an_hour_apart_with_five_minutes_of_jitter() {
+    // Owner, 2026-11-11: a published update should show within about an hour.
+    assert_eq!((CHECK_EVERY.as_secs(), CHECK_JITTER.as_secs()), (3600, 300));
     let lo = CHECK_EVERY - CHECK_JITTER;
     let hi = CHECK_EVERY + CHECK_JITTER;
     let spread: std::collections::BTreeSet<_> = (0..50).map(|_| next_interval()).collect();
