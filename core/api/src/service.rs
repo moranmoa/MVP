@@ -66,6 +66,8 @@ const KV_READ_PREFIX: &str = "read/";
 /// last profile post went out (u64le ms).
 const KV_PROFILE_PENDING: &str = "profile-pending";
 const KV_PROFILE_POSTED_AT: &str = "profile-posted-at";
+/// #359 follow-up: servers whose profile post was refused (JSON hex list).
+const KV_PROFILE_RETRY: &str = "profile-retry";
 /// #354: at most one profile post per server per 10 minutes.
 pub const PROFILE_POST_EVERY_MS: u64 = 10 * 60_000;
 /// Restore servers: a restore still has servers to rejoin from the backup.
@@ -3316,7 +3318,19 @@ impl Inner {
     /// [`PROFILE_POST_EVERY_MS`] old (coalesced: the latest values). Called on
     /// a change and every sync round; the pending flag is stored.
     fn flush_profile(&mut self, ports: &Ports) -> CoreResult<()> {
-        if self.db.get(KV_PROFILE_PENDING)?.is_none() {
+        let pending = self.db.get(KV_PROFILE_PENDING)?.is_some();
+        // Servers whose last profile post was refused (Tech Lead on #359):
+        // only they are tried again, so one refusing server doesn't send
+        // every other server a new post every 10 minutes.
+        let retry: BTreeSet<ServerId> = self
+            .db
+            .get(KV_PROFILE_RETRY)?
+            .and_then(|json| serde_json::from_slice::<Vec<String>>(&json).ok())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|id| model::parse_hex32(id).map(ServerId::from_bytes))
+            .collect();
+        if !pending && retry.is_empty() {
             return Ok(());
         }
         let now = ports.clock.now_ms();
@@ -3328,27 +3342,32 @@ impl Inner {
         if last.is_some_and(|last| now.saturating_sub(last) < PROFILE_POST_EVERY_MS) {
             return Ok(());
         }
-        // The 10 minutes start only when a post actually went out (sign-up
-        // sets a name before I'm in any server).
-        let (sent, failed) = self.post_profile_everywhere(ports);
-        if sent > 0 {
+        let (sent, failed) = self.post_profile_everywhere(ports, (!pending).then_some(&retry));
+        // The 10 minutes start once a post was made or tried (sign-up sets a
+        // name before I'm in any server: nothing either way).
+        if sent > 0 || !failed.is_empty() {
             self.db.set(KV_PROFILE_POSTED_AT, &now.to_le_bytes())?;
         }
-        // A refused post is tried again next round (Tech Lead nit on #359).
-        if failed == 0 {
-            self.db.delete(KV_PROFILE_PENDING)?;
-        }
-        Ok(())
+        let failed: Vec<String> = failed.iter().map(|s| model::hex_id(s.as_bytes())).collect();
+        self.db.set(KV_PROFILE_RETRY, &serde_json::to_vec(&failed).expect("plain list"))?;
+        self.db.delete(KV_PROFILE_PENDING)
     }
 
     /// My profile (name, small picture, colour) as one profile post per
-    /// server I'm still a member of (not closed, not kicked, not left). A
-    /// server that refuses it is skipped and logged. Returns how many went
-    /// out and how many failed.
-    fn post_profile_everywhere(&mut self, ports: &Ports) -> (usize, usize) {
-        let Ok(servers) = self.db.servers() else { return (0, 1) };
-        let Some(me) = self.me.as_ref() else { return (0, 0) };
-        let (mut sent, mut failed) = (0, 0);
+    /// server I'm still a member of (not closed, not kicked, not left), or
+    /// only to `only`. A server that refuses it is logged. Returns how many
+    /// went out and the servers that refused.
+    fn post_profile_everywhere(
+        &mut self,
+        ports: &Ports,
+        only: Option<&BTreeSet<ServerId>>,
+    ) -> (usize, Vec<ServerId>) {
+        let Ok(mut servers) = self.db.servers() else { return (0, Vec::new()) };
+        if let Some(only) = only {
+            servers.retain(|s| only.contains(s));
+        }
+        let Some(me) = self.me.as_ref() else { return (0, Vec::new()) };
+        let (mut sent, mut failed) = (0, Vec::new());
         let key = me.key();
         let p = &me.profile;
         let action = model::profile_action_with(&p.display_name, p.avatar_small.as_deref(), p.color.as_deref());
@@ -3369,7 +3388,7 @@ impl Inner {
                 Ok(true) => sent += 1,
                 Ok(false) => {}
                 Err(e) => {
-                    failed += 1;
+                    failed.push(server);
                     eprintln!("mvs-core: a profile post wasn't published: {:?}", e.code);
                 }
             }
