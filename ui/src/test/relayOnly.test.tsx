@@ -55,6 +55,19 @@ describe('relay-only', () => {
     expect(roomEntry().getAttribute('aria-disabled')).toBeNull();
   });
 
+  it('with no rooms, a relay-only change from elsewhere (the bridge) turns "Join chat" off and on again', async () => {
+    const { core } = await setup({ voiceRooms: 0 });
+    await waitFor(() => expect(roomEntry().getAttribute('aria-disabled')).toBeNull());
+    await act(async () => {
+      await core.setRelayOnly(true);
+    });
+    await waitFor(() => expect(roomEntry().getAttribute('aria-disabled')).toBe('true'));
+    await act(async () => {
+      await core.setRelayOnly(false);
+    });
+    await waitFor(() => expect(roomEntry().getAttribute('aria-disabled')).toBeNull());
+  });
+
   it('"Change in Settings" under the reason opens Privacy with focus on the switch', async () => {
     await setup({ relayOnly: true });
     fireEvent.click(await screen.findByRole('button', { name: 'Change in Settings' }));

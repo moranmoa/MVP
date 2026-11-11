@@ -277,6 +277,14 @@ export class Store {
       voiceRooms: { ...this.state.voiceRooms, [serverId]: rooms },
       ...(rooms.length ? { relayOnly: rooms.some((r) => r.relayOnly === true) } : {}),
     });
+    // No rooms carry no flag, yet the core sends this list when relay-only
+    // changes (QA V3.1 on 0.4.4): ask the device setting instead.
+    if (!rooms.length) {
+      void this.core
+        .getAppInfo()
+        .then((info) => this.set({ relayOnly: info.relayOnly === true }))
+        .catch(() => {});
+    }
   }
 
   private reloadTimers = new Map<Id, ReturnType<typeof setTimeout>>();
