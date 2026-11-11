@@ -168,8 +168,8 @@ function serveCoreIpc() {
         clearLogs: () => signout.clearLogFiles(app.getPath('logs')),
       });
     }
-    // The call gate sees joinCall's answer before the page does, so the
-    // page's getUserMedia after a join finds the microphone open.
+    // The call gate sees a joinCall or createVoiceRoom answer before the page
+    // does, so the page's getUserMedia right after finds the microphone open.
     const token = callGate.beforeCommand(req.cmd);
     const res = await core.request(req.cmd, req.args);
     callGate.afterCommand(req.cmd, token, res);

@@ -164,6 +164,62 @@ test('call gate: a late joinCall answer after a leave, a core restart or quit st
   }
 });
 
+// 0.4.4 blocker: whoever opens a voice room is in it (CONFORMANCE: createVoiceRoom
+// returns the new room's CallState, me as creator), so they need the mic too.
+test('call gate: the commands that start a call are exactly joinCall and createVoiceRoom', () => {
+  assert.deepEqual([...sec.CALL_STARTERS].sort(), ['createVoiceRoom', 'joinCall']);
+  assert.ok(Object.isFrozen(sec.CALL_STARTERS));
+  // Other voice-room commands never open it.
+  for (const cmd of ['listVoiceRooms', 'editVoiceRoom', 'setMuted', 'sendSignal']) {
+    const gate = sec.createCallGate();
+    gate.afterCommand(cmd, gate.beforeCommand(cmd), { ok: CALL });
+    assert.equal(gate.inCall, false, cmd);
+  }
+});
+
+test('call gate: a successful createVoiceRoom opens it', () => {
+  const gate = sec.createCallGate();
+  gate.afterCommand('createVoiceRoom', gate.beforeCommand('createVoiceRoom'), { ok: CALL });
+  assert.equal(gate.inCall, true);
+  assert.equal(sec.allowPermissionRequest(PAGE, 'media', micReq(), gate.inCall), true);
+});
+
+test('call gate: a failed or refused createVoiceRoom never opens it, and shuts an open one', () => {
+  for (const code of ['room-cap', 'relay-only', 'in-call-elsewhere', 'not-allowed', 'not-found', 'not-implemented']) {
+    const gate = sec.createCallGate();
+    gate.afterCommand('createVoiceRoom', gate.beforeCommand('createVoiceRoom'), { error: { code } });
+    assert.equal(gate.inCall, false, code);
+    joined(gate);
+    // It leaves any other call first, so a failed one leaves us out.
+    gate.afterCommand('createVoiceRoom', gate.beforeCommand('createVoiceRoom'), { error: { code } });
+    assert.equal(gate.inCall, false, 'after an open gate: ' + code);
+  }
+  for (const res of [{ ok: LEFT }, { ok: null }, null]) {
+    const gate = sec.createCallGate();
+    gate.afterCommand('createVoiceRoom', gate.beforeCommand('createVoiceRoom'), res);
+    assert.equal(gate.inCall, false, JSON.stringify(res));
+  }
+});
+
+test('call gate: a late createVoiceRoom answer after a leave, a core restart or quit stays shut', () => {
+  for (const [label, act] of [
+    ['leaveCall', (g) => g.beforeCommand('leaveCall')],
+    ['core restart', (g) => g.onCoreStatus({ state: 'starting' })],
+    ['quit', (g) => g.end()],
+  ]) {
+    const gate = sec.createCallGate();
+    const t = gate.beforeCommand('createVoiceRoom');
+    act(gate);
+    gate.afterCommand('createVoiceRoom', t, { ok: CALL });
+    assert.equal(gate.inCall, false, label);
+  }
+  // And leaving the room I opened shuts it.
+  const gate = sec.createCallGate();
+  gate.afterCommand('createVoiceRoom', gate.beforeCommand('createVoiceRoom'), { ok: CALL });
+  gate.beforeCommand('leaveCall');
+  assert.equal(gate.inCall, false);
+});
+
 test('call gate: switching calls (the old call.state [] comes first) ends in the new call', () => {
   const gate = sec.createCallGate();
   joined(gate);
