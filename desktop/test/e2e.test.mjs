@@ -186,9 +186,9 @@ test('legacy desktop capture never gives a stream', async () => {
   assert.equal(await page.evaluate(() => location.origin), 'app://mvs');
 });
 
-test('the page sees only copyText, invoke and onEvent', async () => {
+test('the page sees only copyText, invoke, notify, onEvent and the core-down actions', async () => {
   const keys = await page.evaluate(() => Object.keys(window.mvs).sort());
-  assert.deepEqual(keys, ['copyText', 'invoke', 'onEvent', 'openLogsFolder', 'retryCore']);
+  assert.deepEqual(keys, ['copyText', 'invoke', 'notify', 'onEvent', 'openLogsFolder', 'retryCore']);
   assert.equal(await page.evaluate(() => typeof window.ipcRenderer), 'undefined');
 });
 
@@ -203,6 +203,16 @@ test('copyText writes plain text only, through main', async () => {
   // The page itself still has no clipboard permission.
   const web = await page.evaluate(() => navigator.clipboard.writeText('web').then(() => 'ok', () => 'denied'));
   assert.equal(web, 'denied');
+});
+
+test('notify goes through main; the page itself still cannot notify (G-61)', async () => {
+  // Malformed notices are refused before anything reaches the OS.
+  assert.equal(await page.evaluate(() => window.mvs.notify({ title: 'x' })), false);
+  assert.equal(await page.evaluate(() => window.mvs.notify('x')), false);
+  assert.equal(await page.evaluate(() => window.mvs.notify({ title: 'a', body: 'b', channelId: 'bad id!' })), false);
+  // The web Notification permission stays denied.
+  const perm = await page.evaluate(() => Notification.requestPermission());
+  assert.equal(perm, 'denied');
 });
 
 test('allowed commands reach the core with named args and the data dir', async () => {

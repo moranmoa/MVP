@@ -200,6 +200,8 @@ export interface CoreEvents {
   'link.open': { link: string };
   /** Desktop shell (T8-01): sent on every change and on every page load. */
   'core.status': CoreStatus;
+  /** Desktop shell (G-61): a desktop notification was clicked; open its channel. */
+  'notify.click': { channelId: Id; messageId: Id | null };
   /** Every change to my call; participants [] after leaving. */
   'call.state': CallState;
   'call.signal': CallSignal;

@@ -9,8 +9,9 @@ import { isCoreError, useCore, type Id, type ServerSummary } from '../../core';
 import { GearIcon, HomeIcon, PlusIcon, RefreshIcon } from '../../components/icons';
 import { useContextMenu, type MenuItem } from '../../components/ContextMenu';
 import { copyText } from '../../app/clipboard';
-import { isMutedKey, mutedUntil, MUTE_FOREVER, serverMuteKey } from '../../app/mute';
-import { MuteDialog, useMutedLabel, type MuteTarget } from './MuteDialog';
+import { isMutedKey, mutedUntil, serverMuteKey } from '../../app/mute';
+import { useMutedLabel } from './MuteDialog';
+import { NotifyDialog, type NotifyTarget } from './NotifyDialog';
 
 /** How far the mouse moves before a press becomes a drag (G-01). */
 const DRAG_START_PX = 4;
@@ -45,16 +46,16 @@ export function ServerRail({
   const myId = useStore(store, (s) => s.identity?.id);
   const { bind, menu } = useContextMenu();
   const mutes = useStore(store, (s) => s.mutes);
-  const [muteTarget, setMuteTarget] = useState<MuteTarget | null>(null);
   const isServerMuted = (s: ServerSummary) => isMutedKey(mutes, serverMuteKey(s.id));
   const mutedLabel = useMutedLabel();
-  /** "Unmute", with "· Muted until …" for a timed mute. */
-  const unmuteLabel = (until: number | null) =>
-    [intl.formatMessage({ id: 'notify.unmute' }), until !== null && until !== MUTE_FOREVER ? mutedLabel(until) : null].filter(Boolean).join(' · ');
+  /** "Notifications", with "· Muted until …" for a muted server. */
+  const notifyLabel = (until: number | null) => [intl.formatMessage({ id: 'notify.menu' }), until !== null ? mutedLabel(until) : null].filter(Boolean).join(' · ');
   // G-04: every unread channel of the server, through the core's markRead.
   const markAllRead = (s: ServerSummary) => {
     for (const c of store.getState().channels[s.id] ?? []) if (c.unread || c.mentions) void core.markRead(c.id);
   };
+  // G-61: the server whose notification settings are open.
+  const [notifyFor, setNotifyFor] = useState<NotifyTarget | null>(null);
 
   // G-01: my order, local only. New servers come at the end.
   const servers = sortByOrder(joined, settings.serverOrder ?? []);
@@ -96,9 +97,8 @@ export function ServerRail({
       ? []
       : [
           ...(s.unread || s.mentions ? [{ key: 'read', label: intl.formatMessage({ id: 'unread.markAllRead' }), onSelect: () => markAllRead(s) }] : []),
-          isServerMuted(s)
-            ? { key: 'unmute', label: unmuteLabel(mutedUntil(mutes, serverMuteKey(s.id))), onSelect: () => store.unmute(serverMuteKey(s.id)) }
-            : { key: 'mute', label: intl.formatMessage({ id: 'notify.muteMenu' }), onSelect: () => setMuteTarget({ key: serverMuteKey(s.id), name: s.name, kind: 'server' }) },
+          // G-61: level and mute in one dialog.
+          { key: 'notify', label: notifyLabel(mutedUntil(mutes, serverMuteKey(s.id))), onSelect: () => setNotifyFor({ kind: 'server', id: s.id, name: s.name }) },
           { kind: 'separator' },
           {
             key: 'invite',
@@ -315,7 +315,7 @@ export function ServerRail({
         </button>
       </div>
       {menu}
-      <MuteDialog target={muteTarget} onClose={() => setMuteTarget(null)} />
+      {notifyFor && <NotifyDialog target={notifyFor} onClose={() => setNotifyFor(null)} />}
     </nav>
     </>
   );
