@@ -6,6 +6,42 @@ fails if its version has no section here. Write a section before tagging:
 `## [X.Y.Z] - YYYY-MM-DD`, then Hebrew and English (Fixed / New / Known).
 Never put the relay domain or any IP address here.
 
+## [0.4.0] - 2026-11-11
+
+### מה חדש
+- **סדר השרתים שלך:** אפשר לגרור שרתים ברשימה (או Alt+Shift+חצים, או "שינוי סדר השרתים" בטלפון). הסדר נשמר רק במחשב הזה.
+- **סדר הערוצים בשרת:** הבעלים יכולים לשנות את סדר הערוצים, וכל החברים רואים את הסדר החדש. גרסאות ישנות פשוט ממשיכות להציג את סדר היצירה.
+- **"הודעות חדשות":** קו מפריד מסמן מאיפה מתחילות ההודעות שלא קראת, ופס "N חדשות · מעבר" קופץ אליהן.
+- **אזכורים עם @:** כשמקלידים @ מופיעה רשימת חברים לבחירה. אזכור מוצג כשם האדם, ומי שעזב מוצג כ"@חשבון שעזב". על הערוץ ועל השרת מופיע מונה אזכורים שלא נקראו.
+- **השתקה וסימון כנקרא:** אפשר להשתיק שרת או ערוץ לשעה, 8 שעות, 24 שעות או עד שמבטלים, ולסמן שרת שלם כנקרא.
+- **התראות בדסקטופ:** בחלון "התראות" של שרת או ערוץ בוחרים רמה (הכול / רק אזכורים / כלום) והשתקה. כברירת מחדל ההתראה לא מציגה את תוכן ההודעה, רק "הודעה חדשה ב-#ערוץ". אזכור שלך מגיע גם כשהערוץ מושתק.
+- **השרתים חוזרים אחרי שחזור:** רשימת השרתים נשמרת מוצפנת וחתומה ברשת, ושחזור ממילות השחזור במכשיר חדש מצטרף אליהם מחדש כשאחד המחשבים שלך מחובר.
+
+### מה תוקן
+- **הצטרפות שנתקעת:** פחות בקשות מיותרות בין מחשבים, גם אחרי ניתוק וחיבור מחדש דרך הממסר.
+
+### ידוע
+- **שיחות קול נתמכות רשמית רק כשכל המשתתפים באותה רשת** (למשל אותו Wi-Fi). שיחות בין רשתות שונות בדרך.
+- בפעם הראשונה Windows עשוי לשאול אם לאפשר ל-MVS גישה לרשת. מומלץ לאשר (גם ברשתות פרטיות); בלי זה שיחות קול לא יתחברו.
+
+---
+
+### New
+- **Your server order:** drag servers in the list (or Alt+Shift+arrows, or "Reorder servers" on a phone). The order is saved on this computer only.
+- **Channel order in a server:** owners can reorder channels, and every member sees the new order. Older versions simply keep showing the creation order.
+- **"New messages":** a divider marks where your unread messages start, and an "N new · Jump" bar takes you there.
+- **@mentions:** typing @ lists members to pick from. A mention shows the person's name, and someone who left shows as "@former account". Channels and servers show a count of unread mentions.
+- **Mute and mark as read:** mute a server or channel for 1 hour, 8 hours, 24 hours or until you turn it back on, and mark a whole server as read.
+- **Desktop notifications:** in a server's or channel's "Notifications" window, choose a level (all / mentions only / none) and mute. By default a notification doesn't show the message text, only "New message in #channel". A mention of you still notifies when the channel is muted.
+- **Servers come back after a restore:** your server list is saved encrypted and signed on the network, and restoring from your recovery words on a new device rejoins them when one of your other computers is online.
+
+### Fixed
+- **Joins that got stuck:** fewer needless requests between computers, also after reconnecting through the relay.
+
+### Known
+- **Voice calls are officially supported only when everyone is on the same network** (for example the same Wi-Fi). Calls across networks are on the way.
+- On first run, Windows may ask whether to allow MVS on the network. Please allow it (also on private networks); otherwise voice calls won't connect.
+
 ## [0.3.3] - 2026-11-10
 
 ### מה חדש
