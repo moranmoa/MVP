@@ -150,3 +150,7 @@
    - Nobody else can force a rotation, so nobody else can lock the owner out.
    - **A rotation cancels a pending recovery:** only a device holding the seed can sign with `w`, so a rotation means the owner is active. Every share holder treats it as a `w`-signed cancel.
    - The recovery shares themselves don't change. `r` is tied to `E`, not to the password, so a recovery set up before a password change still works afterwards.
+
+## 10. Security Lead's additions (approved at 67e248e; for the build)
+- **Every holder publishes the pending state:** each share holder, not only the mailer, publishes the pending-reset state for `tag_e`. My devices poll all of them, so a lying mailer can't hide a reset.
+- **The opt-in text also says:** "If any one of the recovery holders loses its share, email recovery stops working. Your 12 words always still work."
