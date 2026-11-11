@@ -20,7 +20,7 @@ fetch() { # tag -> $work/<tag>/mvs-core
   local tag=$1 dir="$work/$1" v=${1#v}
   [ -f "$dir/mvs-core" ] && return
   rm -rf "$dir" && mkdir -p "$dir"
-  gh release download "$tag" -R moranmoa/MVP -D "$(mount "$dir")" -p "mvs-$v-linux-x86_64.tar.gz" -p SHA256SUMS
+  gh release download "$tag" -R moranmoa/MVS -D "$(mount "$dir")" -p "mvs-$v-linux-x86_64.tar.gz" -p SHA256SUMS
   (cd "$dir" && grep " mvs-$v-linux-x86_64.tar.gz\$" SHA256SUMS | sha256sum -c -)
   tar -xzf "$dir/mvs-$v-linux-x86_64.tar.gz" -C "$dir"
   cp "$(find "$dir" -type f -name mvs-core -path '*resources*' | head -1)" "$dir/mvs-core"
