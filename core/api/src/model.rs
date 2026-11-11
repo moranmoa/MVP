@@ -516,6 +516,37 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     (y, m, d)
 }
 
+// ---- G-24: mentions -----------------------------------------------------
+//
+// A mention is the stable token `<@userId>` in a message body (GAPS §2.5):
+// the user ID as 64 lower-case hex, never a name, so a rename or two people
+// with one name don't break it. Older clients show the token as text.
+
+/// The users a body mentions, in order of first mention, each once.
+pub(crate) fn mention_tokens(text: &str) -> Vec<PublicKey> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("<@") {
+        let after = &rest[at + 2..];
+        let hex = after.get(..64);
+        let closed = after.as_bytes().get(64) == Some(&b'>');
+        let key = hex
+            .filter(|h| closed && h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+            .and_then(parse_hex32)
+            .map(PublicKey::from_bytes);
+        match key {
+            Some(key) => {
+                if !out.contains(&key) {
+                    out.push(key);
+                }
+                rest = &after[65..];
+            }
+            None => rest = after,
+        }
+    }
+    out
+}
+
 // ---- G-11: channel order ---------------------------------------------------
 //
 // Tech Lead's design (side notes, g11-channel-order-design.md): a control-log
@@ -694,6 +725,20 @@ fn admin_cache() -> &'static std::sync::Mutex<HashMap<RecordId, bool>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// G-24: `<@64 lower-case hex>` tokens, in order, each once; anything
+    /// else (short, upper-case, unclosed, a name) isn't a mention.
+    #[test]
+    fn mention_tokens_are_strict() {
+        let a = "a".repeat(64);
+        let b = format!("{}1", "b".repeat(63));
+        let text = format!("hi <@{a}> and <@{b}>, again <@{a}>! <@{}> <@{}> <@{a} <@נועה>", "A".repeat(64), "c".repeat(63));
+        let keys: Vec<String> = mention_tokens(&text).iter().map(|k| hex_id(k.as_bytes())).collect();
+        assert_eq!(keys, [a.clone(), b]);
+        assert!(mention_tokens("").is_empty());
+        assert!(mention_tokens("<@").is_empty());
+        assert_eq!(mention_tokens(&format!("<@<@{a}>")).len(), 1);
+    }
 
     /// G-11: 1,000 moves into the same gap keep every key valid and at most
     /// 32 characters (a rebalance when the next one would pass it), and the
