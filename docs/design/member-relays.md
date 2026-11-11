@@ -17,9 +17,9 @@
 - a device on a metered connection, when the OS reports one.
 
 **Rules (all required):**
-1. **Members only.** A reservation or circuit is granted only to a peer that is a *bound current member* of a server we share (the same `member_identity` gate as DCUtR and voice), and that check runs **before** the reservation is accepted. A stranger gets a plain refusal.
+1. **Members only.** A reservation or circuit is granted only to a peer that is a *bound current member* of a server we share (the same `member_identity` gate as DCUtR and voice). Relay v2 has no per-peer hook, so a **wrapper behaviour** gives the relay handler only to connections from already-bound peers (a dummy handler otherwise): the client binds first, then reserves on a new connection (#357 means T23 doesn't delay that). A stranger gets a plain refusal.
 2. **Never advertised publicly.** Member relays aren't put in the public DHT and aren't announced to non-members. Members learn of them through the member-only sync path (as F2 LAN addresses are today).
-3. **Quotas.** At most 8 reservations and 16 circuits, about 256 kbit/s per circuit and 2 Mbit/s in total, with a 2-minute circuit lifetime (renewable) and a daily data cap (for example 2 GB). When a limit is hit, refuse; never queue.
+3. **Quotas** (enforced by relay v2 plus our wrapper): at most 8 reservations and 16 circuits, a 2-minute circuit lifetime (renewable), a per-circuit byte cap (`max_circuit_bytes`) and a **daily byte counter** in the wrapper (for example 2 GB). Relay v2 has no per-circuit bitrate, so there are byte caps, not kbit/s. When a limit is hit, refuse; never queue. **Capacity:** a destination must hold a reservation to be reachable, and there are 8 per relay. Members reserve only once our relay is marked down, on at most 2 member relays each, owner and admin relays first. So a 50-member server with 2 admin relays covers about 16 members in fallback; this is a backup path, not a full replacement.
 4. **Global off switch.** A signed flag in the update manifest turns member relaying off everywhere, in case of abuse.
 5. **No metadata kept.** Only counts are logged, never peer IDs or IPs.
 
