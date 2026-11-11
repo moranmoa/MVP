@@ -3879,15 +3879,16 @@ impl ServerView<'_> {
 
     /// G-11: every live channel in order. Placed ones first, by key (then
     /// ID, for keys two admins happened to pick alike); the rest after, in
-    /// today's order.
+    /// the order they were made (`creation_order`, #323).
     fn ordered_channels(&self) -> Vec<ChannelId> {
         let positions = self.channel_positions();
+        let created = self.creation_order();
         let mut ids: Vec<ChannelId> = self.state.channels.keys().copied().collect();
         ids.sort_by(|a, b| match (positions.get(a), positions.get(b)) {
             (Some(x), Some(y)) => x.cmp(y).then(a.cmp(b)),
             (Some(_), None) => std::cmp::Ordering::Less,
             (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
+            (None, None) => created.get(a).cmp(&created.get(b)),
         });
         ids
     }

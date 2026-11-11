@@ -703,6 +703,25 @@ impl ServerView<'_> {
         out
     }
 
+    /// G-11 (#323, QA on 0.4.2): what unplaced channels sort by, so they keep
+    /// the order they were made in on every device. #general first; then the
+    /// causal depth of the `ChannelCreate` (a channel made after another
+    /// builds on it); then its time; then its record ID. Not the channel ID:
+    /// that is random, and `moveChannel` built its new order on it.
+    pub fn creation_order(&self) -> HashMap<ChannelId, (bool, usize, u64, RecordId)> {
+        let by_id: HashMap<RecordId, &Record> = self.records.iter().map(|r| (r.id(), r)).collect();
+        let mut depths = HashMap::new();
+        self.state
+            .channels
+            .iter()
+            .map(|(id, c)| {
+                let depth = record_depth(c.created, &by_id, &mut depths);
+                let ts = by_id.get(&c.created).map_or(0, |r| r.ts());
+                (*id, (!c.general, depth, ts, c.created))
+            })
+            .collect()
+    }
+
     /// Everyone who was ever owner or admin here: the owner, and the target
     /// of any accepted grant of admin or owner. One pass, no resolving.
     fn ever_admin(&self) -> HashSet<PublicKey> {
@@ -745,6 +764,32 @@ impl ServerView<'_> {
         cache.insert(record.id(), admin);
         admin
     }
+}
+
+/// The longest dep path from `start` down to a record with no known deps
+/// (iterative, so a long log can't overflow the stack). Remembered in `memo`.
+fn record_depth(
+    start: RecordId,
+    by_id: &HashMap<RecordId, &Record>,
+    memo: &mut HashMap<RecordId, usize>,
+) -> usize {
+    let mut stack = vec![start];
+    while let Some(&id) = stack.last() {
+        if memo.contains_key(&id) {
+            stack.pop();
+            continue;
+        }
+        let deps = by_id.get(&id).map_or(&[][..], |r| r.deps());
+        let pending: Vec<RecordId> = deps.iter().copied().filter(|d| !memo.contains_key(d)).collect();
+        if pending.is_empty() {
+            let depth = deps.iter().map(|d| memo[d] + 1).max().unwrap_or(0);
+            memo.insert(id, depth);
+            stack.pop();
+        } else {
+            stack.extend(pending);
+        }
+    }
+    memo[&start]
 }
 
 /// `admin_at` answers by record ID, at most this many (then it starts over).
