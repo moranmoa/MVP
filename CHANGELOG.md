@@ -10,6 +10,22 @@ New sections must not contain a `---` line: the release scripts still read
 it as the old Hebrew/English split.
 Never put the relay domain or any IP address here.
 
+## [0.4.2] - 2026-11-11
+
+### New
+- **Your picture and colour everywhere:** your profile picture now shows next to your messages, in the member list and in voice, for everyone in your servers. Without a picture, your initial shows on your colour. Pick your colour in Settings → Account.
+- **New window and logo:** MVS has its own title bar and its new logo on the window, taskbar and installer. Minimising goes to the taskbar.
+- **Cleaner server header:** the age tag and the invite button moved out of the header. The invite link is in server settings and the server's right-click menu.
+- **Language list:** a 🌐 icon next to the language picker.
+
+### Fixed
+- **Who's online:** members connected to the server no longer show as offline, and the "Nobody from the server is online" banner no longer appears by mistake.
+- **Unread dots that stayed:** the unread dot and count on channels and servers now clear when you read them.
+
+### Known
+- **Voice calls are officially supported only when everyone is on the same network** (for example the same Wi-Fi). Calls across networks are on the way.
+- On first run, Windows may ask whether to allow MVS on the network. Please allow it (also on private networks); otherwise voice calls won't connect.
+
 ## [0.4.1] - 2026-11-11
 
 ### New
