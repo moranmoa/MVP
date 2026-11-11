@@ -3224,4 +3224,18 @@ input.switch:disabled {
 .titlebar-button.close:focus-visible {
   background: #c42b1c;
   color: #fff;
+
+.language-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.language-picker-row select {
+  flex: 1;
+}
+
+.language-globe {
+  font-size: 1.25rem;
+  line-height: 1;
 }

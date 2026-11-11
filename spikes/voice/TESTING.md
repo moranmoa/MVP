@@ -15,7 +15,7 @@
 
 - **אוזניות** – חובה. גרסה B עדיין בלי ביטול הד (אלא אם בונים אותה עם `apm`, ראו למטה).
 - כתובת **שרת האיתות** וגם **שם חדר** – מורן ישלח. הכתובת נראית כך: `ws://1.2.3.4:8080`.
-- את התיקייה `spikes/voice` מהמאגר (`git clone https://github.com/moranmoa/MVP`).
+- את התיקייה `spikes/voice` מהמאגר (`git clone https://github.com/moranmoa/MVS`).
 - macOS או Linux (גם Windows עובד).
 
 ## הכנה – פעם אחת
