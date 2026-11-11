@@ -174,13 +174,17 @@ const hasParticipants = (state) => !!state && Array.isArray(state.participants) 
 
 /**
  * V-C2: whether we are in a call, as main sees it from the core's answers and
- * events. It opens only on a successful joinCall (a CallState with
- * participants) and fails closed: it shuts on leaveCall (when sent), on any
- * joinCall that fails, on a call.state with no participants (left, ended,
- * timed out, refused), whenever the core is not up (a restarted core has no
- * call), and on quit. A joinCall answer that arrives after a leave, a core
- * restart or quit (an older generation) can't reopen it.
+ * events. It opens only on a successful call-starting command (CALL_STARTERS:
+ * joinCall, or createVoiceRoom, whose creator is in the new room; each
+ * answers a CallState with participants) and fails closed: it shuts on
+ * leaveCall (when sent), on any call-starting command that fails, on a
+ * call.state with no participants (left, ended, timed out, refused),
+ * whenever the core is not up (a restarted core has no call), and on quit.
+ * An answer that arrives after a leave, a core restart or quit (an older
+ * generation) can't reopen it.
  */
+const CALL_STARTERS = Object.freeze(new Set(['joinCall', 'createVoiceRoom']));
+
 function createCallGate() {
   let inCall = false;
   let gen = 0;
@@ -199,8 +203,8 @@ function createCallGate() {
     },
     /** The core's answer ({ ok } or { error }) to a command sent with `token`. */
     afterCommand(cmd, token, res) {
-      if (cmd !== 'joinCall') return;
-      // joinCall leaves any other call first, so a failed one leaves us out.
+      if (!CALL_STARTERS.has(cmd)) return;
+      // Both leave any other call first, so a failed one leaves us out.
       if (!res || res.error || !hasParticipants(res.ok)) return void shut();
       if (token === gen) inCall = true;
     },
@@ -229,6 +233,7 @@ module.exports = {
   allowPermissionRequest,
   allowPermissionCheck,
   createCallGate,
+  CALL_STARTERS,
   cspFromIndexHtml,
   responseHeaders,
   mimeOf,
