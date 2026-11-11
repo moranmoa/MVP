@@ -85,6 +85,21 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 
 ## Proposed contract additions (Rust has them; `api.ts` doesn't yet)
 
+- Mentions (G-24, GAPS §2.5):
+  - A mention is the token `<@userId>` (64 lower-case hex) in the body, never a name. The UI shows the current name, or `mention.unknown` for someone no longer in the server. Older clients show the token as text. It counts toward the 4,000 code points.
+  - `Message.mentions?: userId[]` (additive) lists the mentioned users who are members now, in order, each once.
+  - `Message.mentionsMe?: true` when the body mentions me.
+  - `Channel.mentions` and `ServerSummary.mentions` count unread messages that mention me (after the read marker, not mine). `markRead` resets them. `ServerSummary.unread` is set when any channel has unread messages; both come from `listServers`.
+  - No authority or sync change: mentions are read from the message body.
+
+- New-messages divider (G-21, option A):
+  - `Channel.unreadCount?: number` and `Channel.firstUnreadIndex?: number` (additive) count the messages after my read marker that aren't mine, in `getMessages` order. `firstUnreadIndex` is the `getMessages` index of the first of them, and is absent when there are none. `Channel.unread` is `unreadCount > 0`. They appear in `listChannels` and `channel.updated`.
+  - `markRead(channelId)` returns `null` and moves the marker to the channel's last message. It emits `channel.updated` with `unreadCount: 0` and no `firstUnreadIndex`.
+  - A channel never read counts from when this device joined the server, so history from before isn't unread.
+  - The marker is local only (kv `read/<channel>`), and phase 3 syncs it. The count comes from the stored records, with no network or paging.
+  - **v1 limit:** the marker is a point in `(time, ID)` order, and a message counts as unread only if it comes after it. A message that arrives late, with a time older than the marker (an offline peer catching up, say), is shown in its place but isn't counted as unread.
+  - Counts are recomputed on each `listChannels`. A per-channel cached count is a follow-up (board P3), if lists get slow.
+
 - Channel order (G-11, Tech Lead's design):
   - `moveChannel(serverId, channelId, before?, after?)` returns `Channel[]` in the new order. It puts the channel right before `before`, or right after `after`, or last with neither; both given must be one gap.
     - Errors: `not-allowed` below admin, `not-found` for an unknown channel, `bad-request` for a neighbour that isn't a live channel of the server, or two that aren't one gap.

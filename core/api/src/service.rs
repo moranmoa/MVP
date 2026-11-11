@@ -58,6 +58,9 @@ const KV_RECOVERY_CHALLENGE: &str = "recovery-challenge";
 /// Restore servers (#291): my servers as the backup last saw them, server
 /// ID (hex) to when this device first listed it. Not secret.
 const KV_BACKUP_KNOWN: &str = "backup-known";
+/// G-21: per channel, `read/<channel hex>` = the last message read, as
+/// JSON `[ts, "<record id hex>"]`. Local only (phase 3 syncs it).
+const KV_READ_PREFIX: &str = "read/";
 /// Restore servers: a restore still has servers to rejoin from the backup.
 const KV_BACKUP_PENDING: &str = "backup-pending";
 /// Restore servers: a fingerprint of the server set last backed up, and
@@ -244,6 +247,8 @@ impl KeyPending {
             deleted: None,
             send_state: Some(if self.failed { SendState::Failed } else { SendState::Pending }),
             replaces: None,
+            mentions: None,
+            mentions_me: None,
         }
     }
 }
@@ -825,7 +830,14 @@ impl Core {
         let mut out = Vec::new();
         for id in inner.db.servers()? {
             inner.load(id)?;
-            out.push(inner.summary(id)?);
+            let mut summary = inner.summary(id)?;
+            // G-21 and G-24: the server rail's unread dot and mention badge.
+            let me = inner.me.as_ref().map(Me::key);
+            let mut channels = inner.view(id)?.channels(me);
+            inner.fill_unread(&*self.ports.cipher, id, &mut channels)?;
+            summary.unread = channels.iter().any(|c| c.unread);
+            summary.mentions = channels.iter().map(|c| c.mentions).fold(0, u32::saturating_add);
+            out.push(summary);
         }
         Ok(out)
     }
@@ -834,7 +846,9 @@ impl Core {
         let mut inner = self.lock();
         let server = inner.load_mine(parse_server(server_id)?)?;
         let me = inner.me.as_ref().map(Me::key);
-        inner.view(server).map(|view| view.channels(me))
+        let mut list = inner.view(server)?.channels(me);
+        inner.fill_unread(&*self.ports.cipher, server, &mut list)?;
+        Ok(list)
     }
 
     pub fn list_members(&self, server_id: &str) -> CoreResult<Vec<Member>> {
@@ -1423,12 +1437,35 @@ impl Core {
     }
 
     fn channel_json(&self, server: ServerId, channel: ChannelId) -> CoreResult<Channel> {
-        let inner = self.lock();
+        let mut inner = self.lock();
         inner.open_sync(&self.ports, server)?;
         let me = inner.me.as_ref().map(Me::key);
         let id = model::hex_id(channel.as_bytes());
-        let view = inner.view(server)?;
-        view.channels(me).into_iter().find(|c| c.id == id).ok_or_else(|| ErrorCode::Internal.into())
+        let found = inner.view(server)?.channels(me).into_iter().find(|c| c.id == id);
+        let mut json = [found.ok_or(ErrorCode::Internal)?];
+        inner.fill_unread(&*self.ports.cipher, server, &mut json)?;
+        let [json] = json;
+        Ok(json)
+    }
+
+    /// G-21 `markRead(channelId)`: everything in the channel now counts as
+    /// read (the marker moves to its last message), and `channel.updated`
+    /// carries the reset `unreadCount` and no `firstUnreadIndex`. Local only.
+    pub fn mark_read(&self, channel_id: &str) -> CoreResult<()> {
+        let (server, channel) = {
+            let mut inner = self.lock();
+            let (server, channel) = inner.find_channel(channel_id)?;
+            let shown = inner.shown(&*self.ports.cipher, server, channel)?;
+            let last = shown.iter().map(|s| (s.record.ts(), *s.record.id().as_bytes())).max();
+            let marker = last.unwrap_or((self.ports.clock.now_ms(), [0; 32]));
+            let key = format!("{KV_READ_PREFIX}{}", model::hex_id(channel.as_bytes()));
+            let value = serde_json::to_vec(&(marker.0, hex::encode(marker.1))).expect("plain tuple");
+            inner.db.set(&key, &value)?;
+            (server, channel)
+        };
+        let json = self.channel_json(server, channel)?;
+        self.ports.events.emit(&Event::ChannelUpdated(json));
+        Ok(())
     }
 
     /// Rust addition (`undoKick`, B4 kick-undo): the owner lets a kicked
@@ -1829,13 +1866,14 @@ impl Core {
         let (server, channel) = inner.find_channel(channel_id)?;
         let me = inner.me.as_ref().map(Me::key);
         let shown = inner.shown(&*self.ports.cipher, server, channel)?;
+        let members = inner.view(server)?.state.members.clone();
         // Messages held for their key come after the stored ones.
         let held: Vec<&KeyPending> = inner.key_pending.iter().filter(|p| p.channel == channel).collect();
         let end = end.min(shown.len() + held.len());
         let start = start.min(end);
         let messages = (start..end)
             .map(|index| match shown.get(index) {
-                Some(s) => message_json(s, index, channel, me, &Status { net: &*inner.net, db: &inner.db }),
+                Some(s) => message_json(s, index, channel, me, &Status { net: &*inner.net, db: &inner.db }, &members),
                 None => held[index - shown.len()].message(index),
             })
             .collect();
@@ -2625,6 +2663,7 @@ impl Inner {
         events: &mut Events,
     ) -> CoreResult<()> {
         let me = self.me.as_ref().map(Me::key);
+        let members = self.view(server)?.state.members.clone();
         for channel in self.known(server)? {
             let shown = self.shown(cipher, server, channel)?;
             let seen = self.announced.entry(server).or_default();
@@ -2637,6 +2676,7 @@ impl Inner {
                         channel,
                         me,
                         &Status { net: &*self.net, db: &self.db },
+                        &members,
                     )),
                     Some(old) if old != state => Event::MessageUpdated(message_json(
                         s,
@@ -2644,6 +2684,7 @@ impl Inner {
                         channel,
                         me,
                         &Status { net: &*self.net, db: &self.db },
+                        &members,
                     )),
                     Some(_) => continue,
                 };
@@ -2885,7 +2926,8 @@ impl Inner {
         // Announced by the command itself; sync won't repeat it.
         let state = announced(s, me, &Status { net: &*self.net, db: &self.db });
         self.announced.entry(server).or_default().insert(s.record.id(), state);
-        Ok(message_json(s, index, channel, me, &Status { net: &*self.net, db: &self.db }))
+        let members = self.view(server)?.state.members.clone();
+        Ok(message_json(s, index, channel, me, &Status { net: &*self.net, db: &self.db }, &members))
     }
 
     /// A fresh key for `channel`, for `members` (we must be a moderator or
@@ -3070,6 +3112,51 @@ impl Inner {
         let log = self.logs.get_mut(&server).ok_or(ErrorCode::Internal)?;
         chat::sync_cipher(cipher, server, log);
         Ok(chat::messages(cipher, server, channel, log))
+    }
+
+    /// G-21: my read marker in `channel`: the last message I read, as
+    /// (time, ID). Never read: from when this device joined the server, so
+    /// history from before isn't unread.
+    fn read_marker(&self, server: ServerId, channel: ChannelId) -> CoreResult<(u64, [u8; 32])> {
+        let key = format!("{KV_READ_PREFIX}{}", model::hex_id(channel.as_bytes()));
+        if let Some(raw) = self.db.get(&key)? {
+            if let Ok((ts, id)) = serde_json::from_slice::<(u64, String)>(&raw) {
+                if let Some(id) = model::parse_hex32(&id) {
+                    return Ok((ts, id));
+                }
+            }
+        }
+        Ok((self.db.joined_at(server)?.unwrap_or(0), [0; 32]))
+    }
+
+    /// G-21: `firstUnreadIndex` and `unreadCount` for each of `channels`
+    /// (of `server`): the messages after my read marker, in `getMessages`
+    /// order, that aren't mine. Local only: the stored records, no network
+    /// and no paging.
+    fn fill_unread(
+        &mut self,
+        cipher: &dyn GroupCipher,
+        server: ServerId,
+        channels: &mut [Channel],
+    ) -> CoreResult<()> {
+        let Some(me) = self.me.as_ref().map(Me::key) else { return Ok(()) };
+        for json in channels {
+            let Some(channel) = model::parse_hex32(&json.id).map(ChannelId::from_bytes) else {
+                continue;
+            };
+            let marker = self.read_marker(server, channel)?;
+            let shown = self.shown(cipher, server, channel)?;
+            let after = |s: &chat::Shown| (s.record.ts(), *s.record.id().as_bytes()) > marker;
+            let unread = |s: &&chat::Shown| after(s) && s.record.author() != me;
+            let count = shown.iter().filter(unread).count() as u64;
+            json.unread_count = Some(count);
+            json.first_unread_index = shown.iter().position(|s| unread(&s)).map(|i| i as u64);
+            json.unread = count > 0;
+            // G-24: unread messages that mention me (the badge).
+            let mentions = shown.iter().filter(unread).filter(|s| model::mention_tokens(&s.text).contains(&me));
+            json.mentions = u32::try_from(mentions.count()).unwrap_or(u32::MAX);
+        }
+        Ok(())
     }
 
     fn message_count(
@@ -3607,6 +3694,8 @@ impl ServerView<'_> {
             unread: false,
             mentions: 0,
             is_default: general,
+            first_unread_index: None,
+            unread_count: None,
             position: positions.get(&id).cloned(),
         };
         if self.state.channels.is_empty() && self.state.deleted_channels.is_empty() {
@@ -3695,7 +3784,17 @@ fn message_json(
     channel: ChannelId,
     me: Option<PublicKey>,
     st: &Status,
+    members: &BTreeSet<PublicKey>,
 ) -> Message {
+    // G-24: `<@userId>` tokens; only current members are listed (the UI
+    // shows a former member's token as "Former member"), and "mentions me"
+    // from the token alone.
+    let tokens = model::mention_tokens(&s.text);
+    let listed: Vec<Id> = tokens
+        .iter()
+        .filter(|key| members.contains(*key))
+        .map(|key| model::hex_id(key.as_bytes()))
+        .collect();
     Message {
         id: model::hex_id(s.record.id().as_bytes()),
         channel_id: model::hex_id(channel.as_bytes()),
@@ -3707,9 +3806,10 @@ fn message_json(
         deleted: s.deleted.then_some(true),
         send_state: send_state(s, me, st),
         replaces: None,
+        mentions: (!listed.is_empty()).then_some(listed),
+        mentions_me: me.filter(|me| tokens.contains(me)).map(|_| true),
     }
 }
-
 /// Can't write yet (no key, or a rotation only a moderator can make):
 /// `not-allowed`. No group encryption: `not-implemented`.
 fn cipher_error(error: CipherError) -> CoreError {

@@ -9,6 +9,9 @@ import { isCoreError, useCore, type Id, type ServerSummary } from '../../core';
 import { GearIcon, HomeIcon, PlusIcon, RefreshIcon } from '../../components/icons';
 import { useContextMenu, type MenuItem } from '../../components/ContextMenu';
 import { copyText } from '../../app/clipboard';
+import { isMutedKey, mutedUntil, serverMuteKey } from '../../app/mute';
+import { useMutedLabel } from './MuteDialog';
+import { NotifyDialog, type NotifyTarget } from './NotifyDialog';
 
 /** How far the mouse moves before a press becomes a drag (G-01). */
 const DRAG_START_PX = 4;
@@ -42,6 +45,17 @@ export function ServerRail({
   const listRef = useRef<HTMLUListElement>(null);
   const myId = useStore(store, (s) => s.identity?.id);
   const { bind, menu } = useContextMenu();
+  const mutes = useStore(store, (s) => s.mutes);
+  const isServerMuted = (s: ServerSummary) => isMutedKey(mutes, serverMuteKey(s.id));
+  const mutedLabel = useMutedLabel();
+  /** "Notifications", with "· Muted until …" for a muted server. */
+  const notifyLabel = (until: number | null) => [intl.formatMessage({ id: 'notify.menu' }), until !== null ? mutedLabel(until) : null].filter(Boolean).join(' · ');
+  // G-04: every unread channel of the server, through the core's markRead.
+  const markAllRead = (s: ServerSummary) => {
+    for (const c of store.getState().channels[s.id] ?? []) if (c.unread || c.mentions) void core.markRead(c.id);
+  };
+  // G-61: the server whose notification settings are open.
+  const [notifyFor, setNotifyFor] = useState<NotifyTarget | null>(null);
 
   // G-01: my order, local only. New servers come at the end.
   const servers = sortByOrder(joined, settings.serverOrder ?? []);
@@ -82,6 +96,10 @@ export function ServerRail({
     const rest: MenuItem[] = s.closed
       ? []
       : [
+          ...(s.unread || s.mentions ? [{ key: 'read', label: intl.formatMessage({ id: 'unread.markAllRead' }), onSelect: () => markAllRead(s) }] : []),
+          // G-61: level and mute in one dialog.
+          { key: 'notify', label: notifyLabel(mutedUntil(mutes, serverMuteKey(s.id))), onSelect: () => setNotifyFor({ kind: 'server', id: s.id, name: s.name }) },
+          { kind: 'separator' },
           {
             key: 'invite',
             label: intl.formatMessage({ id: 'menu.copyInvite' }),
@@ -170,6 +188,7 @@ export function ServerRail({
     [
       s.name,
       s.closed ? intl.formatMessage({ id: 'server.closedTag' }) : null,
+      isServerMuted(s) ? intl.formatMessage({ id: 'notify.muted' }) : null,
       s.mentions > 0 ? intl.formatMessage({ id: 'mentions.label' }, { count: s.mentions }) : null,
       s.unread ? intl.formatMessage({ id: 'unread.label' }) : null,
     ]
@@ -226,6 +245,7 @@ export function ServerRail({
               style={{ ['--server-color' as string]: s.color }}
               tabIndex={selected === s.id ? 0 : -1}
               unread={s.unread}
+              muted={isServerMuted(s)}
               mentions={s.mentions}
               serverId={s.id}
               menuProps={arranging ? undefined : bind(intl.formatMessage({ id: 'menu.forServer' }, { name: s.name }), () => serverItems(s))}
@@ -295,6 +315,7 @@ export function ServerRail({
         </button>
       </div>
       {menu}
+      {notifyFor && <NotifyDialog target={notifyFor} onClose={() => setNotifyFor(null)} />}
     </nav>
     </>
   );
@@ -310,6 +331,7 @@ function RailButton({
   style,
   tabIndex,
   unread,
+  muted,
   mentions = 0,
   menuProps,
   serverId,
@@ -323,13 +345,15 @@ function RailButton({
   style?: CSSProperties;
   tabIndex?: number;
   unread?: boolean;
+  /** Muted on this device (G-03): shown quieter. */
+  muted?: boolean;
   mentions?: number;
   menuProps?: HTMLAttributes<HTMLButtonElement>;
   /** Servers only: lets the keyboard reorder find the focused one. */
   serverId?: Id;
 }) {
   return (
-    <div className={`rail-item ${active ? 'active' : ''} ${unread ? 'unread' : ''}`}>
+    <div className={`rail-item ${active ? 'active' : ''} ${unread ? 'unread' : ''} ${muted ? 'muted' : ''}`}>
       <span className="rail-pip" aria-hidden="true" />
       <button
         type="button"

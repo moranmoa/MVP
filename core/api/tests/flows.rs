@@ -4275,3 +4275,114 @@ fn channel_order_spam_from_a_member_is_cheap_and_ignored() {
     // Resolving each post's past would take tens of seconds here.
     assert!(start.elapsed() < std::time::Duration::from_secs(3), "{:?}", start.elapsed());
 }
+
+/// G-21 (new-messages divider): `unreadCount` and `firstUnreadIndex` from
+/// the local read marker, my own messages not counted; `markRead` resets
+/// both; history from before I joined isn't unread; 300 unread are counted
+/// from the stored records, quickly.
+#[test]
+fn unread_counts_follow_the_read_marker() {
+    let world = World::new();
+    let (owner, server, channel) = keyed_server(&world, "Unread");
+    owner.core.send_message(&channel, "before Bob joined", None).unwrap();
+    let bob = joiner(&world, &server, "Bob");
+    owner.core.sync_now().unwrap();
+    bob.core.sync_now().unwrap();
+    let unread = |peer: &Peer| -> (Option<u64>, Option<u64>, bool) {
+        let list = peer.core.list_channels(&server.id).unwrap();
+        let c = list.into_iter().find(|c| c.id == channel).unwrap();
+        (c.unread_count, c.first_unread_index, c.unread)
+    };
+    // Nothing new since Bob joined.
+    assert_eq!(unread(&bob), (Some(0), None, false));
+
+    // Bob's own message first, then the owner's and Bob's mixed.
+    bob.core.send_message(&channel, "b0", None).unwrap();
+    owner.core.sync_now().unwrap();
+    for text in ["o1", "o2"] {
+        owner.core.send_message(&channel, text, None).unwrap();
+    }
+    bob.core.sync_now().unwrap();
+    bob.core.send_message(&channel, "b1", None).unwrap();
+    owner.core.send_message(&channel, "o3", None).unwrap();
+    bob.core.sync_now().unwrap();
+    let count = bob.core.get_message_count(&channel).unwrap() as u64;
+    let (n, first, flag) = unread(&bob);
+    assert_eq!((n, flag), (Some(3), true));
+    let first = first.expect("an index") as usize;
+    let page = bob.core.get_messages(&channel, first, count as usize).unwrap().messages;
+    assert_eq!(page[0].body, "o1", "firstUnreadIndex points past Bob's own b0");
+    // The owner sees Bob's two (the owner joined first).
+    owner.core.sync_now().unwrap();
+    assert_eq!(unread(&owner).0, Some(2));
+
+    // markRead: both reset, with channel.updated.
+    bob.events.take();
+    bob.core.handle(&format!(r#"{{"id":1,"cmd":"markRead","args":{{"channelId":"{channel}"}}}}"#));
+    assert_eq!(unread(&bob), (Some(0), None, false));
+    assert!(bob.events.take().iter().any(|e| matches!(e, Event::ChannelUpdated(c) if c.id == channel && c.unread_count == Some(0))));
+
+    // 300 unread: counted from the stored records, quickly.
+    for i in 0..300 {
+        owner.core.send_message(&channel, &format!("m{i}"), None).unwrap();
+    }
+    bob.core.sync_now().unwrap();
+    let start = std::time::Instant::now();
+    let (n, first, _) = unread(&bob);
+    assert_eq!(n, Some(300));
+    assert_eq!(first, Some(count));
+    assert!(start.elapsed() < std::time::Duration::from_secs(2), "{:?}", start.elapsed());
+}
+
+/// G-24 (@mentions): a `<@userId>` token marks the message for that member
+/// (`mentionsMe`), lists the mentioned members (`mentions`, current members
+/// only: a stranger's or a former member's token is left out), and counts in
+/// the channel's and the server's mention badge until `markRead`.
+#[test]
+fn mentions_mark_the_message_and_count_until_read() {
+    let world = World::new();
+    let (owner, server, channel) = keyed_server(&world, "Talk");
+    let nadav = joiner(&world, &server, "Nadav");
+    let noa = joiner(&world, &server, "Noa");
+    owner.core.sync_now().unwrap();
+    for peer in [&nadav, &noa] {
+        peer.core.sync_now().unwrap();
+    }
+    let id = |peer: &Peer| peer.core.get_identity().unwrap().unwrap().id;
+    let (nadav_id, noa_id) = (id(&nadav), id(&noa));
+    let stranger = "ab".repeat(32);
+    owner
+        .core
+        .send_message(&channel, &format!("hi <@{nadav_id}> and <@{noa_id}> and <@{stranger}>"), None)
+        .unwrap();
+    owner.core.send_message(&channel, "no mention here", None).unwrap();
+    nadav.core.sync_now().unwrap();
+
+    let count = nadav.core.get_message_count(&channel).unwrap();
+    let page = nadav.core.get_messages(&channel, 0, count).unwrap().messages;
+    let mention = page.iter().find(|m| m.body.starts_with("hi ")).unwrap();
+    assert_eq!(mention.mentions_me, Some(true));
+    assert_eq!(mention.mentions.as_deref(), Some(&[nadav_id.clone(), noa_id.clone()][..]), "a stranger listed");
+    let plain = page.iter().find(|m| m.body == "no mention here").unwrap();
+    assert_eq!((plain.mentions_me, plain.mentions.as_ref()), (None, None));
+
+    // The badge: the channel and the server count it until read.
+    let channels = nadav.core.list_channels(&server.id).unwrap();
+    let c = channels.iter().find(|c| c.id == channel).unwrap();
+    assert_eq!((c.mentions, c.unread_count), (1, Some(2)));
+    let summary = nadav.core.list_servers().unwrap().into_iter().find(|s| s.id == server.id).unwrap();
+    assert_eq!((summary.mentions, summary.unread), (1, true));
+    nadav.core.mark_read(&channel).unwrap();
+    let c = nadav.core.list_channels(&server.id).unwrap().into_iter().find(|c| c.id == channel).unwrap();
+    assert_eq!(c.mentions, 0);
+    assert_eq!(nadav.core.list_servers().unwrap()[0].mentions, 0);
+
+    // Noa leaves: her token stays in the body, but she's no longer listed.
+    noa.core.leave_server(&server.id).unwrap();
+    noa.core.sync_now().unwrap();
+    nadav.core.sync_now().unwrap();
+    let page = nadav.core.get_messages(&channel, 0, count).unwrap().messages;
+    let mention = page.iter().find(|m| m.body.starts_with("hi ")).unwrap();
+    assert!(mention.body.contains(&format!("<@{noa_id}>")));
+    assert_eq!(mention.mentions.as_deref(), Some(&[nadav_id][..]));
+}

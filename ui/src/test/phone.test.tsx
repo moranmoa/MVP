@@ -95,7 +95,7 @@ describe('context menus on a phone (B25 §5)', () => {
     expect(menu.getAttribute('style')).toBeNull();
     expect(document.activeElement?.getAttribute('role')).toBe('menuitem');
     fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
-    expect(document.activeElement?.textContent).toBe('Rename');
+    expect(document.activeElement?.textContent).toBe('Notifications');
     fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
     expect(screen.queryByRole('menu')).toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(row));

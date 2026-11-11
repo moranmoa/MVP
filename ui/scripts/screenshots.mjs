@@ -296,6 +296,7 @@ for (const [section, name] of [
   ['storage', '32-settings-storage'],
   ['diagnostics', '33-settings-diagnostics'],
   ['about', '34-settings-about'],
+  ['notifications', '361-settings-notifications-he'],
 ]) {
   const p = await chat(`?demo=unchecked&still=1&lang=he&theme=light&settings=${section}`, 'x');
   await p.getByRole('button', { name: 'הגדרות' }).first().click();
@@ -609,6 +610,38 @@ for (const [name, opts] of [
   await p.locator('.channel-arrange').first().waitFor();
   await p.waitForTimeout(200);
   await shot(p, '332-channel-order-phone-he');
+  await p.close();
+}
+
+// ---- G-21: where the new messages start (340-349) ----------------------------
+for (const [channel, name, wait] of [
+  [/^מחפשים-קבוצה/, '340-new-messages-divider-he', '.unread-divider'],
+  [/^clips/, '341-new-messages-bar-he', '.unread-bar'],
+]) {
+  const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999', 'x');
+  await p.getByRole('navigation', { name: 'ערוצים' }).getByRole('button', { name: channel }).click();
+  await p.locator(wait).waitFor();
+  await p.waitForTimeout(400);
+  await shot(p, name);
+  await p.close();
+}
+
+// ---- G-24: mentions (370-379) -------------------------------------------------
+{
+  const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999', 'x');
+  const box = p.getByRole('textbox', { name: /כתיבה ב/ });
+  await box.fill('');
+  await box.pressSequentially('מי בא הערב @א');
+  await p.locator('.mention-suggestions').waitFor();
+  await shot(p, '370-mention-suggestions-he');
+  await box.press('Enter');
+  await box.pressSequentially('?');
+  await box.press('Enter');
+  await box.fill(`תודה ל-<@${'b'.repeat(64)}> על המפה`);
+  await box.press('Enter');
+  await p.locator('.mention-chip.former').waitFor();
+  await p.waitForTimeout(400);
+  await shot(p, '371-mention-chips-he');
   await p.close();
 }
 
@@ -980,6 +1013,26 @@ for (const [lang, t] of [
   await p.getByRole('button', { name: 'סיום' }).click();
   await p.getByRole('heading', { name: 'החשבון שוחזר' }).waitFor();
   await shot(p, '291-restore-servers-notice-he');
+  await p.close();
+}
+
+// Notifications and mute (G-61, G-03, G-17) and mark all as read (G-04): 360, 351.
+{
+  const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999', 'x');
+  const channels = p.getByRole('navigation', { name: 'ערוצים' });
+  await channels.getByRole('button', { name: /^clips/ }).click({ button: 'right' });
+  await p.getByRole('menuitem', { name: 'התראות' }).click();
+  await p.getByRole('dialog', { name: /^התראות של/ }).waitFor();
+  await shot(p, '360-notify-dialog-channel-he');
+  await p.getByRole('button', { name: 'עד שאבטל' }).click();
+  await p.keyboard.press('Escape');
+  await p.getByRole('button', { name: /^Minecraft IL/ }).click({ button: 'right' });
+  await p.getByRole('menuitem', { name: 'התראות' }).click();
+  await p.getByRole('button', { name: 'ל-8 שעות' }).click();
+  await p.keyboard.press('Escape');
+  await p.mouse.move(1, 1);
+  await shot(p, '351-muted-server-and-channel-he');
+  await p.evaluate(() => localStorage.removeItem('mvs.mute.v1'));
   await p.close();
 }
 

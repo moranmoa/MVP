@@ -3,6 +3,7 @@ import { FormattedNumber, IntlProvider } from 'react-intl';
 import type { Locale } from '../core/types';
 import { directionOf, messagesFor } from '../i18n';
 import { cleanOrder } from './serverOrder';
+import { cleanNotifyPrefs, type NotifyPrefs } from './notify';
 
 export type Theme = 'system' | 'light' | 'dark';
 
@@ -15,6 +16,8 @@ export interface Settings {
   fontSize: number;
   /** G-01: my order of the servers in the rail, on this computer only. */
   serverOrder?: string[];
+  /** G-61: desktop notifications, levels and mutes, on this computer only. */
+  notify?: NotifyPrefs;
 }
 
 export const SCALE_MIN = 0.75;
@@ -51,6 +54,7 @@ function load(): Settings {
     uiScale: num(stored.uiScale, SCALE_MIN, SCALE_MAX, base.uiScale),
     fontSize: num(stored.fontSize, FONT_MIN, FONT_MAX, base.fontSize),
     serverOrder: cleanOrder(stored.serverOrder),
+    notify: cleanNotifyPrefs(stored.notify),
     ...(lang === 'he' || lang === 'en' ? { locale: lang } : {}),
     ...(theme === 'light' || theme === 'dark' ? { theme } : {}),
   };

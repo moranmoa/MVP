@@ -7,11 +7,14 @@ import { phoneQuery, useMediaQuery } from '../../app/media';
 import { isCoreError } from '../../core';
 import type { Channel, Id, ServerSummary } from '../../core';
 import { Avatar, Badge, Code, InviteBox, Name } from '../../components/common';
-import { GearIcon, HashIcon, LinkIcon, PlusIcon } from '../../components/icons';
+import { BellOffIcon, GearIcon, HashIcon, LinkIcon, PlusIcon } from '../../components/icons';
 import { CallBar, VoiceRoomEntry, useCallEngine } from './CallBar';
 import { useContextMenu, type MenuItem } from '../../components/ContextMenu';
 import { copyText } from '../../app/clipboard';
 import { useCore } from '../../core';
+import { channelMuteKey, isMutedKey, mutedUntil, MUTE_FOREVER } from '../../app/mute';
+import { useMutedLabel } from './MuteDialog';
+import { NotifyDialog, type NotifyTarget } from './NotifyDialog';
 
 const NO_CHANNELS: Channel[] = [];
 
@@ -50,6 +53,8 @@ export function ChannelSidebar({
   // The one voice engine for my call, shared by the room entry and the call bar.
   const engine = useCallEngine(identity.id);
   const { bind, menu } = useContextMenu();
+  // G-61: the channel whose notification settings are open.
+  const [notifyFor, setNotifyFor] = useState<NotifyTarget | null>(null);
   const phone = useMediaQuery(phoneQuery(useSettings().settings.uiScale));
 
   // G-11 (#323): the owner reorders the channels; everyone sees the core's order.
@@ -130,8 +135,19 @@ export function ChannelSidebar({
   const dragging = drag?.active ? drag : null;
 
   // B25 §3: the channel menu. Rename and delete are also behind the channel's gear.
+  // G-17: a channel muted on this device (app/mute.ts).
+  const mutes = useStore(store, (st) => st.mutes);
+  const mutedLabel = useMutedLabel();
   const channelItems = (c: Channel, active: boolean): MenuItem[] => [
     ...(c.unread && !active ? [{ key: 'read', label: intl.formatMessage({ id: 'menu.markRead' }), onSelect: () => void core.markRead(c.id) }] : []),
+    // G-61: level and mute in one dialog; a muted channel says until when.
+    {
+      key: 'notify',
+      label: [intl.formatMessage({ id: 'notify.menu' }), isMutedKey(mutes, channelMuteKey(c.id)) ? mutedLabel(mutedUntil(mutes, channelMuteKey(c.id)) ?? MUTE_FOREVER) : null]
+        .filter(Boolean)
+        .join(' · '),
+      onSelect: () => setNotifyFor({ kind: 'channel', id: c.id, name: c.name }),
+    },
     ...(owner ? [{ key: 'rename', label: intl.formatMessage({ id: 'menu.renameChannel' }), onSelect: () => onEditChannel(c) }] : []),
     { kind: 'separator' },
     {
@@ -217,8 +233,10 @@ export function ChannelSidebar({
         <ul ref={listRef} className={dragging ? 'dragging' : undefined}>
           {channels.map((c, i) => {
             const active = c.id === channelId;
+            const muted = isMutedKey(mutes, channelMuteKey(c.id));
             const parts = [
               c.name,
+              muted ? intl.formatMessage({ id: 'notify.muted' }) : null,
               c.adult ? intl.formatMessage({ id: 'channel.adult' }) : null,
               c.mentions ? intl.formatMessage({ id: 'mentions.label' }, { count: c.mentions }) : null,
               c.unread && !active ? intl.formatMessage({ id: 'unread.label' }) : null,
@@ -249,7 +267,7 @@ export function ChannelSidebar({
                 )}
                 <button
                   type="button"
-                  className={`channel ${active ? 'active' : ''} ${c.unread && !active ? 'unread' : ''}`}
+                  className={`channel ${active ? 'active' : ''} ${c.unread && !active ? 'unread' : ''} ${muted ? 'muted' : ''}`}
                   aria-current={active ? 'page' : undefined}
                   aria-label={parts.filter(Boolean).join(', ')}
                   data-channel-id={c.id}
@@ -264,6 +282,11 @@ export function ChannelSidebar({
                   <span className="channel-name">
                     <bdi>{c.name}</bdi>
                   </span>
+                  {muted && (
+                    <span className="bell-off-wrap" title={mutedLabel(mutedUntil(mutes, channelMuteKey(c.id)) ?? MUTE_FOREVER)}>
+                      <BellOffIcon />
+                    </span>
+                  )}
                   {c.adult && (
                     <span className="adult-tag" aria-hidden="true">
                       18+
@@ -339,6 +362,7 @@ export function ChannelSidebar({
         </button>
       </footer>
       {menu}
+      {notifyFor && <NotifyDialog target={notifyFor} onClose={() => setNotifyFor(null)} />}
     </aside>
   );
 }

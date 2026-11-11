@@ -13,7 +13,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { app, BrowserWindow, Menu, clipboard, crashReporter, dialog, ipcMain, protocol, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, Notification, clipboard, crashReporter, dialog, ipcMain, protocol, session, shell } = require('electron');
 const sec = require('./security');
 const { toRequest } = require('./commands');
 const signout = require('./signout');
@@ -22,6 +22,7 @@ const deeplink = require('./deeplink');
 const { relayFor, bootstrapFor, logHost, stunFor, stunHost } = require('./config');
 const update = require('./update');
 const { createLog } = require('./logfile');
+const { createNotifier } = require('./notify');
 
 // Tests only, and only in a checkout (never a release build): a throwaway
 // profile, so a test run never shares the installed app's profile
@@ -188,6 +189,25 @@ function serveCoreIpc() {
     if (core) return core.retryNow();
     startCore(); // the binary may have been put back since
     return !!core;
+  });
+  // G-61: a desktop notification, from our own top frame only. Main shows
+  // it (the page's notifications permission stays denied); a click brings
+  // the window up and the page opens the channel.
+  const notifier = createNotifier({
+    Notification,
+    onClick: (target) => {
+      const win = BrowserWindow.getAllWindows()[0];
+      if (win) {
+        if (win.isMinimized()) win.restore();
+        win.show();
+        win.focus();
+      }
+      toPages('notify.click', target);
+    },
+  });
+  ipcMain.handle('notify:show', (event, notice) => {
+    if (!fromUs(event)) return false;
+    return notifier.show(notice);
   });
   ipcMain.handle('logs:open', async (event) => {
     if (!fromUs(event)) return false;

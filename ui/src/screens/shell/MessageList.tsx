@@ -2,11 +2,12 @@
 // exist in the DOM, so a channel with 100,000 messages scrolls like one with 50.
 
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { memo, useCallback, useMemo, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { createContext, Fragment, memo, useCallback, useContext, useMemo, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
 import type { MessageWindow } from '../../app/store';
 import type { Member, Message } from '../../core';
 import { isHeld } from '../../core/sanitize';
+import { MENTION, splitMentions } from '../../app/mentions';
 import { Avatar, Code, Name } from '../../components/common';
 import {
   AlertIcon,
@@ -41,6 +42,8 @@ export function MessageList({
   myId,
   isOwner,
   stickToken,
+  unread = null,
+  onMarkRead = () => {},
   ...handlers
 }: {
   win: MessageWindow;
@@ -50,10 +53,17 @@ export function MessageList({
   isOwner: boolean;
   /** Changes when I send a message: jump to the bottom even if scrolled up. */
   stickToken: number;
+  /** G-21: where the new messages started when I opened the channel, and how many. */
+  unread?: { first: number; count: number } | null;
+  /** G-21: the bottom was seen with the window focused, or ✕ / Esc. */
+  onMarkRead?: () => void;
 } & Handlers) {
   const intl = useIntl();
   const scrollRef = useRef<HTMLDivElement>(null);
-  const atBottom = useRef(true);
+  const openAtDivider = !!unread && unread.count < 200;
+  const atBottom = useRef(!openAtDivider);
+  const [barDismissed, setBarDismissed] = useState(false);
+  const opened = useRef(false);
   const [showJump, setShowJump] = useState(false);
   const [active, setActive] = useState<number | null>(null);
   const [revealed, setRevealed] = useState<Set<string>>(() => new Set());
@@ -117,6 +127,20 @@ export function MessageList({
     if (count) win.ensure(first - 40, last + 40);
   }, [win, first, last, count]);
 
+  // G-21: the first time the list has rows, go to the divider (instantly: no
+  // smooth scroll, so nothing moves under reduced motion either).
+  useLayoutEffect(() => {
+    if (opened.current || !win.ready || !count) return;
+    opened.current = true;
+    // One message above the divider, so it isn't clamped away when the new ones nearly fill the screen.
+    if (openAtDivider && unread) virtualizer.scrollToIndex(Math.max(0, Math.min(unread.first - 1, count - 1)), { align: 'start' });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [win.ready, count]);
+  // Seeing the bottom with the window focused reads the channel.
+  useEffect(() => {
+    if (win.ready && count && atBottom.current && document.hasFocus()) onMarkRead();
+  });
+
   // Pin to the bottom while the reader is there: new messages and late row
   // measurements must not leave a gap under the last message.
   useLayoutEffect(() => {
@@ -166,7 +190,37 @@ export function MessageList({
   }, []);
   const reveal = useCallback((authorId: string) => setRevealed((s) => new Set(s).add(authorId)), []);
 
+  /** Is the divider's row really in view (not just rendered in the overscan)? */
+  const dividerOnScreen = () => {
+    const row = unread && items.find((it) => it.index === unread.first);
+    if (!row) return false;
+    const top = virtualizer.scrollOffset ?? 0;
+    const height = virtualizer.scrollRect?.height || scrollRef.current?.clientHeight || 0;
+    // Not measured yet: rendered counts as seen, so the bar doesn't flash.
+    return height === 0 || (row.end > top && row.start < top + height);
+  };
+
+  const jumpToNew = () => {
+    if (!unread) return;
+    setBarDismissed(true);
+    goTo(unread.first, 'start');
+  };
+  const dismissNew = () => {
+    setBarDismissed(true);
+    onMarkRead();
+  };
+
   const onKeyDown = (e: KeyboardEvent) => {
+    // G-21: Esc reads the channel; Shift+PageUp goes to the first new message.
+    if (unread && e.key === 'Escape') {
+      dismissNew();
+      return;
+    }
+    if (unread && e.key === 'PageUp' && e.shiftKey) {
+      e.preventDefault();
+      jumpToNew();
+      return;
+    }
     const row = (e.target as HTMLElement).closest<HTMLElement>('[data-index]');
     if (!row || e.target !== row) return;
     const i = Number(row.dataset.index);
@@ -253,6 +307,13 @@ export function MessageList({
                   ? bind(intl.formatMessage({ id: 'menu.forMessage' }, { name: authorName(m) }), () => messageItems(m))
                   : {})}
               >
+                {unread && item.index === unread.first && (
+                  <div className="unread-divider" role="separator" aria-label={intl.formatMessage({ id: 'unread.divider' })}>
+                    <span>
+                      <FormattedMessage id="unread.divider" />
+                    </span>
+                  </div>
+                )}
                 {m ? (
                   <MessageRow
                     message={m}
@@ -282,6 +343,22 @@ export function MessageList({
           })}
         </div>
       </div>
+      {unread && !barDismissed && !dividerOnScreen() && (
+        <div className="unread-bar" role="status">
+          <button type="button" className="unread-bar-jump" onClick={jumpToNew}>
+            <FormattedMessage id="unread.jump" values={{ count: unread.count }} />
+          </button>
+          <button
+            type="button"
+            className="icon-button small"
+            onClick={dismissNew}
+            aria-label={intl.formatMessage({ id: 'unread.markRead' })}
+            title={intl.formatMessage({ id: 'unread.markRead' })}
+          >
+            ✕
+          </button>
+        </div>
+      )}
       {showJump && (
         <button type="button" className="jump-latest" onClick={() => goTo(count - 1, 'end')}>
           <ArrowDownIcon />
@@ -371,7 +448,7 @@ const MessageRow = memo(function MessageRow({
           <ReplyIcon />
           <Name>{replyAuthor ? displayName(replyAuthor) : '…'}</Name>
           <span dir={textDir(m.replyTo.excerpt, uiDir)} className="reply-excerpt user-text">
-            {m.replyTo.excerpt || intl.formatMessage({ id: 'chat.deleted' })}
+            {m.replyTo.excerpt ? <MentionText text={m.replyTo.excerpt} message={m} plain /> : intl.formatMessage({ id: 'chat.deleted' })}
           </span>
         </button>
       )}
@@ -401,7 +478,7 @@ const MessageRow = memo(function MessageRow({
           <p className="msg-body">
             {lines.map((l, i) => (
               <span key={i} className="msg-line user-text" dir={l.dir}>
-                {l.text}
+                <MentionText text={l.text} message={m} />
                 {m.editedAt && i === lines.length - 1 && (
                   <>
                     {' '}
@@ -514,5 +591,39 @@ function HeldStateView({ message, onRetry, tab }: { message: Message; onRetry: (
       <ClockIcon />
       <FormattedMessage id="chat.state.held" />
     </span>
+  );
+}
+
+/** Who the message list can name: the server's members, for mention chips (G-24). */
+export const MemberNames = createContext<Map<string, Member>>(new Map());
+
+/**
+ * Text with its <@id> mention tokens shown as "@Name" from the member list. A
+ * token for someone who isn't a member now (not in the core's `mentions`, or
+ * unknown here) shows as a neutral former-member chip. Raw ids never show.
+ * `plain`: names only, no chip styling (reply excerpts); a cut-off token goes.
+ */
+function MentionText({ text, message, plain = false }: { text: string; message: Message; plain?: boolean }) {
+  const members = useContext(MemberNames);
+  const intl = useIntl();
+  const clean = plain ? text.replace(/<@[^>]*$/, '') : text;
+  if (!MENTION.test(clean)) return <>{clean}</>;
+  MENTION.lastIndex = 0;
+  return (
+    <>
+      {splitMentions(clean).map((p, i) => {
+        if ('text' in p) return <Fragment key={i}>{p.text}</Fragment>;
+        const member = members.get(p.mention);
+        const current = member && (!message.mentions || message.mentions.includes(p.mention));
+        const name = current ? member.displayName : intl.formatMessage({ id: 'mention.unknown' });
+        // The @ sits inside the chip, outside the name's isolate, so it follows the line's direction (UX).
+        if (plain) return <Fragment key={i}>@<bdi>{name}</bdi></Fragment>;
+        return (
+          <span key={i} className={`mention-chip ${current ? '' : 'former'}`}>
+            @<bdi>{name}</bdi>
+          </span>
+        );
+      })}
+    </>
   );
 }
