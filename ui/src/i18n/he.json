@@ -283,7 +283,7 @@
   "call.error.notImplemented": "שיחות עוד לא זמינות בגרסה הזו.",
   "call.error.notAllowed": "אי אפשר להצטרף לשיחה הקולית הזו.",
   "call.error.other": "לא הצלחנו להצטרף לשיחה. אפשר לנסות שוב.",
-  "voiceRooms.createHint": "פותח חדר חדש",
+  "voiceRooms.createHint": "פתיחת חדר חדש",
   "voiceRooms.defaultName": "החדר של \u2068{name}\u2069",
   "voiceRooms.rename": "שינוי שם",
   "voiceRooms.limit": "מגבלת משתתפים",

@@ -272,7 +272,11 @@ function checkFileLog() {
 
 // ---- UI --------------------------------------------------------------------
 
-const entry = () => page.locator('.voice-room-entry');
+// Voice rooms (0.4.3): the pinned "Join chat" row opens a new room; a room's row joins it.
+const entry = () => page.locator('.voice-root');
+const roomRow = () => page.locator('.voice-room-row').first();
+/** The first live room in the server, through the bridge. */
+const firstRoom = async () => (await invoke('listVoiceRooms', serverId))[0];
 const roster = () => page.locator('ul.voice-room-people > li');
 const rosterNames = () => roster().locator('.call-person').allInnerTexts();
 async function rosterHas(names) {
@@ -312,9 +316,14 @@ async function openServer() {
   await entry().waitFor({ timeout: 30_000 });
 }
 
+/** A opens the room (it takes turns: A is in first), B joins A's room from its row. */
 async function joinViaUi() {
   await watchPeerConnections();
-  await entry().click();
+  if (ROLE === 'a') await entry().click();
+  else {
+    await roomRow().waitFor({ timeout: 30_000 });
+    await roomRow().click();
+  }
   // First call on this computer: the IP notice (#225) comes before any join.
   const notice = page.locator('.ip-notice');
   await check('V6.1', 'the IP notice shows before the first join, and no call starts until OK', async () => {
@@ -411,7 +420,7 @@ try {
   await openServer();
   log('server open in the UI');
 
-  await check('V1.1', 'one "Join chat" entry with the speaker icon in the sidebar', async () => {
+  await check('V1.1', 'one pinned "Join chat" row with the speaker icon in the sidebar', async () => {
     const n = await entry().count();
     if (n !== 1) throw new Error(`${n} entries`);
     if (!(await entry().locator('svg').count())) throw new Error('no icon');
@@ -615,9 +624,8 @@ try {
       const reason = await page.locator('.voice-room-reason').innerText({ timeout: 5000 });
       return reason;
     });
-    await check('V3.2', 'relay-only: the core refuses joinCall', async () => {
-      const room = await invoke('getVoiceRoom', serverId);
-      const res = await invoke('joinCall', room.roomId).then(
+    await check('V3.2', 'relay-only: the core refuses to open a room', async () => {
+      const res = await invoke('createVoiceRoom', serverId).then(
         () => 'joined',
         (e) => e.message,
       );
@@ -650,11 +658,19 @@ try {
     await take('v3-done');
   }
 
-  // V4: both back in the room, then the owner kicks B.
-  await entry().click();
-  await page.locator('.call-bar').waitFor({ timeout: 15_000 });
+  // V4: both back in one room (A opens it, B joins it), then the owner kicks B.
+  if (ROLE === 'a') {
+    await entry().click();
+    await page.locator('.call-bar').waitFor({ timeout: 15_000 });
+    put('v4-room');
+  } else {
+    await take('v4-room');
+    await roomRow().waitFor({ timeout: 30_000 });
+    await roomRow().click();
+    await page.locator('.call-bar').waitFor({ timeout: 15_000 });
+  }
   await until('both in roster', () => rosterHas([NAME.a, NAME.b]), 30_000).catch(() => {});
-  const room = await invoke('getVoiceRoom', serverId);
+  const room = await firstRoom();
   put('in-for-kick');
   await take('in-for-kick');
   if (ROLE === 'a') {
@@ -676,8 +692,8 @@ try {
     );
     await check('V4.4', 'the owner is still in the call, alone', async () => {
       if (!(await page.locator('.call-bar').count())) throw new Error('the owner\'s call ended');
-      const r = await invoke('getVoiceRoom', serverId);
-      if (r.participants.length !== 1) throw new Error(JSON.stringify(r.participants));
+      const r = await firstRoom();
+      if (r?.members.length !== 1) throw new Error(JSON.stringify(r?.members));
     });
     await take('kick-checked');
   } else {
@@ -699,7 +715,7 @@ try {
       throw new Error(`${what} was allowed`);
     };
     await check('V4.2', 'the kicked member can\'t read the room or join the call again', async () => {
-      const r1 = await until('getVoiceRoom refused', () => refused('getVoiceRoom', () => invoke('getVoiceRoom', serverId)), 15_000);
+      const r1 = await until('listVoiceRooms refused', () => refused('listVoiceRooms', () => invoke('listVoiceRooms', serverId)), 15_000);
       const r2 = await refused('joinCall', () => invoke('joinCall', room.roomId));
       return `${r1}; ${r2}`;
     });
