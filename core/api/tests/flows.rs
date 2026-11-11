@@ -41,6 +41,8 @@ fn sign_up(peer: &Peer, name: &str) -> Identity {
             display_name: name.into(),
             bio: None,
             avatar_data_url: None,
+            avatar_small: None,
+            color: None,
         })
         .unwrap()
 }
@@ -474,6 +476,8 @@ fn profile_fields_are_capped() {
         display_name: name.into(),
         bio,
         avatar_data_url: avatar.map(String::from),
+        avatar_small: None,
+        color: None,
     };
     let ok = [
         input("נועה", Some("שורה\nשורה".into()), Some("data:image/png;base64,iVBORw0KGgo=")),
@@ -614,6 +618,8 @@ fn diagnostics_hold_no_secrets() {
             display_name: "Secret Name".into(),
             bio: None,
             avatar_data_url: None,
+            avatar_small: None,
+            color: None,
         })
         .unwrap();
     let report = peer.core.export_diagnostics().unwrap();
@@ -638,7 +644,7 @@ fn members_chat_through_the_group_cipher() {
     let open = |words: &str, name: &str, cipher: Arc<dyn GroupCipher>| {
         let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
         peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
-        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None, avatar_small: None, color: None };
         peer.core.update_profile(profile).unwrap();
         peer
     };
@@ -845,7 +851,7 @@ fn a_kick_re_keys_the_channel() {
     let open = |words: &str, name: &str, cipher: Arc<GroupKeysCipher>| {
         let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
         peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
-        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None, avatar_small: None, color: None };
         peer.core.update_profile(profile).unwrap();
         peer
     };
@@ -950,7 +956,7 @@ fn edit_delete_and_retry_messages() {
         let cipher = Arc::new(GroupKeysCipher::locked());
         let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
         peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
-        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None, avatar_small: None, color: None };
         peer.core.update_profile(profile).unwrap();
         peer
     };
@@ -1022,7 +1028,7 @@ fn a_failed_re_key_fails_closed() {
     let open = |words: &str, name: &str, cipher: Arc<dyn GroupCipher>| {
         let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
         peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
-        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None, avatar_small: None, color: None };
         peer.core.update_profile(profile).unwrap();
         peer
     };
@@ -1084,7 +1090,7 @@ fn sync_announces_new_and_changed_messages_once() {
         let cipher = Arc::new(GroupKeysCipher::locked());
         let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
         peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
-        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None, avatar_small: None, color: None };
         peer.core.update_profile(profile).unwrap();
         peer
     };
@@ -1135,7 +1141,7 @@ fn channels_come_from_channel_create_records() {
         let cipher = Arc::new(GroupKeysCipher::locked());
         let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
         peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
-        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None, avatar_small: None, color: None };
         peer.core.update_profile(profile).unwrap();
         peer
     };
@@ -1209,7 +1215,7 @@ fn general_is_named_in_the_creators_language() {
         let answers: BTreeMap<usize, String> =
             positions.iter().map(|p| (*p, words[p - 1].clone())).collect();
         assert!(peer.core.check_recovery_words(answers).unwrap().ok);
-        let profile = ProfileInput { display_name: "X".into(), bio: None, avatar_data_url: None };
+        let profile = ProfileInput { display_name: "X".into(), bio: None, avatar_data_url: None, avatar_small: None, color: None };
         peer.core.update_profile(profile).unwrap();
         peer
     };
@@ -1271,7 +1277,7 @@ fn deletes_and_edits_prune_old_bodies_from_the_db() {
         let cipher = Arc::new(GroupKeysCipher::locked());
         let peer = world.peer_with(Arc::new(MemoryStore::new()), Some(db.clone()), cipher);
         peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
-        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None, avatar_small: None, color: None };
         peer.core.update_profile(profile).unwrap();
         (peer, db)
     };
@@ -1362,12 +1368,12 @@ fn removed_members_age_claims_and_clean_names() {
         let answers: BTreeMap<usize, String> =
             positions.iter().map(|p| (*p, words[p - 1].clone())).collect();
         assert!(peer.core.check_recovery_words(answers).unwrap().ok);
-        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None, avatar_small: None, color: None };
         peer.core.update_profile(profile).unwrap().id
     };
     let owner = world.peer();
     owner.core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
-    let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None };
+    let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None, avatar_small: None, color: None };
     owner.core.update_profile(profile).unwrap();
     let adult = world.peer();
     let adult_id = born(&adult, "1990-05-01", "Adult");
@@ -1375,7 +1381,7 @@ fn removed_members_age_claims_and_clean_names() {
     born(&minor, "2014-01-01", "Minor");
 
     // B23: names others see are clean.
-    let bidi = ProfileInput { display_name: "a\u{202E}b".into(), bio: None, avatar_data_url: None };
+    let bidi = ProfileInput { display_name: "a\u{202E}b".into(), bio: None, avatar_data_url: None, avatar_small: None, color: None };
     assert_eq!(adult.core.update_profile(bidi).unwrap_err().code, ErrorCode::BadRequest);
     assert_eq!(
         owner.core.create_server("x\u{200B}y", AgeRestriction::None).unwrap_err().code,
@@ -1572,7 +1578,7 @@ fn send_states_survive_a_restart() {
     };
     let core = open(Arc::new(OfflineNet::default()));
     core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
-    let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None };
+    let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None, avatar_small: None, color: None };
     core.update_profile(profile).unwrap();
     let server = core.create_server("Offline", AgeRestriction::None).unwrap();
     let channel = core.list_channels(&server.id).unwrap().remove(0).id;
@@ -1622,7 +1628,7 @@ fn a_joiners_first_send_right_after_the_join_succeeds() {
         let cipher = Arc::new(GroupKeysCipher::locked());
         let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
         peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
-        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None, avatar_small: None, color: None };
         peer.core.update_profile(profile).unwrap();
         peer
     };
@@ -1770,7 +1776,7 @@ fn a_joiner_can_write_first_once_the_owner_syncs() {
         let cipher = Arc::new(GroupKeysCipher::locked());
         let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
         peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
-        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None, avatar_small: None, color: None };
         peer.core.update_profile(profile).unwrap();
         peer
     };
@@ -1812,7 +1818,7 @@ fn a_failed_join_re_key_fails_closed() {
     let open = |words: &str, name: &str, cipher: Arc<dyn GroupCipher>| {
         let peer = world.peer_with(Arc::new(MemoryStore::new()), None, cipher);
         peer.core.restore_identity(words.split(' ').map(String::from).collect()).unwrap();
-        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None };
+        let profile = ProfileInput { display_name: name.into(), bio: None, avatar_data_url: None, avatar_small: None, color: None };
         peer.core.update_profile(profile).unwrap();
         peer
     };
@@ -1843,7 +1849,7 @@ fn keyed_server(world: &World, name: &str) -> (Peer, ServerSummary, String) {
     let owner =
         world.peer_with(Arc::new(MemoryStore::new()), None, Arc::new(GroupKeysCipher::locked()));
     owner.core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
-    let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None };
+    let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None, avatar_small: None, color: None };
     owner.core.update_profile(profile).unwrap();
     let server = owner.core.create_server(name, AgeRestriction::None).unwrap();
     let channel = owner.core.list_channels(&server.id).unwrap().remove(0).id;
@@ -2089,7 +2095,7 @@ fn an_owner_without_an_adult_claim_cannot_make_adult_channels() {
     let owner = world.peer();
     // Restored: no birth date, so the age claim says "not 18+".
     owner.core.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
-    let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None };
+    let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None, avatar_small: None, color: None };
     owner.core.update_profile(profile).unwrap();
     let server = owner.core.create_server("Minors", AgeRestriction::None).unwrap();
     let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
@@ -2159,7 +2165,7 @@ fn presence_shows_online_members_only() {
     )
     .unwrap();
     owner.restore_identity(OWNER_WORDS.split(' ').map(String::from).collect()).unwrap();
-    let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None };
+    let profile = ProfileInput { display_name: "Owner".into(), bio: None, avatar_data_url: None, avatar_small: None, color: None };
     owner.update_profile(profile).unwrap();
     let server = owner.create_server("Here", AgeRestriction::None).unwrap();
     let guest = world.peer();
@@ -3267,7 +3273,7 @@ fn a_restored_member_rejoins_without_blanking_their_name_or_age() {
     assert!(answer(&owner, &created.words, &[]).1.unwrap().ok);
     let owner_id = owner
         .core
-        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None })
+        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None, avatar_small: None, color: None })
         .unwrap()
         .id;
     let server = owner.core.create_server("Night", AgeRestriction::Eighteen).unwrap();
@@ -3317,7 +3323,7 @@ fn a_restored_member_rejoins_without_blanking_their_name_or_age() {
     other.core.restore_identity(created.words.clone()).unwrap();
     other
         .core
-        .update_profile(ProfileInput { display_name: "MoA 2".into(), bio: None, avatar_data_url: None })
+        .update_profile(ProfileInput { display_name: "MoA 2".into(), bio: None, avatar_data_url: None, avatar_small: None, color: None })
         .unwrap();
     other.core.join_server(&server.invite_link).unwrap();
     assert_eq!(other.core.list_servers().unwrap().len(), 1);
@@ -3346,7 +3352,7 @@ fn a_restore_takes_the_birth_date_asked_again() {
     assert!(answer(&owner, &created.words, &[]).1.unwrap().ok);
     let owner_id = owner
         .core
-        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None })
+        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None, avatar_small: None, color: None })
         .unwrap()
         .id;
     let server = owner.core.create_server("Night", AgeRestriction::Eighteen).unwrap();
@@ -3572,6 +3578,8 @@ fn a_new_name_reaches_every_server_i_am_in() {
                 display_name: name.into(),
                 bio: bio.map(String::from),
                 avatar_data_url: None,
+                avatar_small: None,
+                color: None,
             })
             .unwrap()
     };
@@ -3588,7 +3596,7 @@ fn a_new_name_reaches_every_server_i_am_in() {
     // The owner renames too: seen by Bob.
     owner
         .core
-        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None })
+        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None, avatar_small: None, color: None })
         .unwrap();
     bob.core.sync_now().unwrap();
     assert_eq!(name_seen_by(&bob, &one.id, &owner_id), "MoA");
@@ -3757,7 +3765,7 @@ fn a_call_on_my_other_computer_blocks_joining_here() {
     assert!(answer(&pc, &created.words, &[]).1.unwrap().ok);
     let me = pc
         .core
-        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None })
+        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None, avatar_small: None, color: None })
         .unwrap()
         .id;
     let carol = world.peer();
@@ -3980,7 +3988,7 @@ fn a_restore_brings_my_servers_back_from_the_backup() {
     assert!(answer(&me, &created.words, &[]).1.unwrap().ok);
     let my_id = me
         .core
-        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None })
+        .update_profile(ProfileInput { display_name: "MoA".into(), bio: None, avatar_data_url: None, avatar_small: None, color: None })
         .unwrap()
         .id;
     let bob = world.peer();
@@ -4533,4 +4541,147 @@ fn unread_dots_follow_new_messages_and_mark_read() {
     assert_eq!(c.unread_count, Some(1));
     drop(bob);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A 48×48 lossy WebP header (never decoded: the core reads the header),
+/// padded with an unknown chunk to `pad` extra bytes.
+fn small_webp(side: u16, pad: usize) -> String {
+    use base64::Engine;
+    let mut vp8 = vec![0, 0, 0, 0x9d, 0x01, 0x2a];
+    vp8.extend_from_slice(&side.to_le_bytes());
+    vp8.extend_from_slice(&side.to_le_bytes());
+    vp8.extend_from_slice(&[0; 8]);
+    let mut body = b"WEBP".to_vec();
+    for (kind, data) in [(b"VP8 ", vp8), (b"XTRA", vec![7u8; pad])] {
+        if kind == b"XTRA" && pad == 0 {
+            continue;
+        }
+        body.extend_from_slice(kind);
+        body.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        body.extend_from_slice(&data);
+        if data.len() % 2 == 1 {
+            body.push(0);
+        }
+    }
+    let mut b = b"RIFF".to_vec();
+    b.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    b.extend(body);
+    format!("data:image/webp;base64,{}", base64::engine::general_purpose::STANDARD.encode(b))
+}
+
+/// #354 (owner request): my small picture and colour reach other members
+/// through my profile post, checked on both sides; changes are coalesced to
+/// one post per 10 minutes; a post without them (an older device, a join)
+/// leaves them; "" clears them; a crafted bad picture is ignored.
+#[test]
+fn profile_picture_and_colour_reach_other_members() {
+    let world = World::new();
+    let owner = world.peer();
+    sign_up(&owner, "Owner");
+    let server = owner.core.create_server("Faces", AgeRestriction::None).unwrap();
+    let bob = world.peer();
+    bob.core.restore_identity(LEGAL.split(' ').map(String::from).collect()).unwrap();
+    let bob_key = identity::RecoveryPhrase::parse(LEGAL).unwrap().identity().signing_key().clone();
+    let bob_id = bob.core.get_identity().unwrap().unwrap().id;
+    bob.core.join_server(&server.invite_link).unwrap();
+    owner.core.sync_now().unwrap();
+    let seen = || {
+        owner.core.sync_now().unwrap();
+        let m = owner.core.list_members(&server.id).unwrap().into_iter().find(|m| m.id == bob_id).unwrap();
+        (m.avatar_data_url, m.color)
+    };
+    let profile = |avatar: Option<&str>, color: Option<&str>| ProfileInput {
+        display_name: "Bob".into(),
+        bio: None,
+        avatar_data_url: None,
+        avatar_small: avatar.map(String::from),
+        color: color.map(String::from),
+    };
+    let posts = || profile_posts(&world, &server.id, &bob_id);
+
+    // Set: the owner sees both.
+    let pic = small_webp(48, 0);
+    bob.core.update_profile(profile(Some(&pic), Some("#3b82f6"))).unwrap();
+    assert_eq!(seen(), (Some(pic.clone()), Some("#3b82f6".to_owned())));
+    assert_eq!(bob.core.get_identity().unwrap().unwrap().color.as_deref(), Some("#3b82f6"));
+
+    // Refused on send: an SVG, a 65×65, a bad colour, a picture over 2,560 bytes.
+    let err = |p: ProfileInput| bob.core.update_profile(p).unwrap_err().code;
+    assert_eq!(err(profile(Some("data:image/svg+xml;base64,PHN2Zy8+"), None)), ErrorCode::BadRequest);
+    assert_eq!(err(profile(Some(&small_webp(65, 0)), None)), ErrorCode::BadRequest);
+    assert_eq!(err(profile(None, Some("blue"))), ErrorCode::BadRequest);
+    assert_eq!(err(profile(Some(&small_webp(48, 2_600)), None)), ErrorCode::BadRequest);
+    // The largest valid profile (128 four-byte emoji, a 2,556-byte picture,
+    // a colour) fits one post and is published (the 4 KiB check guards it).
+    let mut largest = profile(Some(&small_webp(48, 2_512)), Some("#ffffff"));
+    largest.display_name = "🙂".repeat(128);
+    bob.core.update_profile(largest).unwrap();
+    let before = posts();
+    advance(&world, api::PROFILE_POST_EVERY_MS);
+    bob.core.sync_now().unwrap();
+    assert_eq!(posts(), before + 1, "the largest profile wasn't published");
+    advance(&world, api::PROFILE_POST_EVERY_MS);
+    bob.core.update_profile(profile(Some(&pic), Some("#3b82f6"))).unwrap();
+
+    // Coalesced: two changes within 10 minutes, one post when they're up.
+    let before = posts();
+    bob.core.update_profile(profile(None, Some("#ff0000"))).unwrap();
+    bob.core.update_profile(profile(None, Some("#00ff00"))).unwrap();
+    bob.core.sync_now().unwrap();
+    assert_eq!(posts(), before, "posted within 10 minutes of the last");
+    advance(&world, api::PROFILE_POST_EVERY_MS);
+    bob.core.sync_now().unwrap();
+    assert_eq!(posts(), before + 1);
+    assert_eq!(seen(), (Some(pic.clone()), Some("#00ff00".to_owned())));
+
+    // A post without them (an older device) leaves them; a crafted bad
+    // picture (10k×10k) is ignored, not shown.
+    older_profile(&world, &server, &bob_key, 50, true);
+    assert_eq!(seen(), (Some(pic.clone()), Some("#00ff00".to_owned())));
+    let server_key = ServerId::from_bytes(hex::decode(&server.id).unwrap().try_into().unwrap());
+    let heads = world.network.fetch(server_key).iter().filter(|r| r.scope() == Scope::Control).map(|r| r.id()).collect();
+    let bomb = r##"{"mvs":"mvs/profile/v1","displayName":"Bob","avatar":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAJxAAACcQCAYAAAAfFcSJAAAAAElFTkSuQmCC","color":"#nothex"}"##;
+    let post = authority::sign_control(&bob_key, server_key, 60, heads, 5, &authority::Action::Post { text: bomb.into() }).unwrap();
+    world.network.publish(&post);
+    assert_eq!(seen(), (Some(pic), Some("#00ff00".to_owned())));
+
+    // "" clears both, for everyone.
+    advance(&world, api::PROFILE_POST_EVERY_MS);
+    bob.core.update_profile(profile(Some(""), Some(""))).unwrap();
+    assert_eq!(seen(), (None, None));
+}
+
+/// Tech Lead (#359): the picture and colour go with every profile post, so
+/// a server I create or join after setting them shows them too.
+#[test]
+fn a_new_server_sees_the_picture_set_before() {
+    let world = World::new();
+    let bob = world.peer();
+    let bob_id = sign_up(&bob, "Bob").id;
+    let pic = small_webp(48, 0);
+    bob.core
+        .update_profile(ProfileInput {
+            display_name: "Bob".into(),
+            bio: None,
+            avatar_data_url: None,
+            avatar_small: Some(pic.clone()),
+            color: Some("#123456".into()),
+        })
+        .unwrap();
+    let look = |peer: &Peer, server: &str| {
+        peer.core.sync_now().unwrap();
+        let m = peer.core.list_members(server).unwrap().into_iter().find(|m| m.id == bob_id).unwrap();
+        (m.avatar_data_url, m.color)
+    };
+    let expected = (Some(pic), Some("#123456".to_owned()));
+    // A server Bob creates afterwards: Carol, who joins it, sees them.
+    let mine = bob.core.create_server("Bob's", AgeRestriction::None).unwrap();
+    let carol = world.peer();
+    sign_up(&carol, "Carol");
+    carol.core.join_server(&mine.invite_link).unwrap();
+    assert_eq!(look(&carol, &mine.id), expected);
+    // A server Bob joins afterwards: its owner sees them.
+    let theirs = carol.core.create_server("Carol's", AgeRestriction::None).unwrap();
+    bob.core.join_server(&theirs.invite_link).unwrap();
+    assert_eq!(look(&carol, &theirs.id), expected);
 }

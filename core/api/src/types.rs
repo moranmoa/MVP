@@ -17,6 +17,9 @@ pub struct Identity {
     pub avatar_color: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar_data_url: Option<String>,
+    /// #354: my chosen colour (`#rrggbb`), shown to other members.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bio: Option<String>,
     pub country: String,
@@ -61,6 +64,13 @@ pub struct ProfileInput {
     pub bio: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar_data_url: Option<String>,
+    /// #354: the small picture shown to other members (`avatar::valid_avatar`).
+    /// Absent: unchanged. `""`: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_small: Option<String>,
+    /// #354: `#rrggbb`. Absent: unchanged. `""`: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,6 +243,13 @@ pub struct Member {
     pub blocked: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bio: Option<String>,
+    /// #354: their small profile picture (a checked WebP or PNG data URL,
+    /// at most 64×64), from their latest profile posts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_data_url: Option<String>,
+    /// #354: their chosen colour (`#rrggbb`); `avatarColor` is the derived one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 /// Every command rejects with this shape.

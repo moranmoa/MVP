@@ -10,6 +10,7 @@
 //! crates are merged.
 
 mod access;
+pub mod avatar;
 pub mod backup;
 mod chat;
 pub mod crypto;
@@ -40,7 +41,7 @@ pub use service::{finish_sign_out, sign_out_pending, stored_relay_only};
 pub use service::{
     Config, Core, AGE_RAISE_DELAY_MS, BACKUP_REPUBLISH_MS, BACKUP_RETRY_FIRST_MS, BACKUP_RETRY_MAX_MS, CHALLENGE_POSITIONS, CLOSED_RETENTION_MS, JOIN_RETRY_FIRST, JOIN_RETRY_FOR,
     JOIN_RETRY_MAX, KEY_PENDING_FOR, KEY_PENDING_PREFIX, MAX_CHECK_FAILURES, MAX_KEY_PENDING,
-    REKEY_WAKE_FLOOR,
+    PROFILE_POST_EVERY_MS, REKEY_WAKE_FLOOR,
     SYNC_EVERY,
 };
 pub use types::*;

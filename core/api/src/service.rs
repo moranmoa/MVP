@@ -15,6 +15,7 @@ use records::{ChannelId, Draft, Kind, PublicKey, Record, RecordId, Scope, Server
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+use crate::avatar;
 use crate::backup;
 use crate::chat;
 use crate::db::Db;
@@ -61,6 +62,12 @@ const KV_BACKUP_KNOWN: &str = "backup-known";
 /// G-21: per channel, `read/<channel hex>` = the last message read, as
 /// JSON `[ts, "<record id hex>"]`. Local only (phase 3 syncs it).
 const KV_READ_PREFIX: &str = "read/";
+/// #354: a profile change waits to be published (coalesced), and when the
+/// last profile post went out (u64le ms).
+const KV_PROFILE_PENDING: &str = "profile-pending";
+const KV_PROFILE_POSTED_AT: &str = "profile-posted-at";
+/// #354: at most one profile post per server per 10 minutes.
+pub const PROFILE_POST_EVERY_MS: u64 = 10 * 60_000;
 /// Restore servers: a restore still has servers to rejoin from the backup.
 const KV_BACKUP_PENDING: &str = "backup-pending";
 /// Restore servers: a fingerprint of the server set last backed up, and
@@ -100,6 +107,11 @@ struct Profile {
     /// then I count as under 18. `None`: nothing pending.
     #[serde(default)]
     pending_birth_date: Option<PendingBirth>,
+    /// #354: the small picture and colour other members see.
+    #[serde(default)]
+    avatar_small: Option<String>,
+    #[serde(default)]
+    color: Option<String>,
     /// The birth date is the one my claims were made from: set at sign-up
     /// here, agreeing with a claim a server already holds, or past its 30
     /// days. Turning 18 with a trusted date is just a birthday: no wait.
@@ -842,20 +854,45 @@ impl Core {
     pub fn update_profile(&self, input: ProfileInput) -> CoreResult<Identity> {
         self.run(|inner, ports, events| {
             model::check_profile(&input)?;
+            // #354: the picture and colour other members see. Absent:
+            // unchanged; "": cleared (published as "", so it clears for
+            // everyone); otherwise checked strictly.
+            let ok = |v: &Option<String>, valid: fn(&str) -> bool| {
+                v.as_deref().is_none_or(|s| s.is_empty() || valid(s))
+            };
+            if !ok(&input.avatar_small, avatar::valid_avatar) || !ok(&input.color, avatar::valid_color) {
+                return Err(ErrorCode::BadRequest.into());
+            }
             let me = inner.me.as_mut().ok_or(ErrorCode::NotFound)?;
             let name = input.display_name.trim().to_owned();
-            let renamed = me.profile.display_name != name;
-            me.profile.display_name = name.clone();
+            let small = input.avatar_small.or_else(|| me.profile.avatar_small.clone());
+            let color = input.color.or_else(|| me.profile.color.clone());
+            // The whole post must fit a control Post (Tech Lead).
+            let authority::Action::Post { text } =
+                model::profile_action_with(&name, small.as_deref(), color.as_deref())
+            else {
+                unreachable!("a profile is a post")
+            };
+            if text.len() > records::Kind::Post.max_body() {
+                return Err(ErrorCode::BadRequest.into());
+            }
+            let changed =
+                me.profile.display_name != name || me.profile.avatar_small != small || me.profile.color != color;
+            me.profile.display_name = name;
             me.profile.bio = input.bio;
             me.profile.avatar_data_url = input.avatar_data_url;
+            me.profile.avatar_small = small;
+            me.profile.color = color;
             let profile = me.profile.clone();
             let key = *me.identity.storage_key().expose_secret();
             inner.db.save_profile(&key, &serde_json::to_vec(&profile).expect("plain struct"))?;
-            // A new name goes to every server I'm still in, as a new profile
-            // post (the latest wins). Bio and avatar stay on this device:
-            // the profile post carries the name (and caps) only.
-            if renamed {
-                inner.post_profile_everywhere(ports, &name);
+            // A change goes to every server I'm still in, as a new profile
+            // post (the latest wins), at most once per PROFILE_POST_EVERY_MS
+            // (coalesced; the pending one survives a restart). The bio and
+            // the large picture stay on this device.
+            if changed {
+                inner.db.set(KV_PROFILE_PENDING, b"1")?;
+                inner.flush_profile(ports)?;
             }
             let identity = inner.identity_json(inner.me.as_ref().expect("checked above"))?;
             events.push(Event::IdentityChanged(identity.clone()));
@@ -939,7 +976,7 @@ impl Core {
             };
             let invite = sign(2, vec![general.id()], &model::FIRST_INVITE)?;
             let profile =
-                sign(3, vec![invite.id()], &model::profile_action(&me.profile.display_name))?;
+                sign(3, vec![invite.id()], &model::profile_action_with(&me.profile.display_name, me.profile.avatar_small.as_deref(), me.profile.color.as_deref()))?;
             inner.logs.insert(server, Log::new(server, []));
             // GAP-4: a fresh sync secret, sealed, and sync opened with it
             // before anything is published.
@@ -2005,6 +2042,8 @@ impl Core {
             inner.expire_closed(ports, events)?;
             // Decision 18: a raise whose 30 days are up takes effect.
             inner.apply_due_birth_date(ports, events)?;
+            // #354: a coalesced profile change, once its 10 minutes are up.
+            inner.flush_profile(ports)?;
             for (server, records) in fetched {
                 if !inner.db.has_server(server)? {
                     continue;
@@ -3291,6 +3330,7 @@ impl Inner {
             display_name: me.profile.display_name.clone(),
             avatar_color: model::color_for(key.as_bytes()),
             avatar_data_url: me.profile.avatar_data_url.clone(),
+            color: me.profile.color.clone(),
             bio: me.profile.bio.clone(),
             country: me.profile.country.clone(),
             birth_date: me.profile.birth_date.clone(),
@@ -3308,13 +3348,46 @@ impl Inner {
     /// stored or sent (`not-allowed`), and the log is rebuilt from the store
     /// so it leaves no trace.
     // TODO(records B4): `Resolver::would_accept` instead.
-    /// `updateProfile` with a new name: one profile post per server I'm
-    /// still a member of (not closed, not kicked, not left). A server that
-    /// refuses it is skipped and logged; the local save already stands.
-    fn post_profile_everywhere(&mut self, ports: &Ports, name: &str) {
-        let Ok(servers) = self.db.servers() else { return };
-        let Some(key) = self.me.as_ref().map(Me::key) else { return };
-        let action = model::profile_action(name);
+    /// #354: a pending profile change goes out once the last profile post is
+    /// [`PROFILE_POST_EVERY_MS`] old (coalesced: the latest values). Called on
+    /// a change and every sync round; the pending flag is stored.
+    fn flush_profile(&mut self, ports: &Ports) -> CoreResult<()> {
+        if self.db.get(KV_PROFILE_PENDING)?.is_none() {
+            return Ok(());
+        }
+        let now = ports.clock.now_ms();
+        let last = self
+            .db
+            .get(KV_PROFILE_POSTED_AT)?
+            .and_then(|v| v.try_into().ok())
+            .map(u64::from_le_bytes);
+        if last.is_some_and(|last| now.saturating_sub(last) < PROFILE_POST_EVERY_MS) {
+            return Ok(());
+        }
+        // The 10 minutes start only when a post actually went out (sign-up
+        // sets a name before I'm in any server).
+        let (sent, failed) = self.post_profile_everywhere(ports);
+        if sent > 0 {
+            self.db.set(KV_PROFILE_POSTED_AT, &now.to_le_bytes())?;
+        }
+        // A refused post is tried again next round (Tech Lead nit on #359).
+        if failed == 0 {
+            self.db.delete(KV_PROFILE_PENDING)?;
+        }
+        Ok(())
+    }
+
+    /// My profile (name, small picture, colour) as one profile post per
+    /// server I'm still a member of (not closed, not kicked, not left). A
+    /// server that refuses it is skipped and logged. Returns how many went
+    /// out and how many failed.
+    fn post_profile_everywhere(&mut self, ports: &Ports) -> (usize, usize) {
+        let Ok(servers) = self.db.servers() else { return (0, 1) };
+        let Some(me) = self.me.as_ref() else { return (0, 0) };
+        let (mut sent, mut failed) = (0, 0);
+        let key = me.key();
+        let p = &me.profile;
+        let action = model::profile_action_with(&p.display_name, p.avatar_small.as_deref(), p.color.as_deref());
         for server in servers {
             let posted = (|| -> CoreResult<bool> {
                 if self.db.closed_at(server)?.is_some() {
@@ -3328,10 +3401,16 @@ impl Inner {
                 self.publish_control(ports, server, &action)?;
                 Ok(true)
             })();
-            if let Err(e) = posted {
-                eprintln!("mvs-core: a profile post wasn't published: {:?}", e.code);
+            match posted {
+                Ok(true) => sent += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    failed += 1;
+                    eprintln!("mvs-core: a profile post wasn't published: {:?}", e.code);
+                }
             }
         }
+        (sent, failed)
     }
 
     fn publish_control(
@@ -3441,13 +3520,17 @@ impl Inner {
     fn post_caps(&mut self, ports: &Ports, server: ServerId) -> CoreResult<()> {
         let Some(me) = self.me.as_ref() else { return Ok(()) };
         let (key, name) = (me.key(), me.profile.display_name.clone());
+        // #359: the picture and colour too (None stays absent).
+        let (me_small, me_color) = (me.profile.avatar_small.clone(), me.profile.color.clone());
         let view = self.view(server)?;
         let member = view.state.is_member(key) && !view.state.kicked.contains(&key);
         if !member || view.state.closed.is_some() || view.lifecycle_caps().get(&key) == Some(&true)
         {
             return Ok(());
         }
-        self.publish_control(ports, server, &model::profile_action(&name)).map(drop)
+        let (small, color) = (me_small, me_color);
+        let action = model::profile_action_with(&name, small.as_deref(), color.as_deref());
+        self.publish_control(ports, server, &action).map(drop)
     }
 
     /// Server lifecycle (#229, the security lead's rule 5): after I leave,
@@ -3593,7 +3676,9 @@ impl Inner {
         let reach = self.net.presence(view.id).unwrap_or_default();
         let server_id = model::hex_id(view.id.as_bytes());
         let mut out = Vec::new();
+        let looks = view.looks();
         for member in view.members() {
+            let (avatar, color) = looks.get(&member.key).cloned().unwrap_or_default();
             let blocked = self.db.is_blocked(&member.key)?;
             out.push(Member {
                 id: model::hex_id(member.key.as_bytes()),
@@ -3617,6 +3702,8 @@ impl Inner {
                 role: member.role,
                 blocked: blocked.then_some(true),
                 bio: None,
+                avatar_data_url: avatar,
+                color,
             });
         }
         Ok(out)
@@ -3701,7 +3788,11 @@ impl Inner {
         // server holds: an empty one would replace my name for everyone.
         let post_profile = !(member && me.profile.display_name.trim().is_empty());
         let profile = post_profile
-            .then(|| sign(&view, view.deps(None), &model::profile_action(&me.profile.display_name)))
+            .then(|| {
+                let p = &me.profile;
+                let action = model::profile_action_with(&p.display_name, p.avatar_small.as_deref(), p.color.as_deref());
+                sign(&view, view.deps(None), &action)
+            })
             .transpose()?;
         for record in log.records.iter().chain(&log.channel) {
             self.db.put_record(record)?;

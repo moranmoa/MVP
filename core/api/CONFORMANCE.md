@@ -85,6 +85,15 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 
 ## Proposed contract additions (Rust has them; `api.ts` doesn't yet)
 
+- Profile picture and colour for other members (#354, `src/avatar.rs`):
+  - `updateProfile` input gains `avatarSmall?` and `color?`: absent means unchanged, `""` clears.
+    - `avatarSmall` is a `data:image/(webp|png);base64,` URL of at most 2,560 bytes and 64×64 declared, and still (no APNG `acTL`, no animated WebP). `color` is `#rrggbb`. Anything else, or a profile post over 4 KiB, is `bad-request`.
+    - The large `avatarDataUrl` and the bio stay on this device.
+  - **Publishing:** they go in my profile post (`avatar`, `color`), at most one per server per 10 minutes. Changes are coalesced, and the pending one survives a restart. Nothing is posted without a change.
+  - **Receivers** check each post the same way, without decoding pixels. A valid value sets it, `""` clears it, an absent field leaves it, and an invalid value is ignored.
+  - **Exposed:** `Member.avatarDataUrl?` and `Member.color?` (`avatarColor` stays the derived one), plus `Identity.color?`. A profile post that arrives brings `members.changed`.
+  - **UI (Security Lead):** the picture is rendered only via `<img src>`, with CSP `img-src 'self' data:`.
+
 - Mentions (G-24, GAPS §2.5):
   - A mention is the token `<@userId>` (64 lower-case hex) in the body, never a name. The UI shows the current name, or `mention.unknown` for someone no longer in the server. Older clients show the token as text. It counts toward the 4,000 code points.
   - `Message.mentions?: userId[]` (additive) lists the mentioned users who are members now, in order, each once.
