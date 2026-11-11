@@ -145,3 +145,8 @@
   - a 72-hour hold, off by default;
   - the KDF parameters in the envelope.
 - **Critical path:** devops' OPRF service and share holders.
+4. **OPRF key rotation is authorised by `w`:**
+   - The OPRF servers rotate an account's key version, and delete the old share (E2), **only on a request signed by `w`**. They check it against the `w_pub` registered with them at opt-in.
+   - Nobody else can force a rotation, so nobody else can lock the owner out.
+   - **A rotation cancels a pending recovery:** only a device holding the seed can sign with `w`, so a rotation means the owner is active. Every share holder treats it as a `w`-signed cancel.
+   - The recovery shares themselves don't change. `r` is tied to `E`, not to the password, so a recovery set up before a password change still works afterwards.
