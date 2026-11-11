@@ -283,7 +283,7 @@ describe('voice rooms (0.4.3)', () => {
     const [room] = await rooms(core);
     // I own the first demo server, so I may rename any room in it.
     await act(async () => {
-      await core.editVoiceRoom(room.roomId, { name: 'Raid night' });
+      await core.editVoiceRoom(room.roomId, 'Raid night');
     });
     act(() => core.simulateVoiceLeave(room.roomId, room.masterId));
     await waitFor(() => expect(label(rows()[0])).toBe("Raid night, 2 of 5, You're in the chat"));

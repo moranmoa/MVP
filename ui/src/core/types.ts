@@ -306,12 +306,6 @@ export interface VoiceRoom {
   relayOnly?: boolean;
 }
 
-/** A room's host (or the server owner) edits it. `name: ''` restores the default. */
-export interface VoiceRoomEdit {
-  name?: string;
-  limit?: number;
-}
-
 /** WebRTC signalling between call members; for the voice engine (ui/src/voice). */
 export interface CallSignal {
   from: Id;

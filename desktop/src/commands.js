@@ -51,7 +51,7 @@ const COMMANDS = Object.freeze({
   // Voice (#223); voice rooms (0.4.3)
   listVoiceRooms: ['serverId'],
   createVoiceRoom: ['serverId'],
-  editVoiceRoom: ['roomId', 'edit'],
+  editVoiceRoom: ['roomId', 'name', 'limit'],
   joinCall: ['channelId'],
   leaveCall: [],
   setMuted: ['muted'],

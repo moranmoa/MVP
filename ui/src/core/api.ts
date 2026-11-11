@@ -29,7 +29,6 @@ import type {
   CallState,
   CallSignal,
   VoiceRoom,
-  VoiceRoomEdit,
 } from './types';
 
 export interface CoreCommands {
@@ -144,8 +143,8 @@ export interface CoreCommands {
    * Rejects room-cap (10 live rooms), relay-only, in-call-elsewhere, not-allowed.
    */
   createVoiceRoom(serverId: Id): Promise<CallState>;
-  /** The room's host or the server owner: rename (`''` = default) or set the limit (2–5, not below the count). Rejects not-allowed, not-found, bad-request. */
-  editVoiceRoom(roomId: Id, edit: VoiceRoomEdit): Promise<null>;
+  /** The room's host or the server owner: rename (`''` = default) or set the limit (2–5, not below the count); a left-out field stays. The change arrives in the next voice.rooms. Rejects not-allowed, not-found (gone, or the host unreachable for an owner), bad-request. */
+  editVoiceRoom(roomId: Id, name?: string, limit?: number): Promise<null>;
   /**
    * Joins a live voice room (leaving any other call first); `channelId` is the room's
    * id. Rejects not-found (not live), not-allowed (a text channel), call-full (at its limit), relay-only, in-call-elsewhere (#294: I'm already in it from another computer), not-implemented.

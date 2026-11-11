@@ -9,7 +9,6 @@ import type { CoreApi, CoreEventName, CoreEvents, Unsubscribe } from './api';
 import type {
   CallState,
   VoiceRoom,
-  VoiceRoomEdit,
   VoiceRoomMember,
   AgeRestriction,
   AppInfo,
@@ -1291,7 +1290,8 @@ export class MockCore implements CoreApi {
     return null;
   }
 
-  async editVoiceRoom(roomId: Id, edit: VoiceRoomEdit): Promise<null> {
+  async editVoiceRoom(roomId: Id, name?: string, limit?: number): Promise<null> {
+    const edit = { name, limit };
     await this.wait(100);
     const found = this.findRoom(roomId);
     if (!found) throw err({ code: 'not-found' });

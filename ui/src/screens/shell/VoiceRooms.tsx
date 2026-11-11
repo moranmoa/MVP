@@ -85,7 +85,7 @@ export function VoiceRooms({ server, myId, engine }: { server: ServerSummary; my
   const run = (action: Pending) => (action.kind === 'create' ? store.createVoiceRoom(serverId) : store.joinCall(action.roomId));
 
   const edit = (room: VoiceRoom, change: { name?: string; limit?: number }) =>
-    core.editVoiceRoom(room.roomId, change).catch((e) => {
+    core.editVoiceRoom(room.roomId, change.name, change.limit).catch((e) => {
       store.showFlash(isCoreError(e) && e.code === 'not-allowed' ? 'voiceRooms.notAllowed' : 'voiceRooms.editFailed');
     });
 
