@@ -4580,3 +4580,38 @@ fn profile_picture_and_colour_reach_other_members() {
     bob.core.update_profile(profile(Some(""), Some(""))).unwrap();
     assert_eq!(seen(), (None, None));
 }
+
+/// Tech Lead (#359): the picture and colour go with every profile post, so
+/// a server I create or join after setting them shows them too.
+#[test]
+fn a_new_server_sees_the_picture_set_before() {
+    let world = World::new();
+    let bob = world.peer();
+    let bob_id = sign_up(&bob, "Bob").id;
+    let pic = small_webp(48, 0);
+    bob.core
+        .update_profile(ProfileInput {
+            display_name: "Bob".into(),
+            bio: None,
+            avatar_data_url: None,
+            avatar_small: Some(pic.clone()),
+            color: Some("#123456".into()),
+        })
+        .unwrap();
+    let look = |peer: &Peer, server: &str| {
+        peer.core.sync_now().unwrap();
+        let m = peer.core.list_members(server).unwrap().into_iter().find(|m| m.id == bob_id).unwrap();
+        (m.avatar_data_url, m.color)
+    };
+    let expected = (Some(pic), Some("#123456".to_owned()));
+    // A server Bob creates afterwards: Carol, who joins it, sees them.
+    let mine = bob.core.create_server("Bob's", AgeRestriction::None).unwrap();
+    let carol = world.peer();
+    sign_up(&carol, "Carol");
+    carol.core.join_server(&mine.invite_link).unwrap();
+    assert_eq!(look(&carol, &mine.id), expected);
+    // A server Bob joins afterwards: its owner sees them.
+    let theirs = carol.core.create_server("Carol's", AgeRestriction::None).unwrap();
+    bob.core.join_server(&theirs.invite_link).unwrap();
+    assert_eq!(look(&carol, &theirs.id), expected);
+}

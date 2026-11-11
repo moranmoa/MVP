@@ -182,14 +182,10 @@ struct ProfileBody {
     color: Option<String>,
 }
 
-/// The post a member signs to tell the server their display name, and
-/// what this version can read. No picture or colour: those stay as they
-/// were (#354), so joins and older devices never wipe them.
-pub(crate) fn profile_action(display_name: &str) -> Action {
-    profile_action_with(display_name, None, None)
-}
-
-/// [`profile_action`] with the picture and colour (`Some("")` clears).
+/// The post a member signs to tell the server their display name, picture
+/// and colour, and what this version can read. `None` leaves a field out, so
+/// receivers keep the earlier value (a restore never wipes it); `Some("")`
+/// clears it (#354).
 pub(crate) fn profile_action_with(display_name: &str, avatar: Option<&str>, color: Option<&str>) -> Action {
     let body = ProfileBody {
         mvs: PROFILE_TAG.to_owned(),

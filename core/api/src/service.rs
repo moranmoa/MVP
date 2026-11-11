@@ -981,7 +981,7 @@ impl Core {
             };
             let invite = sign(2, vec![general.id()], &model::FIRST_INVITE)?;
             let profile =
-                sign(3, vec![invite.id()], &model::profile_action(&me.profile.display_name))?;
+                sign(3, vec![invite.id()], &model::profile_action_with(&me.profile.display_name, me.profile.avatar_small.as_deref(), me.profile.color.as_deref()))?;
             inner.logs.insert(server, Log::new(server, []));
             // GAP-4: a fresh sync secret, sealed, and sync opened with it
             // before anything is published.
@@ -3330,19 +3330,25 @@ impl Inner {
         }
         // The 10 minutes start only when a post actually went out (sign-up
         // sets a name before I'm in any server).
-        if self.post_profile_everywhere(ports) > 0 {
+        let (sent, failed) = self.post_profile_everywhere(ports);
+        if sent > 0 {
             self.db.set(KV_PROFILE_POSTED_AT, &now.to_le_bytes())?;
         }
-        self.db.delete(KV_PROFILE_PENDING)
+        // A refused post is tried again next round (Tech Lead nit on #359).
+        if failed == 0 {
+            self.db.delete(KV_PROFILE_PENDING)?;
+        }
+        Ok(())
     }
 
     /// My profile (name, small picture, colour) as one profile post per
     /// server I'm still a member of (not closed, not kicked, not left). A
-    /// server that refuses it is skipped and logged. Returns how many went out.
-    fn post_profile_everywhere(&mut self, ports: &Ports) -> usize {
-        let Ok(servers) = self.db.servers() else { return 0 };
-        let Some(me) = self.me.as_ref() else { return 0 };
-        let mut sent = 0;
+    /// server that refuses it is skipped and logged. Returns how many went
+    /// out and how many failed.
+    fn post_profile_everywhere(&mut self, ports: &Ports) -> (usize, usize) {
+        let Ok(servers) = self.db.servers() else { return (0, 1) };
+        let Some(me) = self.me.as_ref() else { return (0, 0) };
+        let (mut sent, mut failed) = (0, 0);
         let key = me.key();
         let p = &me.profile;
         let action = model::profile_action_with(&p.display_name, p.avatar_small.as_deref(), p.color.as_deref());
@@ -3363,11 +3369,12 @@ impl Inner {
                 Ok(true) => sent += 1,
                 Ok(false) => {}
                 Err(e) => {
+                    failed += 1;
                     eprintln!("mvs-core: a profile post wasn't published: {:?}", e.code);
                 }
             }
         }
-        sent
+        (sent, failed)
     }
 
     fn publish_control(
@@ -3477,13 +3484,17 @@ impl Inner {
     fn post_caps(&mut self, ports: &Ports, server: ServerId) -> CoreResult<()> {
         let Some(me) = self.me.as_ref() else { return Ok(()) };
         let (key, name) = (me.key(), me.profile.display_name.clone());
+        // #359: the picture and colour too (None stays absent).
+        let (me_small, me_color) = (me.profile.avatar_small.clone(), me.profile.color.clone());
         let view = self.view(server)?;
         let member = view.state.is_member(key) && !view.state.kicked.contains(&key);
         if !member || view.state.closed.is_some() || view.lifecycle_caps().get(&key) == Some(&true)
         {
             return Ok(());
         }
-        self.publish_control(ports, server, &model::profile_action(&name)).map(drop)
+        let (small, color) = (me_small, me_color);
+        let action = model::profile_action_with(&name, small.as_deref(), color.as_deref());
+        self.publish_control(ports, server, &action).map(drop)
     }
 
     /// Server lifecycle (#229, the security lead's rule 5): after I leave,
@@ -3741,7 +3752,11 @@ impl Inner {
         // server holds: an empty one would replace my name for everyone.
         let post_profile = !(member && me.profile.display_name.trim().is_empty());
         let profile = post_profile
-            .then(|| sign(&view, view.deps(None), &model::profile_action(&me.profile.display_name)))
+            .then(|| {
+                let p = &me.profile;
+                let action = model::profile_action_with(&p.display_name, p.avatar_small.as_deref(), p.color.as_deref());
+                sign(&view, view.deps(None), &action)
+            })
             .transpose()?;
         for record in log.records.iter().chain(&log.channel) {
             self.db.put_record(record)?;
