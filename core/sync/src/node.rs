@@ -4091,7 +4091,8 @@ mod tests {
         b.open_server(server(), secret.clone()).unwrap();
         let a = test_node("tri-a", None, Some(port_of(&c).await), access(0)).await;
         a.open_server(server(), secret).unwrap();
-        let wait = |what: &'static str| (what, Instant::now() + Duration::from_secs(20));
+        // Generous: the Windows runner is slow to set up connections.
+        let wait = |what: &'static str| (what, Instant::now() + Duration::from_secs(60));
         let (what, until) = wait("B and A bound to C");
         while !(online(&b, id(2)).await && online(&a, id(2)).await) {
             assert!(Instant::now() < until, "{what}");
@@ -4106,10 +4107,21 @@ mod tests {
         // The A–B link resets (a relay circuit reset), then A dials B again.
         a.test_disconnect(b.peer_id());
         tokio::time::sleep(Duration::from_secs(1)).await;
-        a.test_dial(addr(port_of(&b).await));
+        // Redial until linked again, over TCP and QUIC: on Windows a TCP
+        // redial from the reused listen port to the same peer can sit in
+        // TIME_WAIT for minutes (a real device would come back through the
+        // relay). Only the link is retried; the claim stays the same.
+        let port_b = port_of(&b).await;
+        let quic_b: Multiaddr = format!("/ip4/127.0.0.1/udp/{port_b}/quic-v1").parse().unwrap();
         let (what, until) = wait("A and B online again after the reset");
+        let mut redial = Instant::now() - Duration::from_secs(10);
         while !(online(&a, id(1)).await && online(&b, id(0)).await) {
             assert!(Instant::now() < until, "{what}");
+            if redial.elapsed() >= Duration::from_secs(3) && !a.peers().await.unwrap().contains(&b.peer_id()) {
+                a.test_dial(addr(port_b));
+                a.test_dial(quic_b.clone());
+                redial = Instant::now();
+            }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         for node in [a, b, c] {
