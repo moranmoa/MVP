@@ -367,7 +367,7 @@ function Composer({
                 pick(m);
               }}
             >
-              <Avatar name={m.displayName} color={m.avatarColor} size={20} />
+              <Avatar name={m.displayName} color={m.color ?? m.avatarColor} src={m.avatarDataUrl} size={20} />
               <Name>{m.displayName}</Name>
               <Code value={m.shortCode} />
             </li>

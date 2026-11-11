@@ -369,6 +369,8 @@
   "settings.nav.about": "About",
   "settings.instant": "Changes apply immediately.",
 
+  "profile.color": "Colour",
+  "profile.colorCustom": "Custom colour",
   "profile.edit.open": "Edit profile",
   "profile.edit.remove": "Remove",
   "profile.edit.save": "Save",

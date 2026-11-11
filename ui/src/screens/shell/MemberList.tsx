@@ -136,7 +136,7 @@ export function MemberList({ server, onClose }: { server: ServerSummary; onClose
                   .filter(Boolean)
                   .join(', ')}
               >
-                <Avatar name={displayName(m)} color={m.avatarColor} size={32} presence={m.presence} />
+                <Avatar name={displayName(m)} color={m.color ?? m.avatarColor} src={m.avatarDataUrl} size={32} presence={m.presence} />
                 {m.connection && <ConnectionIcon connection={m.connection} />}
                 <Name>{displayName(m)}</Name>
                 {m.id === myId && (
@@ -242,7 +242,7 @@ export function ProfileCard({
   return (
     <Dialog open onClose={onClose} title={<Name>{name}</Name>} className="profile-dialog">
       <div className="profile-card">
-        <Avatar name={name} color={member.avatarColor} size={80} presence={member.presence} />
+        <Avatar name={name} color={member.color ?? member.avatarColor} src={member.avatarDataUrl} size={80} presence={member.presence} />
         <div className="profile-meta">
           <span className={`presence-label ${member.presence}`}>
             <FormattedMessage id={`presence.${member.presence}`} />

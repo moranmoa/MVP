@@ -464,7 +464,7 @@ const MessageRow = memo(function MessageRow({
               {intl.formatTime(time, { hour: '2-digit', minute: '2-digit' })}
             </time>
           ) : (
-            <Avatar name={name} color={author?.avatarColor ?? '#888'} size={40} />
+            <Avatar name={name} color={author?.color ?? author?.avatarColor ?? '#888'} src={author?.avatarDataUrl} size={40} />
           )}
         </div>
         <div className="msg-content">

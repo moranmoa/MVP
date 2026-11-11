@@ -741,9 +741,15 @@ export class MockCore implements CoreApi {
     await this.wait(150);
     if (this.options.profileError) throw err({ code: 'internal' });
     // Like the core: every field is replaced (no avatar or bio = removed).
-    this.identity = { ...this.identity, displayName: input.displayName, bio: input.bio, avatarDataUrl: input.avatarDataUrl };
+    const color = input.color === undefined ? this.identity.color : input.color || undefined;
+    this.identity = { ...this.identity, displayName: input.displayName, bio: input.bio, avatarDataUrl: input.avatarDataUrl, color };
+    const small = input.avatarSmall === undefined ? undefined : input.avatarSmall || null;
     for (const s of this.servers.values()) {
-      s.members = s.members.map((m) => (m.id === this.identity!.id ? { ...m, displayName: input.displayName, bio: input.bio } : m));
+      s.members = s.members.map((m) =>
+        m.id === this.identity!.id
+          ? { ...m, displayName: input.displayName, bio: input.bio, color, ...(small === undefined ? {} : { avatarDataUrl: small ?? undefined }) }
+          : m,
+      );
       this.emit('members.changed', { serverId: s.summary.id, members: s.members });
     }
     try {

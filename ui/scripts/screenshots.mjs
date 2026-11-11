@@ -485,7 +485,7 @@ for (const [query, name, opts, steps] of [
     await p.locator('.me-profile').click();
   }
   const dialog = p.getByRole('dialog');
-  const field = dialog.locator('.profile-editor input:not([type=file])');
+  const field = dialog.locator('.profile-editor input:not([type=file]):not([type=color])');
   await field.waitFor();
   if (steps !== 'open') {
     await field.fill(name.includes('-en') ? 'Moran B' : 'מורן ב.');

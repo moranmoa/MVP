@@ -5,7 +5,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useId, useRef, useState } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
-import { avatarFromFile, IMAGE_TYPES } from '../../app/image';
+import { avatarFromFile, IMAGE_TYPES, smallAvatarFrom } from '../../app/image';
 import { useStore } from '../../app/store';
 import { useUserTextProps } from '../../app/textDir';
 import { Avatar, Code, Name } from '../../components/common';
@@ -36,7 +36,10 @@ export interface ProfileEditorHandle {
   discard(): void;
 }
 
-type Draft = { name: string; bio: string; avatar?: string };
+type Draft = { name: string; bio: string; avatar?: string; color?: string };
+
+/** #359: the colour others see behind my letter when I have no picture. */
+const PALETTE = ['#5865f2', '#3ba55c', '#e67e22', '#e91e63', '#9b59b6', '#1098ad', '#d6336c', '#607d8b'];
 
 /** The counter "24/32", shown from `from`; read out only when 5 or fewer are left. */
 function Counter({ value, max, from }: { value: string; max: number; from: number }) {
@@ -64,7 +67,7 @@ export const ProfileEditor = forwardRef<ProfileEditorHandle, { onDirtyChange: (d
   const core = useCore();
   const intl = useIntl();
   const identity = useStore(store, (s) => s.identity)!;
-  const saved: Draft = { name: identity.displayName, bio: identity.bio ?? '', avatar: identity.avatarDataUrl };
+  const saved: Draft = { name: identity.displayName, bio: identity.bio ?? '', avatar: identity.avatarDataUrl, color: identity.color };
   const [draft, setDraft] = useState<Draft>(saved);
   const [busy, setBusy] = useState<'image' | 'saving' | null>(null);
   const [imageError, setImageError] = useState<'too-large' | 'unsupported' | null>(null);
@@ -76,7 +79,7 @@ export const ProfileEditor = forwardRef<ProfileEditorHandle, { onDirtyChange: (d
   const bioProps = useUserTextProps(draft.bio);
   const ids = { name: useId(), nameError: useId(), image: useId(), hint: useId() };
 
-  const dirty = draft.name !== saved.name || draft.bio !== saved.bio || draft.avatar !== saved.avatar;
+  const dirty = draft.name !== saved.name || draft.bio !== saved.bio || draft.avatar !== saved.avatar || draft.color !== saved.color;
   useEffect(() => onDirtyChange(dirty), [dirty, onDirtyChange]);
   // The save bar turns sticky with the first change: keep the field being edited
   // clear of it (the panel's scroll-padding sets how far).
@@ -104,7 +107,15 @@ export const ProfileEditor = forwardRef<ProfileEditorHandle, { onDirtyChange: (d
     setSaveError(false);
     try {
       // The core replaces every field: send the whole profile (no avatar = removed).
-      await core.updateProfile({ displayName: draft.name.trim(), bio: draft.bio.trim() || undefined, avatarDataUrl: draft.avatar });
+      // #359: others see a 48×48 copy; '' removes it. The colour: '' clears.
+      const avatarSmall = draft.avatar === saved.avatar ? undefined : draft.avatar ? await smallAvatarFrom(draft.avatar) : '';
+      await core.updateProfile({
+        displayName: draft.name.trim(),
+        bio: draft.bio.trim() || undefined,
+        avatarDataUrl: draft.avatar,
+        ...(avatarSmall !== undefined ? { avatarSmall } : {}),
+        ...(draft.color !== saved.color ? { color: draft.color ?? '' } : {}),
+      });
       setDraft((d) => ({ ...d, name: d.name.trim(), bio: d.bio.trim() }));
       setJustSaved(true);
       return true;
@@ -135,7 +146,7 @@ export const ProfileEditor = forwardRef<ProfileEditorHandle, { onDirtyChange: (d
       <div className="profile-preview" aria-hidden="true">
         <div className="profile-preview-banner" style={{ background: identity.avatarColor }} />
         <div className="profile-preview-body">
-          <Avatar name={previewName} color={identity.avatarColor} src={draft.avatar} size={80} />
+          <Avatar name={previewName} color={draft.color ?? identity.avatarColor} src={draft.avatar} size={80} />
           <div className="profile-preview-text">
             <span className="profile-preview-name" title={previewName}>
               <Name>{previewName}</Name>
@@ -180,6 +191,31 @@ export const ProfileEditor = forwardRef<ProfileEditorHandle, { onDirtyChange: (d
           <FormattedMessage id={imageError === 'too-large' ? 'profile.image.tooLarge' : 'profile.image.unsupported'} />
         </p>
       )}
+
+      <fieldset className="color-picker">
+        <legend>
+          <FormattedMessage id="profile.color" />
+        </legend>
+        {PALETTE.map((c) => (
+          <button
+            key={c}
+            type="button"
+            className="color-swatch"
+            style={{ background: c }}
+            aria-pressed={draft.color === c}
+            aria-label={c}
+            title={c}
+            disabled={!!busy}
+            onClick={() => edit({ color: c })}
+          />
+        ))}
+        <label className="color-custom">
+          <span className="visually-hidden">
+            <FormattedMessage id="profile.colorCustom" />
+          </span>
+          <input type="color" value={draft.color ?? identity.avatarColor} disabled={!!busy} onChange={(e) => edit({ color: e.target.value.toLowerCase() })} />
+        </label>
+      </fieldset>
 
       <label className="field">
         <span>
