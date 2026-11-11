@@ -47,10 +47,28 @@ export function ChatView({
   const nobodyOnline = members.length > 0 && members.every((m) => m.id === myId || m.presence === 'offline');
   const isOwner = server.ownerId === myId;
 
-  // Reading the channel clears its unread dot and mention badge.
+  // G-21: where the new messages started when I opened the channel. Kept until
+  // I leave it, even after it's all read, so the divider stays put.
+  const mark = useRef<{ channelId: string; first: number; count: number } | null>(null);
+  if (mark.current?.channelId !== channelId && channel) {
+    mark.current =
+      channel.firstUnreadIndex !== undefined && channel.unreadCount
+        ? { channelId, first: channel.firstUnreadIndex, count: channel.unreadCount }
+        : { channelId, first: -1, count: 0 };
+  }
+  const unread = mark.current && mark.current.count > 0 ? mark.current : null;
+  const markRead = useCallback(() => {
+    const c = store.getState().channels[server.id]?.find((x) => x.id === channelId);
+    if (c?.unread || c?.mentions) void core.markRead(channelId);
+  }, [store, server.id, channelId, core]);
+
+  // Reading the channel clears its unread dot and mention badge. With the core's
+  // unread position (G-21) that waits until the bottom is seen, or ✕ / Esc;
+  // without it, opening the channel reads it, as before.
+  const hasPosition = channel?.firstUnreadIndex !== undefined;
   useEffect(() => {
-    if (channel?.unread || channel?.mentions) void core.markRead(channelId);
-  }, [channel?.unread, channel?.mentions, channelId, core]);
+    if (!hasPosition && (channel?.unread || channel?.mentions)) void core.markRead(channelId);
+  }, [hasPosition, channel?.unread, channel?.mentions, channelId, core]);
 
   const onReply = useCallback((m: Message) => {
     setEditing(null);
@@ -129,6 +147,9 @@ export function ChatView({
         </div>
       )}
       <MessageList
+        key={channelId}
+        unread={unread}
+        onMarkRead={markRead}
         win={win}
         channelName={channelName}
         memberMap={memberMap}

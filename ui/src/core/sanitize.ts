@@ -229,10 +229,18 @@ export function cleanInvite(i: Invite): Invite {
 /** G-11 (#323): an order key, base-62, 1–32 characters, never ending in 0. */
 const POSITION = /^[0-9A-Za-z]{0,31}[1-9A-Za-z]$/;
 
+/** A non-negative whole number below 2^31, or undefined. */
+const index = (v: unknown): number | undefined => (Number.isInteger(v) && (v as number) >= 0 && (v as number) < 2 ** 31 ? (v as number) : undefined);
+
 export function cleanChannel(c: Channel): Channel {
-  const { position, ...rest } = c;
+  const { position, firstUnreadIndex, unreadCount, ...rest } = c;
+  const first = index(firstUnreadIndex);
+  const n = index(unreadCount);
   return {
     ...rest,
+    // G-21: kept only as sane numbers; dropped otherwise.
+    ...(first !== undefined ? { firstUnreadIndex: first } : {}),
+    ...(n !== undefined ? { unreadCount: n } : {}),
     ...(typeof position === 'string' && POSITION.test(position) ? { position } : {}),
     name: cleanName(c.name, CHANNEL_NAME_MAX) || '…',
     adult: c.adult === true,

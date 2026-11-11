@@ -75,6 +75,13 @@ export interface Channel {
    * informative: the order is the core's list order, never a re-sort by this.
    */
   position?: string;
+  /**
+   * G-21: the index of the first message I haven't read, from the core's read
+   * marker (my own messages don't count). Absent when everything is read.
+   */
+  firstUnreadIndex?: number;
+  /** G-21: how many messages from others I haven't read. */
+  unreadCount?: number;
 }
 
 export type Presence = 'online' | 'offline';
