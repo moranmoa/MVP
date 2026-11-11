@@ -336,13 +336,18 @@ function NotificationsSection() {
           className="switch"
           checked={prefs.preview}
           disabled={!prefs.desktop}
-          aria-describedby="notify-preview-hint"
+          aria-describedby={prefs.desktop ? 'notify-preview-hint' : 'notify-preview-hint notify-preview-off'}
           onChange={(e) => set({ preview: e.target.checked })}
         />
       </label>
       <p className="muted small" id="notify-preview-hint">
         <FormattedMessage id="notify.settings.previewHint" />
       </p>
+      {!prefs.desktop && (
+        <p className="muted small" id="notify-preview-off">
+          <FormattedMessage id="notify.settings.previewDisabled" />
+        </p>
+      )}
     </div>
   );
 }

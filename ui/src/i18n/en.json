@@ -464,15 +464,18 @@
   "notify.mentions": "Only mentions",
   "notify.none": "Nothing",
   "notify.inherit": "Same as the server",
-  "notify.dialog.title": "Notifications for ⁨{name}⁩",
   "notify.localHint": "Saved on this computer only.",
   "notify.settings.title": "Notifications",
   "notify.settings.desktop": "Desktop notifications",
-  "notify.settings.desktopHint": "When MVS isn't in front. Each server and channel can be set from its menu (right-click).",
+  "notify.settings.desktopHint": "Shown when the MVS window isn't in front. Each server and channel can be set from its menu (right-click).",
   "notify.settings.preview": "Show message preview in notifications",
-  "notify.settings.previewHint": "Off: notifications say “New message” without the text.",
+  "notify.settings.previewHint": "Off: notifications say \"New message\" without the text.",
   "notify.settings.desktopOnly": "Notifications work in the desktop app.",
   "notify.hidden": "New message",
   "notify.grouped": "{count, plural, one {# new message} other {# new messages}} in ⁨#{channel}⁩",
-  "settings.nav.notifications": "Notifications"
+  "settings.nav.notifications": "Notifications",
+  "notify.dialog.titleServer": "Notifications for ⁨{name}⁩",
+  "notify.dialog.titleChannel": "Notifications for ⁨#{name}⁩",
+  "notify.mute.label": "Mute",
+  "notify.settings.previewDisabled": "Turn on desktop notifications first."
 }

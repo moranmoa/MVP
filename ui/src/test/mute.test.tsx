@@ -1,5 +1,5 @@
-// Mute a server or a channel on this device (G-03, G-17; GAPS §2.4), and mark a
-// whole server as read (G-04).
+// Mute a server or a channel on this device (G-03, G-17; GAPS §2.4), from the
+// "Notifications" dialog (G-61), and mark a whole server as read (G-04).
 
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -24,19 +24,15 @@ async function setup() {
 }
 
 describe('mute a channel', () => {
-  it('Mute… asks how long; the row then says Muted, shows 🔕, and offers Unmute', async () => {
+  it('Notifications asks how long; the row then says Muted, shows 🔕, and the dialog offers Unmute', async () => {
     const { channels } = await setup();
     fireEvent.contextMenu(within(channels()).getByRole('button', { name: /^clips/ }));
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Mute…' }));
-    const dialog = screen.getByRole('dialog', { name: 'Mute ⁨#clips⁩' });
-    expect(within(dialog).getAllByRole('button').map((b) => b.textContent).filter(Boolean)).toEqual([
-      'For 1 hour',
-      'For 8 hours',
-      'For 24 hours',
-      'Until I turn it back on',
-      'Cancel',
-    ]);
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Until I turn it back on' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Notifications' }));
+    const dialog = screen.getByRole('dialog', { name: 'Notifications for ⁨#clips⁩' });
+    const mute = within(dialog).getByRole('group', { name: 'Mute' });
+    expect(within(mute).getAllByRole('button').map((b) => b.textContent)).toEqual(['For 1 hour', 'For 8 hours', 'For 24 hours', 'Until I turn it back on']);
+    fireEvent.click(within(mute).getByRole('button', { name: 'Until I turn it back on' }));
+    expect(within(mute).getByRole('status').textContent).toBe('Muted');
 
     const row = within(channels()).getByRole('button', { name: /^clips, Muted/ });
     expect(row.classList.contains('muted')).toBe(true);
@@ -44,24 +40,24 @@ describe('mute a channel', () => {
     // Kept on this device.
     expect(loadMutes()).toEqual({ [channelMuteKey('c-clips')]: MUTE_FOREVER });
 
-    fireEvent.contextMenu(row);
-    expect(menuItems()).toContain('Unmute');
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Unmute' }));
+    fireEvent.click(within(mute).getByRole('button', { name: 'Unmute' }));
     expect(within(channels()).getByRole('button', { name: /^clips/ }).classList.contains('muted')).toBe(false);
     expect(loadMutes()).toEqual({});
+    expect(within(mute).getAllByRole('button')).toHaveLength(4);
   });
 });
 
 describe('a timed mute says until when', () => {
-  it('the menu reads "Unmute · Muted until …" and the 🔕 title says the same', async () => {
+  it('the menu reads "Notifications · Muted until …" and the 🔕 title says the same', async () => {
     const { channels } = await setup();
     fireEvent.contextMenu(within(channels()).getByRole('button', { name: /^clips/ }));
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Mute…' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Notifications' }));
     fireEvent.click(screen.getByRole('button', { name: 'For 1 hour' }));
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
     const row = within(channels()).getByRole('button', { name: /^clips, Muted/ });
     expect(row.querySelector('.bell-off-wrap')!.getAttribute('title')).toMatch(/^Muted until ⁨.+⁩$/);
     fireEvent.contextMenu(row);
-    expect(menuItems().find((t) => t?.startsWith('Unmute'))).toMatch(/^Unmute · Muted until ⁨.+⁩$/);
+    expect(menuItems().find((t) => t?.startsWith('Notifications'))).toMatch(/^Notifications · Muted until ⁨.+⁩$/);
   });
 });
 
@@ -70,8 +66,9 @@ describe('mute a server, and mark it all as read', () => {
     const { rail, channels } = await setup();
     const owned = () => within(rail()).getAllByRole('button').find((b) => b.getAttribute('aria-current') === 'page')!;
     fireEvent.contextMenu(owned());
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Mute…' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Notifications' }));
     fireEvent.click(screen.getByRole('button', { name: 'For 8 hours' }));
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
     expect(owned().getAttribute('aria-label')).toMatch(/, Muted/);
     expect(owned().closest('.rail-item')!.classList.contains('muted')).toBe(true);
 

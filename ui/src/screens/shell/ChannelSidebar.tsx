@@ -13,8 +13,8 @@ import { useContextMenu, type MenuItem } from '../../components/ContextMenu';
 import { copyText } from '../../app/clipboard';
 import { useCore } from '../../core';
 import { channelMuteKey, isMutedKey, mutedUntil, MUTE_FOREVER } from '../../app/mute';
-import { MuteDialog, useMutedLabel, type MuteTarget } from './MuteDialog';
-import { NotifyDialog } from './NotifyDialog';
+import { useMutedLabel } from './MuteDialog';
+import { NotifyDialog, type NotifyTarget } from './NotifyDialog';
 
 const NO_CHANNELS: Channel[] = [];
 
@@ -54,7 +54,7 @@ export function ChannelSidebar({
   const engine = useCallEngine(identity.id);
   const { bind, menu } = useContextMenu();
   // G-61: the channel whose notification settings are open.
-  const [notifyFor, setNotifyFor] = useState<Channel | null>(null);
+  const [notifyFor, setNotifyFor] = useState<NotifyTarget | null>(null);
   const phone = useMediaQuery(phoneQuery(useSettings().settings.uiScale));
 
   // G-11 (#323): the owner reorders the channels; everyone sees the core's order.
@@ -137,20 +137,17 @@ export function ChannelSidebar({
   // B25 §3: the channel menu. Rename and delete are also behind the channel's gear.
   // G-17: a channel muted on this device (app/mute.ts).
   const mutes = useStore(store, (st) => st.mutes);
-  const [muteTarget, setMuteTarget] = useState<MuteTarget | null>(null);
   const mutedLabel = useMutedLabel();
   const channelItems = (c: Channel, active: boolean): MenuItem[] => [
     ...(c.unread && !active ? [{ key: 'read', label: intl.formatMessage({ id: 'menu.markRead' }), onSelect: () => void core.markRead(c.id) }] : []),
-    isMutedKey(mutes, channelMuteKey(c.id))
-      ? {
-          key: 'unmute',
-          label: [intl.formatMessage({ id: 'notify.unmute' }), (mutedUntil(mutes, channelMuteKey(c.id)) ?? MUTE_FOREVER) !== MUTE_FOREVER ? mutedLabel(mutedUntil(mutes, channelMuteKey(c.id))!) : null]
-            .filter(Boolean)
-            .join(' · '),
-          onSelect: () => store.unmute(channelMuteKey(c.id)),
-        }
-      : { key: 'mute', label: intl.formatMessage({ id: 'notify.muteMenu' }), onSelect: () => setMuteTarget({ key: channelMuteKey(c.id), name: c.name, kind: 'channel' }) },
-    { key: 'notify', label: intl.formatMessage({ id: 'notify.menu' }), onSelect: () => setNotifyFor(c) },
+    // G-61: level and mute in one dialog; a muted channel says until when.
+    {
+      key: 'notify',
+      label: [intl.formatMessage({ id: 'notify.menu' }), isMutedKey(mutes, channelMuteKey(c.id)) ? mutedLabel(mutedUntil(mutes, channelMuteKey(c.id)) ?? MUTE_FOREVER) : null]
+        .filter(Boolean)
+        .join(' · '),
+      onSelect: () => setNotifyFor({ kind: 'channel', id: c.id, name: c.name }),
+    },
     ...(owner ? [{ key: 'rename', label: intl.formatMessage({ id: 'menu.renameChannel' }), onSelect: () => onEditChannel(c) }] : []),
     { kind: 'separator' },
     {
@@ -365,8 +362,7 @@ export function ChannelSidebar({
         </button>
       </footer>
       {menu}
-      <MuteDialog target={muteTarget} onClose={() => setMuteTarget(null)} />
-      {notifyFor && <NotifyDialog kind="channel" id={notifyFor.id} name={`#${notifyFor.name}`} onClose={() => setNotifyFor(null)} />}
+      {notifyFor && <NotifyDialog target={notifyFor} onClose={() => setNotifyFor(null)} />}
     </aside>
   );
 }

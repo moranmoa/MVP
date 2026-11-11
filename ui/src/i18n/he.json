@@ -464,15 +464,18 @@
   "notify.mentions": "רק אזכורים",
   "notify.none": "כלום",
   "notify.inherit": "כמו בשרת",
-  "notify.dialog.title": "התראות של ⁨{name}⁩",
   "notify.localHint": "נשמר רק במחשב הזה.",
   "notify.settings.title": "התראות",
   "notify.settings.desktop": "התראות דסקטופ",
-  "notify.settings.desktopHint": "כש-MVS לא בחזית. כל שרת וערוץ אפשר לכוון מהתפריט שלו (קליק ימני).",
+  "notify.settings.desktopHint": "מופיעות כשהחלון של MVS לא בחזית. אפשר לכוון כל שרת וערוץ מהתפריט שלו (לחיצה ימנית).",
   "notify.settings.preview": "תצוגה מקדימה של ההודעה בהתראה",
-  "notify.settings.previewHint": "כבוי: בהתראה כתוב “הודעה חדשה”, בלי הטקסט.",
+  "notify.settings.previewHint": "כבוי: בהתראה כתוב \"הודעה חדשה\", בלי הטקסט.",
   "notify.settings.desktopOnly": "התראות עובדות באפליקציית הדסקטופ.",
   "notify.hidden": "הודעה חדשה",
-  "notify.grouped": "{count, plural, other {# הודעות חדשות}} ב-⁨#{channel}⁩",
-  "settings.nav.notifications": "התראות"
+  "notify.grouped": "{count, plural, one {הודעה חדשה אחת} two {שתי הודעות חדשות} other {# הודעות חדשות}} ב-⁨#{channel}⁩",
+  "settings.nav.notifications": "התראות",
+  "notify.dialog.titleServer": "התראות של ⁨{name}⁩",
+  "notify.dialog.titleChannel": "התראות של ⁨#{name}⁩",
+  "notify.mute.label": "השתקה",
+  "notify.settings.previewDisabled": "קודם צריך להפעיל התראות דסקטופ."
 }
