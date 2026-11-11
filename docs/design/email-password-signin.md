@@ -117,3 +117,31 @@
   2. **The mailer:** it's ours, on a host **outside the OPRF set**. The SMTP provider may be a third party.
   3. **Recovery:** 72 hours and **off by default**, with an optional 7-day hold.
   4. **Argon2id parameters:** they go in the envelope header; 64–128 MiB on phones, 256 MiB on desktop.
+
+## 9. Tech Lead's changes (at fc26da1; these replace earlier sections where they differ)
+1. **The mailer alone must not be able to recover.** The OPRF is public, so the mailer can turn any address it mails into `E`, and it enforces its own hold.
+   - So `r` is **split**: `r = r_m ⊕ r_1 ⊕ … ⊕ r_n`, with `r_m` at the mailer and one share at each OPRF bootstrap. Each is encrypted to its holder at opt-in.
+   - A verified code makes the mailer issue a signed "code verified at T" for `tag_e`. **Each share holder starts its own 72-hour hold** from that, and releases its share only after the hold, if no cancel came.
+   - A cancel, signed by `w` (whose public key is registered with every holder at opt-in, as in E1), goes to all of them.
+   - Takeover then needs the mailer **and** every share holder, or the inbox plus 72 hours with no cancel.
+   - The recovery envelope is kept with the share holders, not in the open backup store.
+2. **The pending notice:** the services publish it themselves, signed by the mailer under `tag_e`. My devices poll for it, and a cancel is signed by `w`. Same as E1.
+3. **Nobody can block sign-in by knowing only the email.**
+   - The password envelope's lookup tag and write key come from **both** email and password: `tag_ep = derive_key("mvs/email-pw-tag/v1", handle ‖ P)`, and the write key `w_ep` is Ed25519 from `derive_key("mvs/email-pw-write/v1", handle ‖ P)`.
+   - Holders accept writes under `tag_ep` only if signed by the key whose hash gives `tag_ep`, as for backups.
+   - Knowing the email alone gives neither.
+- **The API:**
+  - `setEmailPassword`, `removeEmailPassword`, `setEmailRecovery`;
+  - `getEmailSignIn() → { available, … }` (`available: false` until two bootstraps are live);
+  - `signInWithEmail`;
+  - `requestRecovery`, then `confirmRecoveryCode`, then `completeRecovery`;
+  - `cancelRecovery`;
+  - the event `account.recoveryPending`.
+- **The envelope:** a `kdf` field holds the Argon2id parameters per envelope, so they can differ by device and change later. The OPRF key version (E2) goes there too.
+- **Crates:** no duplicate crypto crates. The OPRF and `argon2` crates are chosen to share the tree's existing curve and hash crates. `argon2` is already used by `identity`.
+- **Answers to §6** (matching the Security Lead's):
+  - behind a flag (`available: false`) until two bootstraps are live;
+  - our own mailer, sending through an SMTP relay;
+  - a 72-hour hold, off by default;
+  - the KDF parameters in the envelope.
+- **Critical path:** devops' OPRF service and share holders.
