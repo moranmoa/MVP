@@ -197,7 +197,7 @@ B8 is integration: where files live, who runs what, and the transport.
   `UpdateInfo.waitingForCall = true`, while a voice call or screen share is
   active. Voice is phase 2, so today this is always false. The hook exists
   now so voice cannot forget it.
-- **Check cadence.** At core start, then every 6 h ± 30 min of jitter.
+- **Check cadence.** At core start, then every hour ± 5 min of jitter (owner, 2026-11-11; was 6 h ± 30 min).
   Freshness is reported with `ClientPolicy::freshness`.
 
 ## 4. Transport: `UpdateSource` trait, HTTPS now, P2P later
