@@ -1899,6 +1899,12 @@ impl Task {
 
     fn pull(&mut self, peer: PeerId, log: &str, cause: &'static str) {
         let key = (peer, log.to_string());
+        // T23 on every path (round, queue, again, more…): a control log an
+        // unbound peer answered empty lately isn't asked for again.
+        if self.empty_from.get(&key).is_some_and(|until| Instant::now() < *until) {
+            self.again.remove(&key);
+            return;
+        }
         if self.decoding.contains(&key) || self.inflight.values().any(|k| *k == key) {
             self.again.insert(key);
             return;
