@@ -124,7 +124,7 @@
   "unread.jump": "{count, plural, one {הודעה חדשה אחת} two {שתי הודעות חדשות} other {# הודעות חדשות}} · קפיצה",
   "unread.markRead": "סימון כנקרא",
   "mentions.label": "{count, plural, one {אזכור אחד} two {שני אזכורים} other {# אזכורים}}",
-  "mention.unknown": "משתמש לשעבר",
+  "mention.unknown": "חשבון לשעבר",
   "mention.suggestions": "הצעות לאזכור",
   "update.ready": "עדכון מוכן – הפעלה מחדש",
   "update.waitingForCall": "עדכון מוכן – יותקן כשהשיחה תסתיים",

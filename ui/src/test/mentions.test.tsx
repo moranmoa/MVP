@@ -14,8 +14,8 @@ describe('mention helpers', () => {
   it('split, show as names and turn back into tokens', () => {
     expect(splitMentions(`hi <@${HEX}>!`)).toEqual([{ text: 'hi ' }, { mention: HEX }, { text: '!' }]);
     const map = new Map<string, string>();
-    const shown = toDisplay(`hi <@${HEX}> and <@gone>`, (id) => (id === HEX ? 'Dana' : undefined), 'former member', map);
-    expect(shown).toBe('hi @Dana and @former member');
+    const shown = toDisplay(`hi <@${HEX}> and <@gone>`, (id) => (id === HEX ? 'Dana' : undefined), 'former account', map);
+    expect(shown).toBe('hi @Dana and @former account');
     expect(toTokens(shown, map)).toBe(`hi <@${HEX}> and <@gone>`);
   });
 
@@ -64,13 +64,13 @@ describe('mentions in the chat (G-24)', () => {
     expect(document.body.textContent).not.toContain(sent.mentions![0] + '>');
   });
 
-  it('a token for someone who is not a member shows as a former member, never the raw id', async () => {
+  it('a token for someone who is not a member shows as a former account, never the raw id', async () => {
     const { core, box } = await setup();
     typeIn(box, `about <@${HEX}> yesterday`);
     await act(async () => {
       fireEvent.keyDown(box, { key: 'Enter' });
     });
-    const chip = await screen.findByText('@former member');
+    const chip = await screen.findByText('@former account');
     expect(chip.classList.contains('former')).toBe(true);
     expect(document.body.textContent).not.toContain(HEX);
     void core;
