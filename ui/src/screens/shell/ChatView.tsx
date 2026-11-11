@@ -3,15 +3,16 @@ import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { useStore } from '../../app/store';
 import { isCoreError, useCore, type Member, type Message, type ServerSummary } from '../../core';
-import { Dialog, Name, RICH } from '../../components/common';
+import { Avatar, Code, Dialog, Name, RICH } from '../../components/common';
 import { BackIcon, CloseIcon, EditIcon, HashIcon, ReplyIcon, SendIcon, UsersIcon, WifiOffIcon } from '../../components/icons';
 import { useUserTextProps } from '../../app/textDir';
+import { mentionQuery, toDisplay, toTokens } from '../../app/mentions';
 import { BODY_MAX, BODY_MAX_BYTES, isHeld } from '../../core/sanitize';
 
 /** The character counter shows from here on (B6/QA-17 acceptance: 3,800). */
 const COUNTER_FROM = 3800;
 const utf8 = new TextEncoder();
-import { MessageList } from './MessageList';
+import { MemberNames, MessageList } from './MessageList';
 
 const NO_MEMBERS: Member[] = [];
 
@@ -146,6 +147,7 @@ export function ChatView({
           </span>
         </div>
       )}
+      <MemberNames.Provider value={memberMap}>
       <MessageList
         key={channelId}
         unread={unread}
@@ -161,6 +163,7 @@ export function ChatView({
         onDelete={onDelete}
         onRetry={onRetry}
       />
+      </MemberNames.Provider>
       {server.closed ? (
         // Closed by its owner (#261): read-only until it is removed 30 days later.
         <div className="closed-banner" role="status">
@@ -168,6 +171,8 @@ export function ChatView({
         </div>
       ) : (
         <Composer
+          members={members}
+          myId={myId}
           channelName={channelName}
           replyTo={replyTo}
           replyName={replyTo ? (memberMap.get(replyTo.authorId)?.displayName ?? '') : ''}
@@ -217,6 +222,8 @@ export function ChatView({
 }
 
 function Composer({
+  members,
+  myId,
   channelName,
   replyTo,
   replyName,
@@ -225,6 +232,8 @@ function Composer({
   onEditLast,
   onSubmit,
 }: {
+  members: Member[];
+  myId: string;
   channelName: string;
   replyTo: Message | null;
   replyName: string;
@@ -239,12 +248,34 @@ function Composer({
   const textProps = useUserTextProps(text);
   const draft = useRef('');
   const ref = useRef<HTMLTextAreaElement>(null);
+  // G-24: "@Name" in the box ↔ <@id> in the body. The box never shows raw ids.
+  const mentionMap = useRef(new Map<string, string>());
+  const nameOf = (id: string) => members.find((m) => m.id === id)?.displayName || undefined;
+  const unknownName = intl.formatMessage({ id: 'mention.unknown' });
+  const [suggest, setSuggest] = useState<{ start: number; query: string; index: number } | null>(null);
+  const matches = suggest
+    ? members
+        .filter((m) => m.id !== myId && m.displayName && m.displayName.toLowerCase().includes(suggest.query.toLowerCase()))
+        .slice(0, 6)
+    : [];
+  const pick = (m: Member) => {
+    const el = ref.current;
+    if (!suggest || !el) return;
+    const shown = `@${m.displayName}`;
+    mentionMap.current.set(shown, `<@${m.id}>`);
+    const caret = el.selectionStart ?? text.length;
+    const next = text.slice(0, suggest.start) + shown + ' ' + text.slice(caret);
+    setText(next);
+    setSuggest(null);
+    const at = suggest.start + shown.length + 1;
+    requestAnimationFrame(() => el.setSelectionRange(at, at));
+  };
 
   // Entering edit mode swaps the draft out and the message text in.
   useEffect(() => {
     if (editing) {
       draft.current = text;
-      setText(editing.body);
+      setText(toDisplay(editing.body, nameOf, unknownName, mentionMap.current));
     } else if (draft.current) {
       setText(draft.current);
       draft.current = '';
@@ -275,7 +306,7 @@ function Composer({
   const [failed, setFailed] = useState<'no-key' | 'not-yet' | 'other' | null>(null);
 
   const submit = async () => {
-    const body = text.trim();
+    const body = toTokens(text.trim(), mentionMap.current);
     if (!body || tooLong) return;
     setFailed(null);
     if (!editing) setText('');
@@ -284,7 +315,7 @@ function Composer({
       if (editing) setText('');
     } catch (e) {
       // The core refused it: give the text back instead of losing it.
-      setText((t) => t || body);
+      setText((t) => t || toDisplay(body, nameOf, unknownName, mentionMap.current));
       const code = isCoreError(e) ? e.code : null;
       setFailed(code === 'not-allowed' ? 'no-key' : code === 'not-implemented' ? 'not-yet' : 'other');
     }
@@ -318,6 +349,26 @@ function Composer({
           </button>
         </div>
       )}
+      {matches.length > 0 && suggest && (
+        <ul id="mention-suggestions" className="mention-suggestions" role="listbox" aria-label={intl.formatMessage({ id: 'mention.suggestions' })}>
+          {matches.map((m, i) => (
+            <li
+              key={m.id}
+              id={`mention-${m.id}`}
+              role="option"
+              aria-selected={i === suggest.index % matches.length}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                pick(m);
+              }}
+            >
+              <Avatar name={m.displayName} color={m.avatarColor} size={20} />
+              <Name>{m.displayName}</Name>
+              <Code value={m.shortCode} />
+            </li>
+          ))}
+        </ul>
+      )}
       <form
         className="composer-row"
         onSubmit={(e) => {
@@ -334,11 +385,35 @@ function Composer({
           value={text}
           placeholder={intl.formatMessage({ id: 'chat.composer' }, { channel: channelName })}
           aria-label={intl.formatMessage({ id: 'chat.composer' }, { channel: channelName })}
+          aria-controls="mention-suggestions"
+          aria-autocomplete="list"
+          aria-activedescendant={matches.length ? `mention-${matches[suggest!.index % matches.length].id}` : undefined}
           onChange={(e) => {
             setFailed(null);
             setText(e.target.value);
+            const q = mentionQuery(e.target.value, e.target.selectionStart ?? e.target.value.length);
+            setSuggest(q ? { ...q, index: 0 } : null);
           }}
           onKeyDown={(e) => {
+            // G-24: the suggestion list takes the arrows, Enter / Tab and Esc while open.
+            if (matches.length && suggest) {
+              if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                const d = e.key === 'ArrowDown' ? 1 : -1;
+                setSuggest({ ...suggest, index: (suggest.index + d + matches.length) % matches.length });
+                return;
+              }
+              if ((e.key === 'Enter' || e.key === 'Tab') && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                pick(matches[suggest.index % matches.length]);
+                return;
+              }
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                setSuggest(null);
+                return;
+              }
+            }
             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               void submit();

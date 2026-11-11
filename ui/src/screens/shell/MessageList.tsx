@@ -2,11 +2,12 @@
 // exist in the DOM, so a channel with 100,000 messages scrolls like one with 50.
 
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { memo, useCallback, useMemo, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { createContext, Fragment, memo, useCallback, useContext, useMemo, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
 import type { MessageWindow } from '../../app/store';
 import type { Member, Message } from '../../core';
 import { isHeld } from '../../core/sanitize';
+import { MENTION, splitMentions } from '../../app/mentions';
 import { Avatar, Code, Name } from '../../components/common';
 import {
   AlertIcon,
@@ -447,7 +448,7 @@ const MessageRow = memo(function MessageRow({
           <ReplyIcon />
           <Name>{replyAuthor ? displayName(replyAuthor) : '…'}</Name>
           <span dir={textDir(m.replyTo.excerpt, uiDir)} className="reply-excerpt user-text">
-            {m.replyTo.excerpt || intl.formatMessage({ id: 'chat.deleted' })}
+            {m.replyTo.excerpt ? <MentionText text={m.replyTo.excerpt} message={m} plain /> : intl.formatMessage({ id: 'chat.deleted' })}
           </span>
         </button>
       )}
@@ -477,7 +478,7 @@ const MessageRow = memo(function MessageRow({
           <p className="msg-body">
             {lines.map((l, i) => (
               <span key={i} className="msg-line user-text" dir={l.dir}>
-                {l.text}
+                <MentionText text={l.text} message={m} />
                 {m.editedAt && i === lines.length - 1 && (
                   <>
                     {' '}
@@ -590,5 +591,38 @@ function HeldStateView({ message, onRetry, tab }: { message: Message; onRetry: (
       <ClockIcon />
       <FormattedMessage id="chat.state.held" />
     </span>
+  );
+}
+
+/** Who the message list can name: the server's members, for mention chips (G-24). */
+export const MemberNames = createContext<Map<string, Member>>(new Map());
+
+/**
+ * Text with its <@id> mention tokens shown as "@Name" from the member list. A
+ * token for someone who isn't a member now (not in the core's `mentions`, or
+ * unknown here) shows as a neutral former-member chip. Raw ids never show.
+ * `plain`: names only, no chip styling (reply excerpts); a cut-off token goes.
+ */
+function MentionText({ text, message, plain = false }: { text: string; message: Message; plain?: boolean }) {
+  const members = useContext(MemberNames);
+  const intl = useIntl();
+  const clean = plain ? text.replace(/<@[^>]*$/, '') : text;
+  if (!MENTION.test(clean)) return <>{clean}</>;
+  MENTION.lastIndex = 0;
+  return (
+    <>
+      {splitMentions(clean).map((p, i) => {
+        if ('text' in p) return <Fragment key={i}>{p.text}</Fragment>;
+        const member = members.get(p.mention);
+        const current = member && (!message.mentions || message.mentions.includes(p.mention));
+        const name = current ? member.displayName : intl.formatMessage({ id: 'mention.unknown' });
+        if (plain) return <bdi key={i}>@{name}</bdi>;
+        return (
+          <bdi key={i} className={`mention-chip ${current ? '' : 'former'}`}>
+            @{name}
+          </bdi>
+        );
+      })}
+    </>
   );
 }

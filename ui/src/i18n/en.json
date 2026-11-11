@@ -124,6 +124,8 @@
   "unread.jump": "{count, plural, one {# new message} other {# new messages}} · Jump",
   "unread.markRead": "Mark as read",
   "mentions.label": "{count, plural, one {# mention} other {# mentions}}",
+  "mention.unknown": "former member",
+  "mention.suggestions": "Mention suggestions",
   "update.ready": "Update ready – restart",
   "update.waitingForCall": "Update ready – installs when the call ends",
   "update.installed": "Updated to version \u2068{version}\u2069",

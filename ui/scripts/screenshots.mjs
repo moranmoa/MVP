@@ -625,6 +625,25 @@ for (const [channel, name, wait] of [
   await p.close();
 }
 
+// ---- G-24: mentions (350-359) -------------------------------------------------
+{
+  const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999', 'x');
+  const box = p.getByRole('textbox', { name: /כתיבה ב/ });
+  await box.fill('');
+  await box.pressSequentially('מי בא הערב @א');
+  await p.locator('.mention-suggestions').waitFor();
+  await shot(p, '350-mention-suggestions-he');
+  await box.press('Enter');
+  await box.pressSequentially('?');
+  await box.press('Enter');
+  await box.fill(`תודה ל-<@${'b'.repeat(64)}> על המפה`);
+  await box.press('Enter');
+  await p.locator('.mention-chip.former').waitFor();
+  await p.waitForTimeout(400);
+  await shot(p, '351-mention-chips-he');
+  await p.close();
+}
+
 // ---- security demo: what other people could send ---------------------------
 {
   const p = await chat('?demo=1&hostile=1&still=1&lang=he&theme=light&update=999999', 'x');

@@ -3053,3 +3053,43 @@ input.switch:disabled {
 .unread-bar .icon-button {
   color: inherit;
 }
+
+/* G-24: mentions. */
+.mention-chip {
+  padding: 0 0.25em;
+  border-radius: 0.25rem;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.mention-chip.former {
+  background: var(--bg-hover);
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.mention-suggestions {
+  margin: 0 0.75rem 0.25rem;
+  padding: 0.25rem;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  background: var(--bg-elevated);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 0.12);
+}
+
+.mention-suggestions li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--radius-s);
+  cursor: pointer;
+}
+
+.mention-suggestions li[aria-selected='true'],
+.mention-suggestions li:hover {
+  background: var(--bg-active);
+}
