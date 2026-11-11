@@ -15,6 +15,7 @@ Never put the relay domain or any IP address here.
 ### New
 - **Voice rooms:** click "Join chat" in a server to open a new voice room. Live rooms show in the channel list with who is in them and who hosts. The room's owner can rename it and set how many people may join (2 to 5). A server can have up to 10 rooms at once, and you can be in one room at a time.
 - **Backup on the relay (groundwork):** the relay can now keep an encrypted backup of your servers, the first step towards restoring them on a new device. The relay can't read it. It starts working once the relay is updated.
+- **Faster update notices:** MVS now checks for updates every hour (was every 6 hours), so a new version shows up sooner.
 
 ### Known
 - **Everyone needs 0.4.4 for voice.** Voice rooms use a new call format, so people on 0.4.3 or older can't join calls with people on 0.4.4. Please update.
