@@ -59,7 +59,7 @@ side() { # role
   docker run -d --name "$P-$1" --network "$net" -e ROLE="$1" -e MODE="$MODE" -e RELAY_ONLY="${RELAY_ONLY:-}" -e JOIN_TIMEOUT="${JOIN_TIMEOUT:-120}" -e PRESERVERS="${PRESERVERS:-0}" -e MSGS="${MSGS:-0}" -e ROUNDS="${ROUNDS:-1}" \
     -e MVS_RELAY="/dns4/relay/tcp/4001/p2p/$relay_id" \
     -v "$(mount "$rv/$1"):/core:ro" -v "$(mount "$here"):/qa:ro" -v "$(mount "$rv/rv"):/rendezvous" \
-    mvs-voice-e2e-app sh -c "chmod 777 /rendezvous; runuser -u pwuser -- dbus-run-session -- sh -c 'echo -n test | gnome-keyring-daemon --unlock --components=secrets >/dev/null && node /qa/join.mjs'" >/dev/null
+    mvs-voice-e2e-app sh -c "chmod 777 /rendezvous; runuser -u pwuser -- dbus-run-session -- sh -c 'echo -n test | gnome-keyring-daemon --unlock --components=secrets >/dev/null && node /qa/${SCRIPT:-join.mjs}'" >/dev/null
 }
 side a
 # QUIET_START=1: the joiner starts only once the owner has made its servers,
@@ -76,7 +76,7 @@ done
 docker logs "$P-relay" 2>&1 | mask > "$rv/relay.log"
 rm -f "$rv"/rv/core-*.log
 echo "== owner $OWNER, joiner $JOINER, mode $MODE, same LAN ${SAME_LAN:-no}, relay-only ${RELAY_ONLY:-none} ($rv)"
-grep -hE "core |restored|pre-created|JOINED|HANG|FAIL|members now" "$rv/b.log" "$rv/a.log"
+grep -hE "core |restored|pre-created|JOINED|HANG|FAIL|PASS|members now|reports" "$rv/b.log" "$rv/a.log"
 # Pull refusals, logged on the side that answers (sync's answer limits).
 for r in a b; do
   f="$rv/core-$r.log"
