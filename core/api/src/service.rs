@@ -15,6 +15,7 @@ use records::{ChannelId, Draft, Kind, PublicKey, Record, RecordId, Scope, Server
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+use crate::backup;
 use crate::chat;
 use crate::db::Db;
 use crate::model::{self, GenesisBody, Log, ServerView};
@@ -54,6 +55,18 @@ pub fn stored_relay_only(db_path: &Path) -> bool {
     }
 }
 const KV_RECOVERY_CHALLENGE: &str = "recovery-challenge";
+/// Restore servers (#291): my servers as the backup last saw them, server
+/// ID (hex) to when this device first listed it. Not secret.
+const KV_BACKUP_KNOWN: &str = "backup-known";
+/// Restore servers: a restore still has servers to rejoin from the backup.
+const KV_BACKUP_PENDING: &str = "backup-pending";
+/// Restore servers: a fingerprint of the server set last backed up, and
+/// when it was last put (u64le ms).
+const KV_BACKUP_WRITTEN: &str = "backup-written";
+const KV_BACKUP_PUT_AT: &str = "backup-put-at";
+/// Restore servers: an unchanged backup is put again this often (design
+/// §4), so holders keep it and copies heal.
+pub const BACKUP_REPUBLISH_MS: u64 = 24 * 3_600_000;
 
 pub struct Config {
     /// `None` keeps everything in memory (tests).
@@ -248,6 +261,8 @@ pub struct Core {
     db_path: Option<PathBuf>,
     /// Signed out: the shell restarts the core, which finishes the wipe.
     signed_out: AtomicBool,
+    /// Restore servers: the first sync round after start backs up (login).
+    backup_started: AtomicBool,
 }
 
 struct PendingJoin {
@@ -408,6 +423,7 @@ impl Core {
             pending_joins: Mutex::default(),
             db_path: config.db_path,
             signed_out: AtomicBool::new(false),
+            backup_started: AtomicBool::new(false),
         })
     }
 
@@ -669,7 +685,7 @@ impl Core {
         words: Vec<String>,
         input: Option<NewIdentityInput>,
     ) -> CoreResult<Identity> {
-        self.run(|inner, ports, _| {
+        let identity = self.run(|inner, ports, _| {
             if inner.me.is_some() {
                 return Err(ErrorCode::NotAllowed.into());
             }
@@ -693,7 +709,89 @@ impl Core {
             inner.me = Some(me);
             unlock_cipher(ports, inner.me.as_ref());
             Ok(identity)
-        })
+        })?;
+        // Restore servers (#291 phase A): my backup on the network brings
+        // my servers back, rejoined as the same member (the #290 path).
+        self.lock().db.set(KV_BACKUP_PENDING, b"1")?;
+        self.restore_from_backup();
+        Ok(identity)
+    }
+
+    /// Restore servers (#291 phase A): fetches my backup from the holders,
+    /// keeps the newest valid one, and rejoins each live server I don't have
+    /// yet as the same member (`Inner::join`: no new join, nothing posted
+    /// over what the server holds). A server it lists that no longer has
+    /// me as a member isn't entered (a stale backup can't undo a leave or a
+    /// kick). Servers nobody can be reached for are tried again each sync
+    /// round until all are in.
+    fn restore_from_backup(&self) {
+        let Some(keys) = self.lock().me.as_ref().map(|me| me.identity.backup_keys()) else {
+            return;
+        };
+        let answers = self.ports.network.fetch_backup(keys.tag());
+        let Some(plain) = backup::newest(&keys, &answers) else { return };
+        let mut waiting = false;
+        for (id, entry) in plain.servers.iter().filter(|(_, e)| e.live()) {
+            let (Some(server), Some(secret)) = (
+                model::parse_hex32(id).map(ServerId::from_bytes),
+                model::parse_hex32(&entry.secret).map(Zeroizing::new),
+            ) else {
+                continue;
+            };
+            if self.lock().db.has_server(server).unwrap_or(true) {
+                continue;
+            }
+            let fetched = self.open_and_fetch(server, &secret);
+            let status = self.run(|inner, ports, events| {
+                // No invite: a member I still am needs none; anyone else is
+                // refused by authority and nothing is stored or sent.
+                let none = RecordId::from_bytes([0; 32]);
+                inner.join(ports, server, none, &secret, "", fetched, events)
+            });
+            match status {
+                Ok(JoinStatus::NobodyOnline { .. }) => waiting = true,
+                Ok(JoinStatus::Joined { .. }) => {}
+                _ => {
+                    let _ = self.close_candidate(server);
+                }
+            }
+        }
+        if !waiting {
+            let _ = self.lock().db.delete(KV_BACKUP_PENDING);
+        }
+    }
+
+    /// One backup round (Tech Lead on #317): decide under the lock, fetch
+    /// outside it, merge and seal under it, put outside it. Nothing at all
+    /// happens on a round with nothing due (`Inner::backup_due`).
+    fn backup_round(&self) {
+        let now = self.ports.clock.now_ms();
+        let login = !self.backup_started.load(Ordering::SeqCst);
+        let tag = {
+            let inner = self.lock();
+            match inner.backup_due(now, login) {
+                Ok(true) => inner.me.as_ref().map(|me| me.identity.backup_keys().tag()),
+                Ok(false) => None,
+                Err(e) => {
+                    eprintln!("mvs-core: the server backup wasn't checked: {:?}", e.code);
+                    None
+                }
+            }
+        };
+        let Some(tag) = tag else {
+            if login && self.lock().me.is_some() {
+                self.backup_started.store(true, Ordering::SeqCst);
+            }
+            return;
+        };
+        let answers = self.ports.network.fetch_backup(tag);
+        let blob = self.lock().backup_merge(now, &answers);
+        match blob {
+            Ok(Some(blob)) => self.ports.network.put_backup(tag, &blob),
+            Ok(None) => {}
+            Err(e) => eprintln!("mvs-core: the server backup wasn't written: {:?}", e.code),
+        }
+        self.backup_started.store(true, Ordering::SeqCst);
     }
 
     pub fn update_profile(&self, input: ProfileInput) -> CoreResult<Identity> {
@@ -1174,6 +1272,93 @@ impl Core {
         let json = self.channel_json(server, channel)?;
         self.ports.events.emit(&Event::ChannelUpdated(json.clone()));
         Ok(json)
+    }
+
+    /// G-11 `moveChannel(serverId, channelId, before?, after?)`: owner and
+    /// admin only (`not-allowed`). Puts the channel right before `before`,
+    /// or right after `after`, or last with neither; both must agree (the
+    /// two neighbours of one gap), else `bad-request`, as for a neighbour
+    /// that isn't a live channel of the server. One signed channel-order
+    /// post: a key between the new neighbours', or, when a neighbour has no
+    /// key yet or the key would pass 32 characters, keys for every channel
+    /// in the new order (a rebalance). Returns the channels in order, and
+    /// emits `channel.updated` for each one whose position changed.
+    pub fn move_channel(
+        &self,
+        server_id: &str,
+        channel_id: &str,
+        before: Option<&str>,
+        after: Option<&str>,
+    ) -> CoreResult<Vec<Channel>> {
+        let server = parse_server(server_id)?;
+        let parse = |id: &str| model::parse_hex32(id).map(ChannelId::from_bytes);
+        let channel = parse(channel_id).ok_or(ErrorCode::NotFound)?;
+        let (moved, positions) = {
+            let mut inner = self.lock();
+            inner.load_mine(server)?;
+            let me = inner.me.as_ref().map(Me::key).ok_or(ErrorCode::NotFound)?;
+            let view = inner.view(server)?;
+            if view.state.role(me) < authority::Role::Admin {
+                return Err(ErrorCode::NotAllowed.into());
+            }
+            if !view.state.channels.contains_key(&channel) {
+                return Err(ErrorCode::NotFound.into());
+            }
+            let positions = view.channel_positions();
+            let mut order: Vec<ChannelId> = view.ordered_channels();
+            order.retain(|c| *c != channel);
+            let neighbour = |id: Option<&str>| -> CoreResult<Option<ChannelId>> {
+                id.map(|id| {
+                    parse(id)
+                        .filter(|c| order.contains(c))
+                        .ok_or_else(|| CoreError::from(ErrorCode::BadRequest))
+                })
+                .transpose()
+            };
+            let (before, after) = (neighbour(before)?, neighbour(after)?);
+            let at = match (before, after) {
+                (Some(b), Some(a)) => {
+                    let b_at = order.iter().position(|c| *c == b).expect("checked");
+                    if b_at == 0 || order[b_at - 1] != a {
+                        return Err(ErrorCode::BadRequest.into());
+                    }
+                    b_at
+                }
+                (Some(b), None) => order.iter().position(|c| *c == b).expect("checked"),
+                (None, Some(a)) => order.iter().position(|c| *c == a).expect("checked") + 1,
+                (None, None) => order.len(),
+            };
+            order.insert(at, channel);
+            let prev = at.checked_sub(1).map(|i| order[i]);
+            let next = order.get(at + 1).copied();
+            let key_of = |c: Option<ChannelId>| -> Option<Option<&String>> {
+                match c {
+                    None => Some(None),
+                    Some(c) => positions.get(&c).map(Some),
+                }
+            };
+            let single = match (key_of(prev), key_of(next)) {
+                (Some(lo), Some(hi)) if lo.is_none_or(|lo| hi.is_none_or(|hi| lo < hi)) => {
+                    let key = model::key_between(lo.map(String::as_str), hi.map(String::as_str));
+                    (key.len() <= model::POSITION_MAX).then_some(key)
+                }
+                _ => None,
+            };
+            let moved: BTreeMap<ChannelId, String> = match single {
+                Some(key) => BTreeMap::from([(channel, key)]),
+                None => order.iter().copied().zip(model::spread_keys(order.len())).collect(),
+            };
+            (moved, positions)
+        };
+        self.control_action(server_id, model::channel_order_action(&moved))?;
+        let list = self.list_channels(server_id)?;
+        for json in &list {
+            let id = parse(&json.id).expect("own hex");
+            if moved.get(&id).is_some_and(|key| positions.get(&id) != Some(key)) {
+                self.ports.events.emit(&Event::ChannelUpdated(json.clone()));
+            }
+        }
+        Ok(list)
     }
 
     /// B11: the owner deletes a channel; never #general (`not-allowed`).
@@ -1702,6 +1887,14 @@ impl Core {
     pub fn sync_now(&self) -> CoreResult<()> {
         self.retry_joins();
         self.flush_leaves();
+        // A restore still waiting on servers nobody could be reached for.
+        if self.lock().db.get(KV_BACKUP_PENDING).ok().flatten().is_some() {
+            self.restore_from_backup();
+        }
+        // Restore servers (#291 phase A): my server list, backed up when it
+        // changed, at login, or every 24 h; the network calls run outside
+        // the core lock.
+        self.backup_round();
         let servers = {
             let mut inner = self.lock();
             if inner.me.is_none() {
@@ -2159,6 +2352,88 @@ impl Inner {
             })?;
         }
         Ok(due)
+    }
+
+    /// My servers for the backup: server ID (hex) to sync secret (hex), not
+    /// closed.
+    fn backup_set(&self) -> CoreResult<BTreeMap<String, String>> {
+        let mut current = BTreeMap::new();
+        for server in self.db.servers()? {
+            if self.db.closed_at(server)?.is_some() {
+                continue;
+            }
+            if let Some(secret) = self.secret(server)? {
+                current.insert(model::hex_id(server.as_bytes()), hex::encode(*secret));
+            }
+        }
+        Ok(current)
+    }
+
+    fn backup_fingerprint(current: &BTreeMap<String, String>) -> Vec<u8> {
+        let json = serde_json::to_vec(current).expect("plain map");
+        blake3::derive_key("mvs/backup-written/v1", &json).to_vec()
+    }
+
+    /// Restore servers (#291 phase A, Tech Lead on #317): a write is due
+    /// only when my server set changed since the last one, on the first
+    /// round after start (`login`), or [`BACKUP_REPUBLISH_MS`] after the
+    /// last. Otherwise a round fetches and puts nothing.
+    fn backup_due(&self, now: u64, login: bool) -> CoreResult<bool> {
+        if self.me.is_none() {
+            return Ok(false);
+        }
+        let changed = self.db.get(KV_BACKUP_WRITTEN)?.as_deref()
+            != Some(Self::backup_fingerprint(&self.backup_set()?).as_slice());
+        let last = self
+            .db
+            .get(KV_BACKUP_PUT_AT)?
+            .and_then(|v| v.try_into().ok())
+            .map(u64::from_le_bytes)
+            .unwrap_or(0);
+        Ok(login || changed || now.saturating_sub(last) >= BACKUP_REPUBLISH_MS)
+    }
+
+    /// My server list merged into the newest of `answers` (fetched outside
+    /// the lock): servers I'm in are live; servers this device listed
+    /// before and no longer has (left, kicked, closed, purged) get a
+    /// tombstone; what my other devices wrote is kept. Sealed as the next
+    /// version, to be put outside the lock. `None`: nothing to back up.
+    fn backup_merge(&mut self, now: u64, answers: &[Vec<u8>]) -> CoreResult<Option<Vec<u8>>> {
+        let Some(keys) = self.me.as_ref().map(|me| me.identity.backup_keys()) else {
+            return Ok(None);
+        };
+        let mut known: BTreeMap<String, u64> = self
+            .db
+            .get(KV_BACKUP_KNOWN)?
+            .and_then(|json| serde_json::from_slice(&json).ok())
+            .unwrap_or_default();
+        let current = self.backup_set()?;
+        let remote = backup::newest(&keys, answers);
+        if remote.is_none() && current.is_empty() && known.is_empty() {
+            return Ok(None);
+        }
+        let remote = remote.unwrap_or_default();
+        let mut plain = remote.clone();
+        for (id, secret) in &current {
+            let joined_at = *known.entry(id.clone()).or_insert(now);
+            let mut ours = backup::Plain::default();
+            ours.servers.insert(id.clone(), backup::Entry { secret: secret.clone(), joined_at, gone_at: None });
+            plain.merge(&ours);
+        }
+        for id in known.keys().filter(|id| !current.contains_key(*id)) {
+            if let Some(entry) = plain.servers.get_mut(id) {
+                if entry.live() {
+                    entry.gone_at = Some(now.max(entry.joined_at + 1));
+                }
+            }
+        }
+        known.retain(|id, _| current.contains_key(id));
+        plain.version = remote.version + 1;
+        let blob = backup::seal(&keys, &plain).map_err(|_| ErrorCode::Internal)?;
+        self.db.set(KV_BACKUP_KNOWN, &serde_json::to_vec(&known).expect("plain map"))?;
+        self.db.set(KV_BACKUP_WRITTEN, &Self::backup_fingerprint(&current))?;
+        self.db.set(KV_BACKUP_PUT_AT, &now.to_le_bytes())?;
+        Ok(Some(blob))
     }
 
     /// Each sync round: a raise whose 30 days are up takes effect, and its
@@ -3323,6 +3598,7 @@ impl ServerView<'_> {
     /// TODO(#116): hide 18+ channels from members without an 18+ claim.
     fn channels(&self, me: Option<PublicKey>) -> Vec<Channel> {
         let server_id = model::hex_id(self.id.as_bytes());
+        let positions = self.channel_positions();
         let channel = |id: ChannelId, name: &str, adult: bool, general: bool| Channel {
             id: model::hex_id(id.as_bytes()),
             server_id: server_id.clone(),
@@ -3331,18 +3607,34 @@ impl ServerView<'_> {
             unread: false,
             mentions: 0,
             is_default: general,
+            position: positions.get(&id).cloned(),
         };
         if self.state.channels.is_empty() && self.state.deleted_channels.is_empty() {
             return vec![channel(model::default_channel(self.id), model::GENERAL, false, true)];
         }
         // B7: 18+ channels only for members with an accepted 18+ claim.
         let adult = me.is_some_and(|me| self.state.adults.contains(&me));
-        self.state
-            .channels
-            .iter()
+        self.ordered_channels()
+            .into_iter()
+            .filter_map(|id| self.state.channels.get(&id).map(|c| (id, c)))
             .filter(|(_, c)| adult || !c.adult)
-            .map(|(id, c)| channel(*id, &c.name, c.adult, c.general))
+            .map(|(id, c)| channel(id, &c.name, c.adult, c.general))
             .collect()
+    }
+
+    /// G-11: every live channel in order. Placed ones first, by key (then
+    /// ID, for keys two admins happened to pick alike); the rest after, in
+    /// today's order.
+    fn ordered_channels(&self) -> Vec<ChannelId> {
+        let positions = self.channel_positions();
+        let mut ids: Vec<ChannelId> = self.state.channels.keys().copied().collect();
+        ids.sort_by(|a, b| match (positions.get(a), positions.get(b)) {
+            (Some(x), Some(y)) => x.cmp(y).then(a.cmp(b)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+        ids
     }
 }
 

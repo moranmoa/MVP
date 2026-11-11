@@ -78,8 +78,9 @@ describe('context menus (B25)', () => {
     expect(row.getAttribute('aria-haspopup')).toBe('menu');
     fireEvent.contextMenu(row, { clientX: 10, clientY: 10 });
     expect(screen.getByRole('menu', { name: 'Actions for ⁨#clips⁩' })).toBeTruthy();
-    expect(menuItems()).toEqual(['Mark as read', 'Rename', 'Copy channel ID', 'Delete channel']);
-    expect(screen.getAllByRole('separator').length).toBe(2);
+    // G-11: the owner's move items have their own group, before Delete.
+    expect(menuItems()).toEqual(['Mark as read', 'Rename', 'Copy channel ID', 'Move up', 'Move down', 'Delete channel']);
+    expect(screen.getAllByRole('separator').length).toBe(3);
     expect(document.activeElement?.textContent).toBe('Mark as read');
 
     fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
@@ -87,14 +88,14 @@ describe('context menus (B25)', () => {
     await waitFor(() => expect(document.activeElement).toBe(row));
   });
 
-  it('#general has no delete; the arrows wrap and skip the separator', async () => {
+  it('#general has no delete; the arrows wrap and skip the separators', async () => {
     const { channels } = await setup();
     const row = within(channels()).getByRole('button', { name: /^כללי/ });
     // Shift+F10 opens the same menu by the row.
     fireEvent.keyDown(row, { key: 'F10', shiftKey: true });
-    expect(menuItems()).toEqual(['Rename', 'Copy channel ID']);
+    expect(menuItems()).toEqual(['Rename', 'Copy channel ID', 'Move down']); // first in the list: no Move up
     fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp' });
-    expect(document.activeElement?.textContent).toBe('Copy channel ID');
+    expect(document.activeElement?.textContent).toBe('Move down');
     fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
     expect(document.activeElement?.textContent).toBe('Rename');
   });
@@ -164,13 +165,13 @@ describe('context menus (B25)', () => {
     const rail = screen.getByRole('navigation', { name: /servers/i });
     const owned = within(rail).getAllByRole('button').find((b) => b.getAttribute('aria-current') === 'page')!;
     fireEvent.contextMenu(owned);
-    expect(menuItems()).toEqual(['Copy invite link', 'Server settings']);
+    expect(menuItems()).toEqual(['Copy invite link', 'Server settings', 'Move down']); // first in the rail (G-01)
     fireEvent.click(screen.getByRole('menuitem', { name: 'Server settings' }));
     expect(screen.getByRole('tab', { name: 'General' })).toBeTruthy();
     fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
 
     fireEvent.contextMenu(within(rail).getByRole('button', { name: /^Minecraft IL/ }));
-    expect(menuItems()).toEqual(['Copy invite link', 'Leave server']);
+    expect(menuItems()).toEqual(['Copy invite link', 'Leave server', 'Move up', 'Move down']);
   });
 });
 

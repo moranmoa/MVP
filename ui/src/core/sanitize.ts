@@ -226,9 +226,14 @@ export function cleanInvite(i: Invite): Invite {
   };
 }
 
+/** G-11 (#323): an order key, base-62, 1–32 characters, never ending in 0. */
+const POSITION = /^[0-9A-Za-z]{0,31}[1-9A-Za-z]$/;
+
 export function cleanChannel(c: Channel): Channel {
+  const { position, ...rest } = c;
   return {
-    ...c,
+    ...rest,
+    ...(typeof position === 'string' && POSITION.test(position) ? { position } : {}),
     name: cleanName(c.name, CHANNEL_NAME_MAX) || '…',
     adult: c.adult === true,
     isDefault: c.isDefault === true,
@@ -404,6 +409,7 @@ export function guardCore(core: CoreApi): CoreApi {
     updateProfile: wrap(core.updateProfile, cleanIdentity),
     listServers: wrap(core.listServers, (l) => l.map(cleanServer)),
     listChannels: wrap(core.listChannels, (l) => l.map(cleanChannel)),
+    moveChannel: wrap(core.moveChannel, (l) => l.map(cleanChannel)),
     createChannel: wrap(core.createChannel, cleanChannel),
     updateChannel: wrap(core.updateChannel, cleanChannel),
     listMembers: wrap(core.listMembers, (l) => l.map(cleanMember)),

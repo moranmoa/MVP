@@ -552,6 +552,66 @@ for (const [name, opts] of [
   await p.close();
 }
 
+// ---- G-01: reorder my servers in the rail (320-329) --------------------------
+{
+  const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999', 'x');
+  const items = p.locator('.rail li[data-server-li]');
+  const third = await items.nth(2).locator('button.rail-button').boundingBox();
+  const first = await items.nth(0).locator('button.rail-button').boundingBox();
+  await p.mouse.move(third.x + third.width / 2, third.y + third.height / 2);
+  await p.mouse.down();
+  await p.mouse.move(third.x + third.width / 2, third.y + third.height / 2 - 10, { steps: 2 });
+  await p.mouse.move(first.x + first.width / 2 + 6, first.y + 6, { steps: 6 });
+  await p.locator('.rail li.drop-before').waitFor();
+  await shot(p, '320-server-order-drag-he');
+  await p.mouse.up();
+  await p.waitForTimeout(200);
+  await shot(p, '321-server-order-dropped-he');
+  await p.close();
+}
+{
+  const p = await page('?demo=1&still=1&lang=he&theme=light&update=999999', { width: 375, height: 812, phone: true });
+  const rail = p.locator('.rail');
+  await rail.locator('button[data-server-id]').first().waitFor();
+  await rail.locator('button[data-server-id]').first().dispatchEvent('contextmenu');
+  await p.getByRole('menuitem', { name: 'שינוי סדר השרתים' }).click();
+  await rail.locator('.rail-arrange').first().waitFor();
+  await p.waitForTimeout(200);
+  await shot(p, '322-server-order-phone-he');
+  await p.close();
+}
+
+// ---- G-11: the owner reorders the channels (330-339) -------------------------
+{
+  const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999', 'x');
+  const rows = p.locator('.channel-list li.channel-row');
+  const third = rows.nth(2);
+  await third.hover();
+  const handle = await third.locator('.channel-handle').boundingBox();
+  const first = await rows.nth(0).boundingBox();
+  await p.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+  await p.mouse.down();
+  await p.mouse.move(handle.x + handle.width / 2, handle.y - 10, { steps: 2 });
+  await p.mouse.move(handle.x + 40, first.y + 6, { steps: 6 });
+  await p.locator('.channel-row.drop-before').waitFor();
+  await shot(p, '330-channel-order-drag-he');
+  await p.mouse.up();
+  await p.waitForTimeout(300);
+  await shot(p, '331-channel-order-dropped-he');
+  await p.close();
+}
+{
+  const p = await page('?demo=1&still=1&lang=he&theme=light&update=999999', { width: 375, height: 812, phone: true });
+  const row = p.locator('.channel-list li.channel-row button.channel').first();
+  await row.waitFor();
+  await row.dispatchEvent('contextmenu');
+  await p.getByRole('menuitem', { name: 'שינוי סדר הערוצים' }).click();
+  await p.locator('.channel-arrange').first().waitFor();
+  await p.waitForTimeout(200);
+  await shot(p, '332-channel-order-phone-he');
+  await p.close();
+}
+
 // ---- security demo: what other people could send ---------------------------
 {
   const p = await chat('?demo=1&hostile=1&still=1&lang=he&theme=light&update=999999', 'x');

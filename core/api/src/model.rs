@@ -516,9 +516,214 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     (y, m, d)
 }
 
+// ---- G-11: channel order ---------------------------------------------------
+//
+// Tech Lead's design (side notes, g11-channel-order-design.md): a control-log
+// `Post` tagged `mvs/channel-order/v1`, like profile posts, so every version
+// accepts it and older ones ignore it. Body:
+// `{"mvs":"mvs/channel-order/v1","v":1,"pos":{"<channel hex>":"<key>"}}`.
+// Keys are fractional indexes: base-62 digits (`0-9A-Za-z`, ASCII order),
+// compared as strings, 1..=32 long, never ending in `0`.
+
+const CHANNEL_ORDER_TAG: &str = "mvs/channel-order/v1";
+/// The longest position key; a longer one means a rebalance.
+pub(crate) const POSITION_MAX: usize = 32;
+const DIGITS: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+#[derive(Serialize, Deserialize)]
+struct ChannelOrderBody {
+    mvs: String,
+    v: u32,
+    pos: BTreeMap<String, String>,
+}
+
+pub(crate) fn channel_order_action(pos: &BTreeMap<ChannelId, String>) -> Action {
+    let body = ChannelOrderBody {
+        mvs: CHANNEL_ORDER_TAG.to_owned(),
+        v: 1,
+        pos: pos.iter().map(|(id, key)| (hex_id(id.as_bytes()), key.clone())).collect(),
+    };
+    Action::Post { text: serde_json::to_string(&body).expect("plain struct") }
+}
+
+/// A well-formed position key.
+pub(crate) fn valid_position(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= POSITION_MAX
+        && key.bytes().all(|b| DIGITS.contains(&b))
+        && !key.ends_with('0')
+}
+
+fn digit(b: u8) -> u32 {
+    DIGITS.iter().position(|d| *d == b).expect("checked digit") as u32
+}
+
+/// A key strictly between `lo` and `hi` (`None`: no bound), both valid and
+/// `lo < hi`. Never ends in `0`, so there's always room before it.
+pub(crate) fn key_between(lo: Option<&str>, hi: Option<&str>) -> String {
+    let lo = lo.unwrap_or("").as_bytes();
+    let mut hi = hi.map(str::as_bytes);
+    let mut out = Vec::new();
+    for i in 0.. {
+        let l = lo.get(i).map_or(0, |b| digit(*b));
+        let h = hi.map_or(62, |hi| hi.get(i).map_or(0, |b| digit(*b)));
+        if h > l + 1 {
+            out.push(DIGITS[((l + h) / 2) as usize]);
+            break;
+        }
+        out.push(DIGITS[l as usize]);
+        if h > l {
+            // Below `hi` from here on: any larger tail fits.
+            hi = None;
+        }
+    }
+    String::from_utf8(out).expect("ascii")
+}
+
+/// `n` evenly spread keys, short (a rebalance).
+pub(crate) fn spread_keys(n: usize) -> Vec<String> {
+    let mut width = 1u32;
+    while 62u128.pow(width) <= (n as u128 + 1) * 4 {
+        width += 1;
+    }
+    let span = 62u128.pow(width);
+    (1..=n as u128)
+        .map(|i| {
+            let mut value = span * i / (n as u128 + 1);
+            let mut digits = vec![b'0'; width as usize];
+            for slot in digits.iter_mut().rev() {
+                *slot = DIGITS[(value % 62) as usize];
+                value /= 62;
+            }
+            let key = String::from_utf8(digits).expect("ascii");
+            key.trim_end_matches('0').to_owned()
+        })
+        .collect()
+}
+
+impl ServerView<'_> {
+    /// G-11: each live channel's position key. Channel-order posts count in
+    /// authority's linear order, each only if its author was owner or admin
+    /// at that record: in the state of the post's causal past (its deps and
+    /// theirs). Per channel, the last counting post wins. Deleted and
+    /// unknown channels, and bad keys, are ignored.
+    ///
+    /// Cheap against spam (Security Lead on #323): a post whose author was
+    /// never owner or admin in this server is skipped before anything is
+    /// parsed or resolved, and each resolved post's answer is remembered.
+    pub fn channel_positions(&self) -> BTreeMap<ChannelId, String> {
+        let ever_admin = self.ever_admin();
+        let by_id: HashMap<RecordId, &Record> = self.records.iter().map(|r| (r.id(), r)).collect();
+        let mut out = BTreeMap::new();
+        for id in &self.state.posts {
+            let Some(record) = by_id.get(id) else { continue };
+            if !ever_admin.contains(&record.author()) {
+                continue;
+            }
+            let Some(Action::Post { text }) = Action::from_record(record) else { continue };
+            let Ok(body) = serde_json::from_str::<ChannelOrderBody>(&text) else { continue };
+            if body.mvs != CHANNEL_ORDER_TAG || body.v != 1 {
+                continue;
+            }
+            if !self.admin_at(record, &by_id) {
+                continue;
+            }
+            for (channel, key) in body.pos {
+                let Some(channel) = parse_hex32(&channel).map(ChannelId::from_bytes) else { continue };
+                if valid_position(&key) && self.state.channels.contains_key(&channel) {
+                    out.insert(channel, key);
+                }
+            }
+        }
+        out
+    }
+
+    /// Everyone who was ever owner or admin here: the owner, and the target
+    /// of any accepted grant of admin or owner. One pass, no resolving.
+    fn ever_admin(&self) -> HashSet<PublicKey> {
+        let mut out = HashSet::from([self.owner]);
+        for record in self.records.iter().filter(|r| r.kind() == Kind::Grant) {
+            if let Some(Action::Grant { target, role }) = Action::from_record(record) {
+                if role >= authority::Role::Admin {
+                    out.insert(target);
+                }
+            }
+        }
+        out
+    }
+
+    /// `record`'s author is owner or admin in the state of its causal past.
+    /// The answer depends only on the record (its ID fixes its deps, and so
+    /// its past), so it's remembered by ID.
+    fn admin_at(&self, record: &Record, by_id: &HashMap<RecordId, &Record>) -> bool {
+        if let Some(known) = admin_cache().lock().expect("not poisoned").get(&record.id()) {
+            return *known;
+        }
+        let mut past: Vec<Record> = Vec::new();
+        let mut seen = HashSet::new();
+        let mut stack: Vec<RecordId> = record.deps().to_vec();
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            if let Some(r) = by_id.get(&id) {
+                stack.extend(r.deps().iter().copied());
+                past.push((*r).clone());
+            }
+        }
+        let state = authority::resolve(self.id, &past);
+        let admin = state.role(record.author()) >= authority::Role::Admin;
+        let mut cache = admin_cache().lock().expect("not poisoned");
+        if cache.len() >= ADMIN_CACHE_MAX {
+            cache.clear();
+        }
+        cache.insert(record.id(), admin);
+        admin
+    }
+}
+
+/// `admin_at` answers by record ID, at most this many (then it starts over).
+const ADMIN_CACHE_MAX: usize = 4096;
+
+fn admin_cache() -> &'static std::sync::Mutex<HashMap<RecordId, bool>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<RecordId, bool>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// G-11: 1,000 moves into the same gap keep every key valid and at most
+    /// 32 characters (a rebalance when the next one would pass it), and the
+    /// order always holds.
+    #[test]
+    fn position_keys_stay_short_and_ordered() {
+        let mut keys = spread_keys(4);
+        assert!(keys.windows(2).all(|w| w[0] < w[1]) && keys.iter().all(|k| valid_position(k)));
+        let mut rebalances = 0;
+        for _ in 0..1_000 {
+            // Right after the first key, before the second, again and again.
+            let key = key_between(Some(&keys[0]), Some(&keys[1]));
+            if key.len() > POSITION_MAX {
+                keys = spread_keys(keys.len());
+                rebalances += 1;
+            } else {
+                assert!(keys[0] < key && key < keys[1], "{} < {key} < {}", keys[0], keys[1]);
+                keys.insert(1, key);
+                keys.truncate(4);
+            }
+            assert!(keys.iter().all(|k| valid_position(k)), "{keys:?}");
+            assert!(keys.windows(2).all(|w| w[0] < w[1]), "{keys:?}");
+        }
+        assert!(rebalances > 0, "never needed a rebalance");
+        // Before the first and after the last, too.
+        assert!(key_between(None, Some("1")).as_str() < "1");
+        assert!("z" < key_between(Some("z"), None).as_str());
+        assert!(!valid_position("") && !valid_position("a0") && !valid_position("a-b"));
+        assert!(!valid_position(&"a".repeat(33)));
+    }
 
     #[test]
     fn civil_dates() {

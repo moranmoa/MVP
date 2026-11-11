@@ -105,6 +105,18 @@ struct UpdateChannelArgs {
     input: ChannelInput,
 }
 
+/// G-11 `moveChannel(serverId, channelId, before?, after?)`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveChannelArgs {
+    server_id: String,
+    channel_id: String,
+    #[serde(default)]
+    before: Option<String>,
+    #[serde(default)]
+    after: Option<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GrantArgs {
@@ -322,6 +334,10 @@ impl Core {
                 ok(self.update_channel(&a.channel_id, a.input.name.as_deref(), a.input.adult))
             }
             "deleteChannel" => ok(self.delete_channel(&args::<ChannelIdArg>(raw)?.channel_id)),
+            "moveChannel" => {
+                let a: MoveChannelArgs = args(raw)?;
+                ok(self.move_channel(&a.server_id, &a.channel_id, a.before.as_deref(), a.after.as_deref()))
+            }
             "listRemovedMembers" => {
                 ok(self.list_removed_members(&args::<ServerArg>(raw)?.server_id))
             }

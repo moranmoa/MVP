@@ -197,6 +197,20 @@ pub trait Network: Send + Sync {
     fn set_relay_only(&self, on: bool) {
         let _ = on;
     }
+
+    /// Restore servers, phase A (#291): hands my sealed backup to the
+    /// holders (dev-sync's `/mvs/backup/1` stores and the relay mailbox, when
+    /// they exist). Best effort; the next sync round writes again.
+    fn put_backup(&self, tag: [u8; 32], blob: &[u8]) {
+        let _ = (tag, blob);
+    }
+
+    /// Every blob reachable holders keep under `tag`: untrusted answers,
+    /// which the core checks (`backup::open`).
+    fn fetch_backup(&self, tag: [u8; 32]) -> Vec<Vec<u8>> {
+        let _ = tag;
+        Vec::new()
+    }
 }
 
 /// An envelope handle, its server and the publication served under it.
@@ -208,6 +222,8 @@ type ServedInvite = ([u8; 32], ServerId, Vec<u8>);
 pub struct LoopbackNetwork {
     records: Mutex<HashMap<ServerId, Vec<Record>>>,
     invites: Mutex<Vec<ServedInvite>>,
+    /// A holder of backups: the highest valid version per tag.
+    backups: Mutex<HashMap<[u8; 32], Vec<u8>>>,
 }
 
 impl LoopbackNetwork {
@@ -227,6 +243,27 @@ impl Network for LoopbackNetwork {
 
     fn fetch(&self, server: ServerId) -> Vec<Record> {
         self.records.lock().expect("not poisoned").get(&server).cloned().unwrap_or_default()
+    }
+
+    /// As a holder would (design §2): checked before it's kept, and only a
+    /// higher version replaces what's there.
+    fn put_backup(&self, tag: [u8; 32], blob: &[u8]) {
+        let Ok((blob_tag, version)) = crate::backup::check(blob) else { return };
+        if blob_tag != tag {
+            return;
+        }
+        let mut backups = self.backups.lock().expect("not poisoned");
+        let newer = backups
+            .get(&tag)
+            .and_then(|held| crate::backup::check(held).ok())
+            .is_none_or(|(_, held)| version > held);
+        if newer {
+            backups.insert(tag, blob.to_vec());
+        }
+    }
+
+    fn fetch_backup(&self, tag: [u8; 32]) -> Vec<Vec<u8>> {
+        self.backups.lock().expect("not poisoned").get(&tag).cloned().into_iter().collect()
     }
 
     fn serve_invite(&self, server: ServerId, handle: [u8; 32], publication: &[u8], _: bool) -> bool {

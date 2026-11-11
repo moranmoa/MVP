@@ -6,6 +6,38 @@ fails if its version has no section here. Write a section before tagging:
 `## [X.Y.Z] - YYYY-MM-DD`, then Hebrew and English (Fixed / New / Known).
 Never put the relay domain or any IP address here.
 
+## [0.3.3] - 2026-11-10
+
+### מה חדש
+- **יציאה מהחשבון במחשב הזה:** בהגדרות → חשבון. מקלידים את 12 מילות השחזור, והחשבון, השרתים וההודעות נמחקים מהמחשב הזה בלבד. החשבון עצמו לא נמחק, ואפשר לשחזר אותו עם המילים. יציאה בלי המילים דורשת אישור נוסף, כי בלעדיהן אי אפשר לשחזר את החשבון.
+- **שיחה ממחשב אחד:** אם כבר נמצאים בשיחה במחשב אחר, מופיעה הודעה שמסבירה את זה, במקום חיבור כפול.
+- **תאריך לידה בהגדרות:** בהגדרות → חשבון מוצג תאריך הלידה. תיקון שמעלה את הגיל נכנס לתוקף אחרי 30 יום, והתאריך שבו זה יקרה מוצג.
+
+### מה תוקן
+- **הצטרפות לשרת שנתקעת:** מחשב שנמצא בהרבה שרתים כבר לא מציף את המחשבים האחרים בבקשות, ולכן הצטרפות לשרת שנוצר בו לא נתקעת יותר. בבדיקות: הצטרפות בפחות משנייה גם עם 100 שרתים.
+- **שחזור וגיל:** שחזור חשבון עם תאריך לידה שמעלה את הגיל לא נותן גישה מיידית לשרתים ל-18+. יום הולדת 18 אמיתי נכנס לתוקף מיד.
+- **קובץ היומן:** שמות פנימיים כמו mvs::join נשמרים קריאים; כתובות IP עדיין מוסתרות.
+
+### ידוע
+- **שיחות קול נתמכות רשמית רק כשכל המשתתפים באותה רשת** (למשל אותו Wi-Fi).
+- בפעם הראשונה Windows עשוי לשאול אם לאפשר ל-MVS גישה לרשת. מומלץ לאשר (גם ברשתות פרטיות); בלי זה שיחות קול לא יתחברו.
+
+---
+
+### New
+- **Sign out on this computer:** in Settings → Account. You type your 12 recovery words, and the account, servers and messages are removed from this computer only. The account itself isn't deleted, and you can restore it with the words. Signing out without the words needs an extra confirmation, because without them the account can't be restored.
+- **One computer per call:** if you're already in a call on another computer, a message explains it instead of joining twice.
+- **Date of birth in Settings:** Settings → Account shows your date of birth. A correction that raises your age takes effect after 30 days, and the date it does is shown.
+
+### Fixed
+- **Joining a server that got stuck:** a computer that's in many servers no longer floods other computers with requests, so joining a server created on it doesn't get stuck anymore. In tests: joins in under a second, even with 100 servers.
+- **Restore and age:** restoring an account with a birth date that raises the age doesn't give immediate access to 18+ servers. A real 18th birthday takes effect at once.
+- **Log file:** internal names like mvs::join stay readable; IP addresses are still hidden.
+
+### Known
+- **Voice calls are officially supported only when everyone is on the same network** (for example the same Wi-Fi).
+- On first run, Windows may ask whether to allow MVS on the network. Please allow it (also on private networks); otherwise voice calls won't connect.
+
 ## [0.3.2] - 2026-11-10
 
 ### מה חדש

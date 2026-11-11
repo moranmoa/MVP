@@ -70,6 +70,11 @@ export interface Channel {
   isDefault: boolean;
   unread: boolean;
   mentions: number;
+  /**
+   * G-11 (#323): the shared order key (base-62, compared as a string). Only
+   * informative: the order is the core's list order, never a re-sort by this.
+   */
+  position?: string;
 }
 
 export type Presence = 'online' | 'offline';
