@@ -252,10 +252,14 @@ function Composer({
   const mentionMap = useRef(new Map<string, string>());
   const nameOf = (id: string) => members.find((m) => m.id === id)?.displayName || undefined;
   const unknownName = intl.formatMessage({ id: 'mention.unknown' });
+  // Where the space after the last picked mention ends: punctuation typed right there replaces that space.
+  const afterMention = useRef(-1);
   const [suggest, setSuggest] = useState<{ start: number; query: string; index: number } | null>(null);
   const matches = suggest
     ? members
         .filter((m) => m.id !== myId && m.displayName && m.displayName.toLowerCase().includes(suggest.query.toLowerCase()))
+        // Names that start with what was typed come first (UX).
+        .sort((a, b) => Number(!a.displayName.toLowerCase().startsWith(suggest.query.toLowerCase())) - Number(!b.displayName.toLowerCase().startsWith(suggest.query.toLowerCase())))
         .slice(0, 6)
     : [];
   const pick = (m: Member) => {
@@ -268,6 +272,7 @@ function Composer({
     setText(next);
     setSuggest(null);
     const at = suggest.start + shown.length + 1;
+    afterMention.current = at;
     requestAnimationFrame(() => el.setSelectionRange(at, at));
   };
 
@@ -390,7 +395,14 @@ function Composer({
           aria-activedescendant={matches.length ? `mention-${matches[suggest!.index % matches.length].id}` : undefined}
           onChange={(e) => {
             setFailed(null);
-            setText(e.target.value);
+            let value = e.target.value;
+            const at = afterMention.current;
+            afterMention.current = -1;
+            // "@Name " then "?" reads "@Name?": no space before the punctuation (UX).
+            if (at > 0 && value.length === text.length + 1 && value[at - 1] === ' ' && /^[.,!?;:)\]]$/.test(value[at] ?? '')) {
+              value = value.slice(0, at - 1) + value.slice(at);
+            }
+            setText(value);
             const q = mentionQuery(e.target.value, e.target.selectionStart ?? e.target.value.length);
             setSuggest(q ? { ...q, index: 0 } : null);
           }}

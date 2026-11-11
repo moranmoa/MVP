@@ -616,11 +616,12 @@ function MentionText({ text, message, plain = false }: { text: string; message: 
         const member = members.get(p.mention);
         const current = member && (!message.mentions || message.mentions.includes(p.mention));
         const name = current ? member.displayName : intl.formatMessage({ id: 'mention.unknown' });
-        if (plain) return <bdi key={i}>@{name}</bdi>;
+        // The @ sits inside the chip, outside the name's isolate, so it follows the line's direction (UX).
+        if (plain) return <Fragment key={i}>@<bdi>{name}</bdi></Fragment>;
         return (
-          <bdi key={i} className={`mention-chip ${current ? '' : 'former'}`}>
-            @{name}
-          </bdi>
+          <span key={i} className={`mention-chip ${current ? '' : 'former'}`}>
+            @<bdi>{name}</bdi>
+          </span>
         );
       })}
     </>

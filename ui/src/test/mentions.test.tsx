@@ -1,6 +1,6 @@
 // G-24 (#330): mention someone with "@", and see mentions as names.
 
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { App } from '../app/App';
 import { mentionQuery, splitMentions, toDisplay, toTokens } from '../app/mentions';
@@ -59,8 +59,9 @@ describe('mentions in the chat (G-24)', () => {
     expect(sent.body).toMatch(/^hey <@[^>]+> ready\?$/);
     expect(sent.mentions).toHaveLength(1);
     // Shown as a chip with the name; never the id.
-    const chip = await screen.findByText('@Tal');
-    expect(chip.classList.contains('mention-chip')).toBe(true);
+    // The @ sits inside the chip, outside the name's <bdi>.
+    await waitFor(() => expect(document.querySelector('.mention-chip')?.textContent).toBe('@Tal'));
+    expect(document.querySelector('.mention-chip bdi')?.textContent).toBe('Tal');
     expect(document.body.textContent).not.toContain(sent.mentions![0] + '>');
   });
 
@@ -70,10 +71,24 @@ describe('mentions in the chat (G-24)', () => {
     await act(async () => {
       fireEvent.keyDown(box, { key: 'Enter' });
     });
-    const chip = await screen.findByText('@former account');
-    expect(chip.classList.contains('former')).toBe(true);
+    await waitFor(() => expect(document.querySelector('.mention-chip.former')?.textContent).toBe('@former account'));
     expect(document.body.textContent).not.toContain(HEX);
     void core;
+  });
+
+  it('names that start with the query come first; punctuation right after a picked name drops the space', async () => {
+    const { box } = await setup();
+    typeIn(box, '@a');
+    const names = within(screen.getByRole('listbox')).getAllByRole('option').map((o) => o.textContent ?? '');
+    const firstContainsOnly = names.findIndex((n) => !/^a/i.test(n));
+    expect(names.slice(firstContainsOnly < 0 ? names.length : firstContainsOnly).every((n) => !/^a/i.test(n))).toBe(true);
+    typeIn(box, '@Ta');
+    await act(async () => {
+      fireEvent.keyDown(box, { key: 'Enter' });
+    });
+    expect(box.value).toBe('@Tal ');
+    typeIn(box, '@Tal ?');
+    expect(box.value).toBe('@Tal?');
   });
 
   it('Esc closes the suggestions without leaving the composer', async () => {
