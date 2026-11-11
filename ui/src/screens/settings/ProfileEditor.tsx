@@ -2,13 +2,13 @@
 // an explicit Save: a profile change goes out as a signed record to every
 // server, so saving on each keystroke would make dozens of them.
 
-import { forwardRef, useEffect, useImperativeHandle, useId, useRef, useState } from 'react';
+import { type KeyboardEvent, forwardRef, useEffect, useImperativeHandle, useId, useRef, useState } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { useAppStore } from '../../app/App';
 import { avatarFromFile, IMAGE_TYPES, smallAvatarFrom } from '../../app/image';
 import { useStore } from '../../app/store';
 import { useUserTextProps } from '../../app/textDir';
-import { Avatar, Code, Name } from '../../components/common';
+import { Avatar, Code, inkOn, Name } from '../../components/common';
 import { isCoreError, useCore } from '../../core';
 import { cleanName } from '../../core/sanitize';
 
@@ -39,7 +39,88 @@ export interface ProfileEditorHandle {
 type Draft = { name: string; bio: string; avatar?: string; color?: string };
 
 /** #359: the colour others see behind my letter when I have no picture. */
-const PALETTE = ['#5865f2', '#3ba55c', '#e67e22', '#e91e63', '#9b59b6', '#1098ad', '#d6336c', '#607d8b'];
+const PALETTE = [
+  ['#5865f2', 'blue'],
+  ['#3ba55c', 'green'],
+  ['#e67e22', 'orange'],
+  ['#e91e63', 'pink'],
+  ['#9b59b6', 'purple'],
+  ['#1098ad', 'teal'],
+  ['#d6336c', 'raspberry'],
+  ['#607d8b', 'grey'],
+] as const;
+
+/**
+ * #359: the palette is a radio group (one colour is mine): arrows move and pick,
+ * the picked one gets a ring and a tick. "Custom colour" opens the system picker
+ * and is ticked when my colour is not one of the eight.
+ */
+function ColorPicker({ value, fallback, disabled, onChange }: { value?: string; fallback: string; disabled: boolean; onChange(c: string): void }) {
+  const intl = useIntl();
+  const labelId = useId();
+  const hintId = useId();
+  const refs = useRef<(HTMLButtonElement | null)[]>([]);
+  const picked = PALETTE.findIndex(([c]) => c === value);
+  const custom = !!value && picked < 0;
+  const focusable = picked < 0 ? 0 : picked;
+  const move = (e: KeyboardEvent<HTMLElement>, i: number) => {
+    const rtl = getComputedStyle(e.currentTarget).direction === 'rtl';
+    const step = { ArrowDown: 1, ArrowUp: -1, ArrowRight: rtl ? -1 : 1, ArrowLeft: rtl ? 1 : -1 }[e.key];
+    let to: number | undefined = step === undefined ? undefined : (i + step + PALETTE.length) % PALETTE.length;
+    if (e.key === 'Home') to = 0;
+    if (e.key === 'End') to = PALETTE.length - 1;
+    if (to === undefined) return;
+    e.preventDefault();
+    onChange(PALETTE[to][0]);
+    refs.current[to]?.focus();
+  };
+  return (
+    <div className="color-picker">
+      <span className="color-picker-label" id={labelId}>
+        <FormattedMessage id="profile.color" />
+      </span>
+      <div className="color-swatches" role="radiogroup" aria-labelledby={labelId} aria-describedby={hintId}>
+        {PALETTE.map(([c, name], i) => (
+          <button
+            key={c}
+            ref={(el) => {
+              refs.current[i] = el;
+            }}
+            type="button"
+            role="radio"
+            className="color-swatch"
+            style={{ background: c, color: inkOn(c) }}
+            aria-checked={i === picked}
+            aria-label={intl.formatMessage({ id: `profile.color.${name}` })}
+            tabIndex={i === focusable ? 0 : -1}
+            disabled={disabled}
+            onClick={() => onChange(c)}
+            onKeyDown={(e) => move(e, i)}
+          >
+            {i === picked && <span aria-hidden="true">✓</span>}
+          </button>
+        ))}
+      </div>
+      <label className={`color-custom${custom ? ' is-picked' : ''}`}>
+        <span className="color-custom-dot" style={{ background: custom && value ? value : 'conic-gradient(red, yellow, lime, cyan, blue, magenta, red)', color: custom && value ? inkOn(value) : undefined }} aria-hidden="true">
+          {custom && '✓'}
+        </span>
+        <FormattedMessage id="profile.colorCustom" />
+        <input
+          type="color"
+          className="visually-hidden"
+          value={value ?? fallback}
+          disabled={disabled}
+          aria-describedby={hintId}
+          onChange={(e) => onChange(e.target.value.toLowerCase())}
+        />
+      </label>
+      <p className="muted small color-hint" id={hintId}>
+        <FormattedMessage id="profile.colorHint" />
+      </p>
+    </div>
+  );
+}
 
 /** The counter "24/32", shown from `from`; read out only when 5 or fewer are left. */
 function Counter({ value, max, from }: { value: string; max: number; from: number }) {
@@ -192,30 +273,12 @@ export const ProfileEditor = forwardRef<ProfileEditorHandle, { onDirtyChange: (d
         </p>
       )}
 
-      <fieldset className="color-picker">
-        <legend>
-          <FormattedMessage id="profile.color" />
-        </legend>
-        {PALETTE.map((c) => (
-          <button
-            key={c}
-            type="button"
-            className="color-swatch"
-            style={{ background: c }}
-            aria-pressed={draft.color === c}
-            aria-label={c}
-            title={c}
-            disabled={!!busy}
-            onClick={() => edit({ color: c })}
-          />
-        ))}
-        <label className="color-custom">
-          <span className="visually-hidden">
-            <FormattedMessage id="profile.colorCustom" />
-          </span>
-          <input type="color" value={draft.color ?? identity.avatarColor} disabled={!!busy} onChange={(e) => edit({ color: e.target.value.toLowerCase() })} />
-        </label>
-      </fieldset>
+      <ColorPicker
+        value={draft.color}
+        fallback={identity.avatarColor}
+        disabled={!!busy}
+        onChange={(color) => edit({ color })}
+      />
 
       <label className="field">
         <span>

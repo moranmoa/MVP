@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { App } from '../app/App';
 import type { Settings } from '../app/settings';
+import { inkOn } from '../components/common';
 import { MockCore } from '../core/mock';
 import { cleanHexColor, cleanMember, cleanSmallAvatar } from '../core/sanitize';
 import type { Member } from '../core/types';
@@ -53,7 +54,35 @@ describe('avatars and colours (#359)', () => {
     });
     const dialog = await screen.findByRole('dialog', { name: 'Settings' });
     await act(async () => {
-      fireEvent.click(within(dialog).getByRole('button', { name: '#e91e63' }));
+      fireEvent.click(within(dialog).getByRole('radio', { name: 'Pink' }));
+    });
+    // #362: one radio is checked and focusable, the rest are not.
+    const group = within(dialog).getByRole('radiogroup', { name: 'Colour' });
+    const pink = within(group).getByRole('radio', { name: 'Pink' });
+    expect(pink.getAttribute('aria-checked')).toBe('true');
+    expect(pink.tabIndex).toBe(0);
+    expect(within(group).getAllByRole('radio', { checked: true })).toHaveLength(1);
+    expect(group.getAttribute('aria-describedby')).toBeTruthy();
+    // Arrows move and pick (LTR: right is next).
+    act(() => {
+      pink.focus();
+      fireEvent.keyDown(pink, { key: 'ArrowRight' });
+    });
+    const purple = within(group).getByRole('radio', { name: 'Purple' });
+    expect(purple.getAttribute('aria-checked')).toBe('true');
+    expect(document.activeElement).toBe(purple);
+    act(() => {
+      fireEvent.keyDown(purple, { key: 'ArrowLeft' });
+    });
+    // A custom colour unticks the palette and ticks "Custom colour".
+    const custom = within(dialog).getByLabelText('Custom colour');
+    act(() => {
+      fireEvent.change(custom, { target: { value: '#FFD43B' } });
+    });
+    expect(within(group).queryAllByRole('radio', { checked: true })).toHaveLength(0);
+    expect(custom.closest('.color-custom')?.classList.contains('is-picked')).toBe(true);
+    act(() => {
+      fireEvent.click(within(group).getByRole('radio', { name: 'Pink' }));
     });
     await act(async () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
@@ -62,5 +91,12 @@ describe('avatars and colours (#359)', () => {
     expect(me.color).toBe('#e91e63');
     const [server] = await core.listServers();
     expect((await core.listMembers(server.id)).find((m) => m.id === me.id)?.color).toBe('#e91e63');
+  });
+
+  it('the letter is dark on light colours and white on dark ones (#362)', () => {
+    expect(inkOn('#ffd43b')).toBe('#1a1a1a');
+    expect(inkOn('#ffffff')).toBe('#1a1a1a');
+    expect(inkOn('#5865f2')).toBe('#fff');
+    expect(inkOn('#000000')).toBe('#fff');
   });
 });
