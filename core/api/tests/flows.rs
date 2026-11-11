@@ -4416,7 +4416,7 @@ impl Network for FarServers {
 }
 
 /// dev-sync on #339: a restore whose servers nobody can be reached for is
-/// retried with backoff (1 min, 2, 4, … up to 15), not every sync round,
+/// retried with backoff (1 min, 2, 4, … up to 1 h), not every sync round,
 /// and stops once every server is back.
 #[test]
 fn a_waiting_restore_backs_off() {
@@ -4452,12 +4452,15 @@ fn a_waiting_restore_backs_off() {
     assert_eq!(round(61_000), 2);
     assert_eq!(round(4 * 60_000 + 1_000), 3, "then 4");
     assert_eq!(round(8 * 60_000 + 1_000), 4, "then 8");
-    assert_eq!(round(15 * 60_000 + 1_000), 5, "then at most 15");
-    assert_eq!(round(15 * 60_000 + 1_000), 6);
+    assert_eq!(round(16 * 60_000 + 1_000), 5, "then 16");
+    assert_eq!(round(32 * 60_000 + 1_000), 6, "then 32");
+    assert_eq!(round(30 * 60_000), 6, "not yet: the wait is an hour now");
+    assert_eq!(round(30 * 60_000 + 1_000), 7, "then at most an hour");
+    assert_eq!(round(60 * 60_000 + 1_000), 8);
     // The servers can be reached: the next retry restores them, then stops.
     net.reachable.store(true, std::sync::atomic::Ordering::SeqCst);
     // (+1: the server set changed, so that round also writes the backup.)
-    assert_eq!(round(15 * 60_000 + 1_000), 8);
+    assert_eq!(round(60 * 60_000 + 1_000), 10);
     assert_eq!(laptop.core.list_servers().unwrap().len(), 1);
-    assert_eq!(round(60 * 60_000), 8, "done: no more retries");
+    assert_eq!(round(2 * 60 * 60_000), 10, "done: no more retries");
 }

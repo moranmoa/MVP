@@ -71,10 +71,10 @@ const KV_BACKUP_PUT_AT: &str = "backup-put-at";
 /// §4), so holders keep it and copies heal.
 pub const BACKUP_REPUBLISH_MS: u64 = 24 * 3_600_000;
 /// Restore servers: a restore still waiting (no backup found yet, or
-/// servers nobody could be reached for) is retried after 1 min, then 2, 4
-/// and 8, then every 15 min; back to 1 min once it's done.
+/// servers nobody could be reached for) is retried after 1 min, doubling
+/// to at most 1 h (Tech Lead); back to 1 min once it's done.
 pub const BACKUP_RETRY_FIRST_MS: u64 = 60_000;
-pub const BACKUP_RETRY_MAX_MS: u64 = 15 * 60_000;
+pub const BACKUP_RETRY_MAX_MS: u64 = 60 * 60_000;
 
 pub struct Config {
     /// `None` keeps everything in memory (tests).
@@ -274,7 +274,7 @@ pub struct Core {
     /// Restore servers: the first sync round after start backs up (login).
     backup_started: AtomicBool,
     /// Restore servers: when the next retry of a pending restore is due and
-    /// the wait after it (ms, core clock): 1 min doubling to 15 min, reset
+    /// the wait after it (ms, core clock): 1 min doubling to 1 h, reset
     /// once the restore is done.
     backup_retry: Mutex<(u64, u64)>,
 }
