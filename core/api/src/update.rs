@@ -21,9 +21,9 @@ use updater::{Baseline, Freshness, TrustRoot, UpdateDirs, Version};
 
 use crate::types::{CoreError, CoreResult, ErrorCode, UpdateChannel};
 
-/// Between background checks (design §3: every 6 h ± 30 min).
-pub const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
-pub const CHECK_JITTER: Duration = Duration::from_secs(30 * 60);
+/// Between background checks (design §3: every hour ± 5 min, owner 2026-11-11).
+pub const CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
+pub const CHECK_JITTER: Duration = Duration::from_secs(5 * 60);
 /// The first check waits for `markHealthy` (the UI is up and hears
 /// `update.ready`), or this long when it never comes.
 pub const FIRST_CHECK_AFTER: Duration = Duration::from_secs(2 * 60);

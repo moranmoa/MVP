@@ -343,7 +343,7 @@ plus a relaunch through the launcher.
 **Rules the core keeps:**
 - The first check runs once the UI is up (the first `markHealthy`, so the
   UI hears `update.ready`), or 2 minutes after start if that never comes.
-  Then every 6 h ± 30 min (jitter), and at once after `setUpdateChannel`.
+  Then every hour ± 5 min (jitter), and at once after `setUpdateChannel`.
   Each check downloads whatever is available. Downloads are never paused
   for a call: only the apply step waits. Check and download errors go to
   the log (`RUST_LOG`), never to the UI. An already staged version is
