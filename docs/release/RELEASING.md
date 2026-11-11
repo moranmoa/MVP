@@ -172,8 +172,8 @@ What this does and doesn't cover:
 PowerShell on your normal (online) PC, in the repo:
 
 0. **Write the release notes** first: a `## [X.Y.Z] - YYYY-MM-DD` section in
-   [`CHANGELOG.md`](../../CHANGELOG.md), in Hebrew and English (Fixed / New
-   / Known), merged to `main`. The draft's release notes are that section
+   [`CHANGELOG.md`](../../CHANGELOG.md), in English (New / Fixed /
+   Known; management text is English only), merged to `main`. The draft's release notes are that section
    plus the install and verify text, and **a tag without a section fails**
    at "check tag", before anything builds.
 
@@ -272,8 +272,8 @@ PowerShell on your normal (online) PC, in the repo:
 
 4. **Sign offline, one manifest per channel.** The draft carries
    `manifest-body-beta.json` and `manifest-body-alpha.json`. Both have the
-   same artifacts and the "what's new" notes from `CHANGELOG.md` (Hebrew +
-   English). Every release goes to **beta**; sign **alpha** too only when the
+   same artifacts and the "what's new" notes from `CHANGELOG.md` (English;
+   sections up to 0.4.0 are bilingual). Every release goes to **beta**; sign **alpha** too only when the
    release is promoted to stable. Copy only the bodies to the signing machine
    (USB stick). The key never comes to the online PC. There:
 
