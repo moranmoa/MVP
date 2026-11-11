@@ -9,7 +9,7 @@ import type { CoreApi, CoreEventName, CoreEvents, Unsubscribe } from './api';
 import type {
   CallState,
   VoiceRoom,
-  VoiceParticipant,
+  VoiceRoomMember,
   AgeRestriction,
   AppInfo,
   Channel,
@@ -59,7 +59,7 @@ export interface MockOptions {
   /** As the desktop shell would: report the core down, for the T8-01 screen. */
   coreDown?: 'missing' | 'start-failed' | 'crashed' | 'crash-loop' | 'keyring';
   /** joinCall rejects with this code, for the error states (screenshots). */
-  callError?: 'call-full' | 'relay-only' | 'in-call-elsewhere' | 'not-implemented';
+  callError?: 'call-full' | 'relay-only' | 'in-call-elsewhere' | 'not-implemented' | 'room-cap';
   /**
    * As a member who just joined, before the channel key arrives (#288): sends
    * come back held (`pending-…`), then are sent (`arrive`), fail (`fail`), or
@@ -72,8 +72,10 @@ export interface MockOptions {
   signOutKeyring?: boolean;
   /** updateProfile fails (B11e: the save error state). */
   profileError?: boolean;
-  /** Every demo voice room starts with 5 people in it (full). */
+  /** The first demo voice room starts with 5 people in it (full). */
   roomFull?: boolean;
+  /** Voice rooms (0.4.3): how many live rooms each demo server starts with (default 1; 0 = none; up to 10). */
+  voiceRooms?: number;
   /** Start with relay-only on (#272): no direct connections, calls off. */
   relayOnly?: boolean;
   /** Server lifecycle (#261): two members run an old MVS, so rename and close answer `update-needed` (a leave never does). */
@@ -165,6 +167,16 @@ function initialsOf(name: string): string {
 
 function err(e: CoreError): CoreError {
   return e;
+}
+
+/** A live voice room inside the mock; the host is computed, as in the core. */
+interface MockRoom {
+  roomId: Id;
+  creatorId: Id;
+  createdAt: number;
+  name?: string;
+  limit: number;
+  members: VoiceRoomMember[];
 }
 
 export class MockCore implements CoreApi {
@@ -1126,40 +1138,77 @@ export class MockCore implements CoreApi {
     }
   }
 
-  // ---- voice v1 (#223): calls only, no audio in the mock ----------------------------
+  // ---- voice rooms (0.4.3): calls only, no audio in the mock ---------------------
 
   private call: CallState | null = null;
-  /** Who is in each server's voice room, by server id. Made on first use. */
-  private rooms = new Map<Id, VoiceParticipant[]>();
+  /** Each server's live rooms, oldest first. Made on first use. */
+  private rooms = new Map<Id, MockRoom[]>();
+  private roomSeq = 0;
 
-  private roomIdOf(serverId: Id): Id {
-    return `${serverId}-voice`;
-  }
-
-  private roster(serverId: Id): VoiceParticipant[] {
-    let r = this.rooms.get(serverId);
-    if (!r) {
-      // Demo: two online people are already talking (the second one muted), or 5 with ?roomFull.
+  /** Demo rooms: the first has two online people (the second muted), or 5 with ?roomFull; the rest 1–3 each. */
+  private roomsOf(serverId: Id): MockRoom[] {
+    let list = this.rooms.get(serverId);
+    if (!list) {
+      list = [];
       const others = (this.servers.get(serverId)?.members ?? []).filter((m) => m.id !== this.identity?.id);
-      const seed = this.options.roomFull ? others.slice(0, 5) : others.filter((m) => m.presence === 'online').slice(0, 2);
-      r = seed.map((m, i) => ({ userId: m.id, muted: i === 1 }));
-      this.rooms.set(serverId, r);
+      const online = others.filter((m) => m.presence === 'online');
+      const pool = [...online, ...others.filter((m) => m.presence !== 'online')];
+      const count = Math.min(10, this.options.voiceRooms ?? 1);
+      const t0 = Date.now() - 60 * 60_000;
+      let next = 0;
+      for (let i = 0; i < count; i++) {
+        const n = i === 0 ? (this.options.roomFull ? 5 : 2) : 1 + (i % 3);
+        const people = pool.slice(next, next + n);
+        next += n;
+        if (!people.length) break;
+        const createdAt = t0 + i * 60_000;
+        list.push({
+          roomId: `${serverId}-room-${++this.roomSeq}`,
+          creatorId: people[0].id,
+          createdAt,
+          // Demo: the second room has a name of its own.
+          ...(i === 1 ? { name: 'גיימינג' } : {}),
+          limit: 5,
+          members: people.map((m, j) => ({ userId: m.id, muted: j === 1, joinedAt: createdAt + j * 1000 })),
+        });
+      }
+      this.rooms.set(serverId, list);
     }
-    return r;
+    return list;
   }
 
-  private room(serverId: Id): VoiceRoom {
+  /** The earliest joined; ties to the smaller id (design §4). */
+  private masterOf(r: MockRoom): Id {
+    return [...r.members].sort((a, b) => a.joinedAt - b.joinedAt || (a.userId < b.userId ? -1 : 1))[0].userId;
+  }
+
+  private view(serverId: Id, r: MockRoom): VoiceRoom {
     return {
       serverId,
-      roomId: this.roomIdOf(serverId),
-      participants: this.roster(serverId).map((p) => ({ ...p })),
+      roomId: r.roomId,
+      creatorId: r.creatorId,
+      createdAt: r.createdAt,
+      ...(r.name ? { name: r.name } : {}),
+      limit: r.limit,
+      masterId: this.masterOf(r),
+      members: r.members.map((p) => ({ ...p })),
       ...(this.relayOnly ? { relayOnly: true } : {}),
     };
   }
 
-  private setRoster(serverId: Id, participants: VoiceParticipant[]): void {
-    this.rooms.set(serverId, participants);
-    this.emit('voice.room', this.room(serverId));
+  private emitRooms(serverId: Id): void {
+    // An empty room is gone at once (spec §4).
+    const list = this.roomsOf(serverId).filter((r) => r.members.length > 0);
+    this.rooms.set(serverId, list);
+    this.emit('voice.rooms', { serverId, rooms: list.map((r) => this.view(serverId, r)) });
+  }
+
+  private findRoom(roomId: Id): { serverId: Id; room: MockRoom } | null {
+    for (const serverId of this.servers.keys()) {
+      const room = this.roomsOf(serverId).find((r) => r.roomId === roomId);
+      if (room) return { serverId, room };
+    }
+    return null;
   }
 
   private emitCall(): void {
@@ -1167,58 +1216,120 @@ export class MockCore implements CoreApi {
   }
 
   /** The call as seen from the room it is in. */
-  private callOf(serverId: Id): CallState {
-    const people = this.roster(serverId);
+  private callOf(room: MockRoom): CallState {
     return {
-      channelId: this.roomIdOf(serverId),
-      participants: people.map((p) => ({ identity: p.userId, muted: p.muted })),
-      full: people.length >= 5,
+      channelId: room.roomId,
+      participants: room.members.map((p) => ({ identity: p.userId, muted: p.muted })),
+      full: room.members.length >= room.limit,
     };
   }
 
-  private callServer(): Id | null {
-    return [...this.servers.keys()].find((id) => this.roomIdOf(id) === this.call?.channelId) ?? null;
+  private callRoom(): { serverId: Id; room: MockRoom } | null {
+    return this.call ? this.findRoom(this.call.channelId) : null;
   }
 
-  async getVoiceRoom(serverId: Id): Promise<VoiceRoom> {
+  async listVoiceRooms(serverId: Id): Promise<VoiceRoom[]> {
     await this.wait(50);
     if (!this.servers.has(serverId)) throw err({ code: 'not-found' });
-    return this.room(serverId);
+    return this.roomsOf(serverId).map((r) => this.view(serverId, r));
+  }
+
+  async createVoiceRoom(serverId: Id): Promise<CallState> {
+    await this.wait(200);
+    if (this.relayOnly) throw err({ code: 'relay-only' });
+    if (this.options.callError) throw err({ code: this.options.callError });
+    if (!this.servers.has(serverId)) throw err({ code: 'not-found' });
+    if (this.roomsOf(serverId).length >= 10) throw err({ code: 'room-cap' });
+    await this.leaveCall();
+    const me = this.identity!.id;
+    const now = Date.now();
+    const room: MockRoom = {
+      roomId: `${serverId}-room-${++this.roomSeq}`,
+      creatorId: me,
+      createdAt: now,
+      limit: 5,
+      members: [{ userId: me, muted: false, joinedAt: now }],
+    };
+    this.roomsOf(serverId).push(room);
+    this.emitRooms(serverId);
+    this.call = this.callOf(room);
+    this.emitCall();
+    return this.call;
   }
 
   async joinCall(channelId: Id): Promise<CallState> {
     await this.wait(200);
     if (this.relayOnly) throw err({ code: 'relay-only' });
     if (this.options.callError) throw err({ code: this.options.callError });
-    const serverId = [...this.servers.keys()].find((id) => this.roomIdOf(id) === channelId);
-    // Text channels don't carry calls any more (voice-room amendment).
-    if (!serverId) throw err({ code: this.channelIndex.has(channelId) ? 'not-allowed' : 'not-found' });
+    const found = this.findRoom(channelId);
+    // Text channels don't carry calls (voice-room amendment); a room that is gone is not-found.
+    if (!found) throw err({ code: this.channelIndex.has(channelId) ? 'not-allowed' : 'not-found' });
     if (this.call?.channelId === channelId) return this.call;
-    if (this.roster(serverId).length >= 5) throw err({ code: 'call-full' });
+    if (found.room.members.length >= found.room.limit) throw err({ code: 'call-full' });
     await this.leaveCall();
     const me = this.identity!.id;
-    this.setRoster(serverId, [{ userId: me, muted: false }, ...this.roster(serverId).filter((p) => p.userId !== me)]);
-    this.call = this.callOf(serverId);
+    const joinedAt = Math.max(Date.now(), ...found.room.members.map((p) => p.joinedAt + 1));
+    found.room.members.push({ userId: me, muted: false, joinedAt });
+    this.emitRooms(found.serverId);
+    this.call = this.callOf(found.room);
     this.emitCall();
     return this.call;
   }
 
   async leaveCall(): Promise<null> {
-    const serverId = this.callServer();
+    const here = this.callRoom();
     if (this.call) {
       this.call = { ...this.call, participants: [], full: false };
       this.emitCall();
       this.call = null;
     }
-    if (serverId) this.setRoster(serverId, this.roster(serverId).filter((p) => p.userId !== this.identity!.id));
+    if (here) {
+      here.room.members = here.room.members.filter((p) => p.userId !== this.identity!.id);
+      this.emitRooms(here.serverId);
+    }
     return null;
   }
 
+  async editVoiceRoom(roomId: Id, name?: string, limit?: number): Promise<null> {
+    const edit = { name, limit };
+    await this.wait(100);
+    const found = this.findRoom(roomId);
+    if (!found) throw err({ code: 'not-found' });
+    const me = this.identity!.id;
+    const owner = this.servers.get(found.serverId)?.summary.ownerId === me;
+    if (this.masterOf(found.room) !== me && !owner) throw err({ code: 'not-allowed' });
+    if (edit.limit !== undefined) {
+      const ok = Number.isInteger(edit.limit) && edit.limit >= 2 && edit.limit <= 5 && edit.limit >= found.room.members.length;
+      if (!ok) throw err({ code: 'bad-request' });
+      found.room.limit = edit.limit;
+    }
+    if (edit.name !== undefined) {
+      const name = edit.name.trim();
+      if ([...name].length > 32) throw err({ code: 'bad-request' });
+      found.room.name = name || undefined;
+    }
+    this.emitRooms(found.serverId);
+    return null;
+  }
+
+  /** Mock only, for tests and screenshots: someone else leaves a room (a host leaving hands off). */
+  simulateVoiceLeave(roomId: Id, userId: Id): void {
+    const found = this.findRoom(roomId);
+    if (!found) return;
+    found.room.members = found.room.members.filter((p) => p.userId !== userId);
+    if (this.call?.channelId === roomId) {
+      this.call = this.callOf(found.room);
+      this.emitCall();
+    }
+    this.emitRooms(found.serverId);
+  }
+
   async setMuted(muted: boolean): Promise<null> {
-    const serverId = this.callServer();
-    if (!this.call || !serverId) throw err({ code: 'not-allowed' });
-    this.setRoster(serverId, this.roster(serverId).map((p) => (p.userId === this.identity!.id ? { ...p, muted } : p)));
-    this.call = this.callOf(serverId);
+    const here = this.callRoom();
+    if (!this.call || !here) throw err({ code: 'not-allowed' });
+    here.room.members = here.room.members.map((p) => (p.userId === this.identity!.id ? { ...p, muted } : p));
+    this.emitRooms(here.serverId);
+    this.call = this.callOf(here.room);
     this.emitCall();
     return null;
   }
@@ -1284,13 +1395,13 @@ export class MockCore implements CoreApi {
   async setRelayOnly(on: boolean): Promise<void> {
     await this.wait(100);
     this.relayOnlySet = on;
-    const serverId = this.callServer();
+    const here = this.callRoom();
     if (on && this.call) {
       this.emit('call.state', { ...this.call, participants: [], full: false, relayOnly: true });
       this.call = null;
-      if (serverId) this.rooms.set(serverId, this.roster(serverId).filter((p) => p.userId !== this.identity?.id));
+      if (here) here.room.members = here.room.members.filter((p) => p.userId !== this.identity?.id);
     }
-    for (const id of this.servers.keys()) this.emit('voice.room', this.room(id));
+    for (const id of this.servers.keys()) this.emitRooms(id);
   }
 
   async setUpdateChannel(channel: UpdateChannel): Promise<void> {

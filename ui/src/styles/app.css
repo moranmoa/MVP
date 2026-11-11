@@ -3329,3 +3329,81 @@ input.switch:disabled {
     min-height: 2.75rem;
   }
 }
+
+/* Voice rooms, 0.4.3 (docs/ux/specs/voice-rooms.md): the pinned row, then the live rooms. */
+.voice-root-text {
+  display: grid;
+  min-width: 0;
+}
+
+.voice-root-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.voice-room-list {
+  display: grid;
+  gap: 0.125rem;
+  margin: 0.25rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.voice-room-row .channel-name {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The room I'm in. */
+.voice-room-row.in-room {
+  background: var(--bg-active);
+}
+
+.voice-room-row[aria-disabled='true']:not(.in-room) {
+  cursor: default;
+  opacity: 0.75;
+}
+
+.voice-room-count.full {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.voice-crown {
+  display: inline-flex;
+  color: var(--warning-text);
+}
+
+.voice-crown svg {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
+.voice-room-rename {
+  width: 100%;
+  padding: 0.3125rem 0.5rem;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-s);
+  background: var(--bg-input);
+  color: var(--text);
+  font: inherit;
+}
+
+.voice-rooms-more {
+  margin: 0.25rem 0.5rem 0;
+}
+
+.voice-limit-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+@media (pointer: coarse) {
+  .voice-room-row,
+  .voice-root {
+    min-height: 2.75rem;
+  }
+}

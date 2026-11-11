@@ -136,11 +136,18 @@ export interface CoreCommands {
   blockUser(userId: Id): Promise<void>;
   kickMember(serverId: Id, userId: Id): Promise<void>;
   // Voice v1 (#223)
-  /** A server's voice room and who is in it. Rejects not-found, not-allowed (not a member, kicked). */
-  getVoiceRoom(serverId: Id): Promise<VoiceRoom>;
+  /** Voice rooms (0.4.3): a server's live rooms, oldest first. Rejects not-found, not-allowed (not a member, kicked). */
+  listVoiceRooms(serverId: Id): Promise<VoiceRoom[]>;
   /**
-   * Joins a voice room (leaving any other call first); `channelId` is the room's
-   * id. Rejects not-found, not-allowed (a text channel), call-full, relay-only, in-call-elsewhere (#294: I'm already in it from another computer), not-implemented.
+   * Opens a new room in a server with me as its host, leaving any call first.
+   * Rejects room-cap (10 live rooms), relay-only, in-call-elsewhere, not-allowed.
+   */
+  createVoiceRoom(serverId: Id): Promise<CallState>;
+  /** The room's host or the server owner: rename (`''` = default) or set the limit (2–5, not below the count); a left-out field stays. The change arrives in the next voice.rooms. Rejects not-allowed, not-found (gone, or the host unreachable for an owner), bad-request. */
+  editVoiceRoom(roomId: Id, name?: string, limit?: number): Promise<null>;
+  /**
+   * Joins a live voice room (leaving any other call first); `channelId` is the room's
+   * id. Rejects not-found (not live), not-allowed (a text channel), call-full (at its limit), relay-only, in-call-elsewhere (#294: I'm already in it from another computer), not-implemented.
    */
   joinCall(channelId: Id): Promise<CallState>;
   /** Idempotent. */
@@ -209,8 +216,8 @@ export interface CoreEvents {
   /** Every change to my call; participants [] after leaving. */
   'call.state': CallState;
   'call.signal': CallSignal;
-  /** A voice room's roster changed (join, leave, mute, timeout), mine or not. A hint: re-read with getVoiceRoom. */
-  'voice.room': VoiceRoom;
+  /** A server's rooms changed (create, join, leave, mute, edit, timeout), mine or not. Coalesced; a hint: re-read with listVoiceRooms. */
+  'voice.rooms': { serverId: Id; rooms: VoiceRoom[] };
 }
 
 export type CoreEventName = keyof CoreEvents;

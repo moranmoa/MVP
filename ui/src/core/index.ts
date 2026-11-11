@@ -21,12 +21,13 @@ export * from './types';
  *   ?installed=1     a new version was just installed, with release notes
  *   ?rolledBack=1    the last update failed and the previous version is back
  *   ?coreDown=<detail> the desktop shell reports the core down (missing, start-failed, crashed, crash-loop)
- *   ?callError=<code> joinCall fails with call-full, relay-only, in-call-elsewhere or not-implemented
+ *   ?callError=<code> joinCall/createVoiceRoom fail with call-full, relay-only, in-call-elsewhere, not-implemented or room-cap
  *   ?keyPending=arrive|fail|wait  sends wait for the channel key, then go out, fail or keep waiting (#288)
  *   ?pendingDob=1    a birth-date correction waits its 30 days (B7, #306)
  *   ?signOutKeyring=1 signOut fails with keyring-unavailable (#304)
  *   ?profileError=1  updateProfile fails (B11e)
- *   ?roomFull=1      every demo voice room already has 5 people
+ *   ?roomFull=1      the first demo voice room already has 5 people
+ *   ?voiceRooms=<n>  each demo server starts with n live voice rooms (default 1, 0–10)
  *   ?stun=<url>      the desktop shell's STUN URL for voice (stun:host:port)
  *   ?inCall=1        restartToUpdate is refused as during a call (not-allowed)
  *   ?fresh=1         forget the stored mock account
@@ -55,6 +56,7 @@ export function createCore(search = typeof location !== 'undefined' ? location.s
     coreDown: (params.get('coreDown') as MockOptions['coreDown']) ?? undefined,
     callError: (params.get('callError') as MockOptions['callError']) ?? undefined,
     roomFull: params.has('roomFull'),
+    voiceRooms: params.has('voiceRooms') ? Math.max(0, Math.min(10, Number(params.get('voiceRooms')) || 0)) : undefined,
     profileError: params.has('profileError'),
     signOutKeyring: params.has('signOutKeyring'),
     pendingDob: params.has('pendingDob'),
