@@ -247,6 +247,8 @@ impl KeyPending {
             deleted: None,
             send_state: Some(if self.failed { SendState::Failed } else { SendState::Pending }),
             replaces: None,
+            mentions: None,
+            mentions_me: None,
         }
     }
 }
@@ -828,7 +830,14 @@ impl Core {
         let mut out = Vec::new();
         for id in inner.db.servers()? {
             inner.load(id)?;
-            out.push(inner.summary(id)?);
+            let mut summary = inner.summary(id)?;
+            // G-21 and G-24: the server rail's unread dot and mention badge.
+            let me = inner.me.as_ref().map(Me::key);
+            let mut channels = inner.view(id)?.channels(me);
+            inner.fill_unread(&*self.ports.cipher, id, &mut channels)?;
+            summary.unread = channels.iter().any(|c| c.unread);
+            summary.mentions = channels.iter().map(|c| c.mentions).fold(0, u32::saturating_add);
+            out.push(summary);
         }
         Ok(out)
     }
@@ -1857,13 +1866,14 @@ impl Core {
         let (server, channel) = inner.find_channel(channel_id)?;
         let me = inner.me.as_ref().map(Me::key);
         let shown = inner.shown(&*self.ports.cipher, server, channel)?;
+        let members = inner.view(server)?.state.members.clone();
         // Messages held for their key come after the stored ones.
         let held: Vec<&KeyPending> = inner.key_pending.iter().filter(|p| p.channel == channel).collect();
         let end = end.min(shown.len() + held.len());
         let start = start.min(end);
         let messages = (start..end)
             .map(|index| match shown.get(index) {
-                Some(s) => message_json(s, index, channel, me, &Status { net: &*inner.net, db: &inner.db }),
+                Some(s) => message_json(s, index, channel, me, &Status { net: &*inner.net, db: &inner.db }, &members),
                 None => held[index - shown.len()].message(index),
             })
             .collect();
@@ -2653,6 +2663,7 @@ impl Inner {
         events: &mut Events,
     ) -> CoreResult<()> {
         let me = self.me.as_ref().map(Me::key);
+        let members = self.view(server)?.state.members.clone();
         for channel in self.known(server)? {
             let shown = self.shown(cipher, server, channel)?;
             let seen = self.announced.entry(server).or_default();
@@ -2665,6 +2676,7 @@ impl Inner {
                         channel,
                         me,
                         &Status { net: &*self.net, db: &self.db },
+                        &members,
                     )),
                     Some(old) if old != state => Event::MessageUpdated(message_json(
                         s,
@@ -2672,6 +2684,7 @@ impl Inner {
                         channel,
                         me,
                         &Status { net: &*self.net, db: &self.db },
+                        &members,
                     )),
                     Some(_) => continue,
                 };
@@ -2913,7 +2926,8 @@ impl Inner {
         // Announced by the command itself; sync won't repeat it.
         let state = announced(s, me, &Status { net: &*self.net, db: &self.db });
         self.announced.entry(server).or_default().insert(s.record.id(), state);
-        Ok(message_json(s, index, channel, me, &Status { net: &*self.net, db: &self.db }))
+        let members = self.view(server)?.state.members.clone();
+        Ok(message_json(s, index, channel, me, &Status { net: &*self.net, db: &self.db }, &members))
     }
 
     /// A fresh key for `channel`, for `members` (we must be a moderator or
@@ -3138,6 +3152,9 @@ impl Inner {
             json.unread_count = Some(count);
             json.first_unread_index = shown.iter().position(|s| unread(&s)).map(|i| i as u64);
             json.unread = count > 0;
+            // G-24: unread messages that mention me (the badge).
+            let mentions = shown.iter().filter(unread).filter(|s| model::mention_tokens(&s.text).contains(&me));
+            json.mentions = u32::try_from(mentions.count()).unwrap_or(u32::MAX);
         }
         Ok(())
     }
@@ -3767,7 +3784,17 @@ fn message_json(
     channel: ChannelId,
     me: Option<PublicKey>,
     st: &Status,
+    members: &BTreeSet<PublicKey>,
 ) -> Message {
+    // G-24: `<@userId>` tokens; only current members are listed (the UI
+    // shows a former member's token as "Former member"), and "mentions me"
+    // from the token alone.
+    let tokens = model::mention_tokens(&s.text);
+    let listed: Vec<Id> = tokens
+        .iter()
+        .filter(|key| members.contains(*key))
+        .map(|key| model::hex_id(key.as_bytes()))
+        .collect();
     Message {
         id: model::hex_id(s.record.id().as_bytes()),
         channel_id: model::hex_id(channel.as_bytes()),
@@ -3779,9 +3806,10 @@ fn message_json(
         deleted: s.deleted.then_some(true),
         send_state: send_state(s, me, st),
         replaces: None,
+        mentions: (!listed.is_empty()).then_some(listed),
+        mentions_me: me.filter(|me| tokens.contains(me)).map(|_| true),
     }
 }
-
 /// Can't write yet (no key, or a rotation only a moderator can make):
 /// `not-allowed`. No group encryption: `not-implemented`.
 fn cipher_error(error: CipherError) -> CoreError {

@@ -158,6 +158,13 @@ pub struct Message {
     /// provisional ID (`pending-…`) it replaces in the list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<Id>,
+    /// G-24: the user IDs this message mentions (`<@userId>` tokens in the
+    /// body) who are members of the server now, in order, each once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mentions: Option<Vec<Id>>,
+    /// G-24: the body mentions me.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mentions_me: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
