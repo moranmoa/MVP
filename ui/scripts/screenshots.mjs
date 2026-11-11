@@ -296,6 +296,7 @@ for (const [section, name] of [
   ['storage', '32-settings-storage'],
   ['diagnostics', '33-settings-diagnostics'],
   ['about', '34-settings-about'],
+  ['notifications', '361-settings-notifications-he'],
 ]) {
   const p = await chat(`?demo=unchecked&still=1&lang=he&theme=light&settings=${section}`, 'x');
   await p.getByRole('button', { name: 'הגדרות' }).first().click();
@@ -996,18 +997,20 @@ for (const [lang, t] of [
   await p.close();
 }
 
-// Mute (G-03, G-17) and mark all as read (G-04): 350–351.
+// Notifications and mute (G-61, G-03, G-17) and mark all as read (G-04): 360, 351.
 {
   const p = await chat('?demo=1&still=1&lang=he&theme=light&update=999999', 'x');
   const channels = p.getByRole('navigation', { name: 'ערוצים' });
   await channels.getByRole('button', { name: /^clips/ }).click({ button: 'right' });
-  await p.getByRole('menuitem', { name: 'השתקה…' }).click();
-  await p.getByRole('dialog', { name: /^השתקה של/ }).waitFor();
-  await shot(p, '350-mute-dialog-he');
+  await p.getByRole('menuitem', { name: 'התראות' }).click();
+  await p.getByRole('dialog', { name: /^התראות של/ }).waitFor();
+  await shot(p, '360-notify-dialog-channel-he');
   await p.getByRole('button', { name: 'עד שאבטל' }).click();
+  await p.keyboard.press('Escape');
   await p.getByRole('button', { name: /^Minecraft IL/ }).click({ button: 'right' });
-  await p.getByRole('menuitem', { name: 'השתקה…' }).click();
+  await p.getByRole('menuitem', { name: 'התראות' }).click();
   await p.getByRole('button', { name: 'ל-8 שעות' }).click();
+  await p.keyboard.press('Escape');
   await p.mouse.move(1, 1);
   await shot(p, '351-muted-server-and-channel-he');
   await p.evaluate(() => localStorage.removeItem('mvs.mute.v1'));

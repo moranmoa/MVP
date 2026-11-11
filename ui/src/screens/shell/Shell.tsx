@@ -19,6 +19,7 @@ import { MemberList } from './MemberList';
 import { ServerRail } from './ServerRail';
 import { ServerSettings } from './ServerSettings';
 import { LeaveServerDialog } from './ServerLifecycle';
+import { useDesktopNotifications } from './useNotifications';
 
 const MEMBERS_KEY = 'mvp.ui.membersOpen';
 
@@ -183,6 +184,13 @@ export function Shell() {
     setPhoneMembers(false);
     setPhoneView('nav');
   };
+  // G-61: a click on a desktop notification opens its channel.
+  useDesktopNotifications(settingsOpen || (phone && phoneView === 'nav') ? null : (channelId ?? null), (sid, cid) => {
+    setSettingsOpen(false);
+    setServerId(sid);
+    setChannelByServer((m) => ({ ...m, [sid]: cid }));
+    goPhone('chat');
+  });
   const sheetOpen = phone && phoneMembers && phoneView === 'chat';
   const showMembers = !!server && (phone ? sheetOpen : membersOpen);
 

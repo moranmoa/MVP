@@ -10,9 +10,10 @@ import { LOCALES } from '../../i18n';
 import { textDir, useUiDir } from '../../app/textDir';
 import { ProfileEditor, type ProfileEditorHandle } from './ProfileEditor';
 import { SignOutButton } from './SignOut';
+import { defaultNotifyPrefs, shellNotify, type NotifyPrefs } from '../../app/notify';
 
-type Section = 'account' | 'privacy' | 'language' | 'appearance' | 'storage' | 'diagnostics' | 'about';
-const SECTIONS: Section[] = ['account', 'privacy', 'language', 'appearance', 'storage', 'diagnostics', 'about'];
+type Section = 'account' | 'privacy' | 'notifications' | 'language' | 'appearance' | 'storage' | 'diagnostics' | 'about';
+const SECTIONS: Section[] = ['account', 'privacy', 'notifications', 'language', 'appearance', 'storage', 'diagnostics', 'about'];
 
 const GB = 1024 ** 3;
 const LIMIT_STEPS = [1, 2, 5, 10, 20, 50].map((g) => g * GB);
@@ -83,6 +84,7 @@ export function SettingsScreen({
           {section === 'storage' && <StorageSection />}
           {section === 'diagnostics' && <DiagnosticsSection />}
           {section === 'about' && <AboutSection />}
+          {section === 'notifications' && <NotificationsSection />}
           {section === 'privacy' && <PrivacySection focus={request?.section === 'privacy' ? request.at : undefined} />}
         </section>
       </div>
@@ -293,6 +295,65 @@ function Bytes({ value }: { value: number }) {
         maximumFractionDigits={gb ? 1 : 0}
       />
     </bdi>
+  );
+}
+
+/** G-61: the main switches; each server and channel is set from its menu. */
+function NotificationsSection() {
+  const { settings, update } = useSettings();
+  const prefs = settings.notify ?? defaultNotifyPrefs();
+  const set = (patch: Partial<NotifyPrefs>) => update({ notify: { ...prefs, ...patch } });
+  return (
+    <div className="stack">
+      {!shellNotify() && (
+        <p className="muted small" role="note">
+          <FormattedMessage id="notify.settings.desktopOnly" />
+        </p>
+      )}
+      <label className="switch-row">
+        <span>
+          <FormattedMessage id="notify.settings.desktop" />
+        </span>
+        <input
+          type="checkbox"
+          role="switch"
+          className="switch"
+          checked={prefs.desktop}
+          aria-describedby="notify-desktop-hint"
+          onChange={(e) => set({ desktop: e.target.checked })}
+        />
+      </label>
+      <p className="muted small" id="notify-desktop-hint">
+        <FormattedMessage id="notify.settings.desktopHint" />
+      </p>
+      <label className="switch-row">
+        <span>
+          <FormattedMessage id="notify.settings.preview" />
+        </span>
+        <input
+          type="checkbox"
+          role="switch"
+          className="switch"
+          checked={prefs.preview}
+          disabled={!prefs.desktop}
+          aria-describedby={prefs.desktop ? 'notify-preview-hint' : 'notify-preview-hint notify-preview-off'}
+          onChange={(e) => set({ preview: e.target.checked })}
+        />
+      </label>
+      <p className="muted small" id="notify-preview-hint">
+        <FormattedMessage id="notify.settings.previewHint" />
+      </p>
+      {prefs.desktop && prefs.preview && (
+        <p className="muted small" role="note">
+          <FormattedMessage id="notify.settings.previewPrivacy" />
+        </p>
+      )}
+      {!prefs.desktop && (
+        <p className="muted small" id="notify-preview-off">
+          <FormattedMessage id="notify.settings.previewDisabled" />
+        </p>
+      )}
+    </div>
   );
 }
 

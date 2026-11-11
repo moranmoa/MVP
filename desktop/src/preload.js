@@ -32,6 +32,11 @@ contextBridge.exposeInMainWorld('mvs', {
   copyText: (text) => ipcRenderer.invoke('clipboard:write', String(text)),
   /** "Core unavailable" screen: start the core again now. Status follows as core.status. */
   retryCore: () => ipcRenderer.invoke('core:retry'),
+  /**
+   * G-61: a desktop notification { title, body, channelId, messageId }, shown
+   * by the shell; a click arrives as the `notify.click` event. Resolves true if shown.
+   */
+  notify: (notice) => ipcRenderer.invoke('notify:show', notice),
   /** Opens the shell's logs folder (no words, no message content). Resolves true if it did. */
   openLogsFolder: () => ipcRenderer.invoke('logs:open'),
   onEvent: (callback) => {
