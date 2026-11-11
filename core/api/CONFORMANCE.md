@@ -85,6 +85,13 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 
 ## Proposed contract additions (Rust has them; `api.ts` doesn't yet)
 
+- Mentions (G-24, GAPS §2.5):
+  - A mention is the token `<@userId>` (64 lower-case hex) in the body, never a name. The UI shows the current name, or `mention.unknown` for someone no longer in the server. Older clients show the token as text. It counts toward the 4,000 code points.
+  - `Message.mentions?: userId[]` (additive) lists the mentioned users who are members now, in order, each once.
+  - `Message.mentionsMe?: true` when the body mentions me.
+  - `Channel.mentions` and `ServerSummary.mentions` count unread messages that mention me (after the read marker, not mine). `markRead` resets them. `ServerSummary.unread` is set when any channel has unread messages; both come from `listServers`.
+  - No authority or sync change: mentions are read from the message body.
+
 - New-messages divider (G-21, option A):
   - `Channel.unreadCount?: number` and `Channel.firstUnreadIndex?: number` (additive) count the messages after my read marker that aren't mine, in `getMessages` order. `firstUnreadIndex` is the `getMessages` index of the first of them, and is absent when there are none. `Channel.unread` is `unreadCount > 0`. They appear in `listChannels` and `channel.updated`.
   - `markRead(channelId)` returns `null` and moves the marker to the channel's last message. It emits `channel.updated` with `unreadCount: 0` and no `firstUnreadIndex`.
