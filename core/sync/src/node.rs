@@ -1255,6 +1255,11 @@ impl Task {
                 }
                 _ = anti_entropy.tick() => {
                     self.pending.expire(Instant::now(), PENDING_TTL);
+                    // T23 state outlives a disconnect (a reset relay circuit
+                    // must not make us re-probe everything), so it expires here.
+                    let now = Instant::now();
+                    self.empty_from.retain(|_, until| now < *until);
+                    self.probed.retain(|_, at| now < *at + UNBOUND_REPROBE);
                     self.pull_all("round");
                 }
                 _ = discovery.tick() => self.discover(),
@@ -2102,8 +2107,6 @@ impl Task {
                 self.decoding.retain(|(p, _)| *p != peer_id);
                 self.again.retain(|(p, _)| *p != peer_id);
                 self.queued_pulls.remove(&peer_id);
-                self.empty_from.retain(|(p, _), _| *p != peer_id);
-                self.probed.retain(|(p, _), _| *p != peer_id);
             }
             SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
                 if peer_id == self.relay_peer {
