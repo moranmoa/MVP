@@ -20,6 +20,7 @@ Last updated: 2026-11-05, refresh 11. `main` has every PR up to #201 except the 
 - **Product review gate:** product, UX, business, QA-plan and board PRs need a `VERDICT: APPROVE` from product-lead. product-lead's own PRs are reviewed by ux (plus another lead). Engineering features are accepted or rejected by product-lead against their acceptance criteria before they are marked `done`.
 - **Acceptance criteria:** B-items in `docs/reviews/po-review-1.md` §8; T-items in [T acceptance criteria](#t-acceptance-criteria) below.
 - **Every UI PR:** AA contrast (G-112, B20) and reduced motion (G-114, B21) are a condition of acceptance (product-lead, #320).
+- **Language:** Management text (docs, PRs, notes, board) is English only; the app UI ships Hebrew and English (owner, 2026-11-11).
 - **CI checks:** `main` has a ruleset with 6 required checks (owner). **Never rename a CI job**, or every open PR blocks on a check that no longer reports.
 - Before starting an item, check [File ownership](#file-ownership). One writer per path at a time.
 - Never commit IPs, keys, `.env` files or real tester data.
@@ -160,6 +161,7 @@ Merged since the first board: everything up to #201 except the open PRs above. S
 | G-01 | Server order in the rail: drag or keyboard (local, GAPS §2.1) (reviews: tech-lead, product-lead (+ ux visual)) | dev-ui | todo | – | – | M | 0.4.0 |
 | G-11 | Channel order, the same for all members (signed record, GAPS §2.2) (reviews: tech-lead, sec-lead (records), product-lead) | dev-records (record) → dev-identity (api) → dev-ui | todo | – | B4 | M | 0.4.0 |
 | G-21 | New-messages divider and jump to it (local + core index, GAPS §2.3) (reviews: tech-lead, product-lead (+ ux visual)) | dev-ui + dev-identity (index) | todo | – | – | M | 0.4.0 |
+| G-21c | Unread count cache: `fill_unread` rebuilds the shown list per channel on each `listChannels` call; cache the count per channel, updated on message store and `markRead`. Only when profiling shows it (reviews: tech-lead) | dev-identity | todo | – | #327 | S | P3 |
 | G-24 | @mentions (UI + core format, GAPS §2.5) (reviews: tech-lead, product-lead (+ ux visual), sec-lead (format)) | dev-ui + dev-identity (format) | todo | – | – | M | 0.4.0 |
 | G-05 | Mention badge in the rail, separate from the new-messages dot (`mentionsMe` exists) (reviews: tech-lead, product-lead (+ ux visual)) | dev-ui | todo | – | G-24 | S | 0.4.0 |
 | G-61 | Notifications and mute (local + shell, GAPS §2.4) (reviews: tech-lead, product-lead (+ ux visual)) | dev-ui + dev-voice-shell | todo | – | – | M | 0.4.0 |
