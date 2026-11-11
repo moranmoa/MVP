@@ -496,8 +496,7 @@ fn two_members_join_a_call_and_signal_over_sync() {
         owner.core.sync_now().unwrap();
         owner.core.list_members(&server.id).unwrap().len() == 2
     });
-    // Calls happen only in the server's voice room.
-    let room = owner.core.get_voice_room(&server.id).unwrap().room_id;
+    // Calls happen in voice rooms.
 
     for p in [&owner, &guest] {
         p.core.set_voice(p.net.clone());
@@ -520,7 +519,12 @@ fn two_members_join_a_call_and_signal_over_sync() {
         !o.is_empty() && !g.is_empty()
     });
 
-    owner.core.join_call(&room).unwrap();
+    let room = owner.core.create_voice_room(&server.id).unwrap().channel_id;
+    eventually("the guest to see the room", || {
+        deliver();
+        owner.core.voice_tick();
+        guest.core.list_voice_rooms(&server.id).unwrap().iter().any(|r| r.room_id == room)
+    });
     guest.core.join_call(&room).unwrap();
     let mut seen = Vec::new();
     eventually("the owner to see the guest in the call", || {

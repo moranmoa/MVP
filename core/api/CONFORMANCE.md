@@ -166,18 +166,35 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
 - `grantRole(serverId, userId, role: 'admin' | 'moderator' | 'member')` and
   `revokeRole(serverId, userId)`.
 - `Member.role: 'owner' | 'admin' | 'moderator' | 'member'`.
-- Voice calls (voice v1, piece B; `src/voice.rs`). IDs are 64 lower-case hex, and `identity` is a user ID.
-  - Calls happen only in each server's one voice room, whose ID is derived: `blake3::derive_key("mvs/voice-room/v1", serverId)`. There is no channel record for it, no 18+ gate, and text channels carry no calls.
-  - `getVoiceRoom(serverId)` returns `VoiceRoom { serverId, roomId, participants: { userId, muted }[], relayOnly }`.
-    - Participants: me first when I'm in it, at most 5 (the first to arrive), built from verified hellos only, each dropped 30 s after we last received one.
+- Voice calls (voice v1, piece B; voice rooms v2, 0.4.3; `src/voice.rs`). IDs are 64 lower-case hex, and `identity` is a user ID.
+  - Calls happen only in voice rooms ("join to create"). Rooms are soft state carried in voice hellos: no records, nothing stored or synced. A room lives while a verified participant's hellos keep arriving, and is gone with its last one. Text channels carry no calls, and there is no 18+ gate.
+    - A room's ID is derived and checked by every receiver: `blake3::derive_key("mvs/voice-room/v2", serverId ‖ creatorKey ‖ createdAt_ms_le)`. It can't be claimed for another creator or time, and it can't be a channel's or a v1 room's.
+    - Caps: 10 live rooms per server (the first to arrive), each room's `limit` (2 to 5) of members, and one room per identity (a hello for another room ends the earlier stay).
+  - `VoiceRoom { serverId, roomId, creatorId, createdAt, name?, limit, masterId, members: { userId, muted, joinedAt }[], relayOnly }`.
+    - `members` are ordered by `joinedAt`, at most 5. They're built from verified hellos only, each dropped 30 s after we last received one, and include me when I'm in the room.
+    - `masterId` is computed by the core: the earliest `joinedAt`, with ties going to the smaller ID.
+      - `joinedAt` is frozen for a stay. While a core is learning a room (within 30 s of first hearing of it: it just started, or the core just came online), a claim must be no earlier than `createdAt` and no later than the hello's time plus 120 s, or the hello is dropped. Every member already in the room says hello within that time, so cores agree whatever order the hellos arrive in. A newcomer to a room known for longer has its claim clamped to at least now minus 120 s, never dropped.
+      - Accepted residual: someone joining within 2 minutes of another member can claim to be earlier.
+      - So the master is advisory: it can only rename and set the limit, and grants no other right. The server owner's edit always wins: the master applies it whatever the master set before.
+    - `name` and `limit` come only from the master's hellos. With `name` absent, the UI shows the default name with the master's display name.
+  - `createVoiceRoom(serverId)` returns a `CallState` for the new room (its `channelId` is the room ID), with me as its creator and master. It leaves any other call first.
+    - Errors: `not-found` (a server I don't have), `not-allowed` (not a member, or kicked), `room-cap` (10 live rooms, by this core's view), `relay-only`, `in-call-elsewhere`, `not-implemented`.
+  - `listVoiceRooms(serverId)` returns the server's live rooms, `VoiceRoom[]`, oldest first.
     - Errors: `not-found` for a server I don't have (a kicked member's core removes it), `not-allowed` if I'm not a member or I'm kicked.
-  - `joinCall(channelId)` takes the room ID and returns `CallState { channelId, participants: { identity, muted }[], full, relayOnly }`, me first; `channelId` is the room ID. It leaves any other call first.
+  - `editVoiceRoom(roomId, name?, limit?)` returns `null`. `name: ""` restores the default.
+    - The master's edit is applied at once, and its next hello, sent at once, carries it.
+    - The server owner's edit is sent to the master as an `edit`, and the master applies it only if the signer owns the server.
     - Errors:
-      - `not-found`: an unknown ID.
+      - `not-allowed`: neither the master nor the owner;
+      - `bad-request`: a name over 32 characters, or with bidi, control or zero-width characters; a limit outside 2 to 5, or below who is in the room;
+      - `not-found`: no such live room, or the master is unreachable for the owner's edit.
+  - `joinCall(channelId)` takes a live room's ID and returns `CallState { channelId, participants: { identity, muted }[], full, relayOnly }`, me first; `channelId` is the room ID. It leaves any other call first.
+    - Errors:
+      - `not-found`: an unknown ID, or a room that's gone.
       - `not-allowed`: a text channel's ID, not a member, or kicked.
-      - `call-full`: 5 are already in.
+      - `call-full`: the room is at its limit.
       - `relay-only`: relay-only is on, so calls are off.
-      - `in-call-elsewhere`: my own identity is already in this room from another computer. One computer per call until linked devices (phase 3).
+      - `in-call-elsewhere`: my own identity is already in a room from another computer. One computer per call, one room per identity.
       - `not-implemented`: no voice transport (sync's piece A).
   - `leaveCall()` returns `null` and is idempotent. The app lock and quitting leave too.
   - `setMuted(muted: boolean)` returns `null`. `not-allowed` outside a call.
@@ -189,30 +206,37 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
   - Events:
     - `call.state` (a `CallState`) on every change to my call: join, leave, mute or timeout. After a leave, or a refusal by a full call, its `participants` is `[]`.
     - `call.signal { from, kind, payload, fingerprintVerified: true }`.
-    - `voice.room` (a `VoiceRoom`) when a room's roster changes (join, leave, mute, timeout, kick), whether or not I'm in it. At most one per room per sync round, and only while I'm a member. It's a hint: re-read with `getVoiceRoom`. `muted` is a display hint.
+    - `voice.rooms { serverId, rooms: VoiceRoom[] }`: the whole list, sent when a server's rooms change (created, gone, join, leave, mute, timeout, kick, rename, limit), whether or not I'm in one.
+      - At most one per server per sync round, and only while I'm a member.
+      - It's a hint: re-read with `listVoiceRooms`. `muted` is a display hint.
   - It fails closed. A core-to-core envelope is signed by the sender's identity key under `mvs/voice-signal/v1`, and the signature covers the SDP and its fingerprint. The core drops, without an event:
-    - an envelope that doesn't verify or isn't `v: 1`;
+    - an envelope that doesn't verify, or isn't `v: 2` (0.4.x's v1 is dropped, so rooms need everyone on 0.4.3 or later);
+    - one without a `room { creator, createdAt }`, or whose room ID doesn't derive from it;
+    - a hello for a room new to us whose `createdAt` is more than 120 s ahead of our clock (an older room is fine: we may have come online late), or whose creator may not call;
+    - an 11th room's hellos;
+    - a `joinedAt` outside the window above while learning a room;
+    - an `edit` from anyone but the server owner, or one not sent to the master;
     - one outside ±120 s of our clock;
     - a replayed nonce (up to 4096 remembered; when the cache is full, new envelopes are dropped);
-    - one from someone who couldn't join that call themselves;
+    - one from someone who couldn't call in that server;
     - an offer or answer without a fingerprint.
-  - Presence: a hello every 10 s, a bye on leaving, and a participant dropped after 30 s of silence.
-    - Hellos and byes go only to members who could join that call themselves, so a call in an 18+ channel isn't shown to anyone else.
-    - They also go to my own identity, which reaches only my other computers (same recovery words). A hello or bye signed by me counts only when sync bound its sender to me and it has no `to`. It marks the room "in a call elsewhere" until its bye or 30 s without a hello, and never appears in the roster. My own envelopes echoed back are replays.
+  - Presence: a hello every 10 s, a bye on leaving, and a participant dropped after 30 s of silence. A master that goes quiet is dropped the same way, and the hand-off follows.
+    - Hellos and byes go only to members who may call.
+    - They also go to my own identity, which reaches only my other computers (same recovery words). A hello or bye signed by me counts only when sync bound its sender to me and it has no `to`. It marks me "in a call elsewhere" until its bye or 30 s without a hello, and never appears in a roster. My own envelopes echoed back are replays.
     - A full call's refusal counts only if it comes from someone already in that call, within 10 s of joining.
   - `applyUpdate` answers `not-allowed` during a call.
 - Relay-only (GAP-6r), per device:
   - `setRelayOnly(on: boolean)` returns `null`. It's stored in the core database and needs no identity. On:
     - the network keeps no direct listener, makes no direct dials, and reaches peers only through relay circuits, and direct connections already open are closed (#274);
     - my call ends at once (a bye to the others, then a `call.state` with `participants: []` and `relayOnly: true`);
-    - `joinCall` answers `relay-only` until it's off.
+    - `createVoiceRoom` and `joinCall` answer `relay-only` until it's off.
   - At start, `mvs-core` reads the stored value before the network starts, and the node starts relay-only from the first moment (`NodeConfig.relay_only`: no direct listener, no bootstrap dial, no punching). It fails closed: a database that can't be opened or read, or a value other than off, means on.
   - Shown up front:
     - `AppInfo.relayOnly` from `getAppInfo`;
     - `VoiceRoom.relayOnly`, so the UI can disable "Join" before trying;
     - `CallState.relayOnly`.
-  - After a change, one `voice.room` per server at the next sync round carries the new value.
-- `CoreError.code`, voice: `'call-full' | 'relay-only' | 'in-call-elsewhere'`.
+  - After a change, one `voice.rooms` per server at the next sync round carries the new value.
+- `CoreError.code`, voice: `'call-full' | 'relay-only' | 'in-call-elsewhere' | 'room-cap'`.
 - Invites (#208), all moderator and up (`not-allowed` below that):
   - `createInvite(serverId, input?: { expiresMs?: number, maxUses?: number })`
     returns `{ id, link, expiresAt?, maxUses? }`. `expiresMs` is the last time a
