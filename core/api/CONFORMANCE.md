@@ -90,6 +90,8 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
   - `markRead(channelId)` returns `null` and moves the marker to the channel's last message. It emits `channel.updated` with `unreadCount: 0` and no `firstUnreadIndex`.
   - A channel never read counts from when this device joined the server, so history from before isn't unread.
   - The marker is local only (kv `read/<channel>`), and phase 3 syncs it. The count comes from the stored records, with no network or paging.
+  - **v1 limit:** the marker is a point in `(time, ID)` order, and a message counts as unread only if it comes after it. A message that arrives late, with a time older than the marker (an offline peer catching up, say), is shown in its place but isn't counted as unread.
+  - Counts are recomputed on each `listChannels`. A per-channel cached count is a follow-up (board P3), if lists get slow.
 
 - Channel order (G-11, Tech Lead's design):
   - `moveChannel(serverId, channelId, before?, after?)` returns `Channel[]` in the new order. It puts the channel right before `before`, or right after `after`, or last with neither; both given must be one gap.
