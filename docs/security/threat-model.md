@@ -451,6 +451,7 @@ from view rather than voided.
   prompt decides whether inbound direct connections are allowed, and the app
   shows a tip. Saying no there only costs direct connections, since the
   relay still works. The installer never changes system firewall settings.
+- **Server-list backup metadata (#317, #339).** The backup is sealed under a key from the words and signed by a separate write key, so holders can't read it or link it to the identity key. Accepted: each of my devices announces itself as a DHT provider of the same backup tag (every 12 h), so the DHT servers (today the relay) learn that those peer IDs belong to one person, plus write and refresh times; the relay mailbox sees the tag, size step and write times. Only the words compute the tag. A restoring device looks up providers over relay circuits only.
 - One update key in the closed alpha.
 - A window between a kick and its arrival during which messages are still
   readable by the kicked member (groupkeys README).
