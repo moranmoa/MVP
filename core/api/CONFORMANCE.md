@@ -123,7 +123,7 @@ Each difference keeps a scenario Rust-only. Fix the mock, then add `"mock"`.
   - **Holders:** the ports are no-ops until dev-sync's `/mvs/backup/1` and devops' mailbox exist. `LoopbackNetwork` holds them for tests.
 
 - `signOut({ words: string[] } | { withoutWords: true })` returns `null` (both read at the top level of `args`). It removes this identity from this computer.
-  - `words` must be this identity's 12 words: `invalid-words` (with `positions`) for unknown words, `not-allowed` for another identity's. `withoutWords: true` is the explicit "I accept losing this account" path. Neither: `bad-request`. No identity: `not-found`.
+  - `words` must be this identity's 12 words: `invalid-words` otherwise: with `positions` for unknown words, and with `positions: []` for a valid phrase that is another account's, or for a checksum or word-count error. `withoutWords: true` is the explicit "I accept losing this account" path. Neither: `bad-request`. No identity: `not-found`.
   - In order, fail safe:
     1. A wipe marker (the intent) is written beside `core.db`. If it can't be written: `internal`, and nothing changed.
     2. The keychain secret is deleted. If that fails: `keyring-unavailable`, the marker is removed, and nothing changed. Once the secret is gone, a failure to delete the recovery-check entry doesn't stop the sign-out.

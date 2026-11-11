@@ -3667,7 +3667,16 @@ fn sign_out_leaves_a_fresh_start() {
     wrong[0] = "zzzz".into();
     assert_eq!(sign_out(serde_json::json!({ "words": wrong }))["error"]["code"], "invalid-words");
     let other: Vec<String> = LEGAL.split(' ').map(String::from).collect();
-    assert_eq!(sign_out(serde_json::json!({ "words": other }))["error"]["code"], "not-allowed");
+    // Another account's valid words: also `invalid-words`, no positions.
+    let answer = sign_out(serde_json::json!({ "words": other }));
+    assert_eq!(answer["error"]["code"], "invalid-words");
+    assert_eq!(answer["error"]["positions"], serde_json::json!([]));
+    // My own words, two swapped (a checksum error): `invalid-words` too.
+    let mut swapped = created.words.clone();
+    swapped.swap(0, 1);
+    if swapped != created.words {
+        assert_eq!(sign_out(serde_json::json!({ "words": swapped }))["error"]["code"], "invalid-words");
+    }
     let marker = dir.join("signed-out");
     let sync = dir.join("sync");
     let unchanged = |core: &Core| {

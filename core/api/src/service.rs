@@ -479,7 +479,10 @@ impl Core {
                     let phrase =
                         RecoveryPhrase::parse(&words.join(" ")).map_err(phrase_error)?;
                     if phrase.identity().public_key() != me.key() {
-                        return Err(ErrorCode::NotAllowed.into());
+                        // Another account's words are wrong words here too
+                        // (QA, v0.4.0): `invalid-words`, with no position to
+                        // mark, so the UI shows its words message.
+                        return Err(CoreError { code: ErrorCode::InvalidWords, positions: Some(Vec::new()) });
                     }
                 }
                 None if without_words => {}
