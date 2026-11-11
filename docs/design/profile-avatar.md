@@ -50,3 +50,11 @@
 - Keep `Member.avatarDataUrl` only if it's a `data:image/(webp|png);base64,` URL of at most about 3.5 KB, and `Member.color` only as `#rrggbb`.
 - Show the picture everywhere, with the colour ring or the letter on that colour.
 - Settings → Account gets a colour picker. Making `avatarSmall` (canvas → 48×48 WebP, quality lowered until it's 2,560 bytes or less) on save is the UI's job.
+
+## Decisions (Tech Lead, on #354 at 1215e55)
+- **Exposed on `Member` only:** `avatarDataUrl?` and `color?`, plus `members.changed` when a profile post arrives. No author fields on `Message`.
+- **The whole post is checked:** the serialized profile post is checked against `max_body` (4 KiB) before it's published. A maximum-length Hebrew name plus a maximum picture can go over; that's `bad-request` on send.
+- **Absent versus empty:** a post without `avatar` or `color` leaves the earlier value. `""` clears it. That way an older device, or the restore-and-rejoin path, never wipes the picture.
+- **The pending publish survives a restart:** the coalesced 10-minute post is stored, so a restart doesn't lose it.
+- **Size before decoding:** the base64 length is checked before anything is decoded.
+- **Restore keeps both:** a restore keeps both fields. They go into the backup blob later, with the profile (#291).
