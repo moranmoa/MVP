@@ -947,6 +947,11 @@ describe('TURN credentials (cleanTurnCredentials)', () => {
     expect(clean({ username: 'a'.repeat(64) })).toBeNull();
     expect(clean({ username: `1800000000:${'a'.repeat(64)}:x` })).toBeNull();
     expect(clean({ username: 'x'.repeat(300) })).toBeNull();
+    // expiry:<an identity or peer id> is refused too (N8b).
+    expect(clean({ username: `1800000000:${'ab'.repeat(32)}` })).toBeNull();
+    expect(clean({ username: '1800000000:12D3KooWBVzkbuxE3TA4LU7zEeMBM87G4Ns1KQoPdAc4MR8R3GTc' })).toBeNull();
+    expect(clean({ username: '1800000000:QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N' })).toBeNull();
+    expect(clean({ username: `1800000000:${'ab'.repeat(31)}` })?.username).toBe(`1800000000:${'ab'.repeat(31)}`); // not 64: fine
     expect(clean({ credential: '' })).toBeNull();
     expect(clean({ credential: 'has space' })).toBeNull();
     expect(clean({ credential: 'x'.repeat(257) })).toBeNull();

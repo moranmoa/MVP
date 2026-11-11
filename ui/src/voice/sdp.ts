@@ -84,6 +84,10 @@ export function cleanTurnCredentials(raw: unknown, host: string | null | undefin
   }
   const { username, credential, ttl, expiresAt } = c;
   if (typeof username !== 'string' || username.length > 256 || !/^\d{9,12}:[A-Za-z0-9_-]{8,128}$/.test(username)) return null;
+  // The random part must not look like an identity (64-hex member id) or a
+  // libp2p peer id (12D3Koo…, Qm…): the relay must never name the user (N8b).
+  const random = username.slice(username.indexOf(':') + 1);
+  if (/^[0-9a-f]{64}$/i.test(random) || /^(12D3Koo|Qm)[1-9A-HJ-NP-Za-km-z]{40,}$/.test(random)) return null;
   if (typeof credential !== 'string' || !credential || credential.length > 256 || !/^[A-Za-z0-9+/=_-]+$/.test(credential)) return null;
   if (typeof ttl !== 'number' || !Number.isInteger(ttl) || ttl < 60 || ttl > 86_400) return null;
   if (typeof expiresAt !== 'number' || expiresAt <= now || expiresAt > now + ttl * 1000 + 60_000) return null;
