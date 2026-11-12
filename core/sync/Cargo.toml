@@ -17,7 +17,7 @@ anyhow = "1"
 # The request-response codec trait (`voice`); already in the tree through libp2p.
 async-trait = "0.1"
 blake3 = "1"
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 # Test and harness keys only (the app gets keys from core/identity).
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures = "0.3"
